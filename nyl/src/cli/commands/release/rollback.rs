@@ -13,6 +13,7 @@ use nyl_render::{
         fence::{ReleaseClaim, Requester},
         lifecycle::{
             collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, Interruption, ReleaseRecorder,
+            RevisionPolicy,
         },
         KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering,
     },
@@ -161,6 +162,8 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
             ApplySettings {
                 concurrency,
                 history_limit,
+                // A rollback is an explicit change of the release, so it is always recorded.
+                revisions: RevisionPolicy::Always,
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
                 protected: None,

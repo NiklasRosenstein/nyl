@@ -21,7 +21,8 @@ use nyl_core::orchestration::ids::{EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::state::FailureCategory;
 use nyl_render::gitops::direct::release_documents;
 use nyl_render::gitops::observation::{
-    DirectLocation, GitPublicationHistory, ObservedPublication, PublishedDirectRelease, MATCH_WALK_LIMIT,
+    equivalent, running_publication, DeploymentTree, DirectLocation, GitPublicationHistory, ObservedPublication,
+    PublishedDirectRelease, RunningMatch, MATCH_WALK_LIMIT,
 };
 use nyl_render::gitops::publication::{release_history_limit, RenderedTarget};
 use nyl_render::gitops::reconcile::RenderIndexOwner;
@@ -29,10 +30,10 @@ use nyl_render::kubernetes::fence::{admit, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
     collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources, ApplyEvent, ApplySettings,
-    Interruption, Protected, ReleaseRecorder,
+    Interruption, Protected, ReleaseRecorder, RevisionPolicy,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
-use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ResourceKey, ResourceOrdering};
+use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering};
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
@@ -42,6 +43,21 @@ use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadE
 
 /// Resources applied or pruned at the same time, as `nyl apply` does by default.
 const CONCURRENCY: usize = 8;
+
+/// The publication branch of one call, fetched the first time something needs it
+/// and shared by everything after: whether a recorded commit still stands, and
+/// which Releases left the tree. A failed fetch is not kept, so each user retries.
+type HistoryCache = std::sync::Mutex<Option<GitPublicationHistory>>;
+
+/// What decides whether a Release's recorded commit still stands for the one
+/// being applied.
+#[derive(Clone, Copy)]
+struct PublicationCheck<'a> {
+    history: &'a HistoryCache,
+    tree: DeploymentTree<'a>,
+    /// The publication commit being applied.
+    commit: &'a str,
+}
 
 /// What a step of the driver decided.
 pub(crate) enum Step {
@@ -322,6 +338,10 @@ impl<'a, 'c> Direct<'a, 'c> {
             ..self.destination.clone()
         };
         let remaining = self.budget();
+        let destination = &rendered.destination;
+        // Fetched when a Release needs to know whether a recorded commit still stands, or
+        // when Releases that left the tree are purged, and not at all when neither does.
+        let history = HistoryCache::default();
         let tree_namespaces: BTreeSet<String> = releases
             .iter()
             .zip(&documents)
@@ -384,6 +404,16 @@ impl<'a, 'c> Direct<'a, 'c> {
                         (handed_over, pending)
                     },
                 );
+                let expected = release.expected(destination);
+                let tree = DeploymentTree {
+                    path: &expected.path,
+                    release: expected.release.as_deref(),
+                };
+                let check = PublicationCheck {
+                    history: &history,
+                    tree,
+                    commit,
+                };
                 match self
                     .apply_one(
                         &cluster,
@@ -392,6 +422,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                         history_limit,
                         end,
                         &claim,
+                        check,
                         Protected {
                             handed_over: &handed_over,
                             pending: &pending,
@@ -415,7 +446,7 @@ impl<'a, 'c> Direct<'a, 'c> {
             }
             let warnings = tokio::time::timeout_at(
                 end,
-                self.purge_vanished(&cluster, releases, &tree_namespaces, &tracked, &probe),
+                self.purge_vanished(&cluster, releases, &tree_namespaces, &tracked, &probe, &history),
             )
             .await
             .map_err(|_| {
@@ -457,6 +488,76 @@ impl<'a, 'c> Direct<'a, 'c> {
         })
     }
 
+    /// Whether a revision that recorded the publication commit `recorded` still
+    /// stands for `current`, a commit whose tree is applied again: exactly when
+    /// the shared matching ([`running_publication`], [`equivalent`]) would
+    /// accept a Release running `recorded` for a receipt at `current`, so that a
+    /// kept revision never fails the attestation a new one would pass. A branch
+    /// that cannot be read, or that no longer holds `recorded`, does not stand.
+    fn commit_stands(&self, check: PublicationCheck<'_>, recorded: &str) -> bool {
+        let PublicationCheck { tree, commit, .. } = check;
+        // A comparison that fails counts as not standing: the apply then records a revision.
+        self.with_history(check.history, |history| {
+            Ok(match running_publication(history, tree, recorded, MATCH_WALK_LIMIT)? {
+                RunningMatch::Matched(_) => equivalent(history, tree, recorded, commit)?,
+                RunningMatch::NotOnBranch | RunningMatch::NoPublication => false,
+            })
+        })
+        .unwrap_or(false)
+    }
+
+    /// Run `read` over the publication branch, fetching it first unless `cache` holds it.
+    fn with_history<T>(
+        &self,
+        cache: &HistoryCache,
+        read: impl FnOnce(&GitPublicationHistory) -> Result<T, NylError>,
+    ) -> Result<T, NylError> {
+        let mut cached = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cached.is_none() {
+            let variable = |name: &str| self.ctx.env.get(name).cloned();
+            *cached = Some(
+                GitPublicationHistory::fetch(&self.observed, &self.ctx.project_dir, &variable).map_err(|error| {
+                    NylError::config(format!("cannot read the publication branch of the target: {error}"))
+                })?,
+            );
+        }
+        read(cached.as_ref().expect("fetched above"))
+    }
+
+    /// The commit the latest revision of a Release recorded, when it differs from the one
+    /// being applied, with whether it still stands for it.
+    async fn standing_commit(
+        &self,
+        cluster: &ClusterHandle,
+        name: &str,
+        namespace: &str,
+        check: PublicationCheck<'_>,
+    ) -> Option<(String, bool)> {
+        let recorded = self.recorded_commit(cluster, name, namespace).await?;
+        (recorded != check.commit).then(|| {
+            let stands = self.commit_stands(check, &recorded);
+            (recorded, stands)
+        })
+    }
+
+    /// The publication commit the latest revision of a Release recorded, when that
+    /// revision is `Deployed` and was applied for this target's destination: the only
+    /// commit a kept revision could keep.
+    async fn recorded_commit(&self, cluster: &ClusterHandle, name: &str, namespace: &str) -> Option<String> {
+        let latest = cluster
+            .storage
+            .list_revisions(name, namespace)
+            .await
+            .ok()?
+            .into_iter()
+            .max()?;
+        let state = cluster.storage.get_release(name, namespace, latest).await.ok()??;
+        let publication = state.meta.publication?;
+        (state.status == ReleaseStatus::Deployed && publication.same_destination(&self.destination))
+            .then_some(publication.commit)
+            .flatten()
+    }
+
     #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
     async fn apply_one(
         &self,
@@ -466,6 +567,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         history_limit: u32,
         end: tokio::time::Instant,
         claim: &ReleaseClaim<'_>,
+        check: PublicationCheck<'_>,
         protected: Protected<'_>,
     ) -> Result<Applied, NylError> {
         let (namespace, name) = release.identity();
@@ -481,6 +583,15 @@ impl<'a, 'c> Direct<'a, 'c> {
         ResourceOrdering::sort_by_priority(&mut manifests)?;
         let ownership = FieldOwnership::Nyl;
         ensure_namespace_exists(cluster.client.as_ref(), namespace, &ownership).await?;
+        // Decided before the reservation, which makes the latest revision read as
+        // `Rendered` (a mixed reading) until the apply completes: the branch is not
+        // fetched while it stands. Only the commit the latest revision recorded can stand.
+        let standing = self.standing_commit(cluster, name, namespace, check).await;
+        let publication_stands = |recorded: &str| {
+            standing
+                .as_ref()
+                .is_some_and(|(commit, stands)| *stands && commit == recorded)
+        };
         let recorder = ReleaseRecorder::reserve(
             cluster.storage.as_ref(),
             name,
@@ -520,6 +631,9 @@ impl<'a, 'c> Direct<'a, 'c> {
                     ApplySettings {
                         concurrency: CONCURRENCY,
                         history_limit,
+                        revisions: RevisionPolicy::KeepUnchanged {
+                            publication_stands: Some(&publication_stands),
+                        },
                         confirm_prune: false,
                         ownership: &ownership,
                         protected: Some(protected),
@@ -571,21 +685,17 @@ impl<'a, 'c> Direct<'a, 'c> {
         tree_namespaces: &BTreeSet<String>,
         tracked: &HashSet<ObjectKey>,
         probe: &(dyn Fn(&RenderIndexOwner) -> OwnerState + Sync),
+        history: &HistoryCache,
     ) -> Result<Vec<Finding>, Failure> {
-        let variable = |name: &str| self.ctx.env.get(name).cloned();
-        let history =
-            GitPublicationHistory::fetch(&self.observed, &self.ctx.project_dir, &variable).map_err(|error| {
-                NylError::config(format!(
-                    "cannot read the publication branch to find the Releases that left the tree: {error}"
-                ))
-            })?;
         let receipt = self
             .ctx
             .artifacts
             .get("tree")
             .and_then(|tree| tree.spec.get("commit"))
             .and_then(Value::as_str);
-        let previous = history.direct_releases_since(receipt, MATCH_WALK_LIMIT)?;
+        let previous = self.with_history(history, |history| {
+            history.direct_releases_since(receipt, MATCH_WALK_LIMIT)
+        })?;
         let current: HashSet<(&str, &str)> = releases.iter().map(PublishedDirectRelease::identity).collect();
         let mut vanished = std::collections::BTreeMap::new();
         for release in previous.iter().filter(|release| !current.contains(&release.identity())) {
