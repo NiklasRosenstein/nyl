@@ -193,8 +193,8 @@ step can write the same file when the reconcile itself proves the result; the
 run records those results for the receipt it wrote, with
 `source: {driver: reconcile}`, so a unit that
 [requires them](/nyl/orchestration/runs/#requiring-attestations) runs in a later
-wave of the same run. A receipt a later run imports from a dead run has them
-pending until `nyl attest` records them. An
+wave of the same run. A receipt a later run imports from a dead run keeps
+the attestations its run recorded for it. An
 `attest` step that does not exit 0 makes the unit `unknown` and records
 nothing.
 

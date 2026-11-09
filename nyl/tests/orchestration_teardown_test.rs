@@ -325,11 +325,11 @@ fn test_confirm_removed_is_delivered_to_the_waiting_run() {
         finished: false,
     };
     harness.store.write_run(&harness.location, &dev(), &run, None).unwrap();
-    let checkpoint = Checkpoint {
-        desired: snapshot.desired[&name].clone(),
+    let checkpoint = Checkpoint::new(
+        snapshot.desired[&name].clone(),
         observed,
-        artifacts: std::collections::BTreeMap::new(),
-    };
+        std::collections::BTreeMap::new(),
+    );
     harness
         .store
         .write_run(&harness.location, &dev(), &run, Some(&checkpoint))

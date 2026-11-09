@@ -247,12 +247,40 @@ pub struct RunState {
 }
 
 /// One finished unit of a run: the desired document it executed, with its
-/// uid, and its receipt or condition with the receipt's artifacts.
+/// uid, and its receipt or condition with the receipt's artifacts,
+/// attestations, and observed values.
+///
+/// The attestations and the observation record belong to the receipt in
+/// `observed` and to no other: a run that imports the checkpoint takes them
+/// only together with that exact receipt, by execution key, run, and
+/// incarnation. A checkpoint of a failure or an `uncertain` outcome carries
+/// none. Contract:
+/// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 3.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkpoint {
     pub desired: DesiredUnit,
     pub observed: ObservedUnit,
     pub artifacts: BTreeMap<String, ArtifactDocument>,
+    /// The receipt's attestations by name, as the run recorded them. Each
+    /// keeps its own `at`: import never re-stamps one.
+    pub attestations: BTreeMap<String, Attestation>,
+    /// The observed values the run read for the receipt, with their own
+    /// `observedAt` times.
+    pub observations: Option<ObservationRecord>,
+}
+
+impl Checkpoint {
+    /// A checkpoint of `observed` as `desired` produced it, with `artifacts`
+    /// and no attestations or observed values.
+    pub fn new(desired: DesiredUnit, observed: ObservedUnit, artifacts: BTreeMap<String, ArtifactDocument>) -> Self {
+        Self {
+            desired,
+            observed,
+            artifacts,
+            attestations: BTreeMap::new(),
+            observations: None,
+        }
+    }
 }
 
 /// The coordination refs of one environment.

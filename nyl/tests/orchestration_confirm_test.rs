@@ -169,11 +169,7 @@ fn running(store: &dyn StateStore, operation: Operation, units: &[&str], checkpo
     let run = run_record(operation, units, false);
     store.write_run(&location(), &dev(), &run, None).unwrap();
     for (unit, waiting) in checkpoints {
-        let checkpoint = Checkpoint {
-            desired: desired(unit),
-            observed: observed(unit, *waiting),
-            artifacts: BTreeMap::new(),
-        };
+        let checkpoint = Checkpoint::new(desired(unit), observed(unit, *waiting), BTreeMap::new());
         store.write_run(&location(), &dev(), &run, Some(&checkpoint)).unwrap();
     }
 }

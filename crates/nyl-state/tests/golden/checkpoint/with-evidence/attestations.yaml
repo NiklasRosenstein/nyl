@@ -1,0 +1,14 @@
+apiVersion: gitops.nyl/v1
+kind: AttestationRecord
+unit:
+  environment: dev
+  name: lb
+  uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+attestations:
+  healthy:
+    executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+    result: pass
+    at: "2026-09-24T10:01:00Z"
+    source:
+      driver: reconcile
+    reason: null
