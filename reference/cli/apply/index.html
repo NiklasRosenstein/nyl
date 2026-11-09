@@ -149,6 +149,17 @@ of one release in parallel. If an apply fails or is interrupted (Ctrl-C) before 
 completes, its revision is recorded as failed with only the resources it applied;
 press Ctrl-C again to exit without waiting for that. A release that renders no resources
 is still recorded, and its previously deployed resources are pruned.</p>
+<p>An apply always applies every resource, which repairs drift, but it records no
+new revision when it changed nothing: the latest revision is <code dir="auto">Deployed</code>, records
+the same manifest, resource keys, owner, and publication destination, and the
+apply pruned nothing and failed nothing. The reserved revision is released, the
+latest revision stays current with its original timestamps (the <code dir="auto">[release]</code>
+history limit still applies to it), and the command reports
+<code dir="auto">Release: &#x3C;name> revision &#x3C;N> unchanged in namespace &#x3C;namespace>; no new revision recorded</code>. This keeps no-op applies
+from pushing useful revisions out of the history limit, which <code dir="auto">helm upgrade</code>
+does not: it creates a revision every time. <a href="/nyl/reference/cli/release/#rollback"><code dir="auto">release rollback</code></a>,
+a failed or interrupted apply, and any apply that changes or prunes something
+always record a revision.</p>
 <p>Pruning deletes the resources a release no longer contains in the reverse of the
 apply order, so dependents go before what they depend on: admission webhook
 configurations before the backends they call, custom resources and objects of
@@ -206,6 +217,10 @@ there but keeps the managed Namespace, which awaits confirmation:</p>
 </div></div><div class="ec-line output"><div class="code">
 </div></div><div class="ec-line output"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">Summary: 0 created, 0 updated, 3 unchanged</span></div></div><div class="ec-line output"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">Timings: discovery (aggregated) 0.08s, validation 0.00s, apply 0.02s, release 0.02s</span></div></div><div class="ec-line output"><div class="code">
 </div></div><div class="ec-line output"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">Release: web revision 3 deployed successfully to namespace web</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl apply --target production applications/web/release.yamlnyl apply --target production --confirm-prune applications/web/release.yaml"><div></div></button></div></figure></div>
+<p>Applying the same Release again changes nothing, so the latest revision stays
+current and no revision is recorded. The resource lines and summary are those of
+any apply; the last line differs:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="console"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">$ nyl apply --target production applications/web/release.yaml</span></div></div><div class="ec-line output"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">...</span></div></div><div class="ec-line output"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">Release: web revision 3 unchanged in namespace web; no new revision recorded</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl apply --target production applications/web/release.yaml"><div></div></button></div></figure></div>
 <div class="sl-heading-wrapper level-h3"><h3 id="dry-run">Dry Run</h3><a class="sl-anchor-link" href="#dry-run"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Dry Run”</span></a></div>
 <p>Use <code dir="auto">nyl diff</code> to preview changes before running <code dir="auto">nyl apply</code>.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="no-release-mode">No Release Mode</h3><a class="sl-anchor-link" href="#no-release-mode"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “No Release Mode”</span></a></div>
@@ -215,6 +230,7 @@ there but keeps the managed Namespace, which awaits confirmation:</p>
 <li>Nyl accepts one entry file. <code dir="auto">Release.spec.include</code> can attach additional relative manifest files and glob matches; directory arguments are not supported.</li>
 <li>A <code dir="auto">Release</code> resource in the manifest provides release metadata automatically.</li>
 <li>Release state is tracked in Kubernetes Secrets in the release namespace. Use <a href="/nyl/reference/cli/release/"><code dir="auto">nyl release</code></a> to inspect history or <a href="/nyl/reference/cli/release/#rollback">roll back</a> to a previous revision.</li>
+<li>An apply that changed nothing records no revision (see <a href="#apply-order-and-progress">Apply order and progress</a>), so repeating <code dir="auto">nyl apply</code> does not age out older revisions.</li>
 <li>Each release keeps its five most recent revisions unless <code dir="auto">[release] history_limit</code> says otherwise. The oldest revisions beyond the limit are deleted after each successful apply; a failed apply deletes nothing. Deleted revisions can no longer be rolled back to.</li>
 <li>The destination namespace and <code dir="auto">spec.additionalNamespaces</code> are applied as
 managed Namespace objects owned by the release, by the group’s <code dir="auto">namespace</code>
