@@ -28,7 +28,7 @@
 //!   two Releases render is compared once, against the Release that applies
 //!   last ([`wave_of`], then the Release key), as the cluster holds it.
 //! - **Missing is drift**, except a Job whose `ttlSecondsAfterFinished` makes
-//!   its disappearance after completion expected ([`job_expires`], the
+//!   its disappearance after completion expected ([`is_ttl_job`], the
 //!   reader's rule). A Release without a revision applied for this publication
 //!   is drift too. A kind the cluster answers with an unknown API resource is
 //!   told apart: missing when the kind is gone ([`KubeClient::is_kind_removed`]),
@@ -57,15 +57,15 @@ use nyl_render::gitops::observation::{DirectRelease, ExpectedDeployment, Reconci
 use nyl_render::kubernetes::field_manager::NYL_FIELD_MANAGER;
 use nyl_render::kubernetes::lifecycle::ObjectScopes;
 use nyl_render::kubernetes::{
-    run_concurrently, DiffEngine, KubeClient, ObjectIdentity, ReleasePublication, ReleaseState, ReleaseStatus,
-    ResourceKey,
+    run_concurrently, DiffEngine, GroupVersionKind, KubeClient, ObjectIdentity, ReleasePublication, ReleaseState,
+    ReleaseStatus, ResourceKey,
 };
-use nyl_render::{KubeErrorKind, NylError};
+use nyl_render::NylError;
 use serde_json::Value;
 
 use super::apply::wave_of;
-use super::health::job_expires;
-use super::reader::{api_error, applied_for};
+use super::health::is_ttl_job;
+use super::reader::{api_error_granting, applied_for};
 use super::{destination_of, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::observe::facts_of;
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, KUBECONFIG_ENV};
@@ -75,6 +75,16 @@ const CONCURRENCY: usize = 8;
 
 /// The objects a summary names before it counts the rest.
 const LISTED: usize = 8;
+
+/// What the context must be allowed to do to read the objects of the Releases
+/// and compare them.
+const OBJECT_GRANT: &str = "`get` on the objects of the Releases and `patch` for server-side apply dry runs";
+
+/// What it must be allowed to do to tell a removed kind from an unavailable one.
+const KIND_GRANT: &str = "`get` on customresourcedefinitions and `list` on apiservices";
+
+/// What it must be allowed to do to read the release state.
+const STATE_GRANT: &str = "`get` and `list` on Secrets of the Release namespaces";
 
 const DEADLINE: &str = "the unit's deadline passed before the cluster was compared; raise the unit's `timeout`";
 
@@ -224,6 +234,7 @@ struct Object {
 }
 
 /// What the cluster holds of one object.
+#[derive(Clone)]
 enum Found {
     Same,
     Changed,
@@ -232,6 +243,9 @@ enum Found {
     Unserved,
     /// A Job a TTL removed after it finished.
     Expired,
+    /// The cluster does not know the object's kind at this version; which of
+    /// `Missing`, `Unserved`, or `Failed` it is gets decided once per kind.
+    UnknownKind,
     Failed(String),
 }
 
@@ -289,13 +303,29 @@ async fn compare(
         |index, result| found[index] = Some(result),
     )
     .await;
+    // What an unknown kind means is the cluster's answer about the kind, so it is
+    // asked once per kind, not once per object.
+    let mut kinds: HashMap<GroupVersionKind, Found> = HashMap::new();
+    for (object, slot) in objects.iter().zip(found.iter_mut()) {
+        if !matches!(slot, Some(Found::UnknownKind)) {
+            continue;
+        }
+        if !kinds.contains_key(&object.key.gvk) {
+            let client = cluster.client.as_ref();
+            let verdict = tokio::time::timeout_at(end, unserved(client, &object.key))
+                .await
+                .unwrap_or_else(|_| Found::Failed(DEADLINE.to_owned()));
+            kinds.insert(object.key.gvk.clone(), verdict);
+        }
+        *slot = kinds.get(&object.key.gvk).cloned();
+    }
     for (object, found) in objects.iter().zip(found.into_iter().flatten()) {
         let label = |what: &str| Difference {
             release: object.release.clone(),
             what: format!("{} {what}", object.key),
         };
         match found {
-            Found::Same | Found::Expired => {}
+            Found::Same | Found::Expired | Found::UnknownKind => {}
             Found::Changed => report.differences.push(label("changed")),
             Found::Missing => report.differences.push(label("is missing")),
             Found::Unserved => report
@@ -313,7 +343,7 @@ async fn compare(
 
 /// The newest `Deployed` revision of `release` applied for `destination`: what
 /// the unit last applied to it. `None` when no revision qualifies.
-async fn desired_revision(
+pub(super) async fn desired_revision(
     cluster: &ClusterHandle,
     release: &DirectRelease,
     destination: &ReleasePublication,
@@ -323,14 +353,14 @@ async fn desired_revision(
         .storage
         .list_revisions(&release.name, &release.namespace)
         .await
-        .map_err(|error| api_error(&error, &what))?;
+        .map_err(|error| api_error_granting(&error, &what, STATE_GRANT))?;
     numbers.sort_unstable_by(|a, b| b.cmp(a));
     for number in numbers {
         let state = cluster
             .storage
             .get_release(&release.name, &release.namespace, number)
             .await
-            .map_err(|error| api_error(&error, &what))?;
+            .map_err(|error| api_error_granting(&error, &what, STATE_GRANT))?;
         if let Some(state) =
             state.filter(|state| state.status == ReleaseStatus::Deployed && applied_for(state, destination))
         {
@@ -402,12 +432,11 @@ async fn compare_object(client: &dyn KubeClient, object: &Object) -> Found {
     for attempt in 0..2 {
         let live = match client.get_resource(&key.gvk, key.namespace.as_deref(), &key.name).await {
             Ok(live) => live,
-            Err(error) if error.is_api_resource_not_found_error() => return unserved(client, key).await,
-            Err(error) => return Found::Failed(failure(&error, &format!("read {key}"))),
+            Err(error) if error.is_api_resource_not_found_error() => return Found::UnknownKind,
+            Err(error) => return Found::Failed(failure(&error, &format!("read {key}"), OBJECT_GRANT)),
         };
         let Some(live) = live else {
-            let is_job = key.gvk.group == "batch" && key.gvk.kind == "Job";
-            return if is_job && job_expires(&object.manifest) {
+            return if is_ttl_job(key, &object.manifest) {
                 Found::Expired
             } else {
                 Found::Missing
@@ -424,6 +453,7 @@ async fn compare_object(client: &dyn KubeClient, object: &Object) -> Found {
                 return Found::Failed(failure(
                     &error,
                     &format!("compare {key} by a server-side apply dry run"),
+                    OBJECT_GRANT,
                 ))
             }
         };
@@ -455,7 +485,13 @@ async fn unserved(client: &dyn KubeClient, key: &ResourceKey) -> Found {
     match client.get_api_versions().await {
         Ok(served) if serves_another_version(&served, gvk) => return Found::Unserved,
         Ok(_) => {}
-        Err(error) => return Found::Failed(failure(&error, &format!("list the API versions to read {key}"))),
+        Err(error) => {
+            return Found::Failed(failure(
+                &error,
+                &format!("list the API versions to read {key}"),
+                OBJECT_GRANT,
+            ))
+        }
     }
     match client.is_kind_removed(gvk).await {
         Ok(true) => Found::Missing,
@@ -464,7 +500,11 @@ async fn unserved(client: &dyn KubeClient, key: &ResourceKey) -> Found {
              unavailable; check the APIService, or run detect-drift again once it is",
             api_version_of(gvk)
         )),
-        Err(error) => Found::Failed(failure(&error, &format!("check whether the kind of {key} was removed"))),
+        Err(error) => Found::Failed(failure(
+            &error,
+            &format!("check whether the kind of {key} was removed"),
+            KIND_GRANT,
+        )),
     }
 }
 
@@ -490,25 +530,9 @@ fn serves_another_version(served: &[String], gvk: &nyl_render::kubernetes::Group
     })
 }
 
-/// A failed read or dry run, with the fix attached.
-fn failure(error: &NylError, what: &str) -> String {
-    let text = error.to_string();
-    let first = text.lines().next().unwrap_or_default();
-    match error.kube_kind() {
-        Some(KubeErrorKind::Forbidden) => format!(
-            "the context may not {what} (HTTP 403): grant its user `get` on the objects of the Releases and `patch` \
-             for server-side apply dry runs. {first}"
-        ),
-        Some(KubeErrorKind::Unauthorized) => format!(
-            "the Kubernetes API rejected the kubeconfig's credentials (HTTP 401): they are invalid or have expired; \
-             log in again or refresh the admitted kubeconfig. {first}"
-        ),
-        Some(KubeErrorKind::Rejected) => format!(
-            "the Kubernetes API rejected the object when asked to {what} (HTTP 422); it may be rejected by an \
-             admission webhook or hold a field that cannot change. {first}"
-        ),
-        _ => format!("cannot {what}: {first}"),
-    }
+/// A failed read or dry run, with the fix attached: what a 403 asks to grant.
+fn failure(error: &NylError, what: &str, grant: &str) -> String {
+    api_error_granting(error, what, grant).message
 }
 
 /// What a unit's drift is, from what its publication branch and its cluster

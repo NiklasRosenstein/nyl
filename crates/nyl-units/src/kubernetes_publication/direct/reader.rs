@@ -67,27 +67,41 @@ impl DirectReader {
     }
 }
 
+/// What the reader needs the context to be allowed to do.
+const READER_GRANT: &str =
+    "`get` and `list` on Secrets of the Release namespaces and `get` on the workloads the Releases apply";
+
 /// A read error of the Kubernetes API, as the reader reports it.
 pub(super) fn api_error(error: &NylError, what: &str) -> ReadError {
+    api_error_granting(error, what, READER_GRANT)
+}
+
+/// [`api_error`] for a caller that needs other permissions: `grant` is what a
+/// 403 tells the user to grant.
+pub(super) fn api_error_granting(error: &NylError, what: &str, grant: &str) -> ReadError {
     let text = error.to_string();
-    let kind = match error.kube_kind() {
-        Some(KubeErrorKind::Forbidden) => ReadErrorKind::Forbidden,
-        Some(KubeErrorKind::Unauthorized) => ReadErrorKind::Rejected,
-        _ => ReadErrorKind::Unreachable,
-    };
     let first = text.lines().next().unwrap_or_default();
-    let message = match kind {
-        ReadErrorKind::Forbidden => format!(
-            "the context may not {what} (HTTP 403): grant its user `get` and `list` on Secrets of the Release namespaces \
-             and `get` on the workloads the Releases apply. {first}"
+    match error.kube_kind() {
+        Some(KubeErrorKind::Forbidden) => ReadError::new(
+            ReadErrorKind::Forbidden,
+            format!("the context may not {what} (HTTP 403): grant its user {grant}. {first}"),
         ),
-        ReadErrorKind::Rejected => format!(
-            "the Kubernetes API rejected the kubeconfig's credentials (HTTP 401): they are invalid or have expired; \
-             log in again or refresh the admitted kubeconfig. {first}"
+        Some(KubeErrorKind::Unauthorized) => ReadError::new(
+            ReadErrorKind::Rejected,
+            format!(
+                "the Kubernetes API rejected the kubeconfig's credentials (HTTP 401): they are invalid or have expired; \
+                 log in again or refresh the admitted kubeconfig. {first}"
+            ),
         ),
-        _ => format!("cannot {what}: {first}"),
-    };
-    ReadError::new(kind, message)
+        Some(KubeErrorKind::Rejected) => ReadError::new(
+            ReadErrorKind::Unreachable,
+            format!(
+                "the Kubernetes API rejected the object when asked to {what} (HTTP 422); an admission webhook may \
+                 refuse it or it holds a field that cannot change. {first}"
+            ),
+        ),
+        _ => ReadError::new(ReadErrorKind::Unreachable, format!("cannot {what}: {first}")),
+    }
 }
 
 fn locator(deployment: &ExpectedDeployment) -> Result<DirectRelease, ReadError> {

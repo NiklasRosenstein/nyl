@@ -1391,6 +1391,8 @@ enum Unserved {
     Unavailable,
     /// The version of the manifest is gone; `v2` is served.
     OtherVersion,
+    /// The credentials may not look at the CRDs and APIServices that tell.
+    Forbidden,
 }
 
 impl ApiServer {
@@ -1443,10 +1445,11 @@ impl KubeClient for ApiServer {
     }
 
     async fn is_kind_removed(&self, gvk: &GroupVersionKind) -> nyl_render::Result<bool> {
-        Ok(matches!(
-            &*self.unserved.lock().unwrap(),
-            Some((kind, Unserved::Removed)) if *kind == gvk.kind
-        ))
+        match &*self.unserved.lock().unwrap() {
+            Some((kind, Unserved::Forbidden)) if *kind == gvk.kind => Err(Fails::Forbidden.error()),
+            Some((kind, Unserved::Removed)) if *kind == gvk.kind => Ok(true),
+            _ => Ok(false),
+        }
     }
 
     async fn apply_resource(
@@ -1937,6 +1940,50 @@ async fn test_a_kind_the_cluster_does_not_serve_is_told_apart() {
         panic!("an aggregated API that is down is unknown");
     };
     assert!(reason.contains("aggregated API"), "{reason}");
+
+    // Telling them apart reads CRDs and APIServices; a 403 names exactly those.
+    *applied.server.unserved.lock().unwrap() = Some(("ConfigMap".to_owned(), Unserved::Forbidden));
+    let Drift::Unknown { reason } = applied.drift() else {
+        panic!("a forbidden look at the CRDs is unknown");
+    };
+    assert!(
+        reason.contains("`get` on customresourcedefinitions and `list` on apiservices"),
+        "{reason}"
+    );
+}
+
+/// Catches a TTL Job running again on the retry of a failed apply: revision 1
+/// deployed the Job, revision 2 failed on something else, and the TTL removed the
+/// Job. The retry compares the Job with the newest `Deployed` revision of this
+/// publication, as drift does, not with the latest revision, which is `Failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_ttl_job_is_not_applied_again_after_a_failed_revision() {
+    let applied = Applied::new();
+    let mut failed = applied
+        .cluster
+        .storage
+        .get_latest_release("jobs", "jobs")
+        .await
+        .unwrap()
+        .unwrap();
+    failed.revision = 2;
+    failed.status = ReleaseStatus::Failed;
+    failed.error = Some("apply did not complete".to_owned());
+    applied.cluster.storage.save_release(&failed).await.unwrap();
+    applied.remove("batch/v1", "Job", "jobs", "migrate").await;
+
+    tree_of(&reconcile(
+        &applied.driver,
+        &applied.world,
+        &applied.unit,
+        Some(&applied.tree),
+        &nobody(),
+    ));
+
+    assert!(
+        !applied.cluster.exists("batch/v1", "Job", Some("jobs"), "migrate").await,
+        "the Job ran once and its TTL removed it"
+    );
 }
 
 /// Catches a direct unit being judged by what it recorded instead of by its

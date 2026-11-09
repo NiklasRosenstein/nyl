@@ -80,8 +80,8 @@ that never reaches it (or with no receipt at all) fails with
 
 Every reconcile applies every Release, which repairs anything changed in the
 cluster by hand, except a Job that sets `ttlSecondsAfterFinished`, is gone from the
-cluster, and has the document its Release's latest revision holds: it ran and its TTL
-removed it, and applying it again would run it again. It stays tracked, and the Release
+cluster, and has the document the Release's latest `Deployed` revision for this
+publication holds: it ran and its TTL removed it, and applying it again would run it again. It stays tracked, and the Release
 is judged unchanged without it. A Release that changed nothing does not record a new release
 revision, so the history keeps its useful revisions instead of filling with
 copies of one. A Release is unchanged when its latest revision is `Deployed`
@@ -137,7 +137,8 @@ comparing the publication branch with the tree as it does for Argo CD:
   down, or an unfinished comparison at the unit's deadline is `unknown`, never `clean`.
   Drift found anyway is reported as drift, with what stayed uncompared. The check reads
   Secrets of the Release namespaces for the release state, the objects the Releases
-  apply, and needs `patch` for the dry runs. An admission webhook whose `sideEffects`
+  apply, and needs `patch` for the dry runs, and, to tell a removed kind from an
+  unavailable one, `get` on customresourcedefinitions and `list` on apiservices. An admission webhook whose `sideEffects`
   are `Unknown` or `Some` refuses dry runs, so a unit with such a webhook on one of its
   objects stays `unknown`.
 
@@ -152,8 +153,9 @@ A drifted unit is repaired like any other: the next `nyl reconcile` under the de
 [Unchanged Releases](#unchanged-releases)). The apply puts back what was changed or
 deleted and keeps the recorded revision, so a repair that changed nothing in the release
 state records no revision. A Job its TTL removed is not applied again, here or in any
-other reconcile, while its document is the one the Release's latest revision holds: it
-would run a second time. A Job whose document changed is applied.
+other reconcile, while its document is the one the Release's latest `Deployed` revision
+for this publication holds (a later `Failed` revision does not matter): it would run a
+second time. A Job whose document changed is applied.
 
 ## Fencing and manual changes
 

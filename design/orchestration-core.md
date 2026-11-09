@@ -1921,7 +1921,8 @@ either is `drifted`, a half that cannot tell beside a clean one is `unknown`.
   apply them. Only manifest documents are compared.
 - **Unreadable is never clean.** An unreachable cluster, credentials that may
   not read an object or run the dry run (`get`, and `patch` for dry runs, besides
-  the Secrets of the release state), an object the API rejects (an admission
+  the Secrets of the release state, and, to tell a removed kind from an unavailable
+  one, `get` on customresourcedefinitions and `list` on apiservices), an object the API rejects (an admission
   webhook whose `sideEffects` are `Unknown` or `Some` refuses dry runs, so such a
   unit stays `unknown`), or a deadline that passes is `unknown` with the reason
   and the fix. Drift found anyway is `drifted`, with what stayed uncompared.

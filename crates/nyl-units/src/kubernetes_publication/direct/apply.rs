@@ -21,8 +21,8 @@ use nyl_core::orchestration::ids::{EnvironmentName, Uid, UnitName};
 use nyl_core::orchestration::state::FailureCategory;
 use nyl_render::gitops::direct::release_documents;
 use nyl_render::gitops::observation::{
-    equivalent, running_publication, DeploymentTree, DirectLocation, GitPublicationHistory, ObservedPublication,
-    PublishedDirectRelease, RunningMatch, MATCH_WALK_LIMIT,
+    equivalent, running_publication, DeploymentTree, DirectLocation, DirectRelease, GitPublicationHistory,
+    ObservedPublication, PublishedDirectRelease, RunningMatch, MATCH_WALK_LIMIT,
 };
 use nyl_render::gitops::publication::{release_history_limit, RenderedTarget};
 use nyl_render::gitops::reconcile::RenderIndexOwner;
@@ -37,6 +37,8 @@ use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ReleaseStatus, 
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
+use super::drift::desired_revision;
+use super::health::is_ttl_job;
 use super::reader::api_error;
 use super::{not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, ReadErrorKind, KUBECONFIG_ENV};
@@ -560,29 +562,31 @@ impl<'a, 'c> Direct<'a, 'c> {
 
     /// The Jobs of `manifests` that a TTL removed after they finished: the Job
     /// sets `ttlSecondsAfterFinished`, the cluster no longer has it, and its
-    /// document is the one the Release's latest revision, `Deployed` for this
-    /// destination, already holds. Applying it again would run it a second
-    /// time, on every execution; a Job whose document changed is applied, as
-    /// it is meant to run again. Anything that cannot be read counts as not
-    /// expired, so the Job is applied.
+    /// document is the one the Release's newest `Deployed` revision for this
+    /// publication holds (the revision drift detection compares the cluster
+    /// with, [`desired_revision`], whatever revisions failed after it).
+    /// Applying it again would run it a second time, on every execution; a Job
+    /// whose document changed is applied, as it is meant to run again. Anything
+    /// that cannot be read counts as not expired, so the Job is applied.
     async fn expired_jobs(
         &self,
         cluster: &ClusterHandle,
-        name: &str,
-        namespace: &str,
+        release: &DirectRelease,
         manifests: &[Value],
     ) -> HashSet<ResourceKey> {
         let candidates: Vec<(ResourceKey, &Value)> = manifests
             .iter()
-            .filter(|manifest| manifest.pointer("/spec/ttlSecondsAfterFinished").is_some())
             .filter_map(|manifest| ResourceKey::from_json_value(manifest).ok().map(|key| (key, manifest)))
-            .filter(|(key, _)| key.gvk.group == "batch" && key.gvk.kind == "Job")
+            .filter(|(key, manifest)| is_ttl_job(key, manifest))
             .collect();
         let mut expired = HashSet::new();
         if candidates.is_empty() {
             return expired;
         }
-        let Some(previous) = self.latest_deployed_manifest(cluster, name, namespace).await else {
+        let Ok(Some(previous)) = desired_revision(cluster, release, &self.destination).await else {
+            return expired;
+        };
+        let Ok(previous) = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&previous.manifest) else {
             return expired;
         };
         for (key, manifest) in candidates {
@@ -599,32 +603,6 @@ impl<'a, 'c> Direct<'a, 'c> {
             }
         }
         expired
-    }
-
-    /// The documents of the manifest the latest revision of a Release records,
-    /// when it is `Deployed` and was applied for this target's destination.
-    async fn latest_deployed_manifest(
-        &self,
-        cluster: &ClusterHandle,
-        name: &str,
-        namespace: &str,
-    ) -> Option<Vec<Value>> {
-        let latest = cluster
-            .storage
-            .list_revisions(name, namespace)
-            .await
-            .ok()?
-            .into_iter()
-            .max()?;
-        let state = cluster.storage.get_release(name, namespace, latest).await.ok()??;
-        let applied_here = state
-            .meta
-            .publication
-            .as_ref()
-            .is_some_and(|publication| publication.same_destination(&self.destination));
-        (state.status == ReleaseStatus::Deployed && applied_here)
-            .then(|| nyl_render::yaml::parse_yaml_documents_k8s_compatible(&state.manifest).ok())
-            .flatten()
     }
 
     #[allow(clippy::too_many_arguments)] // The inputs of one Release's apply are independent facts.
@@ -652,7 +630,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         .await?;
         ResourceOrdering::sort_by_priority(&mut manifests)?;
         let ownership = FieldOwnership::Nyl;
-        let expired = self.expired_jobs(cluster, name, namespace, &manifests).await;
+        let expired = self.expired_jobs(cluster, &release.release, &manifests).await;
         ensure_namespace_exists(cluster.client.as_ref(), namespace, &ownership).await?;
         // Decided before the reservation, which makes the latest revision read as
         // `Rendered` (a mixed reading) until the apply completes: the branch is not
