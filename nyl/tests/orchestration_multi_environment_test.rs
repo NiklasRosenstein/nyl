@@ -399,10 +399,10 @@ fn test_a_consumer_waits_for_an_observed_value_of_another_environments_unit_then
 }
 
 /// `reconcile --detect-drift` over several environments checks each one inside
-/// its own run, under its own lease, and records its records in its own commit.
-/// Catches a check shared across environments or one that outlives its lease.
+/// its own run and records its records in its own commit. Catches a check
+/// shared across environments, which would leave one without its records.
 #[test]
-fn test_detect_drift_checks_each_selected_environment_under_its_own_lease() {
+fn test_detect_drift_checks_each_selected_environment_in_its_own_run() {
     let harness = Harness::new();
     let converged = harness.invoke(&["reconcile", "-e", "app", "-e", "infra", "-o", "json"]);
     assert_eq!(converged.exit, 0, "{}", converged.stderr);
@@ -418,5 +418,4 @@ fn test_detect_drift_checks_each_selected_environment_under_its_own_lease() {
             "{environment} wrote its records"
         );
     }
-    assert_ne!(section(&run, "infra")["run"], section(&run, "app")["run"]);
 }

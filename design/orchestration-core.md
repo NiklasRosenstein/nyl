@@ -3905,15 +3905,21 @@ never detects drift.
   so no other run can change the resources between the check and the repair.
   It is one run and one transition commit per state ref, with one decision
   path for each part:
-  - *Which units.* The units selection leaves current (owner:
-    `rules::checks`, whose `reconcile_targets` runs `select` with no drift
-    records and takes its `Current` units, once, when the run first selects).
-    A unit `--unit` did not name, a held, blocked, or uncertain unit, a unit
+  - *Which units.* The units selection leaves current whose driver
+    detects drift for their spec (owner: `rules::checks`, whose
+    `reconcile_targets` runs `select` with no drift records and takes its
+    `Current` units, once, when the run first selects, then keeps those whose
+    driver's `capabilities` have `detectDrift`; the rule names no kind). A
+    unit `--unit` did not name, a held, blocked, or uncertain unit, a unit
     awaiting an approval, and a unit that executes anyway, because its inputs
     changed or it has no current receipt, is not checked: a receipt this run
-    replaces says nothing its new receipt keeps. The check follows `--unit` as
-    execution does, so dependencies and dependents of a named unit are not
-    pulled in. A unit that is current at that point is checked even when the
+    replaces says nothing its new receipt keeps. Selection runs once, so a
+    unit blocked at that point is not checked in this run, even if it ends the
+    run current. The check follows `--unit` as execution does, so
+    dependencies and dependents of a named unit are not pulled in. A kind
+    that cannot detect drift is left out, as `attest` leaves out a unit that
+    cannot attest, and is `unsupported` only when `--unit` names it, as in
+    `detect-drift`. A unit that is current at that point is checked even when the
     outputs of a dependency this run executes later change its key; its
     record then goes with the receipt it was about. A unit whose stored
     record says `drifted` is checked again, because the check replaces the
@@ -3927,7 +3933,11 @@ never detects drift.
     the rule that a record equal to the stored one but for its time keeps the
     stored one. A driver failure or a check past its deadline is an error
     (`NYL-DRIVER-ERROR`, exit 1) that records nothing for the unit, and the
-    run goes on with the stored records. A signal before the checks finish
+    run goes on. The run then has no evidence about that unit, so selection
+    does not read its stored record: a stored `drifted` record is not repaired
+    on evidence the run could not renew, and it stays in the state, so
+    `status` still shows it. The error is the report of the failure; no
+    `NYL-DRIFT-UNKNOWN` warning repeats it. A signal before the checks finish
     ends the run as one between waves (`NYL-RUN-CANCELLED`, exit 4, nothing
     written).
   - *Records.* The drift records join the run's transition commit; the run
@@ -3952,15 +3962,14 @@ never detects drift.
     same `driftCheck`. The table adds `drift check: …` to the unit's detail.
     Drift the run repaired is reported by `driftRepaired` and `driftCheck`,
     not by a warning. Drift it left carries `NYL-DRIFT-DETECTED` with the
-    fix `detect-drift` gives; `unknown` and `unsupported` carry
-    `NYL-DRIFT-UNKNOWN` and `NYL-DRIFT-UNSUPPORTED`.
+    fix `detect-drift` gives; `unknown` and `unsupported` (a named unit whose
+    kind cannot detect drift) carry `NYL-DRIFT-UNKNOWN` and
+    `NYL-DRIFT-UNSUPPORTED`.
   - *Exit.* A unit's exit is its reconcile result's, as without the flag
     (`drifted` and `awaiting-approval` exit 2, a failed repair 3, an
     uncertain one 4), and a check that could not conclude (`unknown`) makes
-    the run incomplete (exit 2), as `detect-drift` does. `unsupported` does
-    not change the exit: it is a property of the unit's kind that no
-    amount of repair changes, and counting it would keep a scheduled run
-    from ever exiting 0 in an environment with such a unit.
+    the run incomplete (exit 2), as `detect-drift` does. A named
+    `unsupported` unit adds nothing: it is a note, not a failed check.
   - *Other options.* `--leaving` and `--reapply` leave the check nothing to
     do (units outside the ownership set have no receipt to check, and
     `--reapply` executes its units whether or not they drifted), so they are

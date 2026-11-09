@@ -3152,16 +3152,19 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 .extend(observing.warnings.get(name).cloned().unwrap_or_default());
             if let Some(check) = detection.checks.get(name) {
                 // What `--detect-drift` found; drift this run repaired is
-                // reported by `driftRepaired`, not as a warning.
+                // reported by `driftRepaired`, not as a warning, and a check
+                // that failed is already reported as `NYL-DRIVER-ERROR`.
                 entry.drift_check = Some(check.clone());
-                entry.warnings.extend(crate::rules::checks::reconcile_warnings(
-                    &environment,
-                    name,
-                    check,
-                    crate::rules::selection::execution_recovery(context.drivers, unit),
-                    drift::drift_repair(&prepared.rendered.environment),
-                    self.report.drift_repaired.contains(name),
-                ));
+                if !detection.failed.contains(name) {
+                    entry.warnings.extend(crate::rules::checks::reconcile_warnings(
+                        &environment,
+                        name,
+                        check,
+                        crate::rules::selection::execution_recovery(context.drivers, unit),
+                        drift::drift_repair(&prepared.rendered.environment),
+                        self.report.drift_repaired.contains(name),
+                    ));
+                }
             }
             self.report.units.insert(name.clone(), entry);
         }
@@ -3245,7 +3248,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         // the record is about the old one) and that differs from the stored.
         for (name, (record, receipt)) in &detection.records {
             let standing = observed.get(name).and_then(|observed| observed.receipt.as_ref());
-            if standing == Some(receipt) && snapshot.drift.get(name) != Some(record) {
+            if standing == Some(receipt)
+                && snapshot.drift.get(name) != Some(record)
+                && !changes.drift.contains_key(name)
+            {
                 changes.drift.insert(name.clone(), Some(record.clone()));
             }
         }

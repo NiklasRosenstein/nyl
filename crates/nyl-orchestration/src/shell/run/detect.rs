@@ -15,6 +15,7 @@
 
 #[allow(clippy::wildcard_imports)] // The run module's private helpers and imports.
 use super::*;
+use crate::rules::checks::Target;
 use crate::run_report::CheckResult;
 use crate::shell::check::{self, Halted};
 use nyl_core::orchestration::state::DriftRecord;
@@ -28,13 +29,20 @@ pub(super) struct Detection {
     /// stored ones, with the receipt each describes, so the commit writes
     /// one only while that receipt still stands.
     pub(super) records: BTreeMap<UnitName, (DriftRecord, Receipt)>,
+    /// The units whose check failed (`NYL-DRIVER-ERROR`): the run has no
+    /// evidence about them, so selection does not read their stored records.
+    pub(super) failed: BTreeSet<UnitName>,
 }
 
 impl Detection {
     /// The drift records as this run stands: the snapshot's, with what the
-    /// check found laid over them, so selection sees the fresh results.
+    /// check found laid over them, so selection sees the fresh results. A
+    /// unit whose check failed has none, so a stored `drifted` record does not
+    /// repair it on evidence the run could not renew; the stored record stays
+    /// in the state until a check concludes.
     pub(super) fn overlay(&self, stored: &BTreeMap<UnitName, DriftRecord>) -> BTreeMap<UnitName, DriftRecord> {
         let mut records = stored.clone();
+        records.retain(|name, _| !self.failed.contains(name));
         records.extend(
             self.records
                 .iter()
@@ -45,13 +53,15 @@ impl Detection {
 }
 
 impl Reconcile<'_, '_, '_> {
-    /// Check `targets` for drift, with the lease's deadline moved for each
-    /// batch as a standalone check moves it. A driver failure is an error in
-    /// the report (the check recorded nothing for the unit) and the run
-    /// goes on; a signal ends it as it ends a run between waves.
+    /// Check the [`Target::Check`] units of `targets` for drift, with the
+    /// lease's deadline moved for each batch as a standalone check moves it,
+    /// and report the [`Target::Unsupported`] ones. A driver failure is an
+    /// error in the report (the check recorded nothing for the unit, and
+    /// selection ignores the unit's stored record) and the run goes on; a
+    /// signal ends it as it ends a run between waves.
     pub(super) fn detect_drift(
         &mut self,
-        targets: &BTreeSet<UnitName>,
+        targets: &BTreeMap<UnitName, Target>,
         selectable: &BTreeMap<UnitName, DesiredUnit>,
         observed: &BTreeMap<UnitName, ObservedUnit>,
         artifacts: &BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
@@ -59,6 +69,14 @@ impl Reconcile<'_, '_, '_> {
         project_dir: &str,
     ) -> Result<Detection, Ending> {
         let mut detection = Detection::default();
+        for (name, _) in targets.iter().filter(|(_, target)| **target == Target::Unsupported) {
+            detection.checks.insert(name.clone(), CheckResult::Unsupported);
+        }
+        let targets: BTreeSet<&UnitName> = targets
+            .iter()
+            .filter(|(_, target)| **target == Target::Check)
+            .map(|(name, _)| name)
+            .collect();
         if targets.is_empty() {
             return Ok(detection);
         }
@@ -69,14 +87,14 @@ impl Reconcile<'_, '_, '_> {
         let view = EnvironmentSnapshot {
             desired: targets
                 .iter()
-                .map(|name| (name.clone(), selectable[name].clone()))
+                .map(|name| ((*name).clone(), selectable[*name].clone()))
                 .collect(),
             observed: observed.clone(),
             artifacts: artifacts.clone(),
             drift: stored.clone(),
             ..EnvironmentSnapshot::default()
         };
-        let names: Vec<&UnitName> = targets.iter().collect();
+        let names: Vec<&UnitName> = targets.iter().copied().collect();
         let mut extend = |longest: Duration| -> Result<Timestamp, Ending> {
             let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
             self.phase(Vec::new(), deadline, &[])?;
@@ -88,6 +106,9 @@ impl Reconcile<'_, '_, '_> {
             Err(Halted::Lease(ending)) => return Err(ending),
         };
         for unit in checked {
+            if unit.error.is_some() {
+                detection.failed.insert(unit.name.clone());
+            }
             self.report.errors.extend(unit.error.clone());
             if let Some(record) = unit.drift_record() {
                 if let Some(receipt) = observed.get(&unit.name).and_then(|observed| observed.receipt.clone()) {

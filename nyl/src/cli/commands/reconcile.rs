@@ -256,7 +256,9 @@ fn template_selection_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
 }
 
 /// `--detect-drift` with an option that leaves it nothing to check, refused
-/// before an instance is created or extended, by the rule the run itself applies.
+/// by the rule the run itself applies (`reconcile_environment` refuses it for
+/// every other caller of the engine). This copy exists to refuse before an
+/// instance is created or extended, which happens ahead of the run.
 fn detect_drift_error(args: &ReconcileArgs) -> Option<CommandOutcome> {
     if !args.detect_drift {
         return None;

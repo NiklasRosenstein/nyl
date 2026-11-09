@@ -526,8 +526,6 @@ fn test_detect_drift_with_unit_checks_only_the_named_units() {
     let run = harness.reconcile(&["--detect-drift", "--unit", "api"]);
     assert_eq!(run.exit, 0, "{}", run.stderr);
     assert_eq!(unit(&run.report, "api")["result"], "executed");
-    assert_eq!(unit(&run.report, "job")["driftCheck"], Value::Null);
-    assert_eq!(unit(&run.report, "job")["result"], Value::Null);
     let status = harness.invoke(&["status", "-e", "dev", "-o", "json"]);
     assert_eq!(unit(&status.report, "job")["drift"], Value::Null, "job was not checked");
 }
@@ -557,13 +555,13 @@ fn test_detect_drift_is_refused_with_options_that_leave_nothing_to_check() {
     assert_eq!(harness.tip(), before);
 }
 
-/// A kind that cannot detect drift is reported `unsupported` without
-/// affecting the exit, so a scheduled `reconcile --detect-drift` can exit 0
-/// in an environment with such a unit; a drift check that cannot conclude
-/// (`unknown`) makes the run incomplete (2), as `detect-drift` does. Both
-/// warn with the codes of `detect-drift`.
+/// A kind that cannot detect drift is not checked and not reported, so a
+/// scheduled `reconcile --detect-drift` exits 0 in an environment with such a
+/// unit; `--unit` naming it reports `unsupported`, as `detect-drift` does. A
+/// drift check that cannot conclude (`unknown`) makes the run incomplete (2),
+/// as `detect-drift` does. Both warn with the codes of `detect-drift`.
 #[test]
-fn test_detect_drift_exit_counts_unknown_but_not_unsupported() {
+fn test_detect_drift_leaves_out_kinds_that_cannot_detect_drift_and_counts_unknown() {
     let plain = command("plain", "true", "");
     let flaky = command("flaky", "true", "  detectDrift: [sh, -c, 'exit 1']\n");
     let harness = Harness::with_units(&[("nyl/plain.yaml", plain.clone())]);
@@ -572,8 +570,12 @@ fn test_detect_drift_exit_counts_unknown_but_not_unsupported() {
     assert_eq!(first.exit, 0, "{}", first.stderr);
     let run = harness.reconcile(&["--detect-drift"]);
     assert_eq!(run.exit, 0, "{}", run.stderr);
-    assert_eq!(unit(&run.report, "plain")["driftCheck"]["check"], "unsupported");
-    assert_eq!(warning_codes(&run.report, "plain"), ["NYL-DRIFT-UNSUPPORTED"]);
+    assert_eq!(unit(&run.report, "plain")["driftCheck"], Value::Null);
+    assert_eq!(warning_codes(&run.report, "plain"), Vec::<String>::new());
+    let named = harness.reconcile(&["--detect-drift", "--unit", "plain"]);
+    assert_eq!(named.exit, 0, "{}", named.stderr);
+    assert_eq!(unit(&named.report, "plain")["driftCheck"]["check"], "unsupported");
+    assert_eq!(warning_codes(&named.report, "plain"), ["NYL-DRIFT-UNSUPPORTED"]);
 
     let harness = Harness::with_units(&[("nyl/plain.yaml", plain), ("nyl/flaky.yaml", flaky)]);
     assert_eq!(harness.invoke(&["state", "init", "-e", "dev"]).exit, 0);
@@ -583,4 +585,5 @@ fn test_detect_drift_exit_counts_unknown_but_not_unsupported() {
     assert_eq!(unit(&run.report, "flaky")["driftCheck"]["check"], "unknown");
     assert_eq!(unit(&run.report, "flaky")["result"], "current");
     assert_eq!(warning_codes(&run.report, "flaky"), ["NYL-DRIFT-UNKNOWN"]);
+    assert_eq!(unit(&run.report, "plain")["driftCheck"], Value::Null);
 }

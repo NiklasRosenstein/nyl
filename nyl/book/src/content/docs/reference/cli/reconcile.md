@@ -180,26 +180,19 @@ in which another run could change the resources:
 $ nyl reconcile -e dev --detect-drift
 [dev/api] starting Command (reconcile): repair drift
 [dev/api] executed in 0.0s
-UNIT   KIND     RESULT             DETAIL
-api    Command  executed           reason: repair drift; drift check: drifted (detectDrift reported drift (exit code 2))
-job    Command  awaiting-approval  drift check: drifted (detectDrift reported drift (exit code 2))
-notes  Command  current            drift check: unsupported
+UNIT  KIND     RESULT             DETAIL
+api   Command  executed           reason: repair drift; drift check: drifted (detectDrift reported drift (exit code 2))
+job   Command  awaiting-approval  drift check: drifted (detectDrift reported drift (exit code 2))
 
-  run:      01a1c08e-e3e7-7c61-9db2-f1acdc0e4fb5
-  source:   4532545735b96c34bb646e0b36dcd120eaf95a5a
-  observed: 32befb91d4d401b2faf3a57c4b7cebe4e7b1c2d8
+  run:      01a1c0b6-bbfd-793c-80a0-6e4ebaf21ae9
+  source:   429b6ae7ebecd644c4752951497bf68626121274
+  observed: 5af2de018d762e653a183c4a184c0329800e8f3d
 
 warning  job in dev drifted from its receipt: detectDrift reported drift (exit code 2)
 
   Action  it awaits approval, since job is not safe to re-run: run `nyl reconcile -e dev --approve job`
 
   NYL-DRIFT-DETECTED (job)
-
-warning  the kind of notes cannot detect drift
-
-  Action  check the unit with its own tool, or give it a drift detection step where its kind supports one
-
-  NYL-DRIFT-UNSUPPORTED (notes)
 ```
 
 `api` was repaired in the same run and left no record; `job` awaits approval and
@@ -207,19 +200,20 @@ keeps the record the run wrote, so `nyl status` shows it `drifted` with no
 further check.
 
 - A unit that executes anyway, because its inputs changed or it has no current
-  receipt, is not checked. `--unit` limits the check to the named units.
+  receipt, is not checked. `--unit` limits the check to the named units. A unit
+  whose kind cannot detect drift is left out of the check, and is reported
+  `unsupported` only when `--unit` names it.
 - Each checked unit's `driftCheck` in `-o json`, and in the commit summary, is
   `clean`, `drifted` (with a `summary`), `unknown` (with a `reason`), or
   `unsupported`; the table adds it to the unit's detail. The run records the
   records the check found, unless the unit's new receipt replaced the one
   they are about.
 - A check that cannot tell (`unknown`, `NYL-DRIFT-UNKNOWN`) makes the run exit
-  2, as `detect-drift` does. A kind that cannot detect drift
-  (`unsupported`, `NYL-DRIFT-UNSUPPORTED`) warns without changing the exit. A
-  check that fails to run or passes its deadline is an error
-  (`NYL-DRIVER-ERROR`, exit 1) that records nothing for the unit, and the run
-  goes on with the stored records. Drift the run left is `NYL-DRIFT-DETECTED`
-  with the fix to apply.
+  2, as `detect-drift` does. A check that fails to run or passes its deadline
+  is an error (`NYL-DRIVER-ERROR`, exit 1) that records nothing for the unit,
+  and the run goes on: it does not act on the unit's stored `drifted` record,
+  which stays in the state. Drift the run left is `NYL-DRIFT-DETECTED` with the
+  fix to apply.
 - `--detect-drift` is refused with `--leaving` and `--reapply`
   (`NYL-DRIFT-OPTION-INVALID`, exit 1, before the run takes the lease).
   Each selected environment checks within its own run.

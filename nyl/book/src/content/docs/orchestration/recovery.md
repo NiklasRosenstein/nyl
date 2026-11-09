@@ -293,9 +293,12 @@ the rules below, in the same run:
 
 - **Which units.** The units the run would otherwise leave current. A unit
   that executes anyway, because its inputs changed or it has no current
-  receipt, is not checked: its receipt is about to be replaced. `--unit`
-  limits the check to the named units, as it limits execution, and pulls in
-  neither their dependencies nor their dependents. A unit whose stored record
+  receipt, is not checked: its receipt is about to be replaced. A unit that
+  is blocked when the run first selects is not checked in that run, even if it
+  ends the run current. A kind that cannot detect drift is not checked either.
+  `--unit` limits the check to the named units, as it limits execution, and
+  pulls in neither their dependencies nor their dependents; it also reports a
+  named unit whose kind cannot detect drift as `unsupported`. A unit whose stored record
   says `drifted` is checked again, so a unit you repaired by hand since the
   last `detect-drift` is not executed on stale evidence.
 - **One decision.** The fresh records go through the same rule as the stored
@@ -311,9 +314,9 @@ the rules below, in the same run:
   (`clean`, `drifted`, `unknown`, or `unsupported`). Drift the run did not
   repair is a `NYL-DRIFT-DETECTED` warning whose fix says what to do next; a
   check that cannot tell is `NYL-DRIFT-UNKNOWN` and makes the run exit 2, as
-  `detect-drift` does, and a kind that cannot detect drift is
-  `NYL-DRIFT-UNSUPPORTED` and does not change the exit, so a scheduled run can
-  exit 0 in an environment with such a unit.
+  `detect-drift` does. A check that fails to run or passes its deadline is a
+  `NYL-DRIVER-ERROR` (exit 1) that records nothing; the run does not repair the
+  unit on its stored `drifted` record, which stays for `nyl status`.
 - **Several environments.** Each selected environment checks and repairs inside
   its own run, lease, and transition commit.
 - **Options.** `--detect-drift` is refused, with `NYL-DRIFT-OPTION-INVALID`,
