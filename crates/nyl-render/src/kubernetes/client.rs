@@ -16,6 +16,9 @@ use crate::{
     NylError, Result,
 };
 
+/// How often removing a finalizer reads the object again after another writer got in first.
+const FINALIZER_ATTEMPTS: usize = 5;
+
 /// Trait for Kubernetes client operations
 #[async_trait]
 pub trait KubeClient: Send + Sync {
@@ -71,6 +74,20 @@ pub trait KubeClient: Send + Sync {
         name: &str,
         options: &DeleteOptions,
     ) -> Result<()>;
+
+    /// Remove `finalizer` from the live object, leaving its other finalizers, so an
+    /// object being deleted can go. Returns whether the finalizer was there; an
+    /// object that does not exist is left alone (`false`). A client that never
+    /// adds the finalizer needs no implementation, which is the default.
+    async fn remove_finalizer(
+        &self,
+        _gvk: &GroupVersionKind,
+        _namespace: Option<&str>,
+        _name: &str,
+        _finalizer: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     /// Get server-normalized version of a resource using dry-run apply
     ///
@@ -628,6 +645,51 @@ impl KubeClient for KubeRsClient {
         }
     }
 
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> Result<bool> {
+        let (ar, caps) = self.discover_object_api(gvk)?;
+        let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
+            let ns = namespace
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
+            Api::namespaced_with(self.client.clone(), ns, &ar)
+        } else {
+            Api::all_with(self.client.clone(), &ar)
+        };
+        // The patch names the resourceVersion it read, so a finalizer another party
+        // added meanwhile is never dropped; a conflict reads again.
+        for _ in 0..FINALIZER_ATTEMPTS {
+            let Some(live) = self.get_resource(gvk, namespace, name).await? else {
+                return Ok(false);
+            };
+            let finalizers = live.metadata.finalizers.clone().unwrap_or_default();
+            if !finalizers.iter().any(|present| present == finalizer) {
+                return Ok(false);
+            }
+            let remaining: Vec<&String> = finalizers.iter().filter(|present| *present != finalizer).collect();
+            let patch = serde_json::json!({
+                "metadata": {
+                    "finalizers": remaining,
+                    "resourceVersion": live.metadata.resource_version,
+                }
+            });
+            match api.patch(name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                Ok(_) => return Ok(true),
+                Err(kube::Error::Api(err)) if err.code == 404 => return Ok(false),
+                Err(kube::Error::Api(err)) if err.code == 409 => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(NylError::Kubernetes(format!(
+            "{} {name} kept changing while its finalizer {finalizer} was removed",
+            gvk.kind
+        )))
+    }
+
     async fn get_normalized_resource(&self, resource: &DynamicObject, field_manager: &str) -> Result<DynamicObject> {
         // Extract metadata
         let name = resource.name_any();
@@ -1166,6 +1228,30 @@ impl KubeClient for MockKubeClient {
         // Either way, we consider the operation successful
         store.remove(&key);
         Ok(())
+    }
+
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> Result<bool> {
+        let key = ResourceKey {
+            gvk: gvk.clone(),
+            namespace: namespace.map(str::to_string),
+            name: name.to_string(),
+        };
+        let mut store = self.resources.lock().unwrap();
+        let Some(finalizers) = store
+            .get_mut(&key)
+            .and_then(|object| object.metadata.finalizers.as_mut())
+        else {
+            return Ok(false);
+        };
+        let before = finalizers.len();
+        finalizers.retain(|present| present != finalizer);
+        Ok(finalizers.len() < before)
     }
 
     async fn get_normalized_resource(&self, resource: &DynamicObject, _field_manager: &str) -> Result<DynamicObject> {

@@ -11,11 +11,18 @@
 //!   documents kind by kind ([`ResourceOrdering::apply_batches`]); the documents of
 //!   one kind apply concurrently and a kind finishes before the next starts. A
 //!   Release without hooks or waves is one step, applied exactly as it always was.
+//!   A Namespace or CustomResourceDefinition applies in the step of its first
+//!   dependent when that comes earlier ([`super::hooks::resource_slots`]).
 //! - **Waits.** A step does not finish before its hooks completed: a Job or Pod
-//!   succeeded, another kind exists. When a later step follows, it also waits until
-//!   the workloads the step applied are healthy ([`health`]), as Argo CD does when
-//!   a sync has more than one wave or phase. That is why `PostSync` hooks start only
-//!   after the `Sync` phase is healthy.
+//!   succeeded, another kind exists. In a sync of more than one step it also waits
+//!   until the workloads the step applied are healthy ([`health`]), as Argo CD does,
+//!   except in the last step when that holds nothing but ordinary resources: the sync
+//!   is done once they are applied. That is why `PostSync` hooks start only after the
+//!   `Sync` phase is healthy.
+//! - **Finalizer.** A hook is created with Argo CD's hook finalizer, so a Job a TTL
+//!   controller removes the moment it finishes is still there to be read. The sync
+//!   removes the finalizer once it has seen how the hook ended, and again on every path
+//!   that ends the hook: failure, timeout, and deletion by a policy or a purge.
 //! - **Failure.** A failed document, a failed hook, or a wait that ran out stops the
 //!   sync after the step it happened in; the steps after it never start. `SyncFail`
 //!   hooks then run, and objects with the `HookFailed` policy are deleted.
@@ -34,7 +41,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use super::health::{assessed, rollout, Health};
-use super::hooks::{DeletePolicy, HookPhase, HookTask, ReleasePlan};
+use super::hooks::{self, DeletePolicy, HookPhase, HookTask, ReleasePlan, HOOK_FINALIZER};
 use super::lifecycle::{apply_manifest, ApplyEvent, ApplyEventSink, ApplyExecutionResult, RegisteredKinds};
 use super::{
     field_manager::FieldOwnership, run_concurrently, ApplyOutcome, DeleteOptions, DeletePropagation, GroupVersionKind,
@@ -49,7 +56,16 @@ pub struct WaitSettings {
     /// workloads to become healthy, for a deleted hook to be gone. `None` waits until
     /// the caller interrupts (Argo CD has no limit of its own).
     pub timeout: Option<Duration>,
-    /// The pause between two reads of the cluster.
+    /// The moment after which no wait goes on, whatever `timeout` says: the end of a
+    /// caller's budget for the whole sync, less what it needs to report the failure.
+    /// The failure then takes the normal path (`SyncFail` hooks, the policies, the
+    /// recorded revision) instead of an interrupt cutting the sync short.
+    pub deadline: Option<Instant>,
+    /// How far past `deadline` the waits of the failure path (`SyncFail` hooks) may go:
+    /// the margin the deadline keeps back, which is what they run in.
+    pub grace: Duration,
+    /// The pause between two reads of the cluster; later reads of one wait pause longer,
+    /// up to five times as long.
     pub poll_interval: Duration,
 }
 
@@ -61,7 +77,28 @@ impl WaitSettings {
     pub const fn unbounded() -> Self {
         Self {
             timeout: None,
+            deadline: None,
+            grace: Duration::ZERO,
             poll_interval: Duration::from_secs(2),
+        }
+    }
+
+    /// No limit of its own, but no wait goes on after `deadline`, except those of the
+    /// failure path, which may use `grace` more.
+    #[must_use]
+    pub const fn until(deadline: Instant, grace: Duration) -> Self {
+        Self {
+            deadline: Some(deadline),
+            grace,
+            ..Self::unbounded()
+        }
+    }
+
+    /// The waits of the failure path, which has the grace the deadline kept back.
+    fn failing(self) -> Self {
+        Self {
+            deadline: self.deadline.map(|deadline| deadline + self.grace),
+            ..self
         }
     }
 }
@@ -70,6 +107,8 @@ impl Default for WaitSettings {
     fn default() -> Self {
         Self {
             timeout: Some(Self::DEFAULT_TIMEOUT),
+            deadline: None,
+            grace: Duration::ZERO,
             poll_interval: Duration::from_secs(2),
         }
     }
@@ -85,25 +124,67 @@ pub struct HookReport {
     pub failure: Option<String>,
 }
 
-/// A deadline for one wait.
+/// What bounds one wait.
 #[derive(Clone, Copy)]
-struct Deadline(Option<Instant>);
+enum Bound {
+    Timeout(Duration),
+    Deadline,
+}
+
+/// A deadline for one wait: its own timeout or the sync's deadline, whichever comes first.
+#[derive(Clone, Copy)]
+struct Deadline(Option<(Instant, Bound)>);
 
 impl Deadline {
     fn new(wait: &WaitSettings) -> Self {
-        Self(wait.timeout.map(|timeout| Instant::now() + timeout))
+        let own = wait
+            .timeout
+            .map(|timeout| (Instant::now() + timeout, Bound::Timeout(timeout)));
+        let overall = wait.deadline.map(|deadline| (deadline, Bound::Deadline));
+        Self(match (own, overall) {
+            (Some(own), Some(overall)) => Some(if overall.0 < own.0 { overall } else { own }),
+            (own, overall) => own.or(overall),
+        })
     }
 
     fn passed(&self) -> bool {
-        self.0.is_some_and(|end| Instant::now() >= end)
+        self.0.is_some_and(|(end, _)| Instant::now() >= end)
+    }
+
+    /// Why the wait ended, for the failure it causes.
+    fn explain(&self) -> String {
+        match self.0 {
+            Some((_, Bound::Timeout(timeout))) => format!(
+                "it did not finish within {}s; raise the wait limit with `--hook-timeout`",
+                timeout.as_secs()
+            ),
+            Some((_, Bound::Deadline)) => {
+                "it did not finish in the time left for the sync, which keeps a margin to record the failure".to_owned()
+            }
+            None => "it did not finish".to_owned(),
+        }
     }
 }
 
-fn timed_out(wait: &WaitSettings) -> String {
-    format!(
-        "it did not finish within {}s; raise the wait limit with `--hook-timeout`",
-        wait.timeout.unwrap_or_default().as_secs()
-    )
+/// The pauses between the reads of one wait: the poll interval, growing by half
+/// each time up to five times as long, so a long wait reads less often than a short one.
+struct Pace {
+    next: Duration,
+    cap: Duration,
+}
+
+impl Pace {
+    fn new(wait: &WaitSettings) -> Self {
+        Self {
+            next: wait.poll_interval,
+            cap: wait.poll_interval.saturating_mul(5),
+        }
+    }
+
+    async fn pause(&mut self) {
+        tokio::time::sleep(self.next).await;
+        self.next = (self.next + self.next / 2).min(self.cap);
+    }
 }
 
 /// A document of a step.
@@ -126,8 +207,8 @@ enum Progress {
     Failed(String),
 }
 
-/// A hook object's progress from its live state: a Job or Pod is done when it
-/// succeeded and failed when it did; a workload when it is healthy; any other
+/// A hook object's progress from its live state: a Job, Pod, or Argo Workflow is done
+/// when it succeeded and failed when it did; a workload when it is healthy; any other
 /// kind once it exists, as an Argo CD resource without a health check is.
 fn hook_progress(gvk: &GroupVersionKind, live: &Value) -> Progress {
     if !assessed(&gvk.group, &gvk.kind) {
@@ -139,7 +220,8 @@ fn hook_progress(gvk: &GroupVersionKind, live: &Value) -> Progress {
     let why = status.why.unwrap_or_default();
     match status.health {
         Health::Healthy => Progress::Done,
-        Health::Progressing => Progress::Running(why),
+        // A held workload is waited for, as Argo CD waits for a suspended one.
+        Health::Progressing | Health::Suspended => Progress::Running(why),
         Health::Degraded | Health::Unknown => Progress::Failed(why),
     }
 }
@@ -152,33 +234,86 @@ async fn read(client: &dyn KubeClient, key: &ResourceKey) -> Result<Option<Value
         .transpose()
 }
 
+/// Whether the live object still carries the hook finalizer.
+fn has_finalizer(live: &Value) -> bool {
+    live.pointer("/metadata/finalizers")
+        .and_then(Value::as_array)
+        .is_some_and(|finalizers| finalizers.iter().any(|name| name == HOOK_FINALIZER))
+}
+
+/// Let go of a hook object: remove the finalizer this sync added, so the object can
+/// be deleted by a policy, a purge, or the TTL controller that was waiting for it.
+/// Best-effort: an object that cannot be reached keeps it until the next sync deletes
+/// or purges the hook, which removes it first.
+pub(super) async fn release_hook(client: &dyn KubeClient, key: &ResourceKey) {
+    if let Err(error) = client
+        .remove_finalizer(&key.gvk, key.namespace.as_deref(), &key.name, HOOK_FINALIZER)
+        .await
+    {
+        tracing::warn!(
+            hook = %key,
+            "Could not remove the hook finalizer {HOOK_FINALIZER}; the next sync or purge of the hook removes it: {error}"
+        );
+    }
+}
+
 /// Delete a hook object the way Argo CD does, in the foreground, and, with
-/// `wait`, until it is gone. An object that does not exist counts as deleted.
+/// `wait`, until it is gone. An object that does not exist counts as deleted, also
+/// one that goes between the read and the delete.
 async fn delete_hook(client: &dyn KubeClient, key: &ResourceKey, until_gone: Option<&WaitSettings>) -> Result<()> {
-    if read(client, key).await?.is_none() {
+    let Some(live) = read(client, key).await? else {
         return Ok(());
+    };
+    if has_finalizer(&live) {
+        // A foreground delete would otherwise wait on our own finalizer for ever.
+        client
+            .remove_finalizer(&key.gvk, key.namespace.as_deref(), &key.name, HOOK_FINALIZER)
+            .await?;
     }
     let options = DeleteOptions {
         propagation: Some(DeletePropagation::Foreground),
         grace_period_seconds: None,
     };
-    client
+    if let Err(error) = client
         .delete_resource_with(&key.gvk, key.namespace.as_deref(), &key.name, &options)
-        .await?;
+        .await
+    {
+        // Gone between the read and the delete is what was asked for.
+        return match read(client, key).await {
+            Ok(None) => Ok(()),
+            _ => Err(error),
+        };
+    }
     let Some(wait) = until_gone else {
         return Ok(());
     };
     let deadline = Deadline::new(wait);
+    let mut pace = Pace::new(wait);
     while read(client, key).await?.is_some() {
         if deadline.passed() {
             return Err(NylError::Kubernetes(format!(
                 "the previous {key} is still being deleted: {}",
-                timed_out(wait)
+                deadline.explain()
             )));
         }
-        tokio::time::sleep(wait.poll_interval).await;
+        pace.pause().await;
     }
     Ok(())
+}
+
+/// The manifest of a hook as it is created: with the hook finalizer.
+fn with_finalizer(manifest: &Value) -> Value {
+    let mut manifest = manifest.clone();
+    let Some(metadata) = manifest.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return manifest;
+    };
+    let finalizers = metadata.entry("finalizers").or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(finalizers) = finalizers.as_array_mut() {
+        if !finalizers.iter().any(|name| name == HOOK_FINALIZER) {
+            finalizers.push(Value::String(HOOK_FINALIZER.to_owned()));
+        }
+    }
+    manifest
 }
 
 /// Create one run of a hook: delete the object first when its policy says so,
@@ -192,7 +327,7 @@ async fn create_hook(
     if task.has_policy(DeletePolicy::BeforeHookCreation) {
         delete_hook(client, &task.key, Some(wait)).await?;
     }
-    let resource: DynamicObject = serde_json::from_value(task.manifest.clone())?;
+    let resource: DynamicObject = serde_json::from_value(with_finalizer(&task.manifest))?;
     client.apply_resource(&resource, ownership.manager(), false).await
 }
 
@@ -205,6 +340,7 @@ async fn await_hooks(
     wait: &WaitSettings,
 ) -> Vec<(usize, std::result::Result<(), String>)> {
     let deadline = Deadline::new(wait);
+    let mut pace = Pace::new(wait);
     let mut finished = Vec::new();
     let mut running = indices;
     loop {
@@ -221,7 +357,7 @@ async fn await_hooks(
                 Progress::Done => finished.push((index, Ok(()))),
                 Progress::Failed(why) => finished.push((index, Err(why))),
                 Progress::Running(why) if deadline.passed() => {
-                    finished.push((index, Err(format!("{why}; {}", timed_out(wait)))));
+                    finished.push((index, Err(format!("{why}; {}", deadline.explain()))));
                 }
                 Progress::Running(_) => still.push(index),
             }
@@ -230,18 +366,20 @@ async fn await_hooks(
             return finished;
         }
         running = still;
-        tokio::time::sleep(wait.poll_interval).await;
+        pace.pause().await;
     }
 }
 
 /// Wait until the workloads among `keys` are healthy; returns those that are not,
-/// with why. A workload that is gone, such as a Job a TTL removed, is not waited for.
+/// with why. A workload that is gone, such as a Job a TTL removed, is not waited for;
+/// one that cannot be read is, until the deadline, like a hook.
 async fn await_healthy(
     client: &dyn KubeClient,
     keys: Vec<ResourceKey>,
     wait: &WaitSettings,
 ) -> Vec<(ResourceKey, String)> {
     let deadline = Deadline::new(wait);
+    let mut pace = Pace::new(wait);
     let mut unhealthy = Vec::new();
     let mut waiting: Vec<ResourceKey> = keys
         .into_iter()
@@ -250,9 +388,20 @@ async fn await_healthy(
     loop {
         let mut still = Vec::new();
         for key in waiting {
-            let Ok(Some(live)) = read(client, &key).await else {
-                // Gone, or unreadable: it cannot be judged, and is no ground to hold the sync.
-                continue;
+            let live = match read(client, &key).await {
+                Ok(Some(live)) => live,
+                // Gone: nothing is left to judge.
+                Ok(None) => continue,
+                // A failed read is not a verdict; the deadline bounds the wait.
+                Err(error) => {
+                    if deadline.passed() {
+                        let why = format!("it cannot be read: {error}; {}", deadline.explain());
+                        unhealthy.push((key, why));
+                    } else {
+                        still.push(key);
+                    }
+                    continue;
+                }
             };
             let Some(status) = rollout(&key.gvk.kind, &live) else {
                 continue;
@@ -261,17 +410,17 @@ async fn await_healthy(
             match status.health {
                 Health::Healthy => {}
                 Health::Degraded => unhealthy.push((key, why)),
-                Health::Progressing | Health::Unknown if deadline.passed() => {
-                    unhealthy.push((key, format!("{why}; {}", timed_out(wait))));
+                Health::Progressing | Health::Suspended | Health::Unknown if deadline.passed() => {
+                    unhealthy.push((key, format!("{why}; {}", deadline.explain())));
                 }
-                Health::Progressing | Health::Unknown => still.push(key),
+                Health::Progressing | Health::Suspended | Health::Unknown => still.push(key),
             }
         }
         if still.is_empty() {
             return unhealthy;
         }
         waiting = still;
-        tokio::time::sleep(wait.poll_interval).await;
+        pace.pause().await;
     }
 }
 
@@ -281,7 +430,8 @@ async fn await_healthy(
 pub(super) struct SyncExecution<'a> {
     plan: ReleasePlan,
     keys: Vec<ResourceKey>,
-    waves: Vec<i64>,
+    /// The step each resource applies in ([`hooks::resource_slots`]).
+    slots: Vec<(HookPhase, i64)>,
     results: Vec<Option<Result<ApplyOutcome>>>,
     /// Every `(phase, wave)` the sync runs, in order, `SyncFail` apart.
     steps: Vec<(HookPhase, i64)>,
@@ -310,18 +460,18 @@ impl<'a> SyncExecution<'a> {
         on_event: &mut ApplyEventSink<'_>,
     ) -> Result<Self> {
         let plan = ReleasePlan::of(manifests)?;
-        if !plan.ignored.is_empty() {
-            on_event(ApplyEvent::HooksIgnored { hooks: &plan.ignored });
+        if let Some(finding) = hooks::delete_hook_finding(&plan.ignored) {
+            on_event(ApplyEvent::DeleteHooksIgnored { finding: &finding });
         }
         let keys = plan
             .resources
             .iter()
             .map(ResourceKey::from_json_value)
             .collect::<Result<Vec<_>>>()?;
-        let waves: Vec<i64> = plan.resources.iter().map(super::hooks::wave).collect();
-        let mut steps: Vec<(HookPhase, i64)> = waves
+        let slots = hooks::resource_slots(&plan.resources, &plan.hooks);
+        let mut steps: Vec<(HookPhase, i64)> = slots
             .iter()
-            .map(|wave| (HookPhase::Sync, *wave))
+            .copied()
             .chain(
                 plan.hooks
                     .iter()
@@ -335,7 +485,7 @@ impl<'a> SyncExecution<'a> {
             results: (0..keys.len()).map(|_| None).collect(),
             plan,
             keys,
-            waves,
+            slots,
             steps,
             ownership,
             concurrency,
@@ -461,13 +611,11 @@ impl<'a> SyncExecution<'a> {
         on_event: &mut ApplyEventSink<'_>,
     ) -> Result<()> {
         let mut tasks: Vec<Task> = Vec::new();
-        if phase == HookPhase::Sync {
-            tasks.extend(
-                (0..self.keys.len())
-                    .filter(|index| self.waves[*index] == wave)
-                    .map(Task::Resource),
-            );
-        }
+        tasks.extend(
+            (0..self.keys.len())
+                .filter(|index| self.slots[*index] == (phase, wave))
+                .map(Task::Resource),
+        );
         let step_hooks: Vec<usize> = self
             .plan
             .hooks
@@ -481,7 +629,12 @@ impl<'a> SyncExecution<'a> {
         let keys = &self.keys;
         let ownership = self.ownership;
         let concurrency = self.concurrency;
-        let wait = self.wait;
+        // The failure path runs in the margin the deadline keeps back.
+        let wait = if phase == HookPhase::SyncFail {
+            self.wait.failing()
+        } else {
+            self.wait
+        };
         let results = &mut self.results;
         let registered = &mut self.registered;
         let released_count = &mut self.released_count;
@@ -585,8 +738,12 @@ impl<'a> SyncExecution<'a> {
             .into_iter()
             .map(|(index, error)| (index, Err(error)))
             .collect();
-        finished.extend(await_hooks(client, &plan.hooks, started, &wait).await);
+        finished.extend(await_hooks(client, &plan.hooks, started.clone(), &wait).await);
         finished.sort_by_key(|(index, _)| *index);
+        // However each hook ended, the sync has seen it: the finalizer goes before it is reported.
+        for index in started {
+            release_hook(client, &plan.hooks[index].key).await;
+        }
         for (index, outcome) in finished {
             let task = &plan.hooks[index];
             on_event(ApplyEvent::HookFinished {
@@ -606,10 +763,13 @@ impl<'a> SyncExecution<'a> {
             });
         }
 
-        // The workloads of the step are healthy before a later step starts.
-        if !self.failed && phase == HookPhase::Sync && self.later_step(phase, wave) {
+        // The workloads of the step are healthy before a later step starts, and in a
+        // sync of several steps before the last one, when it holds hooks, is done.
+        // The last step of ordinary resources alone is done once they are applied.
+        let waits_for_health = self.later_step(phase, wave) || (self.steps.len() > 1 && !step_hooks.is_empty());
+        if !self.failed && waits_for_health {
             let applied: Vec<ResourceKey> = (0..self.keys.len())
-                .filter(|index| self.waves[*index] == wave && matches!(self.results[*index], Some(Ok(_))))
+                .filter(|index| self.slots[*index] == (phase, wave) && matches!(self.results[*index], Some(Ok(_))))
                 .map(|index| self.keys[index].clone())
                 .collect();
             let unhealthy = await_healthy(client, applied, &self.wait).await;
@@ -657,5 +817,99 @@ impl<'a> SyncExecution<'a> {
             ignored_hooks: self.plan.ignored.clone(),
             untracked: self.plan.untracked_keys(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn kind(api_version: &str, kind: &str) -> GroupVersionKind {
+        GroupVersionKind::from_api_version_kind(api_version, kind).unwrap()
+    }
+
+    /// Catches a hook that is held, or an Argo Workflow, being judged by the wrong rule:
+    /// a paused Deployment is waited for rather than failed, and a Workflow follows its
+    /// phase, so a hook Workflow is neither passed while it runs nor failed before it ends.
+    #[test]
+    fn test_hook_progress_waits_for_a_held_workload_and_follows_a_workflow() {
+        let progress = |gvk: &GroupVersionKind, live: Value| match hook_progress(gvk, &live) {
+            Progress::Done => "done",
+            Progress::Running(_) => "running",
+            Progress::Failed(_) => "failed",
+        };
+        let deployment = kind("apps/v1", "Deployment");
+        let workflow = kind("argoproj.io/v1alpha1", "Workflow");
+
+        assert_eq!(progress(&deployment, json!({"spec": {"paused": true}})), "running");
+        assert_eq!(progress(&workflow, json!({"status": {"phase": "Running"}})), "running");
+        assert_eq!(progress(&workflow, json!({"status": {"phase": "Succeeded"}})), "done");
+        assert_eq!(progress(&workflow, json!({"status": {"phase": "Error"}})), "failed");
+        assert_eq!(
+            progress(&kind("v1", "ConfigMap"), json!({})),
+            "done",
+            "no health check, done once it exists"
+        );
+    }
+
+    /// Catches a hook created without the finalizer, which a TTL controller could delete
+    /// before the sync read it, one that drops finalizers another party set, and one that
+    /// adds it twice.
+    #[test]
+    fn test_a_hook_is_created_with_the_finalizer_once_and_beside_the_others() {
+        let bare = json!({"metadata": {"name": "migrate"}});
+        assert_eq!(with_finalizer(&bare)["metadata"]["finalizers"], json!([HOOK_FINALIZER]));
+
+        let held = json!({"metadata": {"name": "migrate", "finalizers": ["example.com/other"]}});
+        let once = with_finalizer(&held);
+        assert_eq!(
+            once["metadata"]["finalizers"],
+            json!(["example.com/other", HOOK_FINALIZER])
+        );
+        assert_eq!(with_finalizer(&once), once, "adding it again changes nothing");
+        assert!(has_finalizer(&once) && !has_finalizer(&bare));
+    }
+
+    /// Catches a wait that reads as often at its end as at its start, and one whose
+    /// pauses grow without bound.
+    #[tokio::test(start_paused = true)]
+    async fn test_the_pauses_of_a_wait_grow_to_five_times_the_poll_interval() {
+        let mut pace = Pace::new(&WaitSettings::unbounded());
+        let mut pauses = Vec::new();
+        for _ in 0..6 {
+            pauses.push(pace.next);
+            pace.pause().await;
+        }
+
+        assert_eq!(
+            pauses,
+            [2000, 3000, 4500, 6750, 10_000, 10_000].map(Duration::from_millis),
+            "growing by half, capped at five times the two seconds"
+        );
+    }
+
+    /// Catches the wait's own timeout being named when the sync's deadline cut it, which
+    /// would send the user to a flag that does not help, and the reverse.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_wait_ends_at_the_earlier_of_its_timeout_and_the_sync_deadline() {
+        let soon = Instant::now() + Duration::from_secs(10);
+        let by_deadline = Deadline::new(&WaitSettings {
+            timeout: Some(Duration::from_secs(30)),
+            ..WaitSettings::until(soon, Duration::ZERO)
+        });
+        let by_timeout = Deadline::new(&WaitSettings {
+            timeout: Some(Duration::from_secs(5)),
+            ..WaitSettings::until(soon, Duration::ZERO)
+        });
+
+        assert!(by_deadline.explain().contains("time left for the sync"));
+        assert!(by_timeout.explain().contains("--hook-timeout"));
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(by_timeout.passed() && !by_deadline.passed());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(by_deadline.passed());
+        assert!(!Deadline::new(&WaitSettings::unbounded()).passed(), "no bound, no end");
     }
 }

@@ -9,7 +9,7 @@ use nyl_render::{
     kubernetes::{
         extract_name,
         hooks::{self, HookTask, IgnoredHook, ReleasePlan},
-        lifecycle::{prepare_desired_manifests, ObjectScopes},
+        lifecycle::{prepare_desired_manifests, prunable_keys, ObjectScopes},
         prune::{prune_decision, PruneDecision},
         DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseStatus,
         ReleaseStorage, ResourceKey, ScopeResolver,
@@ -196,13 +196,8 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     }
 
     // 9. Display diff
-    if !diff_result.ignored_hooks.is_empty() {
-        tracing::warn!(
-            "{}: {}; fix: {}",
-            hooks::IGNORED_CODE,
-            hooks::ignored_message(&diff_result.ignored_hooks),
-            hooks::IGNORED_FIX
-        );
+    if let Some(finding) = hooks::delete_hook_finding(&diff_result.ignored_hooks) {
+        tracing::warn!("{finding}");
     }
     if args.summary {
         display_summary(&diff_result, &duplicates);
@@ -321,20 +316,19 @@ async fn compute_diff_from_live(
         scopes.load(client, &previous.resource_keys).await;
     }
     scopes.load(client, &untracked).await;
-    let mut desired_objects: HashSet<ObjectIdentity> = desired_keys.iter().map(|key| scopes.identity(key)).collect();
-    // What an earlier revision tracked and is a hook now is not pruned, as in `nyl apply`.
-    desired_objects.extend(untracked.iter().map(|key| scopes.identity(key)));
-    let mut seen_previous = HashSet::new();
-    let removed_keys: Vec<ResourceKey> = previous_state
-        .map(|state| state.resource_keys.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter(|key| {
-            let identity = scopes.identity(key);
-            !desired_objects.contains(&identity) && seen_previous.insert(identity)
-        })
-        .cloned()
-        .collect();
+    // What `nyl apply` would prune: the same decision, so a diff shows what the apply
+    // deletes, and an object an earlier revision tracked and is a hook now stays.
+    let removed_keys: Vec<ResourceKey> = prunable_keys(
+        previous_state
+            .map(|state| state.resource_keys.as_slice())
+            .unwrap_or_default(),
+        &desired_keys,
+        &untracked,
+        scopes,
+    )
+    .into_iter()
+    .cloned()
+    .collect();
 
     // Fetch live resources for desired manifests
     let mut live_resources = HashMap::new();
@@ -497,17 +491,36 @@ fn hook_lines(hooks: &[HookTask]) -> Vec<String> {
         .collect()
 }
 
+/// The lines of the hooks `nyl apply` leaves out without a warning: they name no sync
+/// phase and are no delete hook (Helm's `test` and the rollback hooks), so they
+/// change nothing, as in Argo CD. A delete hook has its warning.
+fn left_out_lines(ignored: &[IgnoredHook]) -> Vec<String> {
+    ignored
+        .iter()
+        .filter(|hook| !hook.delete)
+        .map(|hook| format!("{}  ({})", hook.key, hook.reason))
+        .collect()
+}
+
 /// Print the hooks that would run, apart from the changes: they are not resources
-/// the apply adds, changes, or deletes, and do not count as changes.
-fn print_hooks(hooks: &[HookTask]) {
-    if hooks.is_empty() {
-        return;
+/// the apply adds, changes, or deletes, and do not count as changes. Hooks the
+/// apply leaves out follow as information.
+fn print_hooks(hooks: &[HookTask], ignored: &[IgnoredHook]) {
+    if !hooks.is_empty() {
+        println!("{}", "Hooks that would run:".cyan().bold());
+        for line in hook_lines(hooks) {
+            println!("  {} {line}", "▶".cyan());
+        }
+        println!();
     }
-    println!("{}", "Hooks that would run:".cyan().bold());
-    for line in hook_lines(hooks) {
-        println!("  {} {line}", "▶".cyan());
+    let left_out = left_out_lines(ignored);
+    if !left_out.is_empty() {
+        println!("{}", "Hooks left out, as Argo CD leaves them out:".bright_black());
+        for line in left_out {
+            println!("  {} {line}", "·".bright_black());
+        }
+        println!();
     }
-    println!();
 }
 
 /// Show resources kept by their Prune sync option, with what keeps them.
@@ -612,7 +625,7 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
         println!();
     }
 
-    print_hooks(&diff.hooks);
+    print_hooks(&diff.hooks, &diff.ignored_hooks);
 
     // Summary with colors
     print_summary(diff, duplicates);
@@ -646,7 +659,7 @@ fn display_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) 
         println!();
     }
 
-    print_hooks(&diff.hooks);
+    print_hooks(&diff.hooks, &diff.ignored_hooks);
     print_summary(diff, duplicates);
 }
 
@@ -1238,5 +1251,13 @@ mod tests {
             ]
         );
         assert_eq!(result.ignored_hooks.len(), 1, "a Helm test hook has no sync phase");
+        assert!(
+            hooks::delete_hook_finding(&result.ignored_hooks).is_none(),
+            "a Helm test hook is left out silently: only delete hooks are worth a warning"
+        );
+        assert_eq!(
+            left_out_lines(&result.ignored_hooks),
+            ["Job app/helm-test  (it declares helm.sh/hook: test, which names no sync phase)"]
+        );
     }
 }

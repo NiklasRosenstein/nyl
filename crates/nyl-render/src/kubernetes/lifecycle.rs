@@ -46,6 +46,7 @@ use super::{
     ReleaseStorage, ResourceKey, ResourceOrdering, ScopeResolver,
 };
 use crate::{NylError, Result};
+use nyl_core::orchestration::codes::Finding;
 
 /// Something that happened during an apply, reported as it happens.
 pub enum ApplyEvent<'a> {
@@ -83,9 +84,11 @@ pub enum ApplyEvent<'a> {
         decision: PruneDecision,
         option: &'static str,
     },
-    /// Hooks that have no sync phase were left out of the apply, reported once
-    /// for the Release ([`super::hooks::IGNORED_CODE`]).
-    HooksIgnored { hooks: &'a [IgnoredHook] },
+    /// The Release declares delete hooks (`PreDelete`, `PostDelete`, and Helm's
+    /// `pre-delete` and `post-delete`), which Nyl does not run, reported once for the
+    /// Release ([`super::hooks::IGNORED_CODE`]). Hooks without a sync phase that
+    /// are no delete hooks are left out silently, as Argo CD does.
+    DeleteHooksIgnored { finding: &'a Finding },
     /// A hook was created and now runs; the sync waits for it.
     HookStarted {
         key: &'a ResourceKey,
@@ -122,7 +125,7 @@ pub struct ApplyExecutionResult {
     /// Workloads of a step that never became healthy, which stopped the sync before
     /// the steps after it.
     pub unhealthy: Vec<(ResourceKey, String)>,
-    /// Hooks left out of the apply for having no sync phase.
+    /// Hooks left out of the apply for having no sync phase, delete hooks and others.
     pub ignored_hooks: Vec<IgnoredHook>,
     /// Objects of the manifests that are not tracked: hooks, hooks left out, and
     /// `Skip` documents. The release never prunes them, whatever an earlier
@@ -254,7 +257,8 @@ fn manifest_keys(manifests: &[serde_json::Value]) -> Result<Vec<ResourceKey>> {
 
 /// The keys a release tracks for `manifests`: every document that is an ordinary
 /// resource. A hook is applied and recorded in the manifest, but is not an owned
-/// object: it is neither pruned nor purged, and never counts as drift.
+/// object: it is never pruned, and never counts as drift. A purge removes it with
+/// the rest of the Release ([`purge_keys`]).
 pub fn tracked_keys(manifests: &[serde_json::Value]) -> Result<Vec<ResourceKey>> {
     manifests
         .iter()
@@ -273,15 +277,50 @@ pub fn keys_to_prune<'a>(
     current_keys: &[ResourceKey],
     scopes: &ObjectScopes,
 ) -> Vec<&'a ResourceKey> {
-    let current: HashSet<ObjectIdentity> = current_keys.iter().map(|key| scopes.identity(key)).collect();
-    let mut to_prune: Vec<&ResourceKey> = live_keys
+    prunable_keys(live_keys, current_keys, &[], scopes)
+}
+
+/// The keys a purge of a release deletes: the keys it tracks, `tracked`, and the hooks
+/// its latest revision's `manifest` holds, which no revision tracks. Hook objects a
+/// sync leaves behind (a completed Job under `BeforeHookCreation`, a hook's
+/// ServiceAccount or Role) would otherwise outlive the Release. A hook an earlier Nyl
+/// tracked as an ordinary resource is in `tracked`. Each key once.
+pub fn purge_keys(tracked: &[ResourceKey], manifest: &str) -> Result<Vec<ResourceKey>> {
+    let documents = crate::yaml::parse_yaml_documents_k8s_compatible(manifest)?;
+    let mut keys = tracked.to_vec();
+    for key in hooks::hook_keys(&documents)? {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// The keys a prune may remove: recorded by an earlier revision (`previous`), no
+/// longer desired, and not an object the Release still applies without tracking it
+/// (`untracked`: a hook, a hook left out, a skipped document, which an earlier
+/// revision may have tracked as an ordinary resource). Each object once, by
+/// [`ObjectIdentity`]. `nyl apply` and `nyl diff` both decide a prune with it, so a
+/// diff shows what the apply deletes.
+pub fn prunable_keys<'a>(
+    previous: impl IntoIterator<Item = &'a ResourceKey>,
+    desired: &[ResourceKey],
+    untracked: &[ResourceKey],
+    scopes: &ObjectScopes,
+) -> Vec<&'a ResourceKey> {
+    let kept: HashSet<ObjectIdentity> = desired
         .iter()
-        .filter(|key| !current.contains(&scopes.identity(key)))
+        .chain(untracked)
+        .map(|key| scopes.identity(key))
         .collect();
-    // Two recorded versions of one removed object are one delete.
     let mut seen = HashSet::new();
-    to_prune.retain(|key| seen.insert(scopes.identity(key)));
-    to_prune
+    previous
+        .into_iter()
+        .filter(|key| {
+            let identity = scopes.identity(key);
+            !kept.contains(&identity) && seen.insert(identity)
+        })
+        .collect()
 }
 
 /// Determine the resources currently live on the cluster for a release, and which
@@ -614,9 +653,14 @@ impl<'s> ReleaseRecorder<'s> {
         let completed = AtomicBool::new(false);
         // Keys applied so far, recorded if the apply does not complete.
         let mut applied_keys: Vec<ResourceKey> = Vec::new();
+        // Hooks created whose end the sync has not seen: they hold the hook finalizer.
+        let mut open_hooks: Vec<ResourceKey> = Vec::new();
         let mut track = |event: ApplyEvent<'_>| {
-            if let ApplyEvent::Applied { key, result: Ok(_) } = &event {
-                applied_keys.push((*key).clone());
+            match &event {
+                ApplyEvent::Applied { key, result: Ok(_) } => applied_keys.push((*key).clone()),
+                ApplyEvent::HookStarted { key, .. } => open_hooks.push((*key).clone()),
+                ApplyEvent::HookFinished { key, .. } => open_hooks.retain(|open| open != *key),
+                _ => {}
             }
             on_event(event);
         };
@@ -678,7 +722,14 @@ impl<'s> ReleaseRecorder<'s> {
                 // objects it did not create.
                 let failed = Self::failed_revision(reserved, applied_keys, err);
                 tokio::select! {
-                    () = Self::record_failed(storage, &failed) => {}
+                    () = async {
+                        // An interrupted sync lets go of the hooks it left running, so a TTL
+                        // controller or a later purge can remove them.
+                        for key in &open_hooks {
+                            super::sync_run::release_hook(client, key).await;
+                        }
+                        Self::record_failed(storage, &failed).await;
+                    } => {}
                     () = interruption.escalate => {}
                 }
             }
@@ -787,14 +838,9 @@ impl<'s> ReleaseRecorder<'s> {
                 scopes.load(client, &apply_result.untracked).await;
                 // What an earlier revision tracked, and this one applies as a hook or skips,
                 // is no longer tracked, and is not deleted for it.
-                let untracked: HashSet<ObjectIdentity> =
-                    apply_result.untracked.iter().map(|key| scopes.identity(key)).collect();
                 let mut to_prune: Vec<&ResourceKey> = Vec::new();
-                for key in keys_to_prune(&live_keys, &release.resource_keys, scopes) {
+                for key in prunable_keys(&live_keys, &release.resource_keys, &apply_result.untracked, scopes) {
                     let identity = scopes.identity(key);
-                    if untracked.contains(&identity) {
-                        continue;
-                    }
                     match settings.protected {
                         // Another Release applied it already: it is theirs now.
                         Some(protected) if protected.handed_over.contains(&identity) => {}
@@ -1491,6 +1537,19 @@ pub async fn purge_resources(
         failed: unreadable.into_iter().cloned().collect(),
         ..Purged::default()
     };
+    // A hook an interrupted sync left holding its finalizer would never finish deleting.
+    // Best-effort and silent: most keys are no hook and hold no such finalizer.
+    super::run_concurrently(
+        deleting.iter().copied(),
+        concurrency,
+        |key| async move {
+            let _ = client
+                .remove_finalizer(&key.gvk, key.namespace.as_deref(), &key.name, hooks::HOOK_FINALIZER)
+                .await;
+        },
+        |_, ()| {},
+    )
+    .await;
     let failed = prune_resources(client, deleting.clone(), concurrency, on_event).await;
     let failed_identities: HashSet<ObjectIdentity> = failed.iter().map(|key| scopes.identity(key)).collect();
     for key in deleting {
@@ -2109,6 +2168,47 @@ mod tests {
             "spec": {"group": "example.com", "scope": scope, "names": {"kind": "Widget", "plural": "widgets"},
                      "versions": [{"name": "v1", "served": true, "storage": true}]}
         })
+    }
+
+    /// A Namespace and a CustomResourceDefinition apply in the step of their first
+    /// dependent, as Argo CD's `adjustDeps` does: a custom resource of sync wave -1 needs
+    /// its CRD and its Namespace before it, though both declare no wave and a ConfigMap
+    /// of wave 0 is in that Namespace. Without it the custom resource is rejected for
+    /// want of a CRD, the CRD and the Namespace come a step too late, and the ordering
+    /// `nyl apply` guarantees (CRD, Namespace, the rest) breaks as soon as a wave is used.
+    #[tokio::test]
+    async fn test_a_namespace_and_a_crd_apply_in_the_wave_of_their_first_dependent() {
+        let client = StrictClient::new();
+        let documents = vec![
+            widget_crd("Namespaced"),
+            json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "app"}}),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "config", "namespace": "app"}}),
+            json!({"apiVersion": "example.com/v1", "kind": "Widget",
+                "metadata": {"name": "widget", "namespace": "app",
+                    "annotations": {"argocd.argoproj.io/sync-wave": "-1"}}}),
+        ];
+
+        let result = apply_sorted_manifests(
+            &client,
+            &documents,
+            &FieldOwnership::Nyl,
+            8,
+            WaitSettings::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.failed_count, 0, "{:?}", client.accepted());
+        assert_eq!(
+            client.accepted(),
+            [
+                "CustomResourceDefinition/widgets.example.com",
+                "Namespace/app",
+                "Widget/widget",
+                "ConfigMap/config",
+            ]
+        );
     }
 
     /// One manifest, written in an order that fails when applied as written: the
@@ -3902,6 +4002,121 @@ mod tests {
         assert!(
             cluster.log().contains(&"delete Job migrate".to_owned()),
             "BeforeHookCreation"
+        );
+    }
+
+    /// An interrupted sync lets go of the hook it left running, so the Job can be
+    /// deleted by whoever deletes it next: a hook object holding the finalizer of a sync
+    /// that is gone would never finish deleting.
+    #[tokio::test(start_paused = true)]
+    async fn test_an_interrupted_sync_removes_the_finalizer_of_the_hooks_it_left_running() {
+        use crate::kubernetes::hook_tests::{HookCluster, Outcome};
+        let storage = crate::kubernetes::memory::InMemoryReleaseStorage::new();
+        let cluster = HookCluster::new();
+        cluster.outcome("migrate", Outcome::Runs);
+        let manifests = [hook("migrate", json!({"argocd.argoproj.io/hook": "PreSync"}))];
+        let mut scopes = ObjectScopes::default();
+        let recorder = ReleaseRecorder::reserve(
+            &storage,
+            "app",
+            "app",
+            &manifests,
+            false,
+            &cluster,
+            &mut scopes,
+            &ReleaseClaim::manual(),
+        )
+        .await
+        .unwrap();
+
+        let result = recorder
+            .run(
+                &cluster,
+                &manifests,
+                &mut scopes,
+                ApplySettings {
+                    waits: WaitSettings::unbounded(),
+                    ..keep_unchanged()
+                },
+                Interruption {
+                    interrupt: tokio::time::sleep(Duration::from_secs(20)),
+                    escalate: std::future::pending(),
+                },
+                &mut |_| {},
+            )
+            .await;
+
+        assert!(matches!(result, Err(NylError::Interrupted(_))));
+        assert!(cluster.exists("migrate"), "the hook keeps running");
+        assert!(
+            cluster.finalizers("migrate").is_empty(),
+            "holds {:?}",
+            cluster.finalizers("migrate")
+        );
+        let revision = storage.get_release("app", "app", 1).await.unwrap().unwrap();
+        assert_eq!(revision.status, ReleaseStatus::Failed, "the revision is still recorded");
+    }
+
+    /// `nyl apply` and `nyl diff` decide a prune with one function: an object an earlier
+    /// revision tracked and the Release still applies untracked (a hook, a skipped
+    /// document) is not removed, each object once even when two versions are recorded.
+    #[test]
+    fn test_prunable_keys_leave_out_what_the_release_still_applies_untracked() {
+        let previous = [
+            key("v1", "ConfigMap", Some("app"), "kept"),
+            key("v1", "ConfigMap", Some("app"), "gone"),
+            key("batch/v1", "Job", Some("app"), "migrate"),
+            key("example.com/v1", "Widget", Some("app"), "old"),
+            key("example.com/v2", "Widget", Some("app"), "old"),
+        ];
+        let desired = [key("v1", "ConfigMap", Some("app"), "kept")];
+        let untracked = [key("batch/v1", "Job", Some("app"), "migrate")];
+
+        let prunable = prunable_keys(&previous, &desired, &untracked, &ObjectScopes::default());
+
+        let names: Vec<(&str, &str)> = prunable
+            .iter()
+            .map(|key| (key.gvk.kind.as_str(), key.name.as_str()))
+            .collect();
+        assert_eq!(names, [("ConfigMap", "gone"), ("Widget", "old")]);
+    }
+
+    /// `release delete --purge` and a direct teardown delete the hooks of the Release
+    /// with the rest: a completed Job under `BeforeHookCreation` and a hook's
+    /// ServiceAccount are in no revision's tracked keys, and would outlive the Release.
+    /// A hook an earlier Nyl tracked is among the tracked keys already, and a hook
+    /// left holding a finalizer by an interrupted sync still goes.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_purge_deletes_the_hooks_of_the_release_and_what_they_left() {
+        use crate::kubernetes::hook_tests::{config_map as cm, HookCluster};
+        let cluster = HookCluster::new();
+        let migrate = hook("migrate", json!({"argocd.argoproj.io/hook": "PreSync"}));
+        let account = json!({"apiVersion": "v1", "kind": "ServiceAccount",
+            "metadata": {"name": "hook-sa", "namespace": "app", "annotations": {"helm.sh/hook": "pre-install"}}});
+        let skipped = hook("skipped", json!({"argocd.argoproj.io/hook": "Skip"}));
+        let manifests = [cm("cfg", json!({})), migrate.clone(), account.clone(), skipped.clone()];
+        let mut stuck = migrate;
+        stuck["metadata"]["finalizers"] = json!([hooks::HOOK_FINALIZER]);
+        for object in [cm("cfg", json!({})), stuck, account, skipped] {
+            cluster.seed(&object);
+        }
+        let tracked = [key("v1", "ConfigMap", Some("app"), "cfg")];
+
+        let keys = purge_keys(&tracked, &manifests_to_yaml(&manifests).unwrap()).unwrap();
+
+        let names: Vec<&str> = keys.iter().map(|key| key.name.as_str()).collect();
+        assert_eq!(names, ["cfg", "migrate", "hook-sa"], "a skipped document never ran");
+        let purged = purge_resources(&cluster, &keys, &|_| false, 8, false, &mut |_| {}).await;
+        assert!(purged.failed.is_empty() && purged.kept.is_empty());
+        assert_eq!(purged.deleted.len(), 3);
+        for name in ["cfg", "migrate", "hook-sa"] {
+            assert!(!cluster.exists(name), "{name} is gone");
+        }
+        assert!(cluster.exists("skipped"), "what no sync created is not the purge's");
+        assert!(
+            cluster.position("release Job migrate") < cluster.position("delete Job migrate"),
+            "the finalizer goes first: {:?}",
+            cluster.log()
         );
     }
 }

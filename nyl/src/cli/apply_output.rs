@@ -11,7 +11,6 @@ use std::time::Duration;
 use colored::Colorize;
 
 use nyl_render::kubernetes::{
-    hooks,
     lifecycle::{ApplyEvent, ApplyExecutionResult, ReleaseRun},
     prune::PruneDecision,
     ApplyOutcome, DiscoveryMode, ReleaseState, ReleaseStatus, ResourceKey,
@@ -147,12 +146,7 @@ impl<'a> ApplyRenderer<'a> {
                 }
             }
             ApplyEvent::PruneFinished => println!(),
-            ApplyEvent::HooksIgnored { hooks } => tracing::warn!(
-                "{}: {}; fix: {}",
-                hooks::IGNORED_CODE,
-                hooks::ignored_message(hooks),
-                hooks::IGNORED_FIX
-            ),
+            ApplyEvent::DeleteHooksIgnored { finding } => tracing::warn!("{finding}"),
             ApplyEvent::HookStarted { key, phase, wave } => {
                 println!("{} {} hook {}{}", "▶".cyan().bold(), phase, key, wave_note(wave));
             }

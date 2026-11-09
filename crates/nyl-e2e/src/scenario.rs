@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::checks::{
     attestation_ready, deployment_ready, hook_ran_after_workload, observations_ready, parse_attestation_record,
-    Observed,
+    rollout_started, Observed,
 };
 use crate::env::Env;
 use crate::error::{Context, Error, Result};
@@ -334,8 +334,8 @@ impl Scenario<'_> {
         })
     }
 
-    /// Wait until the Release's `PostSync` hook Job succeeded after the Deployment
-    /// was created, and, with `previous`, is another object than the Job that
+    /// Wait until the Release's `PostSync` hook Job succeeded after the Deployment's
+    /// newest rollout began (the creation of its newest ReplicaSet), and, with `previous`, is another object than the Job that
     /// ran for the revision before: a sync runs its hooks, whichever reconciler
     /// runs it, and the default delete policy replaces the old Job with a new one.
     /// Returns the Job's UID.
@@ -350,12 +350,11 @@ impl Scenario<'_> {
             let Some(job) = kubectl.get_optional(&["job", fixture::HOOK_JOB, "--namespace", NAMESPACE])? else {
                 return Ok(Poll::pending("the hook Job does not exist yet"));
             };
-            let Some(deployment) =
-                kubectl.get_optional(&["deployment", fixture::DEPLOYMENT, "--namespace", NAMESPACE])?
-            else {
-                return Ok(Poll::pending("the Deployment does not exist"));
+            let Some(replica_sets) = kubectl.get_optional(&["replicasets", "--namespace", NAMESPACE])? else {
+                return Ok(Poll::pending("the Deployment has no ReplicaSet"));
             };
-            Ok(match hook_ran_after_workload(&job, &deployment) {
+            let rollout = rollout_started(&replica_sets, fixture::DEPLOYMENT);
+            Ok(match hook_ran_after_workload(&job, rollout.as_deref()) {
                 Poll::Ready(uid) if Some(uid.as_str()) == previous => {
                     Poll::pending("the hook Job is still the one of the revision before")
                 }

@@ -941,6 +941,16 @@ impl KubeClient for StrictClient {
         self.inner.delete_resource_with(gvk, namespace, name, options).await
     }
 
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.remove_finalizer(gvk, namespace, name, finalizer).await
+    }
+
     async fn get_normalized_resource(
         &self,
         resource: &kube::api::DynamicObject,
@@ -1552,6 +1562,16 @@ impl KubeClient for ApiServer {
         options: &nyl_render::kubernetes::DeleteOptions,
     ) -> nyl_render::Result<()> {
         self.inner.delete_resource_with(gvk, namespace, name, options).await
+    }
+
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.remove_finalizer(gvk, namespace, name, finalizer).await
     }
 
     async fn get_normalized_resource(
@@ -2233,6 +2253,16 @@ impl KubeClient for JobsFinish {
         self.inner.delete_resource_with(gvk, namespace, name, options).await
     }
 
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.remove_finalizer(gvk, namespace, name, finalizer).await
+    }
+
     async fn get_normalized_resource(
         &self,
         resource: &kube::api::DynamicObject,
@@ -2250,8 +2280,9 @@ impl KubeClient for JobsFinish {
     }
 }
 
-/// A Release `hooks` of a ConfigMap with a PreSync Job, a PostSync Job, and a Helm
-/// test hook, which has no sync phase.
+/// A Release `hooks` of a ConfigMap with a PreSync Job, a PostSync Job, a Helm test
+/// hook, which has no sync phase and is left out silently, and a Helm post-delete hook,
+/// which Nyl does not run and warns about.
 const HOOKS: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: hooks, namespace: hooks}\nspec: {}\n---\n\
                      apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg, namespace: hooks}\ndata: {a: b}\n---\n\
                      apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: migrate\n  namespace: hooks\n  \
@@ -2265,13 +2296,18 @@ const HOOKS: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: hoo
                      apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: probe\n  namespace: hooks\n  \
                      annotations: {helm.sh/hook: test}\n\
                      spec:\n  template:\n    spec:\n      restartPolicy: Never\n      \
-                     containers: [{name: probe, image: 'registry.invalid:5000/probe'}]\n";
+                     containers: [{name: probe, image: 'registry.invalid:5000/probe'}]\n---\n\
+                     apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: bye\n  namespace: hooks\n  \
+                     annotations: {helm.sh/hook: post-delete}\n\
+                     spec:\n  template:\n    spec:\n      restartPolicy: Never\n      \
+                     containers: [{name: bye, image: 'registry.invalid:5000/bye'}]\n";
 
 /// Catches the direct reconciler applying hooks like ordinary resources, as it
 /// did before hooks had phases: the Release the unit applies runs its PreSync and
 /// PostSync hooks (a Helm `post-install` one among them), records them in the
 /// revision's manifest, tracks only the ConfigMap, leaves the Helm test hook out
-/// and says so once, and is the same Release whether it is applied again or not:
+/// silently and the delete hook out with one warning, and is the same Release whether
+/// it is applied again or not:
 /// a hook that is gone is no drift, since no sync ran it.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_direct_unit_runs_hooks_tracks_none_and_never_reports_them_as_drift() {
@@ -2295,12 +2331,17 @@ async fn test_a_direct_unit_runs_hooks_tracks_none_and_never_reports_them_as_dri
         .filter(|warning| warning.code == nyl_core::orchestration::codes::Code::KubernetesHookIgnored)
         .collect();
     assert_eq!(ignored.len(), 1, "{warnings:?}");
-    assert!(ignored[0].message.contains("probe"), "{}", ignored[0].message);
+    assert!(
+        ignored[0].message.contains("bye") && !ignored[0].message.contains("probe"),
+        "only the delete hook is named: {}",
+        ignored[0].message
+    );
     assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "migrate").await);
     assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "smoke").await);
     assert!(
-        !cluster.exists("batch/v1", "Job", Some("hooks"), "probe").await,
-        "a Helm test hook has no sync phase"
+        !cluster.exists("batch/v1", "Job", Some("hooks"), "probe").await
+            && !cluster.exists("batch/v1", "Job", Some("hooks"), "bye").await,
+        "hooks without a sync phase are not applied"
     );
     let state = cluster
         .storage
@@ -2384,4 +2425,39 @@ async fn test_a_failed_hook_fails_the_direct_unit_before_the_workload_applies() 
         .unwrap()
         .unwrap();
     assert_eq!(state.status, ReleaseStatus::Failed);
+}
+
+/// Catches hooks outliving the Release they ran for: a teardown deletes the Jobs the
+/// hooks created, which no revision tracks, together with the rest of the Release.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_teardown_deletes_the_hooks_of_a_release_with_the_rest() {
+    let world = direct_world();
+    std::fs::write(world.work().join("applications/web/hooks.yaml"), HOOKS).unwrap();
+    let cluster = Cluster::new();
+    let jobs = Arc::new(JobsFinish {
+        inner: cluster.client.clone(),
+        failing: std::collections::BTreeSet::new(),
+    });
+    let driver = cluster.driver_through(jobs);
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let tree = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "migrate").await);
+    assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "smoke").await);
+
+    let identity = identity();
+    let deleting = deleting(unit.clone());
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&identity));
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    ctx.artifacts.insert("tree".to_owned(), tree);
+    let outcome = driver.teardown(&ctx, &deleting);
+
+    let Ok(Supported::Supported(Outcome::Waiting { .. })) = outcome else {
+        panic!("phase 1 waits: {outcome:?}");
+    };
+    assert!(!cluster.exists("v1", "ConfigMap", Some("hooks"), "cfg").await);
+    assert!(
+        !cluster.exists("batch/v1", "Job", Some("hooks"), "migrate").await
+            && !cluster.exists("batch/v1", "Job", Some("hooks"), "smoke").await,
+        "the hook Jobs are deleted with the Release"
+    );
 }

@@ -71,27 +71,55 @@ pub fn deployment_ready(deployment: &Value, image: &str, database_host: &str) ->
     Poll::Ready(())
 }
 
-/// Whether a `PostSync` hook Job succeeded after the Deployment existed, and
-/// which object that was (its UID): a Job that started before the Deployment was
-/// created ran in the wrong phase, whichever reconciler ran it.
-pub fn hook_ran_after_workload(job: &Value, deployment: &Value) -> Poll<String> {
+/// When the newest rollout of `deployment` began: the creation time of the newest
+/// ReplicaSet it owns, among the `replica_sets` listed. Every revision that changes
+/// the pod template creates one, so it marks the revision, where the Deployment's own
+/// creation time (the first revision's) marks none after it.
+pub fn rollout_started(replica_sets: &Value, deployment: &str) -> Option<String> {
+    replica_sets
+        .get("items")?
+        .as_array()?
+        .iter()
+        .filter(|replica_set| {
+            replica_set
+                .pointer("/metadata/ownerReferences")
+                .and_then(Value::as_array)
+                .is_some_and(|owners| {
+                    owners.iter().any(|owner| {
+                        owner.get("kind").and_then(Value::as_str) == Some("Deployment")
+                            && owner.get("name").and_then(Value::as_str) == Some(deployment)
+                    })
+                })
+        })
+        .filter_map(|replica_set| {
+            replica_set
+                .pointer("/metadata/creationTimestamp")
+                .and_then(Value::as_str)
+        })
+        // RFC 3339 UTC timestamps of one format order as text.
+        .max()
+        .map(str::to_owned)
+}
+
+/// Whether a `PostSync` hook Job succeeded after the newest rollout of the workload
+/// began (`rollout_started`, [`rollout_started`]), and which object that was (its
+/// UID): a Job that started before it ran in the wrong phase, whichever reconciler
+/// ran it, and the Job of the revision before is not the one of this revision.
+pub fn hook_ran_after_workload(job: &Value, rollout_started: Option<&str>) -> Poll<String> {
     let succeeded = job.pointer("/status/succeeded").and_then(Value::as_i64).unwrap_or(0);
     if succeeded < 1 {
         return Poll::pending(format!("the Job has {succeeded} succeeded pods"));
     }
     let started = job.pointer("/status/startTime").and_then(Value::as_str);
-    let created = deployment
-        .pointer("/metadata/creationTimestamp")
-        .and_then(Value::as_str);
-    let (Some(started), Some(created)) = (started, created) else {
+    let (Some(started), Some(rollout)) = (started, rollout_started) else {
         return Poll::pending(format!(
-            "the Job started at {started:?} and the Deployment was created at {created:?}"
+            "the Job started at {started:?} and the newest rollout began at {rollout_started:?}"
         ));
     };
     // RFC 3339 UTC timestamps of one format order as text.
-    if started <= created {
+    if started <= rollout {
         return Poll::pending(format!(
-            "the Job started at {started}, not after the Deployment was created at {created}"
+            "the Job started at {started}, not after the newest rollout began at {rollout}"
         ));
     }
     match job.pointer("/metadata/uid").and_then(Value::as_str) {
@@ -333,17 +361,54 @@ mod tests {
         }
     }
 
+    fn replica_set(owner: &str, created: &str) -> Value {
+        json!({"metadata": {"creationTimestamp": created,
+            "ownerReferences": [{"kind": "Deployment", "name": owner}]}})
+    }
+
     /// Catches a hook that ran before the workload passing for a PostSync hook.
     #[test]
-    fn test_a_hook_is_ready_when_it_succeeded_after_the_workload_was_created() {
-        let deployment = json!({"metadata": {"creationTimestamp": "2026-01-01T10:00:05Z"}});
+    fn test_a_hook_is_ready_when_it_succeeded_after_the_workload_rolled_out() {
         let job = |succeeded: i64, started: &str| json!({"metadata": {"uid": "abc"}, "status": {"succeeded": succeeded, "startTime": started}});
+        let rollout = Some("2026-01-01T10:00:05Z");
 
-        assert!(reason(hook_ran_after_workload(&job(0, "2026-01-01T10:00:30Z"), &deployment)).contains("0 succeeded"));
-        assert!(reason(hook_ran_after_workload(&job(1, "2026-01-01T10:00:05Z"), &deployment)).contains("not after"));
+        assert!(reason(hook_ran_after_workload(&job(0, "2026-01-01T10:00:30Z"), rollout)).contains("0 succeeded"));
+        assert!(reason(hook_ran_after_workload(&job(1, "2026-01-01T10:00:05Z"), rollout)).contains("not after"));
+        assert!(reason(hook_ran_after_workload(&job(1, "2026-01-01T10:00:30Z"), None)).contains("None"));
         assert!(matches!(
-            hook_ran_after_workload(&job(1, "2026-01-01T10:00:30Z"), &deployment),
+            hook_ran_after_workload(&job(1, "2026-01-01T10:00:30Z"), rollout),
             Poll::Ready(uid) if uid == "abc"
+        ));
+    }
+
+    /// Catches the check being vacuous for the second revision: a Job that ran between
+    /// the first rollout and the second, which is the Job of the revision before, or one
+    /// that ran in the wrong phase, started after the Deployment was created, and the
+    /// newest ReplicaSet is what tells it from a Job of this revision.
+    #[test]
+    fn test_the_hook_of_the_revision_before_is_not_after_the_newest_rollout() {
+        let replica_sets = json!({"items": [
+            replica_set("web", "2026-01-01T10:00:05Z"),
+            replica_set("web", "2026-01-01T10:05:00Z"),
+            replica_set("other", "2026-01-01T10:09:00Z"),
+        ]});
+        let rollout = rollout_started(&replica_sets, "web");
+        assert_eq!(
+            rollout.as_deref(),
+            Some("2026-01-01T10:05:00Z"),
+            "another Deployment's does not count"
+        );
+        assert_eq!(rollout_started(&json!({"items": []}), "web"), None);
+
+        let job = |started: &str| json!({"metadata": {"uid": "abc"}, "status": {"succeeded": 1, "startTime": started}});
+        assert!(reason(hook_ran_after_workload(
+            &job("2026-01-01T10:02:00Z"),
+            rollout.as_deref()
+        ))
+        .contains("not after"));
+        assert!(matches!(
+            hook_ran_after_workload(&job("2026-01-01T10:06:00Z"), rollout.as_deref()),
+            Poll::Ready(_)
         ));
     }
 

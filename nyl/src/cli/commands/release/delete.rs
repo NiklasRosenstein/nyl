@@ -168,7 +168,7 @@ async fn delete_release(
             println!(
                 "{} This will also delete {} resource(s) from the cluster.",
                 "⚠".yellow(),
-                release.resource_keys.len()
+                purged_keys(release)?.len()
             );
             warn_delete_hooks(release);
         }
@@ -241,18 +241,24 @@ fn warn_delete_hooks(release: &nyl_render::kubernetes::ReleaseState) {
     let Ok(delete_hooks) = hooks::delete_hooks(&documents) else {
         return;
     };
-    if !delete_hooks.is_empty() {
-        tracing::warn!(
-            "{}: {}; fix: {}",
-            hooks::IGNORED_CODE,
-            hooks::ignored_message(&delete_hooks),
-            hooks::IGNORED_FIX
-        );
+    if let Some(finding) = hooks::delete_hook_finding(&delete_hooks) {
+        tracing::warn!("{finding}");
     }
 }
 
-/// Delete the release's resources, keeping those whose Argo CD `Delete` sync
-/// option retains them or awaits `--confirm-delete`, in reverse apply order
+/// What a purge deletes: the objects the release tracks and the hooks its manifest
+/// holds, which a sync creates and no revision tracks.
+fn purged_keys(release: &nyl_render::kubernetes::ReleaseState) -> Result<Vec<nyl_render::kubernetes::ResourceKey>> {
+    nyl_render::kubernetes::lifecycle::purge_keys(&release.resource_keys, &release.manifest).map_err(|error| {
+        NylError::Other(format!(
+            "cannot read the manifest of revision {} of release {}: {error}",
+            release.revision, release.release_name
+        ))
+    })
+}
+
+/// Delete the release's resources and hooks, keeping those whose Argo CD `Delete`
+/// sync option retains them or awaits `--confirm-delete`, in reverse apply order
 /// with waits for termination.
 async fn purge_resources(
     client: kube::Client,
@@ -267,7 +273,7 @@ async fn purge_resources(
     let kube_client = KubeRsClient::from_client(client).await?;
     let purged = purge_resources(
         &kube_client,
-        &release.resource_keys,
+        &purged_keys(release)?,
         &|_| false,
         crate::cli::commands::apply::DEFAULT_APPLY_CONCURRENCY.into(),
         confirm_delete,

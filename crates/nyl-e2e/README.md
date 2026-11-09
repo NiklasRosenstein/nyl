@@ -12,9 +12,11 @@ One scenario, run against a real Kubernetes cluster with each reconciler:
    the reconcile on a thread while it applies the catalog Application and syncs
    the workload Application, the way an operator would.
 2. The suite waits until the workload runs the image from the local registry, and
-   until the Release's `PostSync` hook Job succeeded after the Deployment was
-   created: Argo CD and the direct reconciler run hooks the same way. After the
-   second revision the hook ran again, as a new Job.
+   until the Release's `PostSync` hook Job succeeded after the Deployment's newest
+   rollout began (the creation of its newest ReplicaSet, which each revision
+   moves): Argo CD and the direct reconciler run hooks the same way. After the
+   second revision the hook ran again, as a new Job that started after the second
+   rollout.
 3. It reads the attestations the reconcile recorded in the observed state
    (`accepted` and `healthy`, source `reconcile`) and cross-checks them with a
    single `nyl attest`. `nyl observe` reads the live values (the Service's

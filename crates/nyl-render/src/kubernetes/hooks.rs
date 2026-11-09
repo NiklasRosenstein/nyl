@@ -22,6 +22,9 @@
 //!   failure. Within a phase, resources and hooks run by wave
 //!   (`argocd.argoproj.io/sync-wave`, else `helm.sh/hook-weight`, else 0), then kind
 //!   ([`ResourceOrdering`]), then name.
+//! - **Dependencies.** A Namespace, and a CustomResourceDefinition, applies no later than
+//!   the first document that needs it, hooks included ([`resource_slots`]), as
+//!   Argo CD's `adjustDeps` moves one to the phase and wave of its first dependent.
 //! - **Delete policy.** `argocd.argoproj.io/hook-delete-policy` and
 //!   `helm.sh/hook-delete-policy` are both read and merged: `HookSucceeded` /
 //!   `hook-succeeded`, `HookFailed` / `hook-failed`, `BeforeHookCreation` /
@@ -43,6 +46,10 @@ pub(crate) const HOOK_DELETE_POLICY: &str = "argocd.argoproj.io/hook-delete-poli
 pub(crate) const HELM_HOOK: &str = "helm.sh/hook";
 pub(crate) const HELM_HOOK_WEIGHT: &str = "helm.sh/hook-weight";
 pub(crate) const HELM_HOOK_DELETE_POLICY: &str = "helm.sh/hook-delete-policy";
+/// The finalizer that keeps a hook object until the sync has seen how it ended, as
+/// Argo CD's `argocd.argoproj.io/hook-finalizer` does: a Job a TTL controller deletes
+/// the moment it finishes is still readable until the sync removes the finalizer.
+pub const HOOK_FINALIZER: &str = "argocd.argoproj.io/hook-finalizer";
 
 /// A sync phase a hook runs in. Variants sort in the order the phases run, with
 /// `SyncFail` last because it runs only after a failure.
@@ -229,11 +236,27 @@ pub fn delete_hooks(manifests: &[Value]) -> Result<Vec<IgnoredHook>> {
                 hooks.push(IgnoredHook {
                     key: ResourceKey::from_json_value(manifest)?,
                     reason,
+                    delete: true,
                 });
             }
         }
     }
     Ok(hooks)
+}
+
+/// The keys of the hooks among `manifests` that a sync creates, each once. No
+/// revision tracks them, so a purge reads them from the revision's manifest.
+pub fn hook_keys(manifests: &[Value]) -> Result<Vec<ResourceKey>> {
+    let mut keys: Vec<ResourceKey> = Vec::new();
+    for manifest in manifests {
+        if matches!(classify(manifest), Classification::Hook(_)) {
+            let key = ResourceKey::from_json_value(manifest)?;
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    Ok(keys)
 }
 
 /// What `manifest` is to the apply. Pure; the one reading of the hook
@@ -316,27 +339,44 @@ impl HookTask {
 pub struct IgnoredHook {
     pub key: ResourceKey,
     pub reason: String,
+    /// Whether it runs when Argo CD removes an Application (a delete hook), which
+    /// Nyl does not do for a Release. Only those are worth a warning: the rest (Helm's
+    /// `test`, the rollback hooks) have no effect in a sync either way.
+    pub delete: bool,
 }
 
-/// The stable code of the warning for hooks that are left out.
+/// The stable code of the warning for delete hooks that Nyl does not run.
 pub const IGNORED_CODE: nyl_core::orchestration::codes::Code =
     nyl_core::orchestration::codes::Code::KubernetesHookIgnored;
 
 /// How to fix [`IGNORED_CODE`].
-pub const IGNORED_FIX: &str = "remove the hook annotation, or give it a phase Argo CD syncs (`argocd.argoproj.io/hook: PreSync`, `Sync`, \
-     `PostSync`, or `SyncFail`, or Helm's `pre-install`, `pre-upgrade`, `post-install`, `post-upgrade`); `Skip` leaves it out without this warning";
+pub const IGNORED_FIX: &str =
+    "Nyl never runs delete hooks, so do what the hook does yourself before the Release is removed \
+     (for example `kubectl create -f` of its Job, then wait for it); to stop the warning, drop the hook from the \
+     Release, or mark it `argocd.argoproj.io/hook: Skip`, which leaves it out of Argo CD's sync as well";
 
-/// The warning for hooks left out of an apply, once for the Release.
-pub fn ignored_message(ignored: &[IgnoredHook]) -> String {
-    let listed = ignored
+/// The warning for the delete hooks among `ignored`, once for the Release: `None`
+/// when there is none. Hooks without a sync phase that are no delete hook (Helm's
+/// `test`, `pre-rollback`, `post-rollback`) are left out silently, as Argo CD leaves
+/// them out.
+pub fn delete_hook_finding(ignored: &[IgnoredHook]) -> Option<nyl_core::orchestration::codes::Finding> {
+    let delete: Vec<&IgnoredHook> = ignored.iter().filter(|hook| hook.delete).collect();
+    if delete.is_empty() {
+        return None;
+    }
+    let listed = delete
         .iter()
         .map(|hook| format!("{} ({})", hook.key, hook.reason))
         .collect::<Vec<_>>()
         .join("; ");
-    format!(
-        "{} hook(s) have no sync phase and are not applied, as Argo CD does not sync them: {listed}",
-        ignored.len()
-    )
+    Some(nyl_core::orchestration::codes::Finding::new(
+        IGNORED_CODE,
+        format!(
+            "{} delete hook(s) are not run: Nyl runs no hooks when it removes a Release, and applies none: {listed}",
+            delete.len()
+        ),
+        IGNORED_FIX,
+    ))
 }
 
 /// A Release's documents divided into what the apply does with each.
@@ -364,6 +404,7 @@ impl ReleasePlan {
                 Classification::Ignored(reason) => plan.ignored.push(IgnoredHook {
                     key: ResourceKey::from_json_value(manifest)?,
                     reason,
+                    delete: is_delete_hook(manifest),
                 }),
                 Classification::Hook(spec) => {
                     let key = ResourceKey::from_json_value(manifest)?;
@@ -415,6 +456,87 @@ fn compare_hooks(a: &HookTask, b: &HookTask) -> Ordering {
         .cmp(&(b.phase, b.wave))
         .then_with(|| ResourceOrdering::compare_kinds(&a.key.gvk, &b.key.gvk))
         .then_with(|| (&a.key.name, &a.key.namespace).cmp(&(&b.key.name, &b.key.namespace)))
+}
+
+/// The `(phase, wave)` step each of `resources` applies in, in the order given.
+///
+/// An ordinary resource applies in the `Sync` phase at its own wave, except a
+/// Namespace and a CustomResourceDefinition, which move to the step of their first
+/// dependent when it is earlier, whether the dependent is a resource or a hook: a
+/// document in the Namespace (`metadata.namespace`), or one of the kind the CRD
+/// defines (`spec.group` and `spec.names.kind`). That is Argo CD's `adjustDeps`
+/// (`sync_tasks.go`), and what keeps a custom resource of an early wave from
+/// applying before its CRD, or a `PreSync` hook before its Namespace. A step is
+/// never moved later, and a `SyncFail` hook, which runs only after a failure,
+/// needs nothing applied before it.
+pub fn resource_slots(resources: &[Value], hooks: &[HookTask]) -> Vec<(HookPhase, i64)> {
+    let own: Vec<(HookPhase, i64)> = resources
+        .iter()
+        .map(|manifest| (HookPhase::Sync, wave(manifest)))
+        .collect();
+    // Every document that can depend on another, with the step it runs in.
+    let documents: Vec<(&Value, (HookPhase, i64))> = resources
+        .iter()
+        .zip(&own)
+        .map(|(manifest, step)| (manifest, *step))
+        .chain(
+            hooks
+                .iter()
+                .filter(|hook| hook.phase != HookPhase::SyncFail)
+                .map(|hook| (&hook.manifest, (hook.phase, hook.wave))),
+        )
+        .collect();
+    resources
+        .iter()
+        .zip(own)
+        .map(|(manifest, step)| {
+            let needed_by = |depends: &dyn Fn(&Value) -> bool| {
+                documents
+                    .iter()
+                    .filter(|(document, _)| !std::ptr::eq(*document, manifest) && depends(document))
+                    .map(|(_, step)| *step)
+                    .min()
+            };
+            let earliest = match dependency(manifest) {
+                Some(Dependency::Namespace(name)) => needed_by(&|document| {
+                    document.pointer("/metadata/namespace").and_then(Value::as_str) == Some(name.as_str())
+                }),
+                Some(Dependency::Kind { group, kind }) => needed_by(&|document| {
+                    api_group(document) == Some(group.as_str())
+                        && document.get("kind").and_then(Value::as_str) == Some(kind.as_str())
+                }),
+                None => None,
+            };
+            earliest.map_or(step, |earliest| earliest.min(step))
+        })
+        .collect()
+}
+
+/// What a document provides that others depend on.
+enum Dependency {
+    /// A Namespace, by name.
+    Namespace(String),
+    /// A CustomResourceDefinition's kind.
+    Kind { group: String, kind: String },
+}
+
+fn api_group(manifest: &Value) -> Option<&str> {
+    let api_version = manifest.get("apiVersion")?.as_str()?;
+    Some(api_version.split_once('/').map_or("", |(group, _)| group))
+}
+
+fn dependency(manifest: &Value) -> Option<Dependency> {
+    let kind = manifest.get("kind")?.as_str()?;
+    match (api_group(manifest)?, kind) {
+        ("", "Namespace") => Some(Dependency::Namespace(
+            manifest.pointer("/metadata/name")?.as_str()?.to_owned(),
+        )),
+        ("apiextensions.k8s.io", "CustomResourceDefinition") => Some(Dependency::Kind {
+            group: manifest.pointer("/spec/group")?.as_str()?.to_owned(),
+            kind: manifest.pointer("/spec/names/kind")?.as_str()?.to_owned(),
+        }),
+        _ => None,
+    }
 }
 
 /// The documents of `manifests` the apply tracks, prunes, and compares: every
@@ -507,45 +629,190 @@ mod tests {
     }
 
     /// Catches hooks without a sync phase being applied during a sync, which
-    /// would run a Helm test against a half-applied Release.
+    /// would run a Helm test against a half-applied Release, and a reason that
+    /// misleads: a delete hook says Nyl runs none when it removes a Release.
     #[test]
     fn test_classify_ignores_hooks_without_a_sync_phase() {
-        for annotations in [
-            json!({HELM_HOOK: "test"}),
-            json!({HELM_HOOK: "pre-delete"}),
-            json!({HELM_HOOK: "post-delete"}),
-            json!({HELM_HOOK: "pre-rollback"}),
-            json!({HELM_HOOK: "post-rollback"}),
-            json!({HOOK: "PostDelete"}),
-            json!({HOOK: "PreDelete"}),
-            json!({HOOK: "Nonsense"}),
+        let no_phase = |declares: &str| format!("it declares {declares}, which names no sync phase");
+        let delete = |declares: &str| {
+            format!("it declares {declares}, a delete hook, and Nyl runs no hooks when it removes a Release")
+        };
+        for (annotations, expected) in [
+            (json!({HELM_HOOK: "test"}), no_phase("helm.sh/hook: test")),
+            (
+                json!({HELM_HOOK: "pre-rollback"}),
+                no_phase("helm.sh/hook: pre-rollback"),
+            ),
+            (
+                json!({HELM_HOOK: "post-rollback"}),
+                no_phase("helm.sh/hook: post-rollback"),
+            ),
+            (json!({HOOK: "Nonsense"}), no_phase("argocd.argoproj.io/hook: Nonsense")),
+            (json!({HELM_HOOK: "pre-delete"}), delete("helm.sh/hook: pre-delete")),
+            (json!({HELM_HOOK: "post-delete"}), delete("helm.sh/hook: post-delete")),
+            (json!({HOOK: "PreDelete"}), delete("argocd.argoproj.io/hook: PreDelete")),
+            (
+                json!({HOOK: "PostDelete"}),
+                delete("argocd.argoproj.io/hook: PostDelete"),
+            ),
         ] {
-            let Classification::Ignored(reason) = hook(annotations.clone()) else {
-                panic!("{annotations} should be ignored");
-            };
-            assert!(
-                reason.contains("names no sync phase") || reason.contains("a delete hook"),
-                "{reason}"
+            assert_eq!(
+                hook(annotations.clone()),
+                Classification::Ignored(expected),
+                "{annotations}"
             );
         }
-        let delete = [
+        // One phase Argo CD knows is enough; the rest is dropped silently.
+        assert_eq!(phases(json!({HELM_HOOK: "pre-install,test"})), [HookPhase::PreSync]);
+    }
+
+    /// Catches the delete-hook warning naming a Helm test hook, which every
+    /// `helm create` chart declares and no fix can remove from a vendor chart, and
+    /// a delete hook going unreported.
+    #[test]
+    fn test_only_delete_hooks_are_warned_about() {
+        let documents = [
             document("Job", "post-delete", json!({HELM_HOOK: "post-delete"})),
             document("Job", "pre-delete", json!({HOOK: "PreDelete"})),
             document("Job", "test", json!({HELM_HOOK: "test"})),
             document("Job", "plain", json!({})),
         ];
-        let names: Vec<String> = delete_hooks(&delete)
+        let names: Vec<String> = delete_hooks(&documents)
             .unwrap()
             .into_iter()
             .map(|hook| hook.key.name)
             .collect();
         assert_eq!(names, ["post-delete", "pre-delete"]);
-        let Classification::Ignored(reason) = hook(json!({HELM_HOOK: "test"})) else {
-            unreachable!()
-        };
-        assert!(reason.contains("helm.sh/hook: test"), "{reason}");
-        // One phase Argo CD knows is enough; the rest is dropped silently.
-        assert_eq!(phases(json!({HELM_HOOK: "pre-install,test"})), [HookPhase::PreSync]);
+
+        let plan = ReleasePlan::of(&documents).unwrap();
+        let finding = delete_hook_finding(&plan.ignored).expect("delete hooks are warned about");
+        assert_eq!(finding.code, IGNORED_CODE);
+        assert!(
+            finding.message.starts_with("2 delete hook(s) are not run")
+                && finding.message.contains("Job app/post-delete")
+                && finding.message.contains("Job app/pre-delete")
+                && !finding.message.contains("Job app/test"),
+            "{}",
+            finding.message
+        );
+        assert_eq!(finding.fix, IGNORED_FIX);
+
+        let only_test = ReleasePlan::of(&documents[2..]).unwrap();
+        assert_eq!(only_test.ignored.len(), 1, "a test hook is still left out of the apply");
+        assert!(delete_hook_finding(&only_test.ignored).is_none(), "but silently");
+    }
+
+    /// Catches a purge missing the hooks of a Release, which no revision tracks,
+    /// and one deleting a hook that never ran.
+    #[test]
+    fn test_hook_keys_are_the_hooks_a_sync_creates() {
+        let documents = [
+            document("Job", "migrate", json!({HOOK: "PreSync,PostSync"})),
+            document("Job", "install", json!({HELM_HOOK: "pre-install"})),
+            document("Job", "test", json!({HELM_HOOK: "test"})),
+            document("Job", "skipped", json!({HOOK: "Skip"})),
+            document("ConfigMap", "plain", json!({})),
+        ];
+
+        let names: Vec<String> = hook_keys(&documents).unwrap().into_iter().map(|key| key.name).collect();
+
+        assert_eq!(names, ["migrate", "install"], "each once, in manifest order");
+    }
+
+    fn step_of(documents: &[Value], hooks: &[Value]) -> Vec<(HookPhase, i64)> {
+        let plan = ReleasePlan::of(&[documents, hooks].concat()).unwrap();
+        resource_slots(&plan.resources, &plan.hooks)
+    }
+
+    fn namespace(name: &str) -> Value {
+        json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}})
+    }
+
+    fn widget_crd() -> Value {
+        json!({
+            "apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+            "metadata": {"name": "widgets.example.com"},
+            "spec": {"group": "example.com", "names": {"kind": "Widget"}}
+        })
+    }
+
+    fn widget(wave: &str) -> Value {
+        json!({"apiVersion": "example.com/v1", "kind": "Widget",
+            "metadata": {"name": "w", "namespace": "app", "annotations": {SYNC_WAVE: wave}}})
+    }
+
+    /// Catches a Namespace or CRD staying in a later wave than a document that
+    /// needs it, which fails that document and breaks the CRD, Namespace, rest
+    /// order: Argo CD moves each to the step of its first dependent.
+    #[test]
+    fn test_a_namespace_and_a_crd_move_to_the_step_of_their_first_dependent() {
+        let documents = [
+            namespace("app"),
+            widget_crd(),
+            document("ConfigMap", "cfg", json!({})),
+            widget("-1"),
+        ];
+
+        let steps = step_of(&documents, &[]);
+
+        assert_eq!(
+            steps,
+            [
+                (HookPhase::Sync, -1),
+                (HookPhase::Sync, -1),
+                (HookPhase::Sync, 0),
+                (HookPhase::Sync, -1)
+            ],
+            "the Namespace and the CRD follow the custom resource of wave -1"
+        );
+    }
+
+    /// Catches a dependency moving a Namespace or CRD later, and one that does
+    /// not exist moving it at all: Argo CD only ever moves one earlier.
+    #[test]
+    fn test_a_namespace_and_a_crd_never_move_later_or_for_a_stranger() {
+        let late = json!({"apiVersion": "v1", "kind": "Namespace",
+            "metadata": {"name": "app", "annotations": {SYNC_WAVE: "-3"}}});
+        let documents = [
+            late,
+            widget_crd(),
+            widget("5"),
+            document("ConfigMap", "elsewhere", json!({})),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "c", "namespace": "other"}}),
+        ];
+
+        let steps = step_of(&documents, &[]);
+
+        assert_eq!(steps[0], (HookPhase::Sync, -3), "its own earlier wave stays");
+        assert_eq!(
+            steps[1],
+            (HookPhase::Sync, 0),
+            "the custom resource of wave 5 needs it later"
+        );
+        assert_eq!(steps[2], (HookPhase::Sync, 5));
+    }
+
+    /// Catches a `PreSync` hook running before the Namespace it runs in: the
+    /// Namespace moves into the hook's phase, and a `SyncFail` hook, which runs
+    /// only after a failure, moves nothing.
+    #[test]
+    fn test_a_namespace_moves_ahead_of_a_hook_that_needs_it() {
+        let hooks = [document("Job", "migrate", json!({HOOK: "PreSync", SYNC_WAVE: "2"}))];
+        assert_eq!(
+            step_of(&[namespace("app")], &hooks),
+            [(HookPhase::PreSync, 2)],
+            "the Namespace applies with the PreSync hook that runs in it"
+        );
+
+        let failure = [document("Job", "cleanup", json!({HOOK: "SyncFail"}))];
+        assert_eq!(step_of(&[namespace("app")], &failure), [(HookPhase::Sync, 0)]);
+
+        let after = [document("Job", "notify", json!({HOOK: "PostSync"}))];
+        assert_eq!(
+            step_of(&[namespace("app")], &after),
+            [(HookPhase::Sync, 0)],
+            "a later phase is no reason to move"
+        );
     }
 
     fn policies(mut annotations: Value) -> Vec<DeletePolicy> {
@@ -651,7 +918,10 @@ mod tests {
         assert!(plan.hooks.is_empty());
         assert_eq!(plan.skipped.len(), 1);
         assert_eq!(plan.ignored.len(), 1);
-        assert!(ignored_message(&plan.ignored).starts_with("1 hook(s) have no sync phase"));
+        assert!(
+            delete_hook_finding(&plan.ignored).is_none(),
+            "a hook without a sync phase that is no delete hook is left out without a warning"
+        );
         assert!(ReleasePlan::of(&[json!({"metadata": {"annotations": {HOOK: "PreSync"}}})]).is_err());
     }
 }

@@ -27,7 +27,7 @@ use crate::kubernetes_publication::reconciler::{
     Visibility,
 };
 use nyl_render::kubernetes::health::{fold, is_workload, Found, Health as Rollout};
-use nyl_render::kubernetes::hooks::{classify, Classification};
+use nyl_render::kubernetes::hooks;
 
 /// Reads a direct target's Releases from the cluster they were applied to.
 pub struct DirectReader {
@@ -244,7 +244,7 @@ async fn health_of(cluster: &ClusterHandle, state: &ReleaseState) -> Result<(Hea
         };
         // A hook runs, finishes, and is deleted by its policy: it is no part of the
         // release's health, as in Argo CD, which does not assess hook objects.
-        if !is_workload(api_version, kind) || !matches!(classify(document), Classification::Resource) {
+        if !is_workload(api_version, kind) || !hooks::is_resource(document) {
             continue;
         }
         let key = ResourceKey::from_json_value(document).map_err(|error| api_error(&error, "read a workload"))?;
@@ -279,7 +279,9 @@ async fn health_of(cluster: &ClusterHandle, state: &ReleaseState) -> Result<(Hea
         Rollout::Healthy => Health::Healthy,
         Rollout::Progressing => Health::Progressing,
         Rollout::Degraded => Health::Degraded,
-        Rollout::Unknown => Health::Unknown,
+        // A paused Deployment: the reconciler-neutral reading has no suspended state,
+        // and a Suspended Argo CD Application reads as unknown too.
+        Rollout::Suspended | Rollout::Unknown => Health::Unknown,
     };
     Ok((health, reason, terminal))
 }
