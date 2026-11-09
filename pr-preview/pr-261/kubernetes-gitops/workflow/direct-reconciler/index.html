@@ -123,8 +123,8 @@ that never reaches it (or with no receipt at all) fails with
 <div class="sl-heading-wrapper level-h2"><h2 id="unchanged-releases">Unchanged Releases</h2><a class="sl-anchor-link" href="#unchanged-releases"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Unchanged Releases”</span></a></div>
 <p>Every reconcile applies every Release, which repairs anything changed in the
 cluster by hand, except a Job that sets <code dir="auto">ttlSecondsAfterFinished</code>, is gone from the
-cluster, and has the document its Release’s latest revision holds: it ran and its TTL
-removed it, and applying it again would run it again. It stays tracked, and the Release
+cluster, and has the document the Release’s latest <code dir="auto">Deployed</code> revision for this
+publication holds: it ran and its TTL removed it, and applying it again would run it again. It stays tracked, and the Release
 is judged unchanged without it. A Release that changed nothing does not record a new release
 revision, so the history keeps its useful revisions instead of filling with
 copies of one. A Release is unchanged when its latest revision is <code dir="auto">Deployed</code>
@@ -177,7 +177,8 @@ objects or run the dry run, an object the API rejects, an aggregated API that is
 down, or an unfinished comparison at the unit’s deadline is <code dir="auto">unknown</code>, never <code dir="auto">clean</code>.
 Drift found anyway is reported as drift, with what stayed uncompared. The check reads
 Secrets of the Release namespaces for the release state, the objects the Releases
-apply, and needs <code dir="auto">patch</code> for the dry runs. An admission webhook whose <code dir="auto">sideEffects</code>
+apply, and needs <code dir="auto">patch</code> for the dry runs, and, to tell a removed kind from an
+unavailable one, <code dir="auto">get</code> on customresourcedefinitions and <code dir="auto">list</code> on apiservices. An admission webhook whose <code dir="auto">sideEffects</code>
 are <code dir="auto">Unknown</code> or <code dir="auto">Some</code> refuses dry runs, so a unit with such a webhook on one of its
 objects stays <code dir="auto">unknown</code>.</li>
 </ul>
@@ -191,8 +192,9 @@ drifted: the two are independent, and the summary names both.</p>
 <a href="#unchanged-releases">Unchanged Releases</a>). The apply puts back what was changed or
 deleted and keeps the recorded revision, so a repair that changed nothing in the release
 state records no revision. A Job its TTL removed is not applied again, here or in any
-other reconcile, while its document is the one the Release’s latest revision holds: it
-would run a second time. A Job whose document changed is applied.</p>
+other reconcile, while its document is the one the Release’s latest <code dir="auto">Deployed</code> revision
+for this publication holds (a later <code dir="auto">Failed</code> revision does not matter): it would run a
+second time. A Job whose document changed is applied.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="fencing-and-manual-changes">Fencing and manual changes</h2><a class="sl-anchor-link" href="#fencing-and-manual-changes"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Fencing and manual changes”</span></a></div>
 <p>The release state in the cluster records the owning unit and the publication it was
 applied for. A second unit cannot apply a Release another unit owns

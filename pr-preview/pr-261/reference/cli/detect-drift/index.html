@@ -112,7 +112,8 @@ with what the unit last applied, with a server-side apply dry run as Nyl’s fie
 manager, so a changed field Nyl manages or a deleted object is <code dir="auto">drifted</code> and the
 summary names the Release and the first eight objects. It needs the unit’s
 admitted <code dir="auto">KUBECONFIG</code>, the Cluster’s declared context, and <code dir="auto">get</code>, <code dir="auto">patch</code> (for the
-dry runs), and access to the Release state Secrets; a cluster it cannot read is
+dry runs), and access to the Release state Secrets, plus <code dir="auto">get</code> on
+customresourcedefinitions and <code dir="auto">list</code> on apiservices when a kind is not served; a cluster it cannot read is
 <code dir="auto">unknown</code> (<code dir="auto">NYL-DRIFT-UNKNOWN</code>, with the reason and the fix), never <code dir="auto">clean</code>.
 Run <code dir="auto">nyl diff --target &#x3C;target></code> on a Release’s file to see each change in full.</p>
 <p><code dir="auto">detect-drift</code> and <code dir="auto">attest</code> do not import runs, so they refuse a lease that
