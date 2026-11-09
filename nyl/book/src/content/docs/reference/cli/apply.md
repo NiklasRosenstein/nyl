@@ -91,7 +91,9 @@ or APIService registered earlier in the same apply, Nyl refreshes API discovery
 until the new kinds are served, for up to 30 seconds. A CustomResourceDefinition's
 kinds are served once it is Established, so the custom resources apply after the
 CRD is Established; the CRDs apply first, so the wait is usually already over, and
-nothing waits for a CRD the cluster already serves. A custom resource without a
+nothing waits for a CRD the cluster already serves. Only the kinds a CRD declares
+are waited for, and, like Argo CD, Nyl does not wait for the backend of a CRD's
+conversion webhook. A custom resource without a
 namespace takes the destination namespace when its CRD, in the same manifest or
 already in the cluster, declares the kind namespaced. A kind that no manifest CRD
 defines and the cluster does not know, such as one an APIService in the same

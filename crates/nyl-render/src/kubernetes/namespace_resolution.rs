@@ -21,7 +21,9 @@ pub struct DeclaredScopes {
 }
 
 impl DeclaredScopes {
-    /// The scopes declared by the CustomResourceDefinitions among `manifests`.
+    /// The scopes declared by the CustomResourceDefinitions among `manifests`. When
+    /// two documents declare one kind with different scopes, the later one wins, as
+    /// the later of two documents for one object does.
     pub fn of(manifests: &[Value]) -> Self {
         let namespaced = manifests
             .iter()
@@ -39,6 +41,11 @@ impl DeclaredScopes {
     /// Whether the kind is namespaced, when a manifest declares it.
     pub fn is_namespaced(&self, gvk: &GroupVersionKind) -> Option<bool> {
         self.namespaced.get(gvk).copied()
+    }
+
+    /// Every declared group, version, and kind.
+    pub(crate) fn gvks(&self) -> impl Iterator<Item = &GroupVersionKind> {
+        self.namespaced.keys()
     }
 
     /// Every declared kind with its scope, by group and kind.
@@ -716,6 +723,26 @@ mod tests {
         assert!(manifests[3]["metadata"].get("namespace").is_none());
         // An unserved version is not requestable, so the cluster is asked, and cannot say.
         assert!(manifests[4]["metadata"].get("namespace").is_none());
+    }
+
+    /// Two CRD documents that disagree on a kind's scope resolve the same way every
+    /// time: the later one wins.
+    #[test]
+    fn test_declared_scopes_of_conflicting_crds_takes_the_later_document() {
+        let versions = json!([{"name": "v1", "served": true}]);
+        let gvk = GroupVersionKind {
+            group: "example.com".to_string(),
+            version: "v1".to_string(),
+            kind: "Widget".to_string(),
+        };
+        let namespaced = crd("example.com", "Widget", "Namespaced", versions.clone());
+        let cluster = crd("example.com", "Widget", "Cluster", versions);
+
+        let later_cluster = DeclaredScopes::of(&[namespaced.clone(), cluster.clone()]);
+        let later_namespaced = DeclaredScopes::of(&[cluster, namespaced]);
+
+        assert_eq!(later_cluster.is_namespaced(&gvk), Some(false));
+        assert_eq!(later_namespaced.is_namespaced(&gvk), Some(true));
     }
 
     /// The duplicate counts follow the namespace the resources resolve to.

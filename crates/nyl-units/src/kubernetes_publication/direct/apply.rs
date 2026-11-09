@@ -30,7 +30,7 @@ use nyl_render::kubernetes::fence::{admit, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
     await_registered_kinds, collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources,
-    registered_api_groups, ApplyEvent, ApplySettings, Interruption, Protected, ReleaseRecorder, RevisionPolicy,
+    ApplyEvent, ApplySettings, Interruption, Protected, RegisteredKinds, ReleaseRecorder, RevisionPolicy,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
 use nyl_render::kubernetes::{ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering};
@@ -172,7 +172,7 @@ fn wave_of(documents: &[Value]) -> u8 {
 async fn await_earlier_kinds(
     cluster: &ClusterHandle,
     documents: &[Value],
-    registered: &HashSet<String>,
+    registered: &RegisteredKinds,
     end: tokio::time::Instant,
     (namespace, name): (&str, &str),
 ) -> Result<(), NylError> {
@@ -393,9 +393,9 @@ impl<'a, 'c> Direct<'a, 'c> {
             let mut awaiting = Vec::new();
             let mut tracked: HashSet<ObjectKey> = HashSet::new();
             let mut current_wave = None;
-            // The API groups the Releases applied so far registered: their kinds are
+            // The kinds the Releases applied so far registered: they are
             // waited for once, before the first Release that uses them.
-            let mut registered: HashSet<String> = HashSet::new();
+            let mut registered = RegisteredKinds::default();
             for &index in &order {
                 let wave = wave_of(&documents[index]);
                 if current_wave.is_some_and(|current| current != wave) && !failures.is_empty() {
@@ -453,10 +453,11 @@ impl<'a, 'c> Direct<'a, 'c> {
                     .await
                 {
                     Ok(done) => {
-                        registered.extend(registered_api_groups(&documents[index]));
                         tracked.extend(done.tracked.iter().map(identity));
                         awaiting.extend(done.awaiting);
                         if done.failures.is_empty() {
+                            // Only a Release that applied registers kinds a later one waits for.
+                            registered.extend(RegisteredKinds::of(&documents[index]));
                             applied_releases.insert(index);
                         }
                         failures.extend(done.failures);
@@ -587,7 +588,7 @@ impl<'a, 'c> Direct<'a, 'c> {
         cluster: &ClusterHandle,
         release: &PublishedDirectRelease,
         documents: Vec<Value>,
-        registered: &HashSet<String>,
+        registered: &RegisteredKinds,
         history_limit: u32,
         end: tokio::time::Instant,
         claim: &ReleaseClaim<'_>,

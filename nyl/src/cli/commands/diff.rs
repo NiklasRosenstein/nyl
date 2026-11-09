@@ -876,7 +876,13 @@ mod tests {
         async fn get_api_versions(&self) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn is_namespaced(&self, _gvk: &GroupVersionKind) -> Result<bool> {
+        async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+            if self
+                .error_gvks
+                .contains(&(gvk.group.clone(), gvk.version.clone(), gvk.kind.clone()))
+            {
+                return Err(NylError::ApiResourceNotFound(gvk.kind.clone()));
+            }
             Ok(true)
         }
         fn default_namespace(&self) -> &'static str {
@@ -941,6 +947,49 @@ mod tests {
         assert!(cr_entry.is_some(), "ClusterPolicy should appear in added");
         let note = cr_entry.unwrap().1.as_ref().expect("should have a note");
         assert!(!note.is_error, "note should not be an error when CRD is in manifests");
+        assert!(note.message.contains("CRD will be installed"));
+        assert_eq!(result.total_error_count(), 0);
+    }
+
+    /// A namespaced custom resource without a namespace, of a CRD that only the manifest
+    /// defines, is shown in the namespace `apply` would put it in, as added and waiting
+    /// for the CRD, not as an error.
+    #[tokio::test]
+    async fn test_diff_new_namespaced_crd_resource_takes_the_destination_namespace() {
+        let crd = json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": { "name": "widgets.example.com" },
+            "spec": {
+                "group": "example.com",
+                "names": { "kind": "Widget", "plural": "widgets" },
+                "versions": [{ "name": "v1", "served": true, "storage": true }],
+                "scope": "Namespaced"
+            }
+        });
+        let widget = json!({
+            "apiVersion": "example.com/v1",
+            "kind": "Widget",
+            "metadata": { "name": "first" }
+        });
+        let client = SelectiveApiResourceNotFoundClient::new([("example.com", "v1", "Widget")]);
+        let (ready, mut scopes) =
+            prepare_desired_manifests(&client, vec![widget, crd], &mut HashMap::new(), Some("app"))
+                .await
+                .unwrap();
+
+        let result = compute_diff_from_live(&client, &ready, None, DiffMode::Raw, &mut scopes, false)
+            .await
+            .unwrap();
+
+        let (key, note) = result
+            .added
+            .iter()
+            .find(|(key, _)| key.gvk.kind == "Widget")
+            .expect("the Widget is added");
+        assert_eq!(key.namespace.as_deref(), Some("app"));
+        let note = note.as_ref().expect("the Widget carries a note");
+        assert!(!note.is_error);
         assert!(note.message.contains("CRD will be installed"));
         assert_eq!(result.total_error_count(), 0);
     }
