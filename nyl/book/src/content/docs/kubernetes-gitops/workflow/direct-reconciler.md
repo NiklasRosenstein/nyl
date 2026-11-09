@@ -96,6 +96,50 @@ the branch was rewritten, the apply records a new revision with the new commit.
 A `Failed` or interrupted latest revision always gets a new one, and so does a
 Release that pruned something.
 
+## Detecting drift
+
+Nothing reconciles a direct target between runs, so a `kubectl edit`, a deleted
+object, or another tool's change goes unnoticed until something looks.
+[`nyl detect-drift`](/nyl/reference/cli/detect-drift/) of a `KubernetesPublication`
+unit with a direct target compares the cluster with what the unit last applied, besides
+comparing the publication branch with the tree as it does for Argo CD:
+
+- **What is compared.** For each Release, the manifest of its newest `Deployed`
+  revision applied for this unit's publication (repository, branch, and prefix),
+  which is what the unit applied, never the declaration as it reads now. A newer
+  revision of another publication, or one applied by hand, is skipped. A Release with
+  no revision of this publication is drift.
+- **How.** Each object is read, then compared by a server-side apply dry run as the
+  field manager `nyl`, the comparison `nyl diff` makes. Only fields the manifest
+  declares count: a field only another manager sets, such as the replicas an
+  autoscaler owns when the manifest leaves them out, is not drift. An object the
+  manifest declares that changed, or that is gone, is drift.
+- **What is not drift.** An object a Release keeps tracked only because its
+  `Prune=confirm` option awaits confirmation, or because another Release has yet to apply
+  it; a Job whose `ttlSecondsAfterFinished` let the cluster remove it after it
+  finished. An object two Releases render is compared once, against the revision
+  applied last.
+  Objects carrying Nyl's labels that no current revision tracks (orphans) are not reported.
+- **What it says.** `drifted`, naming each Release and the first eight changed or
+  missing objects, then how many more; `nyl diff --target <target>` shows each
+  change in full.
+- **What it cannot tell.** An unreachable cluster, credentials that may not read the
+  objects or run the dry run, an object the API rejects, or an unfinished comparison
+  at the unit's deadline is `unknown`, never `clean`. Drift found anyway is reported as
+  drift, with what stayed uncompared. The check reads Secrets of the Release
+  namespaces for the release state, the objects the Releases apply, and needs `patch`
+  for the dry runs.
+
+The check does one read and one dry run per object, eight at a time, within the unit's
+`timeout`. Like a reconcile it uses only the kubeconfig the unit admits and the Cluster's
+declared context.
+
+A drifted unit is repaired like any other: the next `nyl reconcile` under the default
+`driftRepair: converge` executes it again, which applies every Release again (see
+[Unchanged Releases](#unchanged-releases)). The apply puts back what was changed or
+deleted and keeps the recorded revision, so a repair that changed nothing in the release
+state records no revision. It also applies a Job again whose TTL removed it.
+
 ## Fencing and manual changes
 
 The release state in the cluster records the owning unit and the publication it was

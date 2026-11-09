@@ -157,6 +157,16 @@ renders. It reports `drifted` when they differ, or when an owned file was
 edited outside Nyl, and `unknown`, with the reason, when it cannot compare,
 for example when the remote is unreachable.
 
+With a [direct reconciler](/nyl/kubernetes-gitops/workflow/direct-reconciler/#detecting-drift)
+nothing keeps the cluster in line with the tree between runs, so `detect-drift`
+also compares the cluster with what the unit last applied: per Release, the manifest
+of its newest `Deployed` revision applied for this unit's publication, by a
+server-side apply dry run as Nyl's field manager. A changed field Nyl manages or a
+deleted object is `drifted`, and the reason names the Release and the first eight
+objects; a field only another manager sets, a Job a TTL removed, and the state of
+another publication are not drift. A cluster that cannot be read is `unknown`, never
+`clean`. The next reconcile repairs the unit by applying again.
+
 ## Ownership
 
 The published `_nyl/index.json` records the unit that owns the prefix: the
