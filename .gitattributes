@@ -1,5 +1,6 @@
 nyl/tests/fixtures/render-tree-without-inputs/** -text
 crates/nyl-core/tests/golden/** -text
+crates/nyl-state/tests/golden/** -text
 # Tests edit the scenario projects with exact multi-line matches, so check
 # them out with LF line endings on every platform, Windows included.
 nyl/tests/scenarios/** text eol=lf
