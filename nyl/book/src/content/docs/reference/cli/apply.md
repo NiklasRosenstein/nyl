@@ -64,11 +64,20 @@ options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 ## Apply order and progress
 
-Nyl applies resources in the same order as Argo CD: Namespaces, cluster policy
-(NetworkPolicies, ResourceQuotas, LimitRanges, PodDisruptionBudgets),
-ServiceAccounts, Secrets and ConfigMaps, storage, CustomResourceDefinitions, RBAC,
-Services, workloads, Ingresses, and APIServices, followed by every other kind,
-including custom resources. Built-in kinds are matched by API group and kind, so a
+Nyl applies resources in phases, whatever order the manifest lists them in:
+
+1. CustomResourceDefinitions.
+2. Namespaces.
+3. Everything else in Argo CD's order: cluster policy (NetworkPolicies,
+   ResourceQuotas, LimitRanges, PodDisruptionBudgets), ServiceAccounts, Secrets and
+   ConfigMaps, storage, RBAC, Services, workloads, Ingresses, and APIServices,
+   followed by every other kind, including custom resources.
+
+A release can therefore define a CRD and custom resources of it, or a Namespace and
+objects in it, and apply in one run. Nyl orders by kind only: the
+[Argo CD sync waves and phases](/nyl/kubernetes-rendering/pipeline/#argo-cd-sync-waves-and-phases)
+a manifest carries order what Argo CD applies, and `nyl apply` does not read them.
+Built-in kinds are matched by API group and kind, so a
 custom kind named like a built-in one, such as a CNI's `NetworkPolicy`, is ordered
 as a custom resource. Admission webhook configurations are applied last, so a
 webhook is not registered before the resources it admits while its backend may
@@ -79,7 +88,14 @@ while resources of one kind do not wait for each other.
 
 Before applying the first resource of an API group that a CustomResourceDefinition
 or APIService registered earlier in the same apply, Nyl refreshes API discovery
-until the new kinds are served. When several documents describe the same object
+until the new kinds are served, for up to 30 seconds. A CustomResourceDefinition's
+kinds are served once it is Established, so the custom resources apply after the
+CRD is Established; the CRDs apply first, so the wait is usually already over, and
+nothing waits for a CRD the cluster already serves. A custom resource without a
+namespace takes the destination namespace when its CRD, in the same manifest or
+already in the cluster, declares the kind namespaced. A kind that no manifest CRD
+defines and the cluster does not know, such as one an APIService in the same
+manifest will serve, keeps no namespace: set `metadata.namespace` on it. When several documents describe the same object
 (the same group, kind, namespace, and name, in any API version; cluster-scoped
 objects ignore a namespace), only the last one is applied and recorded. A resource
 that fails to apply does not stop the others; the release is recorded as failed
@@ -109,7 +125,8 @@ Pruning deletes the resources a release no longer contains in the reverse of the
 apply order, so dependents go before what they depend on: admission webhook
 configurations before the backends they call, custom resources and objects of
 aggregated APIs before the CustomResourceDefinitions and APIServices behind them,
-APIServices before their backends, and Namespaces last. As with apply, the
+APIServices before their backends, then Namespaces, and CustomResourceDefinitions
+last, after every object that needs them. A purge deletes in the same order. As with apply, the
 resources of one kind are deleted concurrently. Before deleting the next kind,
 Nyl waits until the deleted resources are gone, so finalizers run while the
 controllers, CRDs, and webhooks they need still exist. After two minutes of waiting

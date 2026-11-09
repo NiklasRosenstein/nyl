@@ -63,7 +63,10 @@ server must be the one the Cluster declares.
 
 Releases apply one at a time in waves (Releases that render CustomResourceDefinitions
 first, each prepared when its wave comes so a custom resource without a namespace
-resolves after its CRD applied), within the unit's deadline: no Release starts once it has passed, and the
+resolves after its CRD applied, unless the CRD is in the same Release, which
+declares the scope itself). Inside a Release, CustomResourceDefinitions apply first, then Namespaces, then
+the other kinds, as [`nyl apply`](/nyl/reference/cli/apply/#apply-order-and-progress) applies
+them, within the unit's deadline: no Release starts once it has passed, and the
 run fails as a retryable timeout. A Release never prunes an object another Release
 of the target renders, so moving an object between Releases leaves it in place; if
 the Release that now renders it has not applied yet, the old one keeps tracking it
