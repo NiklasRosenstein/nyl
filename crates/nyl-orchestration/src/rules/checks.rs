@@ -22,6 +22,14 @@
 //!   observations (the decisions about the record are
 //!   [`super::observed_values`]'s); a unit named with `--unit` whose kind
 //!   cannot is `unsupported`.
+//! - `nyl reconcile --detect-drift` runs the `detect-drift` check inside the
+//!   run, under the run's own lease: [`reconcile_targets`] names the units it
+//!   checks (those selection leaves current, so a unit that executes anyway is
+//!   never checked), [`reconcile_warnings`] and [`reconcile_drift_exit`] say
+//!   what its results add to the reconcile report, and
+//!   [`detect_drift_conflict`] refuses the options it leaves nothing to check
+//!   for. The drift record, its settling, and the driver call are the ones
+//!   `nyl detect-drift` uses.
 //! - Exit: 0 every checked unit clean, its attestations pass, or every
 //!   observation has a value; 2 a unit could not be checked (no current
 //!   receipt, unsupported, or unknown) or an observation is `pending` or
@@ -44,6 +52,7 @@ use serde_json::json;
 
 use crate::rules::freshness::receipt_is_current;
 use crate::rules::observed_values::Settled;
+use crate::rules::selection::{select, Candidates, Skipped};
 use crate::run_report::{CheckResult, ExitCategory, ObservationStatus, ReportKind, UnitCheck, UnitReport};
 
 /// The check an invocation runs against current receipts.
@@ -146,6 +155,97 @@ pub fn targets(
             Some((name.clone(), target))
         })
         .collect()
+}
+
+/// The units `nyl reconcile --detect-drift` checks before it selects what to
+/// execute: the units selection leaves current when no drift record is known
+/// ([`Skipped::Current`]), so one decision, [`select`], names them. That
+/// keeps out every unit this run cannot judge or need not judge:
+///
+/// - a unit selection leaves out (`--unit` names others, held, blocked,
+///   awaiting an approval, uncertain, or failed without a retry);
+/// - a unit that executes anyway, because its inputs changed, it has no
+///   current receipt, or `--reapply` forces it: a drift check of a receipt
+///   about to be replaced says nothing the new receipt keeps.
+///
+/// A unit whose stored drift record says `drifted` is still checked: the
+/// check replaces the record, so a unit someone repaired by hand is not
+/// executed again on stale evidence. `candidates.drift` is therefore ignored.
+pub fn reconcile_targets(candidates: &Candidates<'_>) -> BTreeSet<UnitName> {
+    let none = BTreeMap::new();
+    let (_, skipped) = select(&Candidates {
+        drift: &none,
+        ..candidates.clone()
+    });
+    skipped
+        .into_iter()
+        .filter(|(_, why)| *why == Skipped::Current)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// `NYL-DRIFT-OPTION-INVALID` for the options `--detect-drift` leaves
+/// nothing to check with: `--leaving` acts only on units outside the
+/// ownership set, which have no receipt to check, and `--reapply` executes
+/// every named unit whether or not it drifted.
+pub fn detect_drift_conflict(leaving: bool, reapply: bool) -> Option<Finding> {
+    let (option, why) = if leaving {
+        (
+            "--leaving",
+            "--leaving acts only on units outside the ownership set, and --detect-drift checks the units inside it",
+        )
+    } else if reapply {
+        (
+            "--reapply",
+            "--reapply executes the named units whether or not they drifted, so there is nothing for --detect-drift to decide",
+        )
+    } else {
+        return None;
+    };
+    Some(Finding::new(
+        Code::DriftOptionInvalid,
+        format!("--detect-drift cannot be combined with {option}: {why}"),
+        format!("drop {option}, or run `nyl detect-drift` as a separate command"),
+    ))
+}
+
+/// What a drift check inside a reconcile adds to the unit's exit: `unknown`
+/// means the check did not conclude, so the run is incomplete (2), as
+/// `nyl detect-drift` is. Every other result adds nothing: `unsupported` is
+/// a fixed property of the unit's kind, so counting it would keep a
+/// scheduled `reconcile --detect-drift` from ever exiting 0 in an
+/// environment with such a unit, and drift the run found is already the
+/// unit's reconcile result (`executed` after a repair, `drifted` or
+/// `awaiting-approval` without one).
+pub fn reconcile_drift_exit(check: Option<&CheckResult>) -> ExitCategory {
+    match check {
+        Some(CheckResult::Unknown { .. }) => ExitCategory::Incomplete,
+        _ => ExitCategory::Ok,
+    }
+}
+
+/// The warnings a drift check inside a reconcile adds to a unit: the codes
+/// and fixes of `nyl detect-drift`, except that drift this run repaired
+/// (`repaired`) is not a warning, since the report's `driftRepaired` lists it.
+pub fn reconcile_warnings(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    result: &CheckResult,
+    policy: Option<RecoveryPolicy>,
+    drift_repair: DriftRepair,
+    repaired: bool,
+) -> Vec<Finding> {
+    if repaired {
+        return Vec::new();
+    }
+    warnings(
+        Check::DetectDrift,
+        environment,
+        unit,
+        &UnitCheck::from(result.clone()),
+        policy,
+        drift_repair,
+    )
 }
 
 /// Whether `desired`'s driver attests for its spec.
@@ -888,5 +988,128 @@ mod tests {
             "repair it with `nyl reconcile -e {environment} --unit network --reapply --reason <text> --approve network`"
         ))
         );
+    }
+
+    /// `reconcile --detect-drift` checks the units selection leaves current,
+    /// and only those. Catches a check of a receipt this run replaces anyway
+    /// (a unit whose inputs changed, or that `--reapply` forces), a check of a
+    /// unit `--unit` did not name or that waits for `recover`, and a stored
+    /// `drifted` record keeping its unit from being checked again.
+    #[test]
+    fn test_reconcile_targets_are_the_units_selection_leaves_current() {
+        use nyl_core::orchestration::driver::DriftDetection;
+        use nyl_core::orchestration::state::{Condition, Drift};
+        let mut snapshot = snapshot();
+        // `cache` carries a stored `drifted` record; `network` is current and clean.
+        let cache = &snapshot.desired[&name("cache")];
+        let receipt = snapshot.observed[&name("cache")].receipt.clone().unwrap();
+        let stored = drift_record(
+            cache,
+            &receipt,
+            &DriftDetection {
+                drift: Drift::Drifted {
+                    summary: "1 change".to_owned(),
+                },
+                details: Value::Null,
+            },
+            at(1),
+        );
+        snapshot.drift.insert(name("cache"), stored);
+        let drivers = drivers();
+        let attempted = BTreeSet::new();
+        let targets =
+            |snapshot: &EnvironmentSnapshot, named: Option<&BTreeSet<UnitName>>, reapply: &BTreeSet<UnitName>| {
+                reconcile_targets(&Candidates {
+                    desired: &snapshot.desired,
+                    observed: &snapshot.observed,
+                    drivers: &drivers,
+                    named,
+                    attempted: &attempted,
+                    local: None,
+                    approvals: None,
+                    drift: &snapshot.drift,
+                    drift_repair: DriftRepair::Converge,
+                    reapply,
+                })
+            };
+        let none = BTreeSet::new();
+        // `database` has a stale receipt and `web` none: both execute anyway.
+        assert_eq!(
+            targets(&snapshot, None, &none),
+            BTreeSet::from([name("cache"), name("network")])
+        );
+        // `--unit` names the units the run touches.
+        let named = BTreeSet::from([name("network"), name("database")]);
+        assert_eq!(
+            targets(&snapshot, Some(&named), &none),
+            BTreeSet::from([name("network")])
+        );
+        // `--reapply` executes its units whatever a check would say.
+        let forced = BTreeSet::from([name("network")]);
+        assert_eq!(targets(&snapshot, None, &forced), BTreeSet::from([name("cache")]));
+        // An uncertain unit is recovered or waits for `nyl recover`, not checked.
+        snapshot.observed.get_mut(&name("cache")).unwrap().condition = Some(Condition::Uncertain {
+            since: at(2),
+            run: crate::rules::fixtures::run("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90"),
+            reason: "interrupted".to_owned(),
+        });
+        assert_eq!(targets(&snapshot, None, &none), BTreeSet::from([name("network")]));
+    }
+
+    /// Catches `--detect-drift` running with an option that leaves it nothing
+    /// to check, and a refusal without its code and a fix naming the option.
+    #[test]
+    fn test_detect_drift_conflict_names_the_option_and_its_fix() {
+        assert!(detect_drift_conflict(false, false).is_none());
+        for (leaving, reapply, option) in [(true, false, "--leaving"), (false, true, "--reapply")] {
+            let finding = detect_drift_conflict(leaving, reapply).expect("a conflict");
+            assert_eq!(finding.code, Code::DriftOptionInvalid);
+            assert!(finding.message.contains(option), "{}", finding.message);
+            assert!(finding.fix.contains(option), "{}", finding.fix);
+        }
+    }
+
+    /// A drift check inside a reconcile affects the exit only when it could
+    /// not conclude, and drift the run repaired is not warned about while drift
+    /// it left is, with `detect-drift`'s code. Catches a scheduled job that can
+    /// never exit 0 for a kind that cannot detect drift, or that stays silent
+    /// about a check it could not make.
+    #[test]
+    fn test_reconcile_drift_checks_add_exit_and_warnings_by_result() {
+        let unknown = CheckResult::Unknown {
+            reason: "no credentials".to_owned(),
+        };
+        let drifted = CheckResult::Drifted {
+            summary: "1 change".to_owned(),
+        };
+        assert_eq!(reconcile_drift_exit(Some(&unknown)), ExitCategory::Incomplete);
+        for result in [CheckResult::Clean, CheckResult::Unsupported, drifted.clone()] {
+            assert_eq!(
+                reconcile_drift_exit(Some(&result)),
+                ExitCategory::Ok,
+                "{}",
+                result.name()
+            );
+        }
+        assert_eq!(reconcile_drift_exit(None), ExitCategory::Ok);
+
+        let codes = |result: &CheckResult, repaired: bool| -> Vec<Code> {
+            reconcile_warnings(
+                &env(),
+                &name("api"),
+                result,
+                Some(RecoveryPolicy::Converge),
+                DriftRepair::Converge,
+                repaired,
+            )
+            .into_iter()
+            .map(|finding| finding.code)
+            .collect()
+        };
+        assert_eq!(codes(&drifted, true), Vec::<Code>::new());
+        assert_eq!(codes(&drifted, false), [Code::DriftDetected]);
+        assert_eq!(codes(&unknown, false), [Code::DriftUnknown]);
+        assert_eq!(codes(&CheckResult::Unsupported, false), [Code::DriftUnsupported]);
+        assert_eq!(codes(&CheckResult::Clean, false), Vec::<Code>::new());
     }
 }

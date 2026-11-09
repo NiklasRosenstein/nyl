@@ -397,3 +397,26 @@ fn test_a_consumer_waits_for_an_observed_value_of_another_environments_unit_then
     assert_eq!(section(&run, "app")["units"]["app"]["result"], "executed");
     assert!(section(&run, "app")["units"]["app"].get("blockedBy").is_none());
 }
+
+/// `reconcile --detect-drift` over several environments checks each one inside
+/// its own run, under its own lease, and records its records in its own commit.
+/// Catches a check shared across environments or one that outlives its lease.
+#[test]
+fn test_detect_drift_checks_each_selected_environment_under_its_own_lease() {
+    let harness = Harness::new();
+    let converged = harness.invoke(&["reconcile", "-e", "app", "-e", "infra", "-o", "json"]);
+    assert_eq!(converged.exit, 0, "{}", converged.stderr);
+
+    let run = harness.invoke(&["reconcile", "-l", "stage=test", "--detect-drift", "-o", "json"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    for (environment, unit) in [("infra", "network"), ("app", "app")] {
+        let section = section(&run, environment);
+        assert_eq!(section["units"][unit]["driftCheck"]["check"], "clean", "{environment}");
+        assert_eq!(section["units"][unit]["result"], "current", "{environment}");
+        assert!(
+            section["commits"]["observed"].is_string(),
+            "{environment} wrote its records"
+        );
+    }
+    assert_ne!(section(&run, "infra")["run"], section(&run, "app")["run"]);
+}

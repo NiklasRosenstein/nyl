@@ -96,6 +96,7 @@ pub fn remove_expired(
             ..LifecycleOptions::default()
         },
         reapply: false,
+        detect_drift: false,
         fail_fast: removal.fail_fast,
         reason: removal.reason,
     })?;

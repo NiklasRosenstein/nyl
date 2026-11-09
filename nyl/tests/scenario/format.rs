@@ -353,6 +353,11 @@ pub struct Expect {
     pub observations_changed: Option<Vec<String>>,
     /// The units of the summary's `reapplied`, and the report's list.
     pub reapplied: Option<Vec<String>>,
+    /// What `reconcile --detect-drift` found, per unit (`clean`, `drifted`,
+    /// `unknown`, or `unsupported`): exactly these units carry a `driftCheck`
+    /// in the report and in the transition commit summary.
+    #[serde(rename = "drift-checks")]
+    pub drift_checks: Option<BTreeMap<String, String>>,
     /// Whether the transition commit records a lease break (`leaseBroken`).
     #[serde(rename = "lease-broken")]
     pub lease_broken: Option<bool>,

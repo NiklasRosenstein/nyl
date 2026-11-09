@@ -686,6 +686,46 @@ fn test_outcome_sets_compare_report_and_summary() {
     assert!(error.contains("outcome: the report has Some(\"done\")"), "{error}");
 }
 
+/// `drift-checks` names exactly the units whose report entry and transition
+/// summary carry a `driftCheck`: a run whose commit leaves one out, or one
+/// that checked a unit the step did not expect, fails the step.
+#[test]
+fn test_drift_checks_compare_report_and_summary() {
+    use scenario::runner::check_results;
+    let report = json(
+        r#"{"environments": [{"units": {
+            "api": {"result": "executed", "driftCheck": {"check": "drifted", "summary": "1 change"}},
+            "job": {"result": "current", "driftCheck": {"check": "clean"}},
+            "web": {"result": "current"}}}]}"#,
+    );
+    let summaries = [json(
+        r#"{"units": {"api": {"result": "executed", "driftCheck": {"check": "drifted"}},
+            "job": {"result": "current", "driftCheck": {"check": "clean"}}, "web": {"result": "current"}}}"#,
+    )];
+    let check = |text: &str, summaries: Option<&[serde_json::Value]>| check_results(&expect(text), &report, summaries);
+    assert_eq!(
+        check("drift-checks: {api: drifted, job: clean}\n", Some(&summaries)),
+        Ok(())
+    );
+    let error = check("drift-checks: {api: clean, job: clean}\n", Some(&summaries)).unwrap_err();
+    assert!(error.contains("drift-checks: the report has"), "{error}");
+    let error = check("drift-checks: {api: drifted}\n", Some(&summaries)).unwrap_err();
+    assert!(error.contains("drift-checks: the report has"), "{error}");
+    // The report is right, the commit left a check out.
+    let short = [json(
+        r#"{"units": {"api": {"result": "executed", "driftCheck": {"check": "drifted"}}}}"#,
+    )];
+    let error = check("drift-checks: {api: drifted, job: clean}\n", Some(&short)).unwrap_err();
+    assert!(
+        error.contains("drift-checks: the transition commit summary has"),
+        "{error}"
+    );
+    // A run that wrote no commit satisfies only an empty expectation; a `--local` run's commit is not read.
+    let none: [serde_json::Value; 0] = [];
+    assert!(check("drift-checks: {api: drifted, job: clean}\n", Some(&none)).is_err());
+    assert_eq!(check("drift-checks: {api: drifted, job: clean}\n", None), Ok(()));
+}
+
 /// `driftRepaired`, `reapplied`, and `lease-broken` are read from the
 /// summary (and the lists from the report), missing meaning empty, so a run
 /// that repaired drift without recording it, or recorded a break twice, fails.

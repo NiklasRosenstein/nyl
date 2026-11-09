@@ -72,6 +72,20 @@ impl Harness {
         }
     }
 
+    /// A project whose units are `units` (file name, document) next to the
+    /// default Environment, for units whose drift check the markers do not drive.
+    fn with_units(units: &[(&str, String)]) -> Self {
+        let mut files = vec![NYL_TOML, ("nyl/environment.yaml", ENVIRONMENT)];
+        files.extend(units.iter().map(|(name, document)| (*name, document.as_str())));
+        let project = project(&files);
+        let shell = shell::Harness::new(project.path(), true);
+        Self {
+            shell,
+            markers: TempDir::new().unwrap(),
+            _project: project,
+        }
+    }
+
     /// `nyl <args>` in-process in `clone`.
     fn invoke_at(&self, clone: &Path, args: &[&str]) -> Result<CommandOutcome, String> {
         let tools = ProcessRunner::new();
@@ -144,6 +158,19 @@ impl Harness {
 
     fn tip(&self) -> String {
         git_output(&self.shell.world.bare(), &["rev-parse", OBSERVED])
+    }
+
+    /// How many commits the observed ref holds.
+    fn observed_commits(&self) -> usize {
+        git_output(&self.shell.world.bare(), &["rev-list", "--count", OBSERVED])
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// A change repaired by hand: the unit's `detectDrift` step reports no drift.
+    fn repair_by_hand(&self, unit: &str) {
+        std::fs::remove_file(self.markers.path().join(format!("{unit}.drift"))).unwrap();
     }
 
     fn message(&self) -> String {
@@ -366,4 +393,194 @@ fn test_fail_fast_stops_at_an_approval_wait_decided_at_selection() {
         continued.report
     );
     assert_eq!(harness.runs("api"), 2);
+}
+
+fn warning_codes(report: &Value, name: &str) -> Vec<String> {
+    unit(report, name)["warnings"]
+        .as_array()
+        .map(|warnings| {
+            warnings
+                .iter()
+                .map(|warning| warning["code"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `reconcile --detect-drift` checks the current units under its own lease and
+/// repairs what drifted in the same run, writing the drift records and the new
+/// receipts in one transition commit: the idempotent unit runs again and
+/// leaves no record, the other awaits approval and keeps its record, which
+/// `status` reads without another `detect-drift`. Catches a lease gap between
+/// the check and the repair, a second commit, or a repair decided by another
+/// rule than the next reconcile's.
+#[test]
+fn test_detect_drift_checks_then_repairs_in_one_commit() {
+    let harness = Harness::reconciled(None);
+    harness.drift("api");
+    harness.drift("job");
+    let before = harness.observed_commits();
+
+    let run = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(run.exit, 2, "{}", run.stderr);
+    for name in ["api", "job"] {
+        assert_eq!(unit(&run.report, name)["driftCheck"]["check"], "drifted", "{name}");
+    }
+    assert_eq!(unit(&run.report, "api")["result"], "executed");
+    assert_eq!(unit(&run.report, "job")["result"], "awaiting-approval");
+    assert_eq!((harness.runs("api"), harness.runs("job")), (2, 1));
+    assert_eq!(
+        run.report["environments"][0]["driftRepaired"],
+        serde_json::json!(["api"])
+    );
+    assert_eq!(harness.observed_commits(), before + 1, "one transition commit");
+    let message = harness.message();
+    assert!(message.contains("driftRepaired: [api]"), "{message}");
+    assert!(message.contains(r#""driftCheck":{"check":"drifted""#), "{message}");
+    // Repaired drift is reported by `driftRepaired`; the unit that waits is warned about.
+    assert_eq!(warning_codes(&run.report, "api"), Vec::<String>::new());
+    assert_eq!(warning_codes(&run.report, "job"), ["NYL-DRIFT-DETECTED"]);
+
+    // The record the run wrote for `job` is state: status shows it with no further check.
+    let status = harness.invoke(&["status", "-e", "dev", "-o", "json"]);
+    assert_eq!(status.exit, 2, "{}", status.stderr);
+    assert_eq!(unit(&status.report, "api")["state"], "current");
+    assert_eq!(unit(&status.report, "job")["state"], "drifted");
+    assert_eq!(unit(&status.report, "job")["drift"]["result"], "drifted");
+    assert_eq!(unit(&status.report, "api")["drift"], Value::Null);
+}
+
+/// Without the flag a reconcile never detects drift, whatever changed outside
+/// Nyl; with it, clean results are recorded once and a repeat run that finds
+/// nothing new writes nothing.
+#[test]
+fn test_detect_drift_is_opt_in_and_records_clean_results_once() {
+    let harness = Harness::reconciled(None);
+    harness.drift("api");
+    let before = harness.observed_commits();
+    let plain = harness.reconcile(&[]);
+    assert_eq!(plain.exit, 0, "{}", plain.stderr);
+    assert_eq!(unit(&plain.report, "api")["driftCheck"], Value::Null);
+    assert_eq!(harness.runs("api"), 1, "no detection, so nothing to repair");
+    assert_eq!(harness.observed_commits(), before);
+    harness.repair_by_hand("api");
+
+    let first = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(first.exit, 0, "{}", first.stderr);
+    for name in ["api", "job"] {
+        assert_eq!(unit(&first.report, name)["driftCheck"]["check"], "clean", "{name}");
+        assert_eq!(unit(&first.report, name)["result"], "current", "{name}");
+    }
+    assert_eq!(harness.observed_commits(), before + 1);
+    let recorded = harness.tip();
+
+    let second = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(second.exit, 0, "{}", second.stderr);
+    assert_eq!(harness.tip(), recorded, "a check that found nothing new writes nothing");
+}
+
+/// The run's check replaces a stored `drifted` record, so a unit repaired by
+/// hand since `nyl detect-drift` is not executed again on stale evidence.
+#[test]
+fn test_detect_drift_does_not_repair_what_was_repaired_by_hand() {
+    let harness = Harness::reconciled(None);
+    harness.drift("api");
+    assert_eq!(harness.detect_drift().exit, 3);
+    harness.repair_by_hand("api");
+
+    let run = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    assert_eq!(unit(&run.report, "api")["driftCheck"]["check"], "clean");
+    assert_eq!(unit(&run.report, "api")["result"], "current");
+    assert_eq!(harness.runs("api"), 1);
+    let status = harness.invoke(&["status", "-e", "dev", "-o", "json"]);
+    assert_eq!(status.exit, 0, "{}", status.stderr);
+    assert_eq!(unit(&status.report, "api")["drift"]["result"], "clean");
+}
+
+/// Under `driftRepair: manual` the check finds the drift and records it, and
+/// the run repairs nothing: the unit is `drifted` and the warning names the
+/// forced run.
+#[test]
+fn test_detect_drift_under_manual_repair_records_and_reports_the_drift() {
+    let harness = Harness::reconciled(Some("manual"));
+    harness.drift("api");
+    let run = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(run.exit, 2, "{}", run.stderr);
+    assert_eq!(unit(&run.report, "api")["driftCheck"]["check"], "drifted");
+    assert_eq!(unit(&run.report, "api")["result"], "drifted");
+    assert_eq!(harness.runs("api"), 1);
+    assert_eq!(warning_codes(&run.report, "api"), ["NYL-DRIFT-DETECTED"]);
+    assert!(run.stderr.contains("--reapply --reason"), "{}", run.stderr);
+    let status = harness.invoke(&["status", "-e", "dev", "-o", "json"]);
+    assert_eq!(unit(&status.report, "api")["drift"]["result"], "drifted");
+}
+
+/// `--unit` limits the check to the named units, as it limits execution:
+/// another unit's drift is neither checked nor repaired.
+#[test]
+fn test_detect_drift_with_unit_checks_only_the_named_units() {
+    let harness = Harness::reconciled(None);
+    harness.drift("api");
+    harness.drift("job");
+    let run = harness.reconcile(&["--detect-drift", "--unit", "api"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    assert_eq!(unit(&run.report, "api")["result"], "executed");
+    assert_eq!(unit(&run.report, "job")["driftCheck"], Value::Null);
+    assert_eq!(unit(&run.report, "job")["result"], Value::Null);
+    let status = harness.invoke(&["status", "-e", "dev", "-o", "json"]);
+    assert_eq!(unit(&status.report, "job")["drift"], Value::Null, "job was not checked");
+}
+
+/// `--detect-drift` is refused with `--leaving` and `--reapply`, which leave
+/// it nothing to check, before the run takes the lease or writes anything.
+#[test]
+fn test_detect_drift_is_refused_with_options_that_leave_nothing_to_check() {
+    let harness = Harness::reconciled(None);
+    let before = harness.tip();
+    for args in [
+        &["--detect-drift", "--leaving"][..],
+        &["--detect-drift", "--unit", "api", "--reapply", "--reason", "x"][..],
+    ] {
+        let refused = harness.reconcile(args);
+        assert_eq!(refused.exit, 1, "{}", refused.stderr);
+        assert_eq!(
+            refused.report["environments"][0]["errors"][0]["code"], "NYL-DRIFT-OPTION-INVALID",
+            "{:#}",
+            refused.report
+        );
+        assert!(
+            refused.report["environments"][0].get("run").is_none(),
+            "no run took a lease"
+        );
+    }
+    assert_eq!(harness.tip(), before);
+}
+
+/// A kind that cannot detect drift is reported `unsupported` without
+/// affecting the exit, so a scheduled `reconcile --detect-drift` can exit 0
+/// in an environment with such a unit; a drift check that cannot conclude
+/// (`unknown`) makes the run incomplete (2), as `detect-drift` does. Both
+/// warn with the codes of `detect-drift`.
+#[test]
+fn test_detect_drift_exit_counts_unknown_but_not_unsupported() {
+    let plain = command("plain", "true", "");
+    let flaky = command("flaky", "true", "  detectDrift: [sh, -c, 'exit 1']\n");
+    let harness = Harness::with_units(&[("nyl/plain.yaml", plain.clone())]);
+    assert_eq!(harness.invoke(&["state", "init", "-e", "dev"]).exit, 0);
+    let first = harness.reconcile(&[]);
+    assert_eq!(first.exit, 0, "{}", first.stderr);
+    let run = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    assert_eq!(unit(&run.report, "plain")["driftCheck"]["check"], "unsupported");
+    assert_eq!(warning_codes(&run.report, "plain"), ["NYL-DRIFT-UNSUPPORTED"]);
+
+    let harness = Harness::with_units(&[("nyl/plain.yaml", plain), ("nyl/flaky.yaml", flaky)]);
+    assert_eq!(harness.invoke(&["state", "init", "-e", "dev"]).exit, 0);
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    let run = harness.reconcile(&["--detect-drift"]);
+    assert_eq!(run.exit, 2, "{}", run.stderr);
+    assert_eq!(unit(&run.report, "flaky")["driftCheck"]["check"], "unknown");
+    assert_eq!(unit(&run.report, "flaky")["result"], "current");
+    assert_eq!(warning_codes(&run.report, "flaky"), ["NYL-DRIFT-UNKNOWN"]);
 }

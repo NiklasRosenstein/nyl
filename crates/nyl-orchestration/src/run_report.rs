@@ -400,6 +400,13 @@ impl EnvironmentRunReport {
             {
                 entry.insert("approval".to_owned(), serde_json::json!(approval));
             }
+            // What `reconcile --detect-drift` found, so the commit records
+            // the drift behind a repair or a drifted result.
+            if let (Some(check), Some(serde_json::Value::Object(entry))) =
+                (&unit.drift_check, summary.units.get_mut(name))
+            {
+                entry.insert("driftCheck".to_owned(), serde_json::json!(check));
+            }
         }
         summary
     }
@@ -451,31 +458,35 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
                 ExitCategory::Ok
             }
         }
-        ReportKind::ReconcileReport | ReportKind::TeardownReport => match unit.result {
-            Some(UnitResult::Failed { .. }) => ExitCategory::Failed,
-            Some(UnitResult::Uncertain { .. }) => ExitCategory::Uncertain,
-            Some(
-                UnitResult::Current
-                // Recording a teardown request on a held unit is all a
-                // teardown of it does, so it succeeds.
-                | UnitResult::Held { recorded: true, .. }
-                | UnitResult::Executed { .. }
-                | UnitResult::Imported { .. }
-                | UnitResult::Recovered { .. }
-                | UnitResult::Removed
-                | UnitResult::Retained
-                | UnitResult::Released { .. },
-            )
-            | None => ExitCategory::Ok,
-            Some(
-                UnitResult::Blocked { .. }
-                | UnitResult::AwaitingApproval
-                | UnitResult::Held { .. }
-                | UnitResult::Drifted
-                | UnitResult::PendingTeardown { .. }
-                | UnitResult::TearingDown { .. },
-            ) => ExitCategory::Incomplete,
-        },
+        ReportKind::ReconcileReport | ReportKind::TeardownReport => {
+            let result = match unit.result {
+                Some(UnitResult::Failed { .. }) => ExitCategory::Failed,
+                Some(UnitResult::Uncertain { .. }) => ExitCategory::Uncertain,
+                Some(
+                    UnitResult::Current
+                    // Recording a teardown request on a held unit is all a
+                    // teardown of it does, so it succeeds.
+                    | UnitResult::Held { recorded: true, .. }
+                    | UnitResult::Executed { .. }
+                    | UnitResult::Imported { .. }
+                    | UnitResult::Recovered { .. }
+                    | UnitResult::Removed
+                    | UnitResult::Retained
+                    | UnitResult::Released { .. },
+                )
+                | None => ExitCategory::Ok,
+                Some(
+                    UnitResult::Blocked { .. }
+                    | UnitResult::AwaitingApproval
+                    | UnitResult::Held { .. }
+                    | UnitResult::Drifted
+                    | UnitResult::PendingTeardown { .. }
+                    | UnitResult::TearingDown { .. },
+                ) => ExitCategory::Incomplete,
+            };
+            // A drift check of `reconcile --detect-drift` that could not conclude.
+            result.most_severe(crate::rules::checks::reconcile_drift_exit(unit.drift_check.as_ref()))
+        }
         ReportKind::DetectDriftReport | ReportKind::AttestReport | ReportKind::ObserveReport => {
             crate::rules::checks::unit_exit(unit)
         }
@@ -579,6 +590,13 @@ pub struct UnitReport {
     /// What `detect-drift` or `attest` found; `None` in other reports.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub check: Option<UnitCheck>,
+    /// What `reconcile --detect-drift` found when it checked this unit's
+    /// current receipt before selecting units; `None` for a unit it did not
+    /// check and in every other report. Nested, because a reconcile's own
+    /// `result` flattens its fields next to it. Contract:
+    /// [Drift](../../../../design/orchestration-core.md#drift).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift_check: Option<CheckResult>,
     /// The failure or uncertainty message, kept out of the commit summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -652,6 +670,7 @@ impl UnitReport {
             blocked_by: Vec::new(),
             plan_error: None,
             check: None,
+            drift_check: None,
             message: None,
             last_run: None,
             condition: None,

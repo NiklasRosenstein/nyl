@@ -10,7 +10,9 @@
 //! (`SourceRenderer`), builds desired documents (`rules::desired`), the graph
 //! (`rules::graph`), and resolves references in dependency order
 //! (`rules::references`), asking each ready unit's driver for its key inputs
-//! (`rules::execution_key`). Then waves: select ready units
+//! (`rules::execution_key`). With `--detect-drift`, the run then checks the
+//! current units for drift under its own lease ([`detect`]) and selection
+//! reads the fresh records. Then waves: select ready units
 //! (`rules::selection`), execute them in parallel up to the concurrency
 //! limit on scoped threads, each in its concurrency slot's worktree
 //! ([`slots`]) and its own temp dir ([`execute`]), write a
@@ -99,6 +101,7 @@ use nyl_core::orchestration::progress::UnitResult;
 use slots::Slots;
 
 mod cancel;
+mod detect;
 mod execute;
 mod incarnations;
 mod observe;
@@ -243,6 +246,7 @@ pub struct LifecycleOptions {
 
 /// One `plan` or `reconcile` of one environment.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Independent command-line switches next to the run's own facts.
 pub struct RunRequest {
     /// Selected environments whose source/state preflight failed.
     pub unavailable: BTreeSet<EnvironmentName>,
@@ -294,6 +298,12 @@ pub struct RunRequest {
     /// although their receipts are current; requires `units` and `reason`.
     /// Contract: [Drift](../../../../../design/orchestration-core.md#drift).
     pub reapply: bool,
+    /// `reconcile --detect-drift`: before it selects units, the run checks
+    /// the current receipts selection leaves current for drift, under its own
+    /// lease, and selects the units that came back `drifted` by the one
+    /// selection rule. Contract:
+    /// [Drift](../../../../../design/orchestration-core.md#drift).
+    pub detect_drift: bool,
     /// `--fail-fast` (`reconcile`, `teardown`): after the first failure,
     /// uncertain outcome, or approval wait, start no further unit; the run
     /// still checkpoints what finished and writes its transition commit.
@@ -2238,6 +2248,15 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     let base = context.base;
     let environment = session.environment();
     let mut report = EnvironmentRunReport::new(environment.clone());
+    // Options that leave `--detect-drift` nothing to check are refused
+    // before the run takes the lease.
+    if request.detect_drift {
+        if let Some(finding) = crate::rules::checks::detect_drift_conflict(request.lifecycle.leaving, request.reapply) {
+            report.errors.push(finding);
+            report.finish(request.mode.report_kind());
+            return report;
+        }
+    }
     let run = base.ids.run_id();
     // A `--local` run checks for remote run refs it would have to take over
     // before it takes the lease, so a refusal leaves the remote lease (and
@@ -2580,6 +2599,12 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let runs: Vec<_> = leftovers.runs.iter().map(|state| (*state).clone()).collect();
         let mut adoptions: BTreeSet<UnitName> = BTreeSet::new();
         let reapply = request.reapply_units();
+        // `--detect-drift`: what the run's drift check found. The drift
+        // records selection reads are the snapshot's with the fresh ones laid
+        // over them.
+        let mut detection = detect::Detection::default();
+        let mut drift_records = snapshot.drift.clone();
+        let mut drift_checked = false;
         let mut first = true;
         let (resolved, skipped) = loop {
             if request.cancellation.is_cancelled() {
@@ -2698,18 +2723,51 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             let selectable = selection_view(&resolved, &held_view);
             let approvals = session.approvals(&resolved.units);
+            let local_approved = request
+                .local
+                .as_ref()
+                .and_then(|local| local_approve(&local.approve, context.commit_identity));
+            // `--detect-drift`: once, before the first selection, check the
+            // current receipts selection leaves current, under this run's
+            // lease. The records it finds join the ones selection reads.
+            if request.detect_drift && !drift_checked {
+                drift_checked = true;
+                let targets = crate::rules::checks::reconcile_targets(&Candidates {
+                    desired: &selectable,
+                    observed: &observed,
+                    drivers: context.drivers,
+                    named: request.units.as_ref(),
+                    attempted: &attempted,
+                    local: local_approved,
+                    approvals: request.approvals.identity.as_ref().map(|_| &approvals),
+                    drift: &snapshot.drift,
+                    drift_repair: drift::drift_repair(&prepared.rendered.environment),
+                    reapply: &reapply,
+                });
+                match self.detect_drift(
+                    &targets,
+                    &selectable,
+                    &observed,
+                    &artifacts,
+                    &snapshot.drift,
+                    &prepared.rendered.project_dir,
+                ) {
+                    Ok(found) => {
+                        drift_records = found.overlay(&snapshot.drift);
+                        detection = found;
+                    }
+                    Err(ending) => return ending,
+                }
+            }
             let candidates = Candidates {
                 desired: &selectable,
                 observed: &observed,
                 drivers: context.drivers,
                 named: request.units.as_ref(),
                 attempted: &attempted,
-                local: request
-                    .local
-                    .as_ref()
-                    .and_then(|local| local_approve(&local.approve, context.commit_identity)),
+                local: local_approved,
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
-                drift: &snapshot.drift,
+                drift: &drift_records,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
             };
@@ -3039,7 +3097,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .local
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
-                drift: &snapshot.drift,
+                drift: &drift_records,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
@@ -3092,6 +3150,19 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             entry
                 .warnings
                 .extend(observing.warnings.get(name).cloned().unwrap_or_default());
+            if let Some(check) = detection.checks.get(name) {
+                // What `--detect-drift` found; drift this run repaired is
+                // reported by `driftRepaired`, not as a warning.
+                entry.drift_check = Some(check.clone());
+                entry.warnings.extend(crate::rules::checks::reconcile_warnings(
+                    &environment,
+                    name,
+                    check,
+                    crate::rules::selection::execution_recovery(context.drivers, unit),
+                    drift::drift_repair(&prepared.rendered.environment),
+                    self.report.drift_repaired.contains(name),
+                ));
+            }
             self.report.units.insert(name.clone(), entry);
         }
         for (name, held) in &prepared.desired.held {
@@ -3168,6 +3239,16 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             &life,
             &mut changes,
         );
+        // The drift records the run's check found, in the same commit as its
+        // receipts: one for a unit whose receipt this run did not replace
+        // (a repair makes a new receipt with the same execution key, and
+        // the record is about the old one) and that differs from the stored.
+        for (name, (record, receipt)) in &detection.records {
+            let standing = observed.get(name).and_then(|observed| observed.receipt.as_ref());
+            if standing == Some(receipt) && snapshot.drift.get(name) != Some(record) {
+                changes.drift.insert(name.clone(), Some(record.clone()));
+            }
+        }
         self.report.observations_changed = observing
             .changed
             .iter()
