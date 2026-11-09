@@ -79,6 +79,12 @@
 It compares exactly what <a href="/nyl/pr-preview/pr-261/reference/cli/apply/"><code dir="auto">apply</code></a> would apply and
 prune. See <a href="/nyl/pr-preview/pr-261/kubernetes-rendering/pipeline/#the-releases-application">Rendering Pipeline</a>
 for the behavior <code dir="auto">render</code>, <code dir="auto">diff</code>, and <code dir="auto">apply</code> share.</p>
+<p>A diff creates nothing, so a custom resource of a CustomResourceDefinition that is
+new in the same manifest cannot be compared with the server. It is listed as added
+with the note <code dir="auto">CRD will be installed</code> and is not an error; a custom resource whose
+CRD is neither in the manifest nor in the cluster is an error. The namespace such a
+resource takes is decided as <code dir="auto">apply</code> decides it
+(<a href="/nyl/pr-preview/pr-261/reference/cli/apply/#which-kinds-are-namespaced">which kinds are namespaced</a>).</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="arguments">Arguments</h2><a class="sl-anchor-link" href="#arguments"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Arguments”</span></a></div>
 <ul>
 <li><code dir="auto">&#x3C;FILE></code> - Path to the manifest file to diff (required)</li>

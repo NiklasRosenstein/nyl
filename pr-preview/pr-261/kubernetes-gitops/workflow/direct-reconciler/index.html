@@ -106,10 +106,19 @@ target, <code dir="auto">nyl reconcile</code> publishes the tree and then applie
 bytes it pushed, so the cluster never runs what no commit holds. The unit needs the
 Cluster’s <code dir="auto">live.context</code> and the kubeconfig it admits as <code dir="auto">KUBECONFIG</code>; the context’s
 server must be the one the Cluster declares.</p>
-<p>Releases apply one at a time in waves (Releases that render CustomResourceDefinitions
-first, each prepared when its wave comes so a custom resource without a namespace
-resolves after its CRD applied), within the unit’s deadline: no Release starts once it has passed, and the
-run fails as a retryable timeout. A Release never prunes an object another Release
+<p>Releases apply one at a time in waves: Releases that render CustomResourceDefinitions
+or APIServices come first. Each Release is prepared when its wave comes, so a
+custom resource without a namespace takes its scope from a CRD of any Release of the
+target or from the target Cluster’s recorded capabilities (vendored CRDs included)
+before the live cluster is asked; see
+<a href="/nyl/pr-preview/pr-261/reference/cli/apply/#which-kinds-are-namespaced">which kinds are namespaced</a>. A Release applied after
+another that registered kinds waits, within the unit’s deadline, until the cluster
+serves the kinds that Release registered and this one uses; it does not wait for
+a Release that failed. Inside a Release, CustomResourceDefinitions apply first, then
+Namespaces, then the other kinds, as
+<a href="/nyl/pr-preview/pr-261/reference/cli/apply/#apply-order-and-progress"><code dir="auto">nyl apply</code></a> applies them.
+No Release starts once the unit’s deadline has passed, and the run fails as a
+retryable timeout. A Release never prunes an object another Release
 of the target renders, so moving an object between Releases leaves it in place; if
 the Release that now renders it has not applied yet, the old one keeps tracking it
 until it does. A
