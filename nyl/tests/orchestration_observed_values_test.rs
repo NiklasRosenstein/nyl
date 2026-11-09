@@ -1259,7 +1259,11 @@ fn test_observe_names_consumers_in_other_environments_whose_input_changed() {
 /// compared, and a missing peer failing a check that wrote its own state.
 #[test]
 fn test_an_environment_whose_state_cannot_be_read_is_a_warning_of_observe_and_status() {
-    let missing_repository = "  state:\n    repository: {repoURL: 'file:///nonexistent/nyl-state.git'}\n";
+    // A repository URL that is valid on every platform but names nothing.
+    let nowhere = tempfile::TempDir::new().unwrap();
+    let missing_url = reqwest::Url::from_file_path(nowhere.path().join("nyl-state.git")).unwrap();
+    let missing_repository = format!("  state:\n    repository: {{repoURL: '{missing_url}'}}\n");
+    let missing_repository = missing_repository.as_str();
     let unresolvable = "  state:\n    repositoryRef: {name: nowhere}\n";
 
     // observe -e dev: prod's state is in a repository that is not there, and a
