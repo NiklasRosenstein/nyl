@@ -110,6 +110,22 @@ same holds for a consumer that was blocked on a value that has arrived now. The
 transition commit’s summary lists the changed observations under
 <code dir="auto">observationsChanged</code>, such as <code dir="auto">observationsChanged: {kubernetes: [ingressIp]}</code>
 and its headline counts the units, such as <code dir="auto">nyl: observe dev (1 observed)</code>.</p>
+<p>Consumers in other environments are named too. A unit that reads the value with
+<code dir="auto">fromUnit: {environment: dev, unit: kubernetes, observation: ingressIp}</code> resolved
+the value its own environment’s state records, and <code dir="auto">observe -e dev</code> compares it
+with the value now recorded for <code dir="auto">dev</code>. It names each consumer that resolved
+another value, with its environment and the reconcile of that environment:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">warning  observed value ingressIp of dev/kubernetes changed, so prod/dns resolves another value than it executed with</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Action  run `nyl reconcile -e prod`: it executes dns with the new value, under its own approval</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="warning  observed value ingressIp of dev/kubernetes changed, so prod/dns resolves another value than it executed with  Action  run &#x60;nyl reconcile -e prod&#x60;: it executes dns with the new value, under its own approval"><div></div></button></div></figure></div>
+<p>Reading the other environments’ state takes no lease and writes nothing there,
+and happens after <code dir="auto">observe</code> has written its own commit and released its lease.
+An environment whose state location cannot be resolved, or whose state cannot be
+read, is a <code dir="auto">NYL-STATE-UNAVAILABLE</code> warning and its consumers are not compared;
+the exit code does not change. <code dir="auto">nyl status -e prod</code> shows <code dir="auto">dns</code> as <code dir="auto">ready</code>.</p>
+<p>A consumer in another environment that waits for a value that has not arrived is
+not named yet; it stays <code dir="auto">blocked</code> until its own next reconcile resolves the
+recorded value. This is a current limitation, tracked by
+<a href="https://github.com/NiklasRosenstein/nyl/issues/248">#248</a>.</p>
 <p><code dir="auto">observe</code> does not apply a consumer’s changed inputs: that reconcile executes
 it, under its own <code dir="auto">approval</code>, as it does for any changed input.</p>
 <p>Like <code dir="auto">detect-drift</code>, <code dir="auto">observe</code> does not import runs, so it refuses a lease that

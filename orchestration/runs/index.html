@@ -245,10 +245,17 @@ apply. The value enters its consumers’ execution keys, so each of them runs
 again like for any changed input, under its own
 <a href="#approvals"><code dir="auto">approval</code></a>, while the producer does not execute. <code dir="auto">nyl status</code>
 and <code dir="auto">nyl plan</code> show such a consumer as <code dir="auto">ready</code>, and <code dir="auto">nyl observe</code> names it
-with <code dir="auto">NYL-OBSERVATION-CHANGED</code>. They find consumers of the same environment
-from its stored documents: a consumer in another environment (a reference with
-<code dir="auto">environment</code>) is not named, and stays <code dir="auto">current</code> in its own <code dir="auto">status</code> until its
-next <code dir="auto">reconcile</code> resolves the producer environment’s recorded value and runs it.</li>
+with <code dir="auto">NYL-OBSERVATION-CHANGED</code>. They find consumers from the stored documents,
+without rendering. That includes a consumer in another environment that reads
+the value through a reference with <code dir="auto">environment</code>: <code dir="auto">nyl observe -e &#x3C;producer environment></code> reads the other environments’ state without taking a lease or
+writing, and names it with its environment (<code dir="auto">prod/dns</code>) and the fix
+<code dir="auto">nyl reconcile -e prod</code>, and <code dir="auto">nyl status -e prod</code> shows it <code dir="auto">ready</code> once the
+producer environment records another value than the one it resolved. An
+environment whose state cannot be read is a <code dir="auto">NYL-STATE-UNAVAILABLE</code> warning;
+its consumers are not compared. A consumer in another environment that waits
+for a value is not found yet (a current limitation, tracked by
+<a href="https://github.com/NiklasRosenstein/nyl/issues/248">#248</a>): it stays
+<code dir="auto">blocked</code> and resolves the recorded value at its own next <code dir="auto">reconcile</code>.</li>
 <li><strong>What is written.</strong> The record changes only when a value arrives, changes,
 or becomes pending again, or when the last successful read is older than an
 hour (half the <code dir="auto">maxAge</code> when that is shorter), so an unchanged read writes
