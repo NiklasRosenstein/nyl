@@ -1734,6 +1734,77 @@ absolute deadline bounds the purge too, and each teardown phase takes one of its
 own. Argo CD does this through the catalog's pruning
 and the Application finalizers; the direct reconciler does it itself.
 
+#### Hooks and sync waves
+
+Resource hooks are Kubernetes and Argo CD semantics, so they live in
+`nyl_render::kubernetes` (`hooks`: what a document is, pure; `sync_run`: one sync, with
+effects; `health`: the workload health both the sync and the reader use) and are
+driven by the `lifecycle` code `nyl apply`, `nyl release rollback`, and the driver
+share. Orchestration, state, and the driver contract know nothing of them. The rules
+follow Argo CD's gitops-engine (`pkg/sync/hook`, `pkg/sync/sync_tasks.go`,
+`pkg/sync/syncwaves`), so a Release applied by either reconciler behaves the same:
+
+- **Classification.** `argocd.argoproj.io/hook` is a comma-separated list of
+  `PreSync`, `Sync`, `PostSync`, `SyncFail`, `Skip`; a document runs once in each phase
+  it names. Without a recognized Argo CD hook type, `helm.sh/hook` decides:
+  `pre-install` and `pre-upgrade` run as `PreSync`, `post-install` and `post-upgrade`
+  as `PostSync`. `crd-install` is an ordinary resource and `Skip` alone is never
+  applied. A hook with no sync phase (Helm `test`, `pre-delete`, `post-delete`,
+  `pre-rollback`, `post-rollback`; Argo CD `PreDelete`, `PostDelete`) is left out and
+  reported once per Release as the warning `NYL-KUBERNETES-HOOK-IGNORED`
+  (`ApplyEvent::HooksIgnored`; the driver turns it into a `Finding`). Delete policies
+  are read from both vocabularies and merged; none means `BeforeHookCreation`.
+- **Steps.** A sync is the ascending `(phase, wave)` steps of `PreSync`, `Sync`, and
+  `PostSync`. The wave is `argocd.argoproj.io/sync-wave`, else `helm.sh/hook-weight`,
+  else 0, for hooks and ordinary resources alike. A step applies its documents by the
+  kind order (`ResourceOrdering`, then name for hooks), one concurrent batch per
+  kind. A Release without hooks or waves is one step, applied as before.
+- **Waits.** A step finishes when its hooks have: a Job or Pod succeeded, a workload
+  healthy, any other kind created; a hook deleted meanwhile failed. When a later step
+  follows, the workloads the step applied (Deployment, StatefulSet, DaemonSet,
+  ReplicaSet, Job, Pod) must be healthy by the rules of the Health table in
+  [Reading](#reading) (the reader itself does not read Pods), which is how `PostSync`
+  waits for the `Sync` phase. A Pod is healthy once it `Succeeded`, or is `Running` and
+  ready with `restartPolicy: Always`, and failed when it `Failed`. Each wait is
+  bounded by `WaitSettings`: `nyl apply` takes `--hook-timeout` (ten minutes by
+  default); the driver passes none and relies on the unit's deadline, which interrupts
+  the apply.
+- **Failure.** A failed document, hook, or wait stops the sync after its step, and
+  `SyncFail` hooks run. `HookFailed` objects are then deleted; after a successful sync
+  `HookSucceeded` objects are (never a `SyncFail` hook, as in Argo CD). The revision is
+  `Failed`, with what failed in its `error`.
+- **`BeforeHookCreation`.** An existing hook object is deleted in the foreground and
+  waited for until it is gone, then created (server-side apply as the apply's field
+  manager). A hook not there is not an error. An object a policy does not delete is
+  applied over, so a finished Job does not run again, as in Argo CD.
+- **Ownership.** The revision's manifest holds the hooks, so `release rollback` runs
+  them again, but `resource_keys` does not: `tracked_keys` excludes every document
+  that is not an ordinary resource. A hook is therefore never pruned, purged, or
+  compared (`hooks::is_resource` filters the drift check and the health reading), and
+  what an earlier revision tracked and is a hook or skipped now is not pruned either
+  (`ApplyExecutionResult::untracked`). No state format changes: the manifest is the
+  same text, and the keys are a subset.
+- **Order against pruning.** `PostSync` runs after the prune, which Argo CD does within
+  `Sync`; `ReleaseRecorder::complete` runs it, and a failed `PostSync` hook records the
+  revision `Failed` after the prune.
+- **When hooks run.** Every apply runs the hooks of every Release it applies, including
+  an apply that `RevisionPolicy::KeepUnchanged` keeps the revision of: the apply always
+  runs and the policy decides only whether a revision is written, as Argo CD runs hooks on every
+  sync (a self-heal included). For the driver that is every execution of the unit,
+  which happens when its key changes or drift repair executes it. A hook that is gone is
+  no drift and does not run again by itself.
+- **Not supported.** Hooks that run when a Release is removed (`PreDelete`,
+  `PostDelete`, Helm's `pre-delete` and `post-delete`) are not run by a purge, a
+  teardown, or `release delete`; `release delete` warns with the same code, and every
+  apply of the Release has already warned. Hooks have no `generateName` and no hook
+  finalizer; a hook interrupted by Ctrl-C or the deadline keeps running.
+
+| Where it stops | What happened | Outcome |
+| --- | --- | --- |
+| A `PreSync` hook fails or times out | Nothing of the Release's resources applied; `SyncFail` hooks ran | `Failed` (`tool-error`, or `timeout` at the deadline), naming the Release, phase, and hook |
+| A workload of a step never becomes healthy | Later steps, `PostSync` included, never started | `Failed`, naming the workload and why |
+| A `PostSync` hook fails | Resources applied and pruned; the revision is `Failed` | `Failed`; the next execution applies again |
+
 #### Fencing and ownership in the cluster
 
 The release state in the cluster (the `nyl.release.v1.<name>.<revision>`
@@ -1824,7 +1895,8 @@ anchor visible.
 | **Source**, **Deleting** | None, false |
 
 Health reads only workload objects that the revision's manifest declares (not
-keys that stay tracked only because their prune awaits confirmation), with
+keys that stay tracked only because their prune awaits confirmation, and never a
+hook), with
 `kubectl rollout status` semantics, folded `Degraded`, `Progressing`,
 `Unknown`, `Healthy`, naming the worst object in `reported`:
 
@@ -1913,7 +1985,8 @@ either is `drifted`, a half that cannot tell beside a clean one is `unknown`.
   (`is_kind_removed`) is missing; anything else, such as an aggregated API that is
   down, is unverified.
 - **Not drift.** A Job that declares `ttlSecondsAfterFinished` and is gone, as
-  the health rules read it. An object that two Releases render (a stale
+  the health rules read it. A hook ([Hooks and sync waves](#hooks-and-sync-waves)):
+  hooks are not compared, whether gone, changed, or finished. An object that two Releases render (a stale
   revision of one of them), compared once against the Release that applies
   last, in the apply's order (the wave, then the Release key), never by when the
   revisions were applied: a revision an apply kept keeps its timestamps. The state

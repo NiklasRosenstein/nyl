@@ -163,7 +163,7 @@ also compares the cluster with what the unit last applied: per Release, the mani
 of its newest `Deployed` revision applied for this unit's publication, by a
 server-side apply dry run as Nyl's field manager. A changed field Nyl manages or a
 deleted object is `drifted`, and the reason names the Release and the first eight
-objects; a field only another manager sets, a Job a TTL removed, and the state of
+objects; a field only another manager sets, a Job a TTL removed, a resource hook, and the state of
 another publication are not drift. A cluster that cannot be read is `unknown`, never
 `clean`. The next reconcile repairs the unit by applying again.
 

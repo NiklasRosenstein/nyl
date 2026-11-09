@@ -102,6 +102,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
   [`nyl apply`](/nyl/reference/cli/apply/#field-ownership-options).
 - `--take-over` - Roll back a release an environment owns anyway, recording no
   owner, as with [`nyl apply`](/nyl/reference/cli/apply/).
+- `--hook-timeout <SECONDS>` - How long each wait for hooks and workloads lasts, as with
+  [`nyl apply`](/nyl/reference/cli/apply/#hook-options).
 
 #### Examples
 
@@ -120,6 +122,11 @@ nyl release rollback my-app --namespace default --revision 2 --yes
 - Pruning matches `nyl apply` semantics: resources present in the previously
   deployed revision but absent from the rolled-back revision are deleted, unless
   their Argo CD sync options keep them.
+- The stored manifest holds the revision's hooks, and a rollback syncs it as
+  [`nyl apply`](/nyl/reference/cli/apply/#hooks-and-sync-waves) does: it runs the
+  `PreSync` hooks of the revision it applies before its resources, and the
+  `PostSync` hooks after them, as an Argo CD sync of that revision would. Hooks are
+  not tracked, so a rollback neither prunes nor restores one.
 - A clear error is returned if the release or the requested revision does not
   exist, or if there is no previous revision to roll back to.
 
@@ -139,6 +146,12 @@ such as managed Namespaces, unless `--confirm-delete` is passed. See
 - `--confirm-delete` - Also delete resources whose sync option is `Delete=confirm`
 - `--take-over` - Delete a release an environment owns anyway (see [`nyl apply --take-over`](/nyl/reference/cli/apply/)). Resources are deleted in reverse apply order, waiting for each kind to terminate before the next, as a prune does.
 - `--dry-run` - Show what would be deleted without deleting it
+
+A purge deletes the objects the release tracks, never its hooks (the revision does not
+track them), and runs none: Argo CD runs `PreDelete` and `PostDelete` hooks when it
+removes an Application, and Nyl does not when it removes a Release. When the latest
+revision declares such a hook, the command warns with `NYL-KUBERNETES-HOOK-IGNORED`,
+naming it, and goes ahead.
 
 ## See Also
 
