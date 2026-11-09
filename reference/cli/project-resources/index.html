@@ -108,7 +108,9 @@ teardown settings, such as a <code dir="auto">KubernetesPublication</code>: <cod
 <code dir="auto">incomplete:</code> with the unmet requirements, and <code dir="auto">-</code> for other kinds.
 The state is the one <a href="/nyl/reference/cli/status/"><code dir="auto">nyl status</code></a> shows,
 including <code dir="auto">ready</code> for a unit that reads an observed value of another
-environment that changed since it resolved. With <code dir="auto">--state-revision</code>, no
+environment that changed since it resolved; that producer environment is
+<a href="/nyl/orchestration/runs/#other-environments">required</a>, so one that cannot
+be read is an error. With <code dir="auto">--state-revision</code>, no
 other environment is read, so that readiness is not evaluated.</li>
 <li><code dir="auto">get unit &#x3C;name> -e &#x3C;env> -o yaml|json</code> prints exactly the persisted
 <code dir="auto">{desired, observed}</code> documents, never a synthesized merge. <code dir="auto">--desired</code> or

@@ -119,9 +119,13 @@ another value, with its environment and the reconcile of that environment:</p>
 </div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">Action  run `nyl reconcile -e prod`: it executes dns with the new value, under its own approval</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="warning  observed value ingressIp of dev/kubernetes changed, so prod/dns resolves another value than it executed with  Action  run &#x60;nyl reconcile -e prod&#x60;: it executes dns with the new value, under its own approval"><div></div></button></div></figure></div>
 <p>Reading the other environments’ state takes no lease and writes nothing there,
 and happens after <code dir="auto">observe</code> has written its own commit and released its lease.
-An environment whose state location cannot be resolved, or whose state cannot be
-read, is a <code dir="auto">NYL-STATE-UNAVAILABLE</code> warning and its consumers are not compared;
-the exit code does not change. <code dir="auto">nyl status -e prod</code> shows <code dir="auto">dns</code> as <code dir="auto">ready</code>.</p>
+<code dir="auto">observe</code> reads the other environments only to give this advice, so they are
+<a href="/nyl/orchestration/runs/#other-environments">advisory</a>: an environment whose
+declaration cannot be used (a malformed state URL, a <code dir="auto">repositoryRef</code> that names
+no GitRepository) or whose state cannot be read is a <code dir="auto">NYL-STATE-UNAVAILABLE</code>
+warning that names it, and its consumers are not compared; the exit code does
+not change, and the fix points to <a href="/nyl/reference/cli/validate/"><code dir="auto">nyl validate</code></a>.
+<code dir="auto">nyl status -e prod</code> shows <code dir="auto">dns</code> as <code dir="auto">ready</code>.</p>
 <p>A consumer in another environment that was blocked waiting for a value that now
 has one is named too, as <code dir="auto">has a value now, so prod/dns can resolve</code>. It is judged
 as its reconcile will resolve the reference, so a consumer that also requires an
