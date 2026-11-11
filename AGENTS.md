@@ -567,6 +567,12 @@ src/
 - Sensitive context uses the cache-local keyed fingerprint and never appears
   raw or as a directly guessable digest in dependency records. Cache artifacts
   can contain rendered secrets and must retain private filesystem permissions.
+- Helm `lookup` reads only a declared source: the target's last publication,
+  restricted to the objects of the Release being rendered. Every lookup, with
+  its result digest (a keyed fingerprint for Secret data), enters the dependency
+  recorder at each cache layer, and a cached render is reused only while each
+  recorded lookup still returns the same result. An unreadable source is an
+  error, never an absent object.
 - The rendered ownership index describes published ownership and provenance;
   it is not a complete render-cache key.
 - Corrupt, incomplete, or unavailable cache state is a cache miss. It must not

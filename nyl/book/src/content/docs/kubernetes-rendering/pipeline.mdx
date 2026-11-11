@@ -28,9 +28,28 @@ import { Steps } from '@astrojs/starlight/components';
 </Steps>
 
 Bundle expansion and parsed Helm output are cached by their complete observed
-inputs. `--refresh` bypasses cache reads and replaces successful entries;
+inputs, including what a chart's Helm `lookup` returned ([below](#helm-lookup)). `--refresh` bypasses cache reads and replaces successful entries;
 `--no-cache` disables persistent reads and writes. `diff` and `apply` always
 perform their live-cluster work even when desired-manifest rendering is reused.
+
+## Helm `lookup`
+
+A [HelmChart that declares `spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup)
+renders with Helm's server-side dry run against a read-only Kubernetes API that Nyl
+serves on 127.0.0.1 for the duration of that chart's render. The API answers from the
+objects of the chart's own Release in the target's last publication, so a chart that
+generated a CA reads it back instead of generating another. Every command that
+renders the target takes this path, whether it is `render`, `diff`, `apply`,
+`render-tree`, `diff-tree`, or `publish-tree`; a render without a target, or before the
+Release is published, finds nothing.
+
+The publication is the one `fromPublication` Release inputs read, resolved when the
+first chart needs it. `publish-tree` verifies that the publication branch did not move
+between that read and its push. Each lookup a chart makes is recorded as a render
+cache input with the digest of its result (a keyed fingerprint when it holds Secret
+data), at the Helm, Release, and target cache layers alike, and a cached render is
+reused only while every recorded lookup still returns the same result. A publication
+that cannot be read is an error, never an absent object.
 
 ## Argo CD sync waves and phases
 

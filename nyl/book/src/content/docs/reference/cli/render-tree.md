@@ -53,6 +53,13 @@ names.
 `--no-cache` uses ephemeral source storage and performs no persistent cache
 reads or writes. The two flags are mutually exclusive.
 
+`--refresh-lookup <KIND/NAMESPACE/NAME>` treats one object as absent for this render,
+so a chart that declares [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup)
+generates it again, which rotates a CA that a previous publication holds, for example
+`--refresh-lookup Secret/kube-system/cilium-ca`. Use `Kind/name` for a cluster-scoped
+object; the flag is repeatable. Without it, such a chart reads the objects of its
+Release from the target's last publication.
+
 Tree rendering excludes the project secrets provider and `NYL_*` process
 environment by default. Pass `--allow-secret-inputs` to the individual
 `render-tree`, `diff-tree`, or `publish-tree` invocation when trusted central

@@ -35,8 +35,8 @@ for the behavior `render`, `diff`, and `apply` share.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 
-`--input`, `--inputs`, `--application-group`, `--defaults-only`, and the cache
-options work as for [`render`](/nyl/reference/cli/render/#common-options).
+`--input`, `--inputs`, `--application-group`, `--defaults-only`, `--refresh-lookup`,
+and the cache options work as for [`render`](/nyl/reference/cli/render/#common-options).
 
 ### Release Options
 

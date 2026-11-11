@@ -39,6 +39,7 @@ resource takes is decided as `apply` decides it
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 - `--release-only` and `--allow-secret-inputs` - As for [`apply`](/nyl/reference/cli/apply/#common-options).
+- `--refresh-lookup <KIND/NAMESPACE/NAME>` - As for [`render`](/nyl/reference/cli/render/#common-options).
 
 ### Release Options
 
