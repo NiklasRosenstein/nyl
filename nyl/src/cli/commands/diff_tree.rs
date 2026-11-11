@@ -187,6 +187,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
 }
 
 pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::ColorChoice) -> Result<()> {
+    args.lookup.refuse_live("diff-tree")?;
     let protected = std::iter::once(args.output.clone())
         .chain(args.stats_output.iter().map(|o| o.path.clone()))
         .filter(|p| p != Path::new("-"))

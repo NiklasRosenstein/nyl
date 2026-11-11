@@ -141,6 +141,7 @@ fn handle_with_config(config: LookupConfig) -> LookupHandle {
             Ok(Some(ReleaseScope {
                 directory: format!("platform/{}", release.name),
                 namespace: release.namespace.clone(),
+                release: Some(release.clone()),
             }))
         })),
     )
@@ -344,4 +345,75 @@ fn test_a_cached_render_is_reused_only_while_its_lookups_return_the_same_results
         "a snapshot that now holds the CA invalidates the render"
     );
     assert_eq!(cached(snapshot_with_ca()), reused);
+}
+
+/// Catches live lookups not reaching Helm: a chart reuses the CA the cluster
+/// holds, read through Nyl's own client, and still sees nothing outside its Release.
+#[tokio::test]
+async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
+    use nyl_render::helm::lookup::api::{ApiCapabilities, ApiState};
+    use nyl_render::helm::lookup::ApiServer;
+    use nyl_render::kubernetes::lookup::{LiveLookup, ObjectIdentity, PublishedMembers};
+
+    let cluster = ObjectSet::from_documents(
+        vec![
+            json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "my-ca", "namespace": "demo"},
+                   "type": "Opaque", "data": {"tls.crt": "TElWRS1DRVJU", "tls.key": "TElWRS1LRVk="}}),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm-a", "namespace": "demo"}}),
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm-b", "namespace": "demo"}}),
+        ],
+        &|_, _| Some(true),
+        "demo",
+    )
+    .unwrap();
+    let capabilities = ApiCapabilities::new("1.30.0", ["v1".to_owned()], []).unwrap();
+    let server = ApiServer::start(
+        Arc::new(ApiState::new(capabilities, Arc::new(cluster), "token".to_owned())),
+        "token".to_owned(),
+    )
+    .unwrap();
+    let kubeconfig = kube::config::Kubeconfig::from_yaml(&server.kubeconfig()).unwrap();
+    let mut config = kube::Config::from_custom_kubeconfig(kubeconfig, &kube::config::KubeConfigOptions::default())
+        .await
+        .unwrap();
+    config.proxy_url = None;
+    // The Release owns the CA and one of the two ConfigMaps.
+    let owned = |kind: &str, name: &str| ObjectIdentity {
+        api_version: "v1".to_owned(),
+        kind: kind.to_owned(),
+        namespace: Some("demo".to_owned()),
+        name: name.to_owned(),
+    };
+    let members: PublishedMembers = Arc::new(move |_| Ok(vec![owned("Secret", "my-ca"), owned("ConfigMap", "cm-a")]));
+    let live = LiveLookup::new(config, Some(members)).unwrap();
+
+    let directory = TempDir::new().unwrap();
+    let chart = chart(directory.path(), &[]);
+    // The Release is named by its publication alone here: the fake cluster keeps
+    // no release revisions, which a real one lists by label.
+    let handle = LookupHandle::new(
+        LookupConfig::new(Arc::new(live), BTreeSet::new()),
+        Some(ReleaseIdentity {
+            name: "web".to_owned(),
+            namespace: "demo".to_owned(),
+        }),
+        Some(ScopeSource::new(|release| {
+            Ok(Some(ReleaseScope {
+                directory: format!("platform/{}", release.name),
+                namespace: release.namespace.clone(),
+                release: None,
+            }))
+        })),
+    );
+    let manifests = render(&chart, Some(handle)).unwrap();
+    assert_eq!(
+        secret_data(&manifests),
+        json!({"tls.crt": "TElWRS1DRVJU", "tls.key": "TElWRS1LRVk="}),
+        "the chart reuses the CA the cluster holds"
+    );
+    assert_eq!(
+        results(&manifests)["listNames"],
+        "cm-a",
+        "a ConfigMap the cluster holds but the Release does not own is absent"
+    );
 }

@@ -62,6 +62,7 @@ pub struct RenderTreeArgs {
 
 #[allow(clippy::too_many_lines)] // One linear command flow from arguments to the rendered tree.
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
+    args.lookup.refuse_live("render-tree")?;
     args.validation
         .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;
     let started = Instant::now();

@@ -76,6 +76,16 @@ impl Arguments {
                     shared_catalog = true;
                     continue;
                 }
+                // The tree reads lookups from the target's last publication, the
+                // default, so naming it changes nothing; the cluster cannot decide it.
+                Some("--lookup=snapshot") => continue,
+                Some(lookup) if lookup == "--lookup" || lookup.starts_with("--lookup=") => {
+                    return Err(DriverError::before_effects(format!(
+                        "{}: a publication renders what Git declares and publishes, so it reads the Helm lookups of its \
+                         charts from the target's last publication and never from a live cluster; {lookup} is not accepted",
+                        nyl_render::helm::lookup::LIVE_REFUSED_CODE
+                    )));
+                }
                 _ => {
                     return Err(DriverError::before_effects(format!(
                     "{ARGUMENT}: the publication driver accepts --diff, --push, or --shared-catalog after `--`, not {}",

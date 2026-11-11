@@ -1496,4 +1496,155 @@ spec:
                 .unwrap();
         assert!(error.to_string().contains("symbolic links"));
     }
+
+    /// A source of lookups whose objects the test changes between renders.
+    struct Moving {
+        value: std::sync::Arc<std::sync::Mutex<String>>,
+        cacheable: bool,
+    }
+
+    impl crate::helm::lookup::LookupBackend for Moving {
+        fn describe(&self) -> String {
+            "a moving source".to_owned()
+        }
+
+        fn store(
+            &self,
+            scope: &crate::helm::lookup::ReleaseScope,
+        ) -> std::sync::Arc<dyn crate::helm::lookup::ObjectStore> {
+            let documents = if scope.is_none() {
+                Vec::new()
+            } else {
+                vec![serde_json::json!({
+                    "apiVersion": "v1", "kind": "ConfigMap",
+                    "metadata": {"name": "settings", "namespace": scope.namespace},
+                    "data": {"value": *self.value.lock().unwrap()},
+                })]
+            };
+            std::sync::Arc::new(
+                crate::helm::lookup::ObjectSet::from_documents(documents, &|_, _| Some(true), &scope.namespace)
+                    .unwrap(),
+            )
+        }
+
+        fn cacheable(&self) -> bool {
+            self.cacheable
+        }
+    }
+
+    fn write_lookup_release(root: &Path) {
+        let chart = root.join("chart");
+        fs::create_dir_all(chart.join("templates")).unwrap();
+        fs::write(chart.join("Chart.yaml"), "apiVersion: v2\nname: seen\nversion: 1.0.0\n").unwrap();
+        fs::write(
+            chart.join("templates/seen.yaml"),
+            "{{- $cm := lookup \"v1\" \"ConfigMap\" .Release.Namespace \"settings\" }}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: seen\ndata:\n  value: {{ dig \"data\" \"value\" \"none\" $cm | quote }}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app.yaml"),
+            format!(
+                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: seen\n  namespace: apps\n---\napiVersion: {API_VERSION}\nkind: HelmChart\nmetadata:\n  name: seen\n  namespace: apps\nspec:\n  chart:\n    name: chart\n  lookup: {{}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    async fn render_seen(session: &RenderSession) -> RenderedBundle {
+        let mut request = RenderRequest::new(Path::new("app.yaml"), None);
+        request.lookup_scope = Some(crate::helm::lookup::ScopeSource::new(|release| {
+            Ok(Some(crate::helm::lookup::ReleaseScope {
+                directory: format!("group/{}", release.name),
+                namespace: release.namespace.clone(),
+                release: Some(release.clone()),
+            }))
+        }));
+        session.render(request).await.unwrap()
+    }
+
+    fn seen(bundle: &RenderedBundle) -> String {
+        bundle
+            .manifests
+            .iter()
+            .find(|manifest| manifest["metadata"]["name"] == "seen")
+            .and_then(|manifest| manifest["data"]["value"].as_str())
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Catches a Release cached across a change in what its charts looked up: the
+    /// cached render is reused while every lookup returns what it did, and the
+    /// Release is rendered again once one returns something else.
+    #[tokio::test]
+    async fn a_cached_release_is_reused_only_while_its_lookups_return_the_same_results() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        write_lookup_release(temp.path());
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
+        let value = std::sync::Arc::new(std::sync::Mutex::new("one".to_owned()));
+        let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        session.set_cache(Some(
+            RenderCache::with_root(temp.path().join("cache"), CacheMode::Default).unwrap(),
+        ));
+        session.set_lookup(Some(crate::helm::lookup::LookupConfig::new(
+            std::sync::Arc::new(Moving {
+                value: value.clone(),
+                cacheable: true,
+            }),
+            std::collections::BTreeSet::new(),
+        )));
+
+        let first = render_seen(&session).await;
+        assert_eq!(seen(&first), "one");
+        assert!(first.cacheable);
+        assert!(
+            first.cache_dependencies.keys().any(|name| name.starts_with("lookup")),
+            "the target above records what the Release looked up: {:?}",
+            first.cache_dependencies.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(seen(&render_seen(&session).await), "one");
+
+        *value.lock().unwrap() = "two".to_owned();
+        assert_eq!(
+            seen(&render_seen(&session).await),
+            "two",
+            "a changed lookup result invalidates the cached Release"
+        );
+    }
+
+    /// Catches a render that read the live cluster being cached: what the
+    /// cluster holds changes without Nyl observing it, so every render looks it up again.
+    #[tokio::test]
+    async fn a_render_that_used_a_live_source_is_never_cached() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        write_lookup_release(temp.path());
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
+        let value = std::sync::Arc::new(std::sync::Mutex::new("one".to_owned()));
+        let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        session.set_cache(Some(
+            RenderCache::with_root(temp.path().join("cache"), CacheMode::Default).unwrap(),
+        ));
+        session.set_lookup(Some(crate::helm::lookup::LookupConfig::new(
+            std::sync::Arc::new(Moving {
+                value: value.clone(),
+                cacheable: false,
+            }),
+            std::collections::BTreeSet::new(),
+        )));
+
+        let first = render_seen(&session).await;
+        assert_eq!(seen(&first), "one");
+        assert!(!first.cacheable);
+        assert!(
+            first
+                .cache_bypass_reasons
+                .iter()
+                .any(|reason| reason.contains("Helm lookup reads")),
+            "{:?}",
+            first.cache_bypass_reasons
+        );
+        *value.lock().unwrap() = "two".to_owned();
+        assert_eq!(seen(&render_seen(&session).await), "two");
+    }
 }

@@ -336,6 +336,18 @@ impl ObjectSet {
         self.objects.len()
     }
 
+    /// Every object's `(apiVersion, kind, namespace, name)`.
+    pub fn identities(&self) -> impl Iterator<Item = (String, String, Option<String>, String)> + '_ {
+        self.objects.iter().map(|object| {
+            (
+                object.kind.api_version(),
+                object.kind.kind.clone(),
+                object.namespace.clone(),
+                object.name.clone(),
+            )
+        })
+    }
+
     /// The `apiVersion`s of the objects, which discovery must list.
     pub fn api_versions(&self) -> BTreeSet<String> {
         self.objects.iter().map(|object| object.kind.api_version()).collect()

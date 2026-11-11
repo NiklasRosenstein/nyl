@@ -114,6 +114,30 @@ impl PublicationLookup {
             .get_or_insert_with(|| Ok(base.clone()));
     }
 
+    /// The objects a Release's last publication holds, which belong to the Release
+    /// in a live cluster too.
+    pub fn published_members(&self) -> crate::kubernetes::lookup::PublishedMembers {
+        let inner = self.inner.clone();
+        Arc::new(move |scope| {
+            let snapshot = ReleaseSnapshot {
+                inner: inner.clone(),
+                scope: scope.clone(),
+            };
+            Ok(snapshot
+                .objects()?
+                .identities()
+                .map(
+                    |(api_version, kind, namespace, name)| crate::kubernetes::lookup::ObjectIdentity {
+                        api_version,
+                        kind,
+                        namespace,
+                        name,
+                    },
+                )
+                .collect())
+        })
+    }
+
     /// The publication base the lookups read, when any lookup needed it.
     pub fn resolved_base(&self) -> Option<PublicationBase> {
         self.inner
@@ -317,6 +341,10 @@ pub fn release_scope(group: &ApplicationGroup, release: &str, release_namespace:
             .destination_namespace
             .clone()
             .unwrap_or_else(|| release_namespace.to_owned()),
+        release: Some(crate::helm::lookup::ReleaseIdentity {
+            name: release.to_owned(),
+            namespace: release_namespace.to_owned(),
+        }),
     }
 }
 
@@ -327,10 +355,31 @@ pub fn group_scope(group: &ApplicationGroup) -> ScopeSource {
     ScopeSource::new(move |release| Ok(Some(release_scope(&group, &release.name, &release.namespace))))
 }
 
+/// A lookup source that replaces the target's publication for one command.
+#[derive(Clone)]
+pub struct LookupBackendOverride(pub Arc<dyn LookupBackend>);
+
+impl std::fmt::Debug for LookupBackendOverride {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "LookupBackendOverride({})", self.0.describe())
+    }
+}
+
+impl PartialEq for LookupBackendOverride {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.0), Arc::as_ptr(&other.0))
+    }
+}
+
+impl Eq for LookupBackendOverride {}
+
 /// The lookups of a direct command (`render`, `diff`, `apply`) with a target.
 pub struct DirectLookup {
     pub config: LookupConfig,
     pub scope: ScopeSource,
+    /// The live cluster, when the command reads it instead of the publication;
+    /// the compiled target the command takes its Release from reads it too.
+    pub live: Option<LookupBackendOverride>,
 }
 
 /// Build the lookups of a direct command for the Release file `file`.
@@ -351,13 +400,24 @@ pub fn direct_lookup(
     read: PublicationRead,
     cache: Option<&RenderCache>,
     refresh: BTreeSet<ObjectRef>,
+    live: Option<kube::Config>,
 ) -> Result<DirectLookup> {
     let publication = PublicationLookup::for_target(inventory, target, cluster, read, cache, None)?;
-    let config = LookupConfig::new(Arc::new(publication), refresh);
+    let live = live
+        .map(|config| {
+            crate::kubernetes::lookup::LiveLookup::new(config, Some(publication.published_members()))
+                .map(|live| LookupBackendOverride(Arc::new(live)))
+        })
+        .transpose()?;
+    let config = match &live {
+        Some(live) => LookupConfig::new(live.0.clone(), refresh),
+        None => LookupConfig::new(Arc::new(publication), refresh),
+    };
     if defaults_only {
         return Ok(DirectLookup {
             config,
             scope: ScopeSource::new(|_| Ok(None)),
+            live,
         });
     }
     let (inventory, target) = (inventory.clone(), target.clone());
@@ -374,7 +434,7 @@ pub fn direct_lookup(
             .map_err(NylError::config)?;
         Ok(group.map(|group| release_scope(&group, &release.name, &release.namespace)))
     });
-    Ok(DirectLookup { config, scope })
+    Ok(DirectLookup { config, scope, live })
 }
 
 #[cfg(test)]
