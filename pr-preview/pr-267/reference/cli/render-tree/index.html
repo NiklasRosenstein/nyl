@@ -97,14 +97,10 @@ names.</p>
 <p><code dir="auto">--refresh</code> bypasses render cache reads and repopulates successful entries.
 <code dir="auto">--no-cache</code> uses ephemeral source storage and performs no persistent cache
 reads or writes. The two flags are mutually exclusive.</p>
-<p><code dir="auto">--refresh-lookup &#x3C;KIND/NAMESPACE/NAME></code> treats one object as absent for this render,
-so a chart that declares <a href="/nyl/pr-preview/pr-267/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup"><code dir="auto">spec.lookup</code></a>
-generates it again, which rotates a CA that a previous publication holds, for example
-<code dir="auto">--refresh-lookup Secret/kube-system/cilium-ca</code>. Use <code dir="auto">Kind/name</code> for a cluster-scoped
-object; the flag is repeatable. Without it, such a chart reads the objects of its
-Release from the target’s last publication. <code dir="auto">--lookup=snapshot</code> names that source; the
-tree commands refuse <code dir="auto">--lookup=live</code> (<code dir="auto">NYL-HELM-LOOKUP-LIVE-REFUSED</code>), because what a
-cluster holds today must not decide what Git publishes.</p>
+<p><code dir="auto">--refresh-lookup &#x3C;KIND/NAMESPACE/NAME></code> regenerates one object that a chart with
+<a href="/nyl/pr-preview/pr-267/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup"><code dir="auto">spec.lookup</code></a> reads, for example to rotate a CA
+(<code dir="auto">Secret/kube-system/cilium-ca</code>; <code dir="auto">Kind/name</code> for a cluster-scoped object). Repeatable.
+The tree commands refuse <code dir="auto">--lookup=live</code> (<code dir="auto">NYL-HELM-LOOKUP-LIVE-REFUSED</code>).</p>
 <p>Tree rendering excludes the project secrets provider and <code dir="auto">NYL_*</code> process
 environment by default. Pass <code dir="auto">--allow-secret-inputs</code> to the individual
 <code dir="auto">render-tree</code>, <code dir="auto">diff-tree</code>, or <code dir="auto">publish-tree</code> invocation when trusted central
