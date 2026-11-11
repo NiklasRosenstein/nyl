@@ -112,6 +112,7 @@ export default defineConfig({
                       "kubernetes-rendering/components/troubleshooting",
                     ],
                   },
+                  "kubernetes-rendering/pod-template-checksums",
                   "kubernetes-rendering/git-integration",
                 ],
               },
