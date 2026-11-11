@@ -58,12 +58,23 @@ $ nyl render glance.yaml --offline
     metadata:
       annotations:
         k8s.nyl/checksum: auto
-        k8s.nyl/checksum-sha256: ccdf2d6616149086a551c27122eaeb8e53f5395f21863b49e83eb3304a781ea1
+        k8s.nyl/checksum-sha256: f64f17eaef82f5a51004e73a3ff47404143e2c52bb2d2c6a375bd430c58a27aa
 ```
 
 Change `glance.yml` and the digest changes, so the Deployment rolls out. Reorder
 the keys of `data`, edit the ConfigMap's labels, or reformat the YAML, and it
 does not.
+
+Rendering the output again is safe: a Pod template that already holds
+`k8s.nyl/checksum-sha256` next to `k8s.nyl/checksum` gets the value recomputed.
+Nyl owns the key, so a document that sets it without `k8s.nyl/checksum` fails.
+
+What a rollout means depends on the workload. A Job's `spec.template` is
+immutable, so a changed digest makes the apply or sync fail unless the Job is
+recreated, for example with a hook delete policy or Argo CD's `Replace=true`. A
+ReplicaSet does not replace running Pods when its template changes, so the
+digest only reaches Pods that are created afterwards; use a Deployment to roll
+Pods out.
 
 ## Choosing what is hashed
 
@@ -91,7 +102,9 @@ are not read: they carry no content that the workload's configuration depends on
 does not render (a ConfigMap another team owns, say) or to a key that the
 rendered object lacks is skipped, not an error: Nyl never reads the cluster, and
 adding the key later changes the digest. When nothing is selected, the
-annotation still gets the digest of the empty selection.
+annotation still gets the digest of the empty selection, and Nyl warns with
+`NYL-KUBERNETES-CHECKSUM-EMPTY`, since the Pod spec probably references nothing
+the Release renders.
 
 ### An explicit list
 
@@ -129,7 +142,7 @@ file.
 
 The digest is the SHA-256, in lowercase hex, of this input:
 
-1. The text `nyl.k8s/checksum/v1` and a zero byte, which name the format.
+1. The text `k8s.nyl/checksum/v1` and a zero byte, which name the format.
 2. For each selected key, in ascending byte order of `(kind, name, key)`, four
    fields: the kind (`ConfigMap` or `Secret`), the object's name, the key, and the
    value. Each field is its length in bytes as an unsigned 64-bit big-endian
@@ -145,8 +158,14 @@ not hashed.
 ## Namespaces
 
 A reference resolves in the workload's namespace, as Kubernetes resolves it: the
-workload's `metadata.namespace`, or the Release's namespace when it sets none. A
-ConfigMap or Secret without a namespace is in the Release's namespace too, so it
+workload's `metadata.namespace`, or the namespace the Release is deployed to when
+it sets none. That is the `destinationNamespace` of the
+[ApplicationGroup](/nyl/kubernetes-gitops/resource-guides/application-group/) that
+renders the Release, else the Release's own namespace. A file without a Release
+has none of its own; `nyl apply` and `nyl diff` then use `--namespace`, and
+`nyl render` leaves documents without a namespace in no namespace.
+
+A ConfigMap or Secret without a namespace is in the deployed namespace too, so it
 makes no difference whether the documents spell the namespace out. A resource in
 another namespace is not the object the Pod mounts, and cannot be hashed.
 
@@ -162,11 +181,14 @@ it does not depend on their order. `nyl render`, `nyl diff`, `nyl apply`,
 `nyl render-tree`, and `nyl publish-tree` take the same
 [rendering pipeline](/nyl/kubernetes-rendering/pipeline/), so they write the same
 digest, and the published tree holds the annotation as any other manifest field.
-The render cache stores it with the rendered Release; it is derived from the
-documents the cache already tracks, so it needs no cache input of its own.
+The render cache stores it with the rendered Release, keyed by the same inputs as
+the rest of the render plus the destination namespace.
 
-`--only-source-kind` renders a part of the Release, which lacks the documents a
-checksum reads, so it leaves `k8s.nyl/checksum` untouched.
+`--only-source-kind` renders a part of the Release, which may lack the documents a
+checksum reads, and a digest of a part would differ from the one every other
+command writes. A render with that flag fails with
+`NYL-KUBERNETES-CHECKSUM-PARTIAL` when a remaining document sets
+`k8s.nyl/checksum`; drop the flag.
 
 ## Secrets
 
@@ -177,7 +199,7 @@ standard output. A digest of data that is in that output reveals nothing the
 output does not already hold.
 
 Nyl does not mask Secret data in its output: `nyl render` prints it and `nyl diff`
-shows it, so the annotation is no exception to treat apart. Keep a Secret that
+shows it. Keep a Secret that
 must not appear in rendered output out of the Release, for example by letting an
 in-cluster operator create it, and reference it from the Pod spec: `auto` skips
 what the Release does not render.
@@ -192,7 +214,7 @@ $ nyl render bad.yaml --offline
 ERROR nyl: Render error:
 Source: bad.yaml (document 3)
 Resource: apps/v1 Deployment glance
-Caused by: Invalid Deployment: NYL-KUBERNETES-CHECKSUM-NOT-FOUND: Deployment glance/glance: k8s.nyl/checksum lists ConfigMap/glance-settings, but the Release renders no such resource in namespace "glance"
+Caused by: NYL-KUBERNETES-CHECKSUM-NOT-FOUND: Deployment glance/glance: k8s.nyl/checksum lists ConfigMap/glance-settings, but the Release renders no such resource in namespace "glance"
 Hint: Render the resource in the same Release, in the workload's namespace, or correct its name. Nyl hashes only rendered documents and never reads the cluster; use `auto` to skip references the Release does not render.
 ```
 
@@ -201,6 +223,8 @@ Hint: Render the resource in the same Release, in the workload's namespace, or c
 | `NYL-KUBERNETES-CHECKSUM-MALFORMED` | The value is not `auto` or a list of `Kind/name[#key]` with the kind `ConfigMap` or `Secret`, has an empty entry, or is not a string. |
 | `NYL-KUBERNETES-CHECKSUM-NOT-FOUND` | An explicit entry names a ConfigMap or Secret that the Release does not render in the workload's namespace, or a key it lacks. |
 | `NYL-KUBERNETES-CHECKSUM-AMBIGUOUS` | A reference matches more than one rendered document, or a ConfigMap key is in both `data` and `binaryData`. |
-| `NYL-KUBERNETES-CHECKSUM-NO-POD-TEMPLATE` | `k8s.nyl/checksum` is on a document that has no Pod template, or on a workload's own `metadata.annotations` instead of its Pod template's. |
-| `NYL-KUBERNETES-CHECKSUM-RESERVED` | A document sets `k8s.nyl/checksum-sha256`. Nyl owns the key; remove it. |
-| `NYL-KUBERNETES-CHECKSUM-INVALID-DATA` | A referenced object has data that cannot be read: a value that is not a string, or base64 text that does not decode. |
+| `NYL-KUBERNETES-CHECKSUM-NO-POD-TEMPLATE` | `k8s.nyl/checksum` is on a document that has no Pod template, or on a workload's own `metadata.annotations` (a CronJob's `spec.jobTemplate.metadata.annotations` too) instead of its Pod template's. |
+| `NYL-KUBERNETES-CHECKSUM-RESERVED` | A document sets `k8s.nyl/checksum-sha256` without `k8s.nyl/checksum` on the same Pod template, or outside a Pod template. Nyl owns the key; remove it. |
+| `NYL-KUBERNETES-CHECKSUM-INVALID-DATA` | A referenced object has data that cannot be read: a value that is not a string, or base64 text that does not decode. Base64 may contain line breaks, as Kubernetes allows. |
+| `NYL-KUBERNETES-CHECKSUM-PARTIAL` | `--only-source-kind` is set and a remaining document sets `k8s.nyl/checksum`. Drop the flag. |
+| `NYL-KUBERNETES-CHECKSUM-EMPTY` | A warning, not an error: `auto` found no ConfigMap or Secret the Release renders, so the digest covers nothing. |
