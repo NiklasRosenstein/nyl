@@ -4,6 +4,7 @@ pub mod artifact;
 mod bundle;
 pub mod cache;
 mod expand;
+mod pod_checksum;
 mod postprocess;
 mod provenance;
 mod session;

@@ -46,6 +46,16 @@ pub const ANNOTATION_PARENT_NAMESPACE: &str = "k8s.nyl/parent-namespace";
 /// Annotation declaring when Nyl applies a Kyverno policy during rendering.
 pub const ANNOTATION_KYVERNO_SCOPE: &str = "k8s.nyl/apply-policy-scope";
 
+/// Annotation on a Pod template that opts into a checksum of the ConfigMaps and
+/// Secrets it consumes: `auto`, or a comma-separated list of `Kind/name` with an
+/// optional `#key`.
+pub const ANNOTATION_CHECKSUM: &str = "k8s.nyl/checksum";
+
+/// Annotation Nyl writes on the Pod template that declares
+/// [`ANNOTATION_CHECKSUM`]: the SHA-256 of the selected ConfigMap and Secret
+/// data, in lowercase hex. Nyl owns the key; a document that sets it is an error.
+pub const ANNOTATION_CHECKSUM_SHA256: &str = "k8s.nyl/checksum-sha256";
+
 /// Annotation carrying a Helm manifest's chart-relative source path from
 /// rendering to the rendered layout, which removes it before writing.
 pub const ANNOTATION_HELM_SOURCE: &str = "k8s.gitops.nyl/helm-source";
