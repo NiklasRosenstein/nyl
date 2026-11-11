@@ -350,7 +350,8 @@ An unreadable publication is never read as an absent one, because that would
 silently regenerate a CA. A publication that cannot be fetched, a branch that was
 never cached when `--offline` is given, an unparsable ownership index, a file
 missing from the tree, and a file whose bytes do not match the index all fail the
-render with `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE`.
+render with `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE`. [`--lookup=live`](#reading-the-live-cluster)
+reads the cluster instead.
 
 ### Rotating a generated object
 
@@ -366,6 +367,36 @@ The next render without the flag reads the rotated object from the new publicati
 and keeps it. `render`, `diff`, and `apply` with the flag show or apply the rotated
 object without publishing it, which a later `render` without the flag does not
 reproduce.
+
+### Reading the live cluster
+
+`render`, `diff`, and `apply` can read the cluster instead of the publication with
+`--lookup=live`. Helm still talks only to the local API and never gets the cluster or
+its credentials: the API reads the cluster through Nyl's own client, with GET and LIST
+only, and only for objects that belong to the Release. Those are the resources of the
+Release's latest recorded revision (`nyl apply` records one) and, with a target, the
+objects its last publication holds; any other object, whatever the cluster holds, is
+absent.
+
+- Without GitOps configuration, `--context` already chose the cluster, so the live
+  cluster is the default source there (`--lookup=snapshot` finds nothing instead, since
+  there is no publication). With a target, the publication stays the default.
+- `render --target <name> --lookup=live` connects to the Cluster for this alone, as
+  `diff` and `apply` do; `--context` then selects how to reach it.
+- A render that reads the cluster is never cached: what the cluster holds changes
+  without Nyl observing it, so every render looks it up again.
+- A cluster that cannot be read is an error (`NYL-HELM-LOOKUP-LIVE-UNAVAILABLE`), never
+  an absent object. `--lookup=live` without a target or `--context` has no cluster to
+  read (`NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER`).
+- `render-tree`, `diff-tree`, `publish-tree`, `nyl build -- --push`, and the publication
+  unit refuse `--lookup=live` (`NYL-HELM-LOOKUP-LIVE-REFUSED`), as they accept no
+  `--context`: what a cluster holds today must not decide what Git publishes.
+
+`diff --lookup=live` can legitimately differ from the publication: the cluster holds
+the object as it is now, which may be a CA that was rotated there, or one that was
+never published, while the publication holds what `publish-tree` last wrote. The two
+diverge exactly when the cluster is not what Git declares; compare with a plain `diff`
+to see the difference.
 
 ### Caching and diagnostics
 
@@ -411,6 +442,9 @@ a warning on stderr is not an error.
 | --- | --- |
 | `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE` | The publication that `lookup` reads cannot be read, or is corrupt. Nothing is treated as absent. Check network access to the publication repository; with `--offline`, render once without it so the branch is cached; for a corrupt publication, restore the file or republish. |
 | `NYL-HELM-LOOKUP-API-VERSION-UNDECLARED` | A chart that declares `lookup` renders a kind whose API version no declaration covers. Declare the API version in `Cluster.spec.kubernetes.apiVersions`, or ship its CustomResourceDefinition in the chart's `crds/`. |
+| `NYL-HELM-LOOKUP-LIVE-UNAVAILABLE` | `--lookup=live` could not read the cluster, or the release revisions that say which objects belong to the Release. Nothing is treated as absent. Check the connection and the credentials, or render without `--lookup=live` to read the last publication. |
+| `NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER` | `--lookup=live` was given where no cluster is selected. Pass `--target`, or `--context` in a project without GitOps configuration. |
+| `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree or publication command (`render-tree`, `diff-tree`, `publish-tree`, `nyl build -- --push`) was given `--lookup=live`. Publications read lookups from the last publication only; use `render`, `diff`, or `apply` for live lookups. |
 | `NYL-HELM-LOOKUP-FAILED` | The lookup API could not answer a request Helm made, for example one it does not implement. The message names the request. |
 
 ## Sync waves and phases

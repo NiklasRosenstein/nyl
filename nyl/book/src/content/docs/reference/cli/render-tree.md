@@ -58,7 +58,9 @@ so a chart that declares [`spec.lookup`](/nyl/kubernetes-rendering/resource-guid
 generates it again, which rotates a CA that a previous publication holds, for example
 `--refresh-lookup Secret/kube-system/cilium-ca`. Use `Kind/name` for a cluster-scoped
 object; the flag is repeatable. Without it, such a chart reads the objects of its
-Release from the target's last publication.
+Release from the target's last publication. `--lookup=snapshot` names that source; the
+tree commands refuse `--lookup=live` (`NYL-HELM-LOOKUP-LIVE-REFUSED`), because what a
+cluster holds today must not decide what Git publishes.
 
 Tree rendering excludes the project secrets provider and `NYL_*` process
 environment by default. Pass `--allow-secret-inputs` to the individual

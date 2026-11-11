@@ -39,7 +39,7 @@ resource takes is decided as `apply` decides it
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 - `--release-only` and `--allow-secret-inputs` - As for [`apply`](/nyl/reference/cli/apply/#common-options).
-- `--refresh-lookup <KIND/NAMESPACE/NAME>` - As for [`render`](/nyl/reference/cli/render/#common-options).
+- `--lookup <snapshot|live>` and `--refresh-lookup <KIND/NAMESPACE/NAME>` - As for [`render`](/nyl/reference/cli/render/#common-options). A diff with `--lookup=live` can legitimately differ from one that reads the publication: the cluster holds the object as it is now.
 
 ### Release Options
 

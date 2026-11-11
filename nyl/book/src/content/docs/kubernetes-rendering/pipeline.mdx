@@ -51,6 +51,12 @@ data), at the Helm, Release, and target cache layers alike, and a cached render 
 reused only while every recorded lookup still returns the same result. A publication
 that cannot be read is an error, never an absent object.
 
+`render`, `diff`, and `apply` can read the cluster instead (`--lookup=live`, the default
+for `--context` without GitOps configuration), through Nyl's own client, for the
+Release's own objects only. A render that did is never cached, and tree and
+publication commands refuse the flag. `diff --lookup=live` can differ from the
+publication, which holds what was last published, not what the cluster holds now.
+
 ## Argo CD sync waves and phases
 
 A `HelmChart`, `Component`, or `RemoteManifest` is never applied itself; the
@@ -237,7 +243,8 @@ connects. Without `--target` or `--context` and without targets, `diff`,
 `apply`, and `release` fail and name both flags.
 
 `render-tree`, `diff-tree`, and `publish-tree` have no such mode, so nothing
-read from a live cluster reaches a publication.
+read from a live cluster reaches a publication. In this mode a chart's Helm
+[`lookup`](#helm-lookup) reads the context's cluster by default.
 
 ## Pruning and deletion
 

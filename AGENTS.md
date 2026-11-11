@@ -572,7 +572,9 @@ src/
   its result digest (a keyed fingerprint for Secret data), enters the dependency
   recorder at each cache layer, and a cached render is reused only while each
   recorded lookup still returns the same result. An unreadable source is an
-  error, never an absent object.
+  error, never an absent object. Live lookups (`--lookup=live`, `render`, `diff`,
+  and `apply` only) are never cached, read only the Release's own objects, and are
+  refused by tree and publication commands like `--context`.
 - The rendered ownership index describes published ownership and provenance;
   it is not a complete render-cache key.
 - Corrupt, incomplete, or unavailable cache state is a cache miss. It must not
