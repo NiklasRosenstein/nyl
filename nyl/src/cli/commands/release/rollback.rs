@@ -4,7 +4,7 @@ use dialoguer::Confirm;
 
 use crate::{
     cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
-    cli::commands::apply::{HandoffArgs, DEFAULT_APPLY_CONCURRENCY},
+    cli::commands::apply::{HandoffArgs, SyncWaitArgs, DEFAULT_APPLY_CONCURRENCY},
     cli::commands::cluster::{resolve_command_cluster, CommandCluster},
 };
 use nyl_render::{
@@ -67,6 +67,9 @@ pub struct RollbackArgs {
 
     #[command(flatten)]
     pub handoff: HandoffArgs,
+
+    #[command(flatten)]
+    pub waits: SyncWaitArgs,
 }
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
@@ -169,6 +172,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
                 confirm_prune: args.confirm_prune,
                 ownership: &ownership,
                 protected: None,
+                waits: args.waits.settings(),
                 unapplied: None,
             },
             Interruption {

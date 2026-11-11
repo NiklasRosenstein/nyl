@@ -20,11 +20,7 @@
 
 use serde_json::{Map, Value};
 
-const SYNC_WAVE: &str = "argocd.argoproj.io/sync-wave";
-const HOOK: &str = "argocd.argoproj.io/hook";
-const HOOK_DELETE_POLICY: &str = "argocd.argoproj.io/hook-delete-policy";
-const HELM_HOOK: &str = "helm.sh/hook";
-const HELM_HOOK_WEIGHT: &str = "helm.sh/hook-weight";
+use crate::kubernetes::hooks::{HELM_HOOK, HELM_HOOK_WEIGHT, HOOK, HOOK_DELETE_POLICY, SYNC_WAVE};
 
 /// Copies the parent's sync wave and phase onto `children` that declare neither.
 pub(crate) fn inherit_sync_order(parent: &Value, children: &mut [Value]) {

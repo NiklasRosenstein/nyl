@@ -135,6 +135,34 @@ $ nyl diff --target production applications/web/release.yaml
 Summary: 0 to add, 1 to modify, 1 to delete, 2 unchanged, 1 kept
 ```
 
+### Hooks
+
+A [hook](/nyl/reference/cli/apply/#hooks-and-sync-waves) is no resource `apply` adds,
+changes, or deletes, so the diff does not list it with the resources. After them, a
+section lists the hook runs `apply` would make, in the order they run: the phase, the
+sync wave, the object, and its delete policies. A hook that names several phases is
+listed once for each. Hooks are in none of the counts and never set the exit status
+of `--exit-code`: the exit status is `1` only when a resource would be added, changed,
+or deleted, and `2` when the diff itself failed. `--summary` shows the section too.
+
+```console
+$ nyl diff --target production applications/web/release.yaml
+= Deployment web/web
+
+Hooks that would run:
+  ▶ PreSync  wave  -1  Job web/migrate  (delete: HookSucceeded)
+  ▶ PostSync wave   0  Job web/smoke-test  (delete: BeforeHookCreation)
+
+Summary: 0 to add, 0 to modify, 0 to delete, 1 unchanged
+```
+
+Hooks that name no sync phase are left out of the apply. Helm's `test` hook and the
+rollback hooks are listed after the hooks that would run, for information, under
+"Hooks left out"; delete hooks (`PreDelete`, `PostDelete`, `pre-delete`,
+`post-delete`), which Nyl never runs, get the warning `NYL-KUBERNETES-HOOK-IGNORED`
+once for the Release. See
+[Hooks left out](/nyl/reference/cli/apply/#hooks-and-sync-waves).
+
 Before the first apply, every resource is new, including the managed Namespaces
 the Release's Application deploys:
 

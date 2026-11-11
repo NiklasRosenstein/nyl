@@ -65,6 +65,38 @@ Other annotations are not copied. Nested expansion inherits transitively: a
 `HelmChart` that a Component's chart renders passes on the wave it inherited.
 Every command renders the same annotations, from `render` to `publish-tree`.
 
+### Applying waves and hooks
+
+The annotations only take effect when something syncs the resources. Argo CD does,
+and so do the commands that apply a Release themselves: `nyl apply`, `nyl release
+rollback`, and the [direct reconciler](/nyl/kubernetes-gitops/workflow/direct-reconciler/).
+They share one implementation, so a Release is applied the same way by each:
+
+- `PreSync` hooks run first and must finish (a Job completed, a Pod succeeded) before
+  anything else is applied; then the `Sync` phase applies the ordinary resources and
+  the `Sync` hooks wave by wave; then `PostSync` hooks run once the workloads are
+  healthy. `SyncFail` hooks run only after a failure. `Skip` documents are never
+  applied.
+- Within a phase, resources and hooks run by sync wave, lowest first, then by kind,
+  then by name. `helm.sh/hook-weight` is the wave of a document without its own sync
+  wave.
+- A hook is deleted before it is created again unless its delete policy says
+  otherwise (`HookSucceeded` after a good sync, `HookFailed` after a failed one).
+- Helm hooks map as Argo CD maps them: `pre-install` and `pre-upgrade` to `PreSync`,
+  `post-install` and `post-upgrade` to `PostSync`; `crd-install` documents are
+  ordinary resources; hooks with no sync phase are left out: `test` and the rollback
+  hooks silently, delete hooks (`pre-delete`, `post-delete`, `PreDelete`,
+  `PostDelete`), which Nyl never runs, with a warning.
+- Hooks are not owned objects: they are not pruned or compared, and a hook that is
+  gone is not drift. A purge of the Release deletes them with the rest.
+- A Namespace or CustomResourceDefinition applies in the step of the first document
+  that needs it when that comes earlier, as in Argo CD.
+
+A Release that declares no waves or hooks is applied in one step, as before. The
+rules, the waits, the failure behavior, and where Nyl differs from Argo CD are in
+[`nyl apply`](/nyl/reference/cli/apply/#hooks-and-sync-waves); `nyl diff` lists the
+hooks that would run apart from the resource changes.
+
 ## Resource errors
 
 Nyl's own resources (`HelmChart`, `Component`, `RemoteManifest`, `Release`,

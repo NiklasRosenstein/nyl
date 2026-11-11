@@ -941,6 +941,16 @@ impl KubeClient for StrictClient {
         self.inner.delete_resource_with(gvk, namespace, name, options).await
     }
 
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.remove_finalizer(gvk, namespace, name, finalizer).await
+    }
+
     async fn get_normalized_resource(
         &self,
         resource: &kube::api::DynamicObject,
@@ -1554,6 +1564,16 @@ impl KubeClient for ApiServer {
         self.inner.delete_resource_with(gvk, namespace, name, options).await
     }
 
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.remove_finalizer(gvk, namespace, name, finalizer).await
+    }
+
     async fn get_normalized_resource(
         &self,
         resource: &kube::api::DynamicObject,
@@ -2164,5 +2184,280 @@ async fn test_a_job_a_ttl_removed_is_not_applied_again_until_its_document_change
     assert_eq!(
         applied.cluster.storage.list_revisions("jobs", "jobs").await.unwrap(),
         vec![1, 2]
+    );
+}
+
+/// A cluster whose Jobs finish as soon as they exist: `failing` names the ones
+/// that fail instead. Everything else is the mock.
+struct JobsFinish {
+    inner: Arc<MockKubeClient>,
+    failing: std::collections::BTreeSet<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl KubeClient for JobsFinish {
+    async fn get_resource(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> nyl_render::Result<Option<kube::api::DynamicObject>> {
+        let Some(live) = self.inner.get_resource(gvk, namespace, name).await? else {
+            return Ok(None);
+        };
+        if gvk.kind != "Job" {
+            return Ok(Some(live));
+        }
+        let mut value = serde_json::to_value(live).unwrap();
+        let outcome = if self.failing.contains(name) {
+            "Failed"
+        } else {
+            "Complete"
+        };
+        value["status"] = serde_json::json!({"conditions": [{"type": outcome, "status": "True"}]});
+        Ok(Some(serde_json::from_value(value).unwrap()))
+    }
+
+    async fn apply_resource(
+        &self,
+        resource: &kube::api::DynamicObject,
+        field_manager: &str,
+        dry_run: bool,
+    ) -> nyl_render::Result<nyl_render::kubernetes::ApplyOutcome> {
+        self.inner.apply_resource(resource, field_manager, dry_run).await
+    }
+
+    async fn get_server_version(&self) -> nyl_render::Result<String> {
+        self.inner.get_server_version().await
+    }
+
+    async fn get_api_versions(&self) -> nyl_render::Result<Vec<String>> {
+        self.inner.get_api_versions().await
+    }
+
+    async fn is_namespaced(&self, gvk: &GroupVersionKind) -> nyl_render::Result<bool> {
+        self.inner.is_namespaced(gvk).await
+    }
+
+    fn default_namespace(&self) -> &str {
+        self.inner.default_namespace()
+    }
+
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &nyl_render::kubernetes::DeleteOptions,
+    ) -> nyl_render::Result<()> {
+        self.inner.delete_resource_with(gvk, namespace, name, options).await
+    }
+
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.remove_finalizer(gvk, namespace, name, finalizer).await
+    }
+
+    async fn get_normalized_resource(
+        &self,
+        resource: &kube::api::DynamicObject,
+        field_manager: &str,
+    ) -> nyl_render::Result<kube::api::DynamicObject> {
+        self.inner.get_normalized_resource(resource, field_manager).await
+    }
+
+    async fn release_field_manager(
+        &self,
+        resource: &kube::api::DynamicObject,
+        manager: &str,
+    ) -> nyl_render::Result<bool> {
+        self.inner.release_field_manager(resource, manager).await
+    }
+}
+
+/// A Release `hooks` of a ConfigMap with a PreSync Job, a PostSync Job, a Helm test
+/// hook, which has no sync phase and is left out silently, and a Helm post-delete hook,
+/// which Nyl does not run and warns about.
+const HOOKS: &str = "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: hooks, namespace: hooks}\nspec: {}\n---\n\
+                     apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg, namespace: hooks}\ndata: {a: b}\n---\n\
+                     apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: migrate\n  namespace: hooks\n  \
+                     annotations: {argocd.argoproj.io/hook: PreSync}\n\
+                     spec:\n  template:\n    spec:\n      restartPolicy: Never\n      \
+                     containers: [{name: migrate, image: 'registry.invalid:5000/migrate'}]\n---\n\
+                     apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: smoke\n  namespace: hooks\n  \
+                     annotations: {helm.sh/hook: post-install}\n\
+                     spec:\n  template:\n    spec:\n      restartPolicy: Never\n      \
+                     containers: [{name: smoke, image: 'registry.invalid:5000/smoke'}]\n---\n\
+                     apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: probe\n  namespace: hooks\n  \
+                     annotations: {helm.sh/hook: test}\n\
+                     spec:\n  template:\n    spec:\n      restartPolicy: Never\n      \
+                     containers: [{name: probe, image: 'registry.invalid:5000/probe'}]\n---\n\
+                     apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: bye\n  namespace: hooks\n  \
+                     annotations: {helm.sh/hook: post-delete}\n\
+                     spec:\n  template:\n    spec:\n      restartPolicy: Never\n      \
+                     containers: [{name: bye, image: 'registry.invalid:5000/bye'}]\n";
+
+/// Catches the direct reconciler applying hooks like ordinary resources, as it
+/// did before hooks had phases: the Release the unit applies runs its PreSync and
+/// PostSync hooks (a Helm `post-install` one among them), records them in the
+/// revision's manifest, tracks only the ConfigMap, leaves the Helm test hook out
+/// silently and the delete hook out with one warning, and is the same Release whether
+/// it is applied again or not:
+/// a hook that is gone is no drift, since no sync ran it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_direct_unit_runs_hooks_tracks_none_and_never_reports_them_as_drift() {
+    let world = direct_world();
+    std::fs::write(world.work().join("applications/web/hooks.yaml"), HOOKS).unwrap();
+    let cluster = Cluster::new();
+    let jobs = Arc::new(JobsFinish {
+        inner: cluster.client.clone(),
+        failing: std::collections::BTreeSet::new(),
+    });
+    let driver = cluster.driver_through(jobs);
+    let unit = unit_for(&driver, &world, "kubernetes");
+
+    let outcome = reconcile(&driver, &world, &unit, None, &nobody());
+
+    let Outcome::Succeeded { warnings, .. } = &outcome else {
+        panic!("the apply succeeds: {outcome:?}");
+    };
+    let ignored: Vec<_> = warnings
+        .iter()
+        .filter(|warning| warning.code == nyl_core::orchestration::codes::Code::KubernetesHookIgnored)
+        .collect();
+    assert_eq!(ignored.len(), 1, "{warnings:?}");
+    assert!(
+        ignored[0].message.contains("bye") && !ignored[0].message.contains("probe"),
+        "only the delete hook is named: {}",
+        ignored[0].message
+    );
+    assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "migrate").await);
+    assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "smoke").await);
+    assert!(
+        !cluster.exists("batch/v1", "Job", Some("hooks"), "probe").await
+            && !cluster.exists("batch/v1", "Job", Some("hooks"), "bye").await,
+        "hooks without a sync phase are not applied"
+    );
+    let state = cluster
+        .storage
+        .get_latest_release("hooks", "hooks")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.status, ReleaseStatus::Deployed);
+    let tracked: Vec<String> = state.resource_keys.iter().map(ToString::to_string).collect();
+    assert!(tracked.iter().any(|key| key == "ConfigMap hooks/cfg"), "{tracked:?}");
+    assert!(
+        !tracked.iter().any(|key| key.starts_with("Job")),
+        "hooks are not tracked: {tracked:?}"
+    );
+    assert!(
+        state.manifest.contains("name: migrate"),
+        "a rollback applies the hooks again"
+    );
+
+    // A hook that is gone is not drift, and a Job is not read as a workload gone missing.
+    cluster
+        .client
+        .delete_resource(
+            &GroupVersionKind::from_api_version_kind("batch/v1", "Job").unwrap(),
+            Some("hooks"),
+            "migrate",
+        )
+        .await
+        .unwrap();
+    let mut ctx = context(&world, DriverOperation::DetectDrift, None);
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    let receipt = Receipt {
+        execution_key: unit.execution_key.clone().unwrap(),
+        behavior_version: 1,
+        run: RunId::new("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90").unwrap(),
+        read_desired: None,
+        started_at: chrono::Utc::now(),
+        finished_at: chrono::Utc::now(),
+        versions: BTreeMap::new(),
+        approval: None,
+        provenance: BTreeMap::new(),
+        outputs: serde_json::json!({}),
+        artifacts: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let Supported::Supported(detection) = driver.detect_drift(&ctx, &unit, &receipt).unwrap() else {
+        panic!("the driver detects drift");
+    };
+    assert_eq!(detection.drift, Drift::Clean);
+}
+
+/// Catches a failed hook leaving the unit succeeded: the PreSync Job fails, the
+/// unit fails naming the Release and the hook (Git ahead of the cluster, as for
+/// any apply failure), and the workload of the Release is never applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_failed_hook_fails_the_direct_unit_before_the_workload_applies() {
+    let world = direct_world();
+    std::fs::write(world.work().join("applications/web/hooks.yaml"), HOOKS).unwrap();
+    let cluster = Cluster::new();
+    let jobs = Arc::new(JobsFinish {
+        inner: cluster.client.clone(),
+        failing: std::collections::BTreeSet::from(["migrate"]),
+    });
+    let driver = cluster.driver_through(jobs);
+    let unit = unit_for(&driver, &world, "kubernetes");
+
+    let outcome = reconcile(&driver, &world, &unit, None, &nobody());
+
+    let Outcome::Failed { message, .. } = outcome else {
+        panic!("a failed hook fails the unit: {outcome:?}");
+    };
+    assert!(
+        message.contains("hooks/hooks") && message.contains("PreSync hook Job hooks/migrate"),
+        "{message}"
+    );
+    assert!(!cluster.exists("v1", "ConfigMap", Some("hooks"), "cfg").await);
+    let state = cluster
+        .storage
+        .get_latest_release("hooks", "hooks")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.status, ReleaseStatus::Failed);
+}
+
+/// Catches hooks outliving the Release they ran for: a teardown deletes the Jobs the
+/// hooks created, which no revision tracks, together with the rest of the Release.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_teardown_deletes_the_hooks_of_a_release_with_the_rest() {
+    let world = direct_world();
+    std::fs::write(world.work().join("applications/web/hooks.yaml"), HOOKS).unwrap();
+    let cluster = Cluster::new();
+    let jobs = Arc::new(JobsFinish {
+        inner: cluster.client.clone(),
+        failing: std::collections::BTreeSet::new(),
+    });
+    let driver = cluster.driver_through(jobs);
+    let unit = unit_for(&driver, &world, "kubernetes");
+    let tree = tree_of(&reconcile(&driver, &world, &unit, None, &nobody()));
+    assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "migrate").await);
+    assert!(cluster.exists("batch/v1", "Job", Some("hooks"), "smoke").await);
+
+    let identity = identity();
+    let deleting = deleting(unit.clone());
+    let mut ctx = context(&world, DriverOperation::Teardown, Some(&identity));
+    ctx.deadline = ctx.now + chrono::Duration::minutes(10);
+    ctx.artifacts.insert("tree".to_owned(), tree);
+    let outcome = driver.teardown(&ctx, &deleting);
+
+    let Ok(Supported::Supported(Outcome::Waiting { .. })) = outcome else {
+        panic!("phase 1 waits: {outcome:?}");
+    };
+    assert!(!cluster.exists("v1", "ConfigMap", Some("hooks"), "cfg").await);
+    assert!(
+        !cluster.exists("batch/v1", "Job", Some("hooks"), "migrate").await
+            && !cluster.exists("batch/v1", "Job", Some("hooks"), "smoke").await,
+        "the hook Jobs are deleted with the Release"
     );
 }

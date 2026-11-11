@@ -29,25 +29,42 @@ use nyl_render::gitops::reconcile::RenderIndexOwner;
 use nyl_render::kubernetes::fence::{admit, OwnerState, ReleaseClaim, Requester};
 use nyl_render::kubernetes::field_manager::FieldOwnership;
 use nyl_render::kubernetes::lifecycle::{
-    await_registered_kinds, collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_resources,
-    ApplyEvent, ApplySettings, Interruption, ObjectScopes, Protected, RegisteredKinds, ReleaseRecorder, RevisionPolicy,
+    await_registered_kinds, collect_live_state, ensure_namespace_exists, prepare_desired_manifests, purge_keys,
+    purge_resources, ApplyEvent, ApplySettings, Interruption, ObjectScopes, Protected, RegisteredKinds,
+    ReleaseRecorder, RevisionPolicy,
 };
 use nyl_render::kubernetes::prune::PruneDecision;
 use nyl_render::kubernetes::{
-    ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering, ScopeMismatch, ScopeResolver,
+    hooks, ObjectIdentity, ReleasePublication, ReleaseStatus, ResourceKey, ResourceOrdering, ScopeMismatch,
+    ScopeResolver, WaitSettings,
 };
 use nyl_render::resources::ClusterKubernetesCapabilities;
 use nyl_render::{KubeErrorKind, NylError};
 use serde_json::Value;
 
 use super::drift::desired_revision;
-use super::health::is_ttl_job;
 use super::reader::api_error;
 use super::{not_removable, ClusterAccess, ClusterHandle};
 use crate::kubernetes_publication::reconciler::{block_on_with as block_on, ReadError, ReadErrorKind, KUBECONFIG_ENV};
+use nyl_render::kubernetes::health::is_ttl_job;
 
 /// Resources applied or pruned at the same time, as `nyl apply` does by default.
 const CONCURRENCY: usize = 8;
+
+/// The most time an apply keeps back from the unit's deadline, so a wait that ran
+/// out fails the sync through its normal path (`SyncFail` hooks, hook deletion by
+/// policy, the revision recorded `Failed`) before the deadline interrupts the apply.
+const FAILURE_MARGIN: Duration = Duration::from_secs(30);
+
+/// The waits of an apply that must end by `end`: none goes on past `end` less the
+/// margin, which is a fifth of the time left at most when little is left. A hook that
+/// hangs therefore fails the sync as it does under `nyl apply`, whatever
+/// `--hook-timeout` would have been.
+fn waits_before(now: tokio::time::Instant, end: tokio::time::Instant) -> WaitSettings {
+    let left = end.saturating_duration_since(now);
+    let margin = FAILURE_MARGIN.min(left / 5);
+    WaitSettings::until(end.checked_sub(margin).unwrap_or(end), margin)
+}
 
 /// The publication branch of one call, fetched the first time something needs it
 /// and shared by everything after: whether a recorded commit still stands, and
@@ -411,6 +428,8 @@ impl<'a, 'c> Direct<'a, 'c> {
             let mut applied_releases: HashSet<usize> = HashSet::new();
             let mut failures = Vec::new();
             let mut awaiting = Vec::new();
+            // Hooks left out, once per Release.
+            let mut hook_warnings: Vec<Finding> = Vec::new();
             let mut tracked: HashSet<ObjectKey> = HashSet::new();
             let mut current_wave = None;
             // The kinds the Releases applied so far registered: they are
@@ -480,6 +499,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                     Ok(done) => {
                         tracked.extend(done.tracked.iter().map(identity));
                         awaiting.extend(done.awaiting);
+                        hook_warnings.extend(done.warnings);
                         if done.failures.is_empty() {
                             // Only a Release that applied registers kinds a later one waits for.
                             registered.extend(RegisteredKinds::of(&documents[index]));
@@ -491,7 +511,9 @@ impl<'a, 'c> Direct<'a, 'c> {
                 }
             }
             if !failures.is_empty() {
-                return Ok::<_, Failure>((failures, awaiting, scope_warnings(&target_scopes)));
+                let mut warnings = scope_warnings(&target_scopes);
+                warnings.extend(hook_warnings);
+                return Ok::<_, Failure>((failures, awaiting, warnings));
             }
             let mut warnings = tokio::time::timeout_at(
                 end,
@@ -504,6 +526,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                 )
             })??;
             warnings.extend(scope_warnings(&target_scopes));
+            warnings.extend(hook_warnings);
             Ok((failures, awaiting, warnings))
         })
         .map_err(|error| DriverError::after_effects(error.message))?;
@@ -624,6 +647,8 @@ impl<'a, 'c> Direct<'a, 'c> {
     ) -> HashSet<ResourceKey> {
         let candidates: Vec<(ResourceKey, &Value)> = manifests
             .iter()
+            // A hook is judged by its own policies, never by whether it is still there.
+            .filter(|manifest| hooks::is_resource(manifest))
             .filter_map(|manifest| ResourceKey::from_json_value(manifest).ok().map(|key| (key, manifest)))
             .filter(|(key, manifest)| is_ttl_job(key, manifest))
             .collect();
@@ -735,6 +760,15 @@ impl<'a, 'c> Direct<'a, 'c> {
                     decision: PruneDecision::AwaitConfirmation,
                     ..
                 } => applied.awaiting.push(key.to_string()),
+                ApplyEvent::HookFinished {
+                    key,
+                    phase,
+                    result: Err(why),
+                    ..
+                } => applied
+                    .failure_texts
+                    .push((format!("{phase} hook {key}"), why.clone(), false)),
+                ApplyEvent::DeleteHooksIgnored { finding } => applied.warnings.push(finding.clone()),
                 _ => {}
             };
             recorder
@@ -751,6 +785,9 @@ impl<'a, 'c> Direct<'a, 'c> {
                         confirm_prune: false,
                         ownership: &ownership,
                         protected: Some(protected),
+                        // No wait outlasts the unit's deadline, so a hook that hangs fails the
+                        // sync, and the failure is recorded, before the deadline interrupts.
+                        waits: waits_before(tokio::time::Instant::now(), end),
                         unapplied: Some(&expired),
                     },
                     Interruption {
@@ -958,8 +995,23 @@ impl<'a, 'c> Direct<'a, 'c> {
             )
             .await
             .map_err(|error| api_error(&error, &what))?;
+            // The hooks the latest revision holds are no revision's tracked keys, and
+            // what they left behind goes with the Release.
+            let latest = cluster
+                .storage
+                .get_release(name, namespace, latest_revision)
+                .await
+                .map_err(|error| api_error(&error, &what))?;
+            let tracked: Vec<ResourceKey> = live.into_iter().collect();
+            let with_hooks = match &latest {
+                Some(latest) => purge_keys(&tracked, &latest.manifest).map_err(|error| api_error(&error, &what))?,
+                None => tracked,
+            };
             let mut seen = HashSet::new();
-            let mut keys: Vec<ResourceKey> = live.into_iter().filter(|key| seen.insert(identity(key))).collect();
+            let mut keys: Vec<ResourceKey> = with_hooks
+                .into_iter()
+                .filter(|key| seen.insert(identity(key)))
+                .collect();
             keys.sort_by_key(identity);
             let purged = purge_resources(
                 cluster.client.as_ref(),
@@ -1210,8 +1262,10 @@ struct Applied {
     tracked: Vec<ResourceKey>,
     awaiting: Vec<String>,
     failures: Vec<Why>,
-    /// Each failed resource, its error, and whether the API rejected the object itself.
+    /// Each failed resource or hook, its error, and whether the API rejected the object itself.
     failure_texts: Vec<(String, String, bool)>,
+    /// What the apply found that does not fail it, such as hooks it left out.
+    warnings: Vec<Finding>,
 }
 
 /// An object's group, kind, namespace, and name.
@@ -1255,4 +1309,30 @@ fn candidate_identities(documents: &[Value], default_namespace: &str) -> HashSet
         identities.insert(namespaced.object_identity(true));
     }
     identities
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches an apply whose waits can outlast the unit's deadline, which an interrupt then
+    /// cuts short without the failure path, and one that keeps back so much that a hook
+    /// which would have finished fails: the margin is thirty seconds at most, and a fifth
+    /// of the time left when little is.
+    #[test]
+    fn test_the_waits_of_an_apply_end_before_the_unit_deadline_with_room_for_the_failure() {
+        let now = tokio::time::Instant::now();
+
+        let plenty = waits_before(now, now + Duration::from_secs(600));
+        assert_eq!(plenty.deadline, Some(now + Duration::from_secs(570)));
+        assert_eq!(plenty.grace, FAILURE_MARGIN, "the failure path may use the margin");
+        assert_eq!(plenty.timeout, None, "the deadline is the only bound");
+
+        let little = waits_before(now, now + Duration::from_secs(50));
+        assert_eq!(little.deadline, Some(now + Duration::from_secs(40)));
+        assert_eq!(little.grace, Duration::from_secs(10));
+
+        let none = waits_before(now, now);
+        assert_eq!(none.deadline, Some(now), "no time left, no margin to keep");
+    }
 }

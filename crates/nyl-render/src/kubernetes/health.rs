@@ -1,25 +1,57 @@
 //! The health of the workloads a release applied, from their live status.
 //!
-//! Contract: [Reading a direct target](../../../../../design/promotion.md#reading-a-direct-target).
-//! Rollout status has the semantics of `kubectl rollout status` for the kinds
-//! that roll out: Deployments, StatefulSets, DaemonSets, Jobs, and ReplicaSets
-//! no controller owns. Every other kind is not read, as an Argo CD resource
-//! without a health check counts as healthy once synced. The objects come from
-//! the manifest of the revision (never from keys that stay tracked only
-//! because their prune awaits confirmation), and an object that does not exist
-//! is a finding, except a Job whose `ttlSecondsAfterFinished` makes its
+//! Contract: [Reading a direct target](../../../../design/promotion.md#reading-a-direct-target)
+//! and [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler),
+//! applying. Rollout status has the semantics of `kubectl rollout status` for the
+//! kinds that roll out: Deployments, StatefulSets, DaemonSets, Jobs, and ReplicaSets
+//! no controller owns, a Pod follows its phase, and an Argo Workflow its
+//! `status.phase`. Every other kind is not read, as an Argo CD resource without a
+//! health check counts as healthy once synced; Argo CD also reads Ingresses,
+//! LoadBalancer Services, PersistentVolumeClaims, APIServices, and
+//! HorizontalPodAutoscalers, and runs custom Lua checks, which Nyl does not.
+//!
+//! Two callers read it: the apply's waits between Argo CD sync waves and phases
+//! ([`super::hooks`]), and the direct reconciler's reader, which takes the objects
+//! from the manifest of the revision (never from keys that stay tracked only
+//! because their prune awaits confirmation, and never a hook). An object that does
+//! not exist is a finding, except a Job whose `ttlSecondsAfterFinished` makes its
 //! disappearance after completion expected.
 
-use nyl_render::kubernetes::ResourceKey;
 use serde_json::Value;
 
-use crate::kubernetes_publication::reconciler::Health;
+use super::ResourceKey;
+
+/// How healthy a workload is. The direct reader maps it onto the reconciler-neutral
+/// health it reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Healthy,
+    Progressing,
+    /// Held on purpose, as a paused Deployment is: a sync waits for it, as for
+    /// `Progressing`, but no rollout is under way.
+    Suspended,
+    Degraded,
+    /// Anything else, and nothing reported: never a pass.
+    Unknown,
+}
 
 /// Whether a kind rolls out and is read.
 pub fn is_workload(api_version: &str, kind: &str) -> bool {
     matches!(
         (api_version, kind),
         ("apps/v1", "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet") | ("batch/v1", "Job")
+    )
+}
+
+/// Whether an apply reads the health of this kind ([`rollout`]): the workloads, Pods,
+/// and Argo Workflows. Any other kind counts as healthy once it exists.
+pub fn assessed(group: &str, kind: &str) -> bool {
+    matches!(
+        (group, kind),
+        ("apps", "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet")
+            | ("batch", "Job")
+            | ("", "Pod")
+            | ("argoproj.io", "Workflow")
     )
 }
 
@@ -93,13 +125,15 @@ pub fn rollout(kind: &str, live: &Value) -> Option<Status> {
         "DaemonSet" => daemon_set(live),
         "ReplicaSet" => replica_set(live),
         "Job" => job(live),
+        "Pod" => pod(live),
+        "Workflow" => workflow(live),
         _ => return None,
     })
 }
 
 fn deployment(live: &Value) -> Status {
     if live.pointer("/spec/paused").and_then(Value::as_bool) == Some(true) {
-        return Status::of(Health::Unknown, "it is paused");
+        return Status::of(Health::Suspended, "it is paused");
     }
     if !observed(live) {
         return Status::of(
@@ -210,6 +244,49 @@ fn job(live: &Value) -> Status {
     }
 }
 
+/// A Pod's phase, as Argo CD's Pod health reads it: a Pod that runs to completion
+/// is healthy once it succeeded and degraded once it failed, and one that keeps
+/// running (`restartPolicy: Always`) is healthy once it is ready.
+fn pod(live: &Value) -> Status {
+    let phase = live
+        .pointer("/status/phase")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let keeps_running = live.pointer("/spec/restartPolicy").and_then(Value::as_str) == Some("Always");
+    match phase {
+        "Succeeded" => Status::healthy(),
+        "Failed" => Status::terminal("the Pod failed"),
+        "Running" if keeps_running && condition_is(live, "Ready", "True") => Status::healthy(),
+        "Running" => Status::of(Health::Progressing, "the Pod is running"),
+        _ => Status::of(Health::Progressing, "the Pod is pending"),
+    }
+}
+
+/// An Argo Workflow's `status.phase`, as Argo CD's health check for it reads it:
+/// `Succeeded` is healthy, `Failed` and `Error` are degraded, and anything else, a
+/// Workflow no controller has picked up included, is still progressing.
+fn workflow(live: &Value) -> Status {
+    let phase = live
+        .pointer("/status/phase")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match phase {
+        "Succeeded" => Status::healthy(),
+        "Failed" | "Error" => {
+            let message = live
+                .pointer("/status/message")
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty());
+            Status::terminal(match message {
+                Some(message) => format!("the Workflow {}: {message}", phase.to_lowercase()),
+                None => format!("the Workflow {}", phase.to_lowercase()),
+            })
+        }
+        "" => Status::of(Health::Progressing, "the Workflow has not started"),
+        other => Status::of(Health::Progressing, format!("the Workflow is {}", other.to_lowercase())),
+    }
+}
+
 /// Whether a manifest's Job sets `ttlSecondsAfterFinished`, so its
 /// disappearance after completion is expected.
 pub fn job_expires(manifest: &Value) -> bool {
@@ -240,7 +317,7 @@ pub fn fold(found: &[Found<'_>]) -> (Health, Option<String>, bool) {
     let mut worst: Option<(Health, String, bool)> = None;
     let rank = |health: Health| match health {
         Health::Degraded => 3,
-        Health::Progressing => 2,
+        Health::Progressing | Health::Suspended => 2,
         Health::Unknown => 1,
         Health::Healthy => 0,
     };
@@ -316,16 +393,17 @@ mod tests {
     }
 
     /// Catches a stuck rollout being reported as progressing forever, and a
-    /// paused one as healthy.
+    /// paused one as healthy or as unknown, which a sync would fail on instead of
+    /// waiting for it.
     #[test]
-    fn test_a_deployment_past_its_deadline_is_degraded_and_a_paused_one_unknown() {
+    fn test_a_deployment_past_its_deadline_is_degraded_and_a_paused_one_suspended() {
         let mut stuck = deployment_status(1, 1, 1, 0, 1, 0);
         stuck["status"]["conditions"] =
             json!([{"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"}]);
         assert_eq!(rollout("Deployment", &stuck).unwrap().health, Health::Degraded);
         let mut paused = deployment_status(1, 1, 1, 1, 1, 1);
         paused["spec"]["paused"] = json!(true);
-        assert_eq!(rollout("Deployment", &paused).unwrap().health, Health::Unknown);
+        assert_eq!(rollout("Deployment", &paused).unwrap().health, Health::Suspended);
     }
 
     /// Catches a StatefulSet counted healthy before its update revision is
@@ -347,6 +425,48 @@ mod tests {
         assert_eq!(rollout("Job", &job("Complete")).unwrap().health, Health::Healthy);
         assert_eq!(rollout("Job", &job("Failed")).unwrap().health, Health::Degraded);
         assert_eq!(rollout("Job", &json!({})).unwrap().health, Health::Progressing);
+    }
+
+    /// Catches a hook Pod that keeps the sync waiting after it succeeded, or passes
+    /// while it still runs: a Pod that runs to completion follows its phase, and
+    /// one that keeps running is healthy once it is ready.
+    #[test]
+    fn test_a_pod_follows_its_phase_and_readiness() {
+        let pod = |phase: &str, restart: &str, ready: bool| {
+            json!({"spec": {"restartPolicy": restart}, "status": {"phase": phase,
+                "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }}]}})
+        };
+        let health = |live: Value| rollout("Pod", &live).unwrap().health;
+
+        assert_eq!(health(pod("Succeeded", "Never", false)), Health::Healthy);
+        assert_eq!(health(pod("Running", "Never", true)), Health::Progressing);
+        assert_eq!(health(pod("Pending", "OnFailure", false)), Health::Progressing);
+        assert_eq!(health(pod("Failed", "Never", false)), Health::Degraded);
+        assert_eq!(health(pod("Running", "Always", true)), Health::Healthy);
+        assert_eq!(health(pod("Running", "Always", false)), Health::Progressing);
+        assert!(assessed("", "Pod") && assessed("batch", "Job") && !assessed("example.com", "Job"));
+    }
+
+    /// Catches a hook Workflow being passed while it runs, or failing the sync
+    /// before it ended: Argo CD reads `status.phase`.
+    #[test]
+    fn test_a_workflow_follows_its_phase() {
+        let workflow = |phase: Option<&str>| match phase {
+            Some(phase) => json!({"status": {"phase": phase, "message": "boom"}}),
+            None => json!({}),
+        };
+        let health = |phase| rollout("Workflow", &workflow(phase)).unwrap();
+
+        assert_eq!(health(Some("Succeeded")).health, Health::Healthy);
+        assert_eq!(health(Some("Running")).health, Health::Progressing);
+        assert_eq!(health(Some("Pending")).health, Health::Progressing);
+        assert_eq!(health(None).health, Health::Progressing);
+        for phase in ["Failed", "Error"] {
+            let status = health(Some(phase));
+            assert_eq!(status.health, Health::Degraded, "{phase}");
+            assert!(status.terminal && status.why.unwrap().contains("boom"), "{phase}");
+        }
+        assert!(assessed("argoproj.io", "Workflow") && !assessed("example.com", "Workflow"));
     }
 
     /// Catches kinds without a rollout being judged, which would make every

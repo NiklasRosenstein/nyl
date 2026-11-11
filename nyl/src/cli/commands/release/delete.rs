@@ -6,7 +6,7 @@ use crate::cli::commands::cluster::load_command_kube_config;
 use nyl_render::{
     kubernetes::{
         fence::{admit, ReleaseClaim, Requester},
-        KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
+        hooks, KubernetesReleaseStorage, ReleaseStatus, ReleaseStorage,
     },
     NylError, Result,
 };
@@ -168,8 +168,9 @@ async fn delete_release(
             println!(
                 "{} This will also delete {} resource(s) from the cluster.",
                 "⚠".yellow(),
-                release.resource_keys.len()
+                purged_keys(release)?.len()
             );
+            warn_delete_hooks(release);
         }
     }
 
@@ -230,8 +231,34 @@ async fn delete_release(
     Ok(())
 }
 
-/// Delete the release's resources, keeping those whose Argo CD `Delete` sync
-/// option retains them or awaits `--confirm-delete`, in reverse apply order
+/// Warn, once, that the hooks the release declares for its removal are not run:
+/// Argo CD runs `PreDelete` and `PostDelete` hooks when it removes an Application,
+/// and a purge by Nyl runs none of them ([`hooks::IGNORED_CODE`]).
+fn warn_delete_hooks(release: &nyl_render::kubernetes::ReleaseState) {
+    let Ok(documents) = nyl_render::yaml::parse_yaml_documents_k8s_compatible(&release.manifest) else {
+        return;
+    };
+    let Ok(delete_hooks) = hooks::delete_hooks(&documents) else {
+        return;
+    };
+    if let Some(finding) = hooks::delete_hook_finding(&delete_hooks) {
+        tracing::warn!("{finding}");
+    }
+}
+
+/// What a purge deletes: the objects the release tracks and the hooks its manifest
+/// holds, which a sync creates and no revision tracks.
+fn purged_keys(release: &nyl_render::kubernetes::ReleaseState) -> Result<Vec<nyl_render::kubernetes::ResourceKey>> {
+    nyl_render::kubernetes::lifecycle::purge_keys(&release.resource_keys, &release.manifest).map_err(|error| {
+        NylError::Other(format!(
+            "cannot read the manifest of revision {} of release {}: {error}",
+            release.revision, release.release_name
+        ))
+    })
+}
+
+/// Delete the release's resources and hooks, keeping those whose Argo CD `Delete`
+/// sync option retains them or awaits `--confirm-delete`, in reverse apply order
 /// with waits for termination.
 async fn purge_resources(
     client: kube::Client,
@@ -246,7 +273,7 @@ async fn purge_resources(
     let kube_client = KubeRsClient::from_client(client).await?;
     let purged = purge_resources(
         &kube_client,
-        &release.resource_keys,
+        &purged_keys(release)?,
         &|_| false,
         crate::cli::commands::apply::DEFAULT_APPLY_CONCURRENCY.into(),
         confirm_delete,

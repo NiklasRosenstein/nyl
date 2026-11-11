@@ -7,7 +7,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::checks::{attestation_ready, deployment_ready, observations_ready, parse_attestation_record, Observed};
+use crate::checks::{
+    attestation_ready, deployment_ready, hook_ran_after_workload, observations_ready, parse_attestation_record,
+    rollout_started, Observed,
+};
 use crate::env::Env;
 use crate::error::{Context, Error, Result};
 use crate::fixture::{
@@ -79,6 +82,9 @@ impl Scenario<'_> {
             self.check_published(&first)
         })?;
         step("the workload runs revision 1", || self.await_workload(&first))?;
+        let first_hook = step("the PostSync hook ran after the workload was created", || {
+            self.await_hook(None)
+        })?;
         step("reconcile recorded accepted and healthy, and nyl attest agrees", || {
             self.attest()
         })?;
@@ -106,6 +112,9 @@ impl Scenario<'_> {
             self.check_published(&second)
         })?;
         step("the workload runs revision 2", || self.await_workload(&second))?;
+        step("the PostSync hook ran again, as a new Job", || {
+            self.await_hook(Some(&first_hook)).map(|_| ())
+        })?;
         step(
             "reconcile recorded accepted and healthy for revision 2, and nyl attest agrees",
             || self.attest(),
@@ -322,6 +331,35 @@ impl Scenario<'_> {
                 return Ok(Poll::pending("the Deployment does not exist yet"));
             };
             Ok(deployment_ready(&deployment, &revision.image, &revision.database_host))
+        })
+    }
+
+    /// Wait until the Release's `PostSync` hook Job succeeded after the Deployment's
+    /// newest rollout began (the creation of its newest ReplicaSet), and, with `previous`, is another object than the Job that
+    /// ran for the revision before: a sync runs its hooks, whichever reconciler
+    /// runs it, and the default delete policy replaces the old Job with a new one.
+    /// Returns the Job's UID.
+    fn await_hook(&self, previous: Option<&str>) -> Result<String> {
+        let kubectl = &self.env.kubectl;
+        Waiter::new(
+            format!("the {} hook Job to have run", fixture::HOOK_JOB),
+            Duration::from_secs(5 * 60),
+        )
+        .backoff(Duration::from_secs(2), Duration::from_secs(10))
+        .until(|| {
+            let Some(job) = kubectl.get_optional(&["job", fixture::HOOK_JOB, "--namespace", NAMESPACE])? else {
+                return Ok(Poll::pending("the hook Job does not exist yet"));
+            };
+            let Some(replica_sets) = kubectl.get_optional(&["replicasets", "--namespace", NAMESPACE])? else {
+                return Ok(Poll::pending("the Deployment has no ReplicaSet"));
+            };
+            let rollout = rollout_started(&replica_sets, fixture::DEPLOYMENT);
+            Ok(match hook_ran_after_workload(&job, rollout.as_deref()) {
+                Poll::Ready(uid) if Some(uid.as_str()) == previous => {
+                    Poll::pending("the hook Job is still the one of the revision before")
+                }
+                other => other,
+            })
         })
     }
 

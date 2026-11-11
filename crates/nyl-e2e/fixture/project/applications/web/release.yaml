@@ -45,3 +45,23 @@ spec:
   selector: {app: web}
   ports:
     - {name: http, port: 80, targetPort: http}
+---
+# A hook: Argo CD runs it after the sync, and the direct reconciler runs it the
+# same way, once the workload above is healthy. The Release does not own it, so it
+# is neither pruned nor reported as drift when it is gone.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: web-smoke
+  namespace: '{{ inputs.namespace }}'
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: '{{ inputs.image }}'
+          command: ["true"]

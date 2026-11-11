@@ -20,6 +20,8 @@ pub const UNIT_PUBLICATION: &str = "kubernetes";
 /// The Namespace and the workload objects the Release renders.
 pub const NAMESPACE: &str = "web";
 pub const DEPLOYMENT: &str = "web";
+/// The `PostSync` hook Job of the Release.
+pub const HOOK_JOB: &str = "web-smoke";
 pub const SERVICE: &str = "web";
 /// The branch the publication unit pushes the rendered tree to, and the prefix
 /// of the target on it.

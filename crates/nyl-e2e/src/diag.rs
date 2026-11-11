@@ -16,6 +16,20 @@ use crate::reconciler::Reconciler;
 /// Lines kept of each command's output.
 const KEPT_LINES: usize = 150;
 
+/// Per Job of the workload, such as a hook: its UID (a re-created hook is
+/// another object of the same name), its deletion and finalizers (a hook
+/// finalizer left behind blocks a deletion), and when it ran.
+const JOB_SUMMARY: &str = "jsonpath={range .items[*]}{.metadata.name}\
+{\"\\n  uid: \"}{.metadata.uid}\
+{\"\\n  hook: \"}{.metadata.annotations.argocd\\.argoproj\\.io/hook}{\" \"}{.metadata.annotations.helm\\.sh/hook}\
+{\"\\n  createdAt: \"}{.metadata.creationTimestamp}\
+{\"\\n  deletionTimestamp: \"}{.metadata.deletionTimestamp}\
+{\"\\n  finalizers: \"}{.metadata.finalizers}\
+{\"\\n  startTime: \"}{.status.startTime}{\", completionTime \"}{.status.completionTime}\
+{\", succeeded \"}{.status.succeeded}{\", failed \"}{.status.failed}\
+{\"\\n  conditions: \"}{.status.conditions}\
+{\"\\n\"}{end}";
+
 fn show(title: &str, command: Cmd) {
     let command = command.timeout(Duration::from_secs(60));
     log::raw(&format!("\n--- {title}\n$ {}\n", command.display()));
@@ -59,6 +73,10 @@ pub fn dump(infra: &Infra, reconciler: &dyn Reconciler, env: Option<&Env>) {
     show(
         "the workload's objects",
         kubectl.cmd(&["get", "all", "--namespace", NAMESPACE, "--output", "wide"]),
+    );
+    show(
+        "the workload's Jobs: identity, deletion, finalizers, and run",
+        kubectl.cmd(&["get", "jobs", "--namespace", NAMESPACE, "--output", JOB_SUMMARY]),
     );
     show(
         "the workload's Deployment and pods, described",

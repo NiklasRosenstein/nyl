@@ -12,8 +12,9 @@
 //! (such as a CNI's `NetworkPolicy`) still follows the CustomResourceDefinition or
 //! APIService that registers it.
 //!
-//! Nyl orders by kind only. Argo CD's sync waves and phases order what Argo CD
-//! applies; `nyl apply` and the direct reconciler do not read them.
+//! This is the order within one sync wave of one phase. Argo CD's sync waves and
+//! hook phases order what comes before and after: [`super::hooks`] decides them and
+//! [`super::lifecycle`] applies waves in turn, each by this order.
 //!
 //! Admission webhook configurations are applied after everything else: registering a
 //! webhook before the resources it admits would send their requests to a backend
@@ -110,6 +111,12 @@ impl ResourceOrdering {
                 kind: gvk.kind.clone(),
             },
         }
+    }
+
+    /// How two kinds compare in apply order: the order hooks of one phase and
+    /// wave run in, as resources of one wave are applied.
+    pub fn compare_kinds(a: &GroupVersionKind, b: &GroupVersionKind) -> std::cmp::Ordering {
+        Self::gvk_order_key(a).cmp(&Self::gvk_order_key(b))
     }
 
     /// Sort resources into apply order.
