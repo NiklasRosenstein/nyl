@@ -50,8 +50,14 @@ struct Inner {
     read: PublicationRead,
     cluster: Option<ClusterKubernetesCapabilities>,
     base: Mutex<Option<std::result::Result<PublicationBase, StoreError>>>,
-    releases: Mutex<HashMap<ReleaseScope, std::result::Result<Arc<ObjectSet>, StoreError>>>,
+    /// The documents beneath a Release's directory, read once per directory.
+    documents: Mutex<HashMap<String, Loaded<Vec<Value>>>>,
+    /// The objects of a Release, by its directory and the namespace its objects default to.
+    releases: Mutex<HashMap<(String, String), Loaded<ObjectSet>>>,
 }
+
+/// What a lazily read part of the publication holds, or why it cannot be read.
+type Loaded<T> = std::result::Result<Arc<T>, StoreError>;
 
 impl PublicationLookup {
     /// The publication of `target`, read as `read` says.
@@ -94,6 +100,7 @@ impl PublicationLookup {
                 read,
                 cluster,
                 base: Mutex::new(None),
+                documents: Mutex::new(HashMap::new()),
                 releases: Mutex::new(HashMap::new()),
             }),
         }
@@ -155,7 +162,7 @@ impl ReleaseSnapshot {
         }
         let mut releases = self.inner.releases.lock().expect("the releases are not poisoned");
         releases
-            .entry(self.scope.clone())
+            .entry((self.scope.directory.clone(), self.scope.namespace.clone()))
             .or_insert_with(|| self.inner.load(&self.scope).map(Arc::new))
             .clone()
     }
@@ -200,6 +207,34 @@ impl Inner {
 
     /// The objects of the Release `scope` names, from the publication base.
     fn load(&self, scope: &ReleaseScope) -> std::result::Result<ObjectSet, StoreError> {
+        let documents = self
+            .documents
+            .lock()
+            .expect("the documents are not poisoned")
+            .entry(scope.directory.clone())
+            .or_insert_with(|| self.read_documents(&scope.directory).map(Arc::new))
+            .clone()?;
+        let resolver = ScopeResolver::new(self.cluster.as_ref(), documents.iter());
+        ObjectSet::from_documents(
+            documents.as_ref().clone(),
+            &|group, kind| {
+                resolver
+                    .scope(group, kind)
+                    .map(|scope| scope == ResourceScope::Namespaced)
+            },
+            &scope.namespace,
+        )
+        .map_err(|error| {
+            snapshot_unavailable(format!(
+                "the publication {} is corrupt beneath {}: {error}",
+                self.describe(),
+                scope.directory
+            ))
+        })
+    }
+
+    /// The documents of the files beneath `directory` in the publication base.
+    fn read_documents(&self, directory: &str) -> std::result::Result<Vec<Value>, StoreError> {
         let base = self.base()?;
         let Some(commit) = &base.commit else {
             // A branch that was never fetched cannot be told apart from one that
@@ -210,10 +245,10 @@ impl Inner {
                      published is unknown; render once with network access (without --offline) so the publication is \
                      cached, then use --offline",
                     self.describe(),
-                    scope.directory
+                    directory
                 )))
             } else {
-                Ok(ObjectSet::default())
+                Ok(Vec::new())
             };
         };
         let git = self.git.lock().expect("the Git source is not poisoned");
@@ -228,7 +263,7 @@ impl Inner {
         };
         let Some(index) = read(DEFAULT_INDEX_PATH)? else {
             // The branch holds no ownership index under the prefix: nothing is published there yet.
-            return Ok(ObjectSet::default());
+            return Ok(Vec::new());
         };
         let index = parse_index(
             &index,
@@ -238,7 +273,7 @@ impl Inner {
             ),
         )
         .map_err(|error| snapshot_unavailable(error.to_string()))?;
-        let directory = format!("{}/", scope.directory);
+        let directory = format!("{directory}/");
         let mut documents = Vec::new();
         for (path, digest) in index
             .files
@@ -270,23 +305,7 @@ impl Inner {
                 ))
             })?);
         }
-        let resolver = ScopeResolver::new(self.cluster.as_ref(), documents.iter());
-        ObjectSet::from_documents(
-            documents,
-            &|group, kind| {
-                resolver
-                    .scope(group, kind)
-                    .map(|scope| scope == ResourceScope::Namespaced)
-            },
-            &scope.namespace,
-        )
-        .map_err(|error| {
-            snapshot_unavailable(format!(
-                "the publication {} at {commit} is corrupt beneath {}: {error}",
-                self.describe(),
-                scope.directory
-            ))
-        })
+        Ok(documents)
     }
 }
 
@@ -327,6 +346,15 @@ pub fn group_scope(group: &ApplicationGroup) -> ScopeSource {
     ScopeSource::new(move |release| Ok(Some(release_scope(&group, &release.name, &release.namespace))))
 }
 
+/// A new error with the text, and the kind callers act on, of `error`: the code a message
+/// begins with, or the one a hint names, survives being reported more than once.
+fn same_error(error: &NylError) -> NylError {
+    match error {
+        NylError::Config(message) => NylError::Config(message.clone()),
+        other => NylError::Other(other.to_string()),
+    }
+}
+
 /// The lookups of a direct command (`render`, `diff`, `apply`) with a target.
 pub struct DirectLookup {
     pub config: LookupConfig,
@@ -339,7 +367,8 @@ pub struct DirectLookup {
 /// the one `--application-group` names, which is decided the first time a
 /// chart's lookup needs it, never for a file that declares none. A render
 /// outside every group (`--defaults-only`) has no published Release and finds
-/// nothing.
+/// nothing. `base` is the publication base the command's `fromPublication`
+/// inputs already read, which the lookups then read too: one commit, one fetch.
 #[allow(clippy::too_many_arguments)]
 pub fn direct_lookup(
     inventory: &GitOpsInventory,
@@ -351,8 +380,9 @@ pub fn direct_lookup(
     read: PublicationRead,
     cache: Option<&RenderCache>,
     refresh: BTreeSet<ObjectRef>,
+    base: Option<&PublicationBase>,
 ) -> Result<DirectLookup> {
-    let publication = PublicationLookup::for_target(inventory, target, cluster, read, cache, None)?;
+    let publication = PublicationLookup::for_target(inventory, target, cluster, read, cache, base)?;
     let config = LookupConfig::new(Arc::new(publication), refresh);
     if defaults_only {
         return Ok(DirectLookup {
@@ -362,17 +392,18 @@ pub fn direct_lookup(
     }
     let (inventory, target) = (inventory.clone(), target.clone());
     let (file, application_group) = (PathBuf::from(file), application_group.map(ToOwned::to_owned));
-    let group: OnceLock<std::result::Result<Option<ApplicationGroup>, String>> = OnceLock::new();
+    let group: OnceLock<std::result::Result<Option<ApplicationGroup>, NylError>> = OnceLock::new();
     let scope = ScopeSource::new(move |release| {
         let group = group
             .get_or_init(|| {
                 super::direct::rendering_group(&inventory, &target, &file, application_group.as_deref())
                     .map(|selected| selected.map(|(group, _)| group))
-                    .map_err(|error| error.to_string())
             })
-            .clone()
-            .map_err(NylError::config)?;
-        Ok(group.map(|group| release_scope(&group, &release.name, &release.namespace)))
+            .as_ref()
+            .map_err(same_error)?;
+        Ok(group
+            .as_ref()
+            .map(|group| release_scope(group, &release.name, &release.namespace)))
     });
     Ok(DirectLookup { config, scope })
 }
