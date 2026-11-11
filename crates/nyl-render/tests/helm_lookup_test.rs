@@ -117,13 +117,17 @@ fn objects(documents: Vec<Value>) -> ObjectSet {
 }
 
 fn snapshot_with_ca() -> ObjectSet {
-    objects(vec![
+    objects(snapshot_with_ca_documents())
+}
+
+fn snapshot_with_ca_documents() -> Vec<Value> {
+    vec![
         json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "my-ca", "namespace": "demo", "resourceVersion": "7"},
                "type": "Opaque", "data": {"tls.crt": "U05BUFNIT1QtQ0VSVA==", "tls.key": "U05BUFNIT1QtS0VZ"}}),
         json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm-a", "namespace": "demo"}}),
         json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm-b", "namespace": "demo"}}),
         json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm-other", "namespace": "elsewhere"}}),
-    ])
+    ]
 }
 
 fn handle(backend: Snapshot) -> LookupHandle {
@@ -152,13 +156,15 @@ fn render(chart: &ResolvedChart, handle: Option<LookupHandle>) -> nyl_render::Re
 }
 
 fn executor(handle: Option<LookupHandle>) -> HelmTemplateExecutor {
+    executor_declaring(handle, &[])
+}
+
+fn executor_declaring(handle: Option<LookupHandle>, more: &[&str]) -> HelmTemplateExecutor {
+    let mut api_versions = vec!["v1".to_owned(), "apps/v1".to_owned(), "foo.example.com/v1".to_owned()];
+    api_versions.extend(more.iter().map(|entry| (*entry).to_owned()));
     HelmTemplateExecutor::new()
         .with_kube_version("1.30.0")
-        .with_api_versions(vec![
-            "v1".to_owned(),
-            "apps/v1".to_owned(),
-            "foo.example.com/v1".to_owned(),
-        ])
+        .with_api_versions(api_versions)
         .with_lookup(handle)
 }
 
@@ -415,5 +421,159 @@ async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
         results(&manifests)["listNames"],
         "cm-a",
         "a ConfigMap the cluster holds but the Release does not own is absent"
+    );
+}
+
+const CAPABILITIES_TEMPLATE: &str = r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: capabilities
+data:
+  apiVersions: {{ .Capabilities.APIVersions | toJson | quote }}
+"#;
+
+fn capabilities(manifests: &[Value]) -> BTreeSet<String> {
+    let versions = manifests
+        .iter()
+        .find(|manifest| manifest["metadata"]["name"] == "capabilities")
+        .expect("the chart renders its capabilities")["data"]["apiVersions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    serde_json::from_str(&versions).unwrap()
+}
+
+/// Catches `.Capabilities` depending on the snapshot or on the chart's own output, which would
+/// make the first render of a Release (nothing published) differ from every later one.
+#[test]
+fn test_capabilities_do_not_depend_on_what_the_snapshot_holds() {
+    let directory = TempDir::new().unwrap();
+    let chart = chart(directory.path(), &[("capabilities.yaml", CAPABILITIES_TEMPLATE)]);
+    let with_widget = {
+        let mut documents = vec![
+            json!({"apiVersion": "foo.example.com/v1", "kind": "Widget", "metadata": {"name": "w", "namespace": "demo"}}),
+            json!({"apiVersion": "policy/v1", "kind": "PodDisruptionBudget", "metadata": {"name": "pdb", "namespace": "demo"}}),
+        ];
+        documents.extend(snapshot_with_ca_documents());
+        objects(documents)
+    };
+    let empty = objects(vec![
+        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm-a", "namespace": "demo"}}),
+    ]);
+    let first = capabilities(&render(&chart, Some(handle(Snapshot(Ok(empty))))).unwrap());
+    let later = capabilities(&render(&chart, Some(handle(Snapshot(Ok(with_widget))))).unwrap());
+    assert_eq!(
+        first, later,
+        "the same declaration lists the same capabilities on every render"
+    );
+    assert!(first.contains("apps/v1/Deployment"), "built-in kinds are listed");
+    assert!(
+        first.contains("shipped.example.com/v1/Thing"),
+        "the chart's CRD kinds are listed"
+    );
+    assert!(first.contains("policy/v1"), "Helm's default API versions are listed");
+    assert!(
+        !first.contains("foo.example.com/v1/Widget"),
+        "a kind only the snapshot holds is not listed"
+    );
+}
+
+#[test]
+fn test_a_rendered_kind_of_a_declared_api_version_needs_its_declaration() {
+    let directory = TempDir::new().unwrap();
+    let chart = chart(
+        directory.path(),
+        &[(
+            "widget.yaml",
+            "apiVersion: foo.example.com/v1\nkind: Widget\nmetadata:\n  name: w\nspec: {}\n",
+        )],
+    );
+    let new_handle = || handle(Snapshot(Ok(snapshot_with_ca())));
+    let error = executor(Some(new_handle()))
+        .template(&chart, "web", Some("demo"), &Value::Null)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("NYL-HELM-LOOKUP-KIND-UNDECLARED:"), "{error}");
+    assert!(
+        error.contains("declare foo.example.com/v1/Widget") && error.contains("no matches for kind"),
+        "the fix names the kind and Helm's words follow: {error}"
+    );
+    let declared = executor_declaring(Some(new_handle()), &["foo.example.com/v1/Widget"])
+        .template(&chart, "web", Some("demo"), &Value::Null)
+        .unwrap();
+    assert!(declared.iter().any(|manifest| manifest["kind"] == "Widget"));
+}
+
+/// Catches a lookup of an API version nobody declared surfacing as "helm template failed".
+#[test]
+fn test_a_lookup_of_an_undeclared_api_version_fails_with_its_code_and_fix() {
+    let directory = TempDir::new().unwrap();
+    let chart = chart(
+        directory.path(),
+        &[(
+            "peek.yaml",
+            "{{- $w := lookup \"undeclared.example.com/v1\" \"Widget\" \"demo\" \"w\" }}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: peek\ndata:\n  found: {{ empty $w | quote }}\n",
+        )],
+    );
+    let error = render(&chart, Some(handle(Snapshot(Ok(snapshot_with_ca())))))
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("NYL-HELM-LOOKUP-API-VERSION-UNDECLARED:"), "{error}");
+    assert!(
+        error.contains("undeclared.example.com/v1") && error.contains("spec.kubernetes.apiVersions"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_an_object_looked_up_at_another_version_than_it_is_held_at_fails_instead_of_reading_absent() {
+    let directory = TempDir::new().unwrap();
+    let chart = chart(
+        directory.path(),
+        &[(
+            "hpa.yaml",
+            "{{- $h := lookup \"autoscaling/v1\" \"HorizontalPodAutoscaler\" \"demo\" \"web\" }}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: hpa\ndata:\n  found: {{ empty $h | quote }}\n",
+        )],
+    );
+    let mut documents = snapshot_with_ca_documents();
+    documents.push(json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web", "namespace": "demo"}}));
+    let error = render(&chart, Some(handle(Snapshot(Ok(objects(documents))))))
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("NYL-HELM-LOOKUP-VERSION-MISMATCH:"), "{error}");
+    assert!(error.contains("held at v2"), "{error}");
+}
+
+/// Catches the Helm cache reusing a record made under another scope: a render outside every
+/// group (`--defaults-only`) records its lookups as absent, which must not be replayed for the
+/// published Release, or the CA would be regenerated and rotated.
+#[test]
+fn test_a_scopeless_render_is_not_reused_for_a_published_release() {
+    let directory = TempDir::new().unwrap();
+    let chart = chart(directory.path(), &[]);
+    let cache_root = TempDir::new().unwrap();
+    let cache = nyl_render::render::cache::RenderCache::with_root(
+        cache_root.path(),
+        nyl_render::render::cache::CacheMode::Default,
+    )
+    .unwrap();
+    let config = || LookupConfig::new(Arc::new(Snapshot(Ok(snapshot_with_ca()))), BTreeSet::new());
+    let cached = |handle: LookupHandle| {
+        executor(Some(handle))
+            .with_gitops_cache(Some(cache.clone()))
+            .template(&chart, "web", Some("demo"), &Value::Null)
+            .unwrap()
+    };
+    let scopeless = cached(LookupHandle::new(config(), None, None));
+    assert_ne!(
+        secret_data(&scopeless)["tls.crt"],
+        json!("U05BUFNIT1QtQ0VSVA=="),
+        "outside every group nothing is found, so the CA is generated"
+    );
+    let published = cached(handle_with_config(config()));
+    assert_eq!(
+        secret_data(&published)["tls.crt"],
+        json!("U05BUFNIT1QtQ0VSVA=="),
+        "the published Release reuses its CA instead of the scope-less render's record"
     );
 }

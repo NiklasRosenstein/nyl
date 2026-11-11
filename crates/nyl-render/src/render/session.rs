@@ -514,6 +514,7 @@ impl RenderSession {
             request.lookup_scope.clone(),
         );
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
+        let has_lookup_chart = resources.iter().any(declares_lookup);
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
         let mut cacheable = cache_bypass_reasons.is_empty();
         let ReleaseCacheLookup {
@@ -650,6 +651,15 @@ impl RenderSession {
         // What the charts looked up is an input of this Release, and of the
         // target that renders it.
         let lookups = lookup_handle.observed();
+        if lookups.is_empty() && has_lookup_chart {
+            // Nothing was looked up, but the record names the scope it was made for all the
+            // same, which is what the next render's key asks for.
+            if let Some(probe) = &mut cache_probe {
+                probe
+                    .recorder
+                    .record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup_handle.scope_input())?;
+            }
+        }
         if !lookups.is_empty() {
             if let Some(config) = self.lookup.as_ref().filter(|config| !config.cacheable()) {
                 cacheable = false;
@@ -765,13 +775,18 @@ impl RenderSession {
         if let Some(previous) = &previous {
             recorder.replay_filesystem_dependencies(previous)?;
         }
+        // Where the Release is published decides which objects its lookups read, so a render
+        // for another group (or for none) never reuses one that looked up in this group's
+        // Release. A Release records it when its own HelmCharts declare `lookup`, and when the
+        // previous render recorded one because a chart it expanded did.
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.dependencies.contains_key(LOOKUP_SCOPE_DEPENDENCY))
+            || resources.iter().any(declares_lookup)
+        {
+            recorder.record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup.scope_input())?;
+        }
         if let Some(previous) = &previous {
-            if previous.dependencies.contains_key(LOOKUP_SCOPE_DEPENDENCY) {
-                // Where the Release is published decides which objects its
-                // lookups read, so a render for another group never reuses one
-                // that looked up in this group's Release.
-                recorder.record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup.scope_input())?;
-            }
             // The lookups the previous render made are inputs: the record is
             // reused only while each still returns what it did.
             recorder.replay_lookup_dependencies(previous, lookup.config());
@@ -1053,6 +1068,12 @@ fn target_template_context(target: &DeploymentTarget, trusted_source: bool) -> R
 /// The cache dependency that records where a Release that looked up objects is
 /// published; only such a Release records one.
 const LOOKUP_SCOPE_DEPENDENCY: &str = "lookup-scope";
+
+/// Whether a resource is a HelmChart that declares `lookup`.
+fn declares_lookup(resource: &RenderResource) -> bool {
+    resource.value.get("kind").and_then(Value::as_str) == Some("HelmChart")
+        && resource.value.pointer("/spec/lookup").is_some()
+}
 
 /// The Release a bundle declares: the Helm release its charts render for, and
 /// the namespace they render into by default.

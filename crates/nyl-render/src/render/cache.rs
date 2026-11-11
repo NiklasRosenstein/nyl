@@ -388,7 +388,7 @@ pub struct RecordedDependency {
 pub const LOOKUP_DEPENDENCY_KINDS: [&str; 3] = ["lookup", "lookup-secret", "lookup-discovery"];
 
 /// What one Helm `lookup` request, or the discovery a render saw, returned.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum LookupFingerprint {
     /// The object does not exist (a list is never absent; it is empty).
     Absent,
@@ -398,6 +398,17 @@ pub enum LookupFingerprint {
     /// fingerprints them with the cache-local key; they are never persisted
     /// and never digested without it.
     Secret(Vec<u8>),
+}
+
+/// Secret data never reaches a log or a panic message through `{:?}`.
+impl std::fmt::Debug for LookupFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => formatter.write_str("Absent"),
+            Self::Plain(digest) => formatter.debug_tuple("Plain").field(digest).finish(),
+            Self::Secret(bytes) => write!(formatter, "Secret(<redacted, {} bytes>)", bytes.len()),
+        }
+    }
 }
 
 /// Answers a recorded lookup again from the current source of lookups.
@@ -1229,6 +1240,16 @@ mod tests {
             first_recording.dependencies["token"].digest,
             second_recording.dependencies["token"].digest
         );
+    }
+
+    #[test]
+    fn a_lookup_fingerprint_never_prints_secret_data() {
+        let printed = format!("{:?}", LookupFingerprint::Secret(b"super-secret-ca-key".to_vec()));
+        assert!(
+            !printed.contains("super-secret") && printed.contains("redacted"),
+            "{printed}"
+        );
+        assert_eq!(format!("{:?}", LookupFingerprint::Absent), "Absent");
     }
 
     #[test]

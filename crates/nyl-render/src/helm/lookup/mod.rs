@@ -19,6 +19,7 @@
 //! is absent.
 
 pub mod api;
+mod builtin;
 pub mod capabilities;
 mod model;
 mod run;
@@ -27,7 +28,9 @@ mod server;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-pub use model::{join_api_version, EmptyStore, FilteredStore, KindInfo, ObjectRef, ObjectSet, ObjectStore, StoreError};
+pub use model::{
+    join_api_version, EmptyStore, FilteredStore, KindInfo, ObjectRef, ObjectSet, ObjectStore, RefreshAudit, StoreError,
+};
 pub use run::{render_with_lookup, LookupRender};
 pub use server::{ApiServer, ServerReport};
 
@@ -95,6 +98,22 @@ pub const LIVE_REFUSED_CODE: &str = "NYL-HELM-LOOKUP-LIVE-REFUSED";
 pub const LIVE_NEEDS_CLUSTER_CODE: &str = "NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER";
 /// The code of the error for a live cluster that cannot be read.
 pub const LIVE_UNAVAILABLE_CODE: &str = "NYL-HELM-LOOKUP-LIVE-UNAVAILABLE";
+/// The code of the error for a rendered or looked-up kind that discovery does not list.
+pub const KIND_UNDECLARED_CODE: &str = "NYL-HELM-LOOKUP-KIND-UNDECLARED";
+/// The code of the error for an object a chart looks up at another API version than it is held at.
+pub const VERSION_MISMATCH_CODE: &str = "NYL-HELM-LOOKUP-VERSION-MISMATCH";
+/// The code of the error for a Helm that does not take the flags a lookup render needs.
+pub const HELM_UNSUPPORTED_CODE: &str = "NYL-HELM-LOOKUP-HELM-UNSUPPORTED";
+/// The code of the warning for a `--refresh-lookup` reference that matched nothing.
+pub const REFRESH_UNMATCHED_CODE: &str = "NYL-HELM-LOOKUP-REFRESH-UNMATCHED";
+
+/// The fix for an API version a render with lookup cannot serve.
+pub(crate) fn declare_api_version_fix(api_version: &str) -> String {
+    format!(
+        "declare {api_version} in the Cluster's spec.kubernetes.apiVersions (or pass it to --kube-api-versions for a \
+         render without a target), or ship the CustomResourceDefinition in the chart's crds/"
+    )
+}
 
 const REQUEST_PREFIX: &str = "lookup:";
 const DISCOVERY_PREFIX: &str = "lookup-discovery:";
@@ -178,7 +197,7 @@ impl LookupBackend for NoSnapshot {
 #[derive(Clone)]
 pub struct LookupConfig {
     backend: Arc<dyn LookupBackend>,
-    refresh: Arc<BTreeSet<ObjectRef>>,
+    refresh: Arc<RefreshAudit>,
 }
 
 impl std::fmt::Debug for LookupConfig {
@@ -201,7 +220,7 @@ impl LookupConfig {
     pub fn new(backend: Arc<dyn LookupBackend>, refresh: BTreeSet<ObjectRef>) -> Self {
         Self {
             backend,
-            refresh: Arc::new(refresh),
+            refresh: Arc::new(RefreshAudit::new(refresh)),
         }
     }
 
@@ -213,13 +232,9 @@ impl LookupConfig {
         self.backend.cacheable()
     }
 
-    /// The same backend with another set of objects treated as absent.
-    #[must_use]
-    pub fn with_refresh(&self, refresh: BTreeSet<ObjectRef>) -> Self {
-        Self {
-            backend: self.backend.clone(),
-            refresh: Arc::new(refresh),
-        }
+    /// The references to treat as absent that have hidden no object so far.
+    pub fn unmatched_refreshes(&self) -> Vec<ObjectRef> {
+        self.refresh.unmatched()
     }
 
     fn store(&self, scope: &ReleaseScope) -> Arc<dyn ObjectStore> {
@@ -227,7 +242,7 @@ impl LookupConfig {
         if self.refresh.is_empty() {
             store
         } else {
-            Arc::new(FilteredStore::refreshing(store, (*self.refresh).clone()))
+            Arc::new(FilteredStore::refreshing(store, self.refresh.clone()))
         }
     }
 }
