@@ -1,12 +1,20 @@
 //! The API versions a lookup render declares to Helm.
 //!
 //! Helm in server mode reads `.Capabilities.APIVersions` from discovery and
-//! ignores `--api-versions`. To keep a chart's capability checks the way an
-//! offline render answers them, discovery lists exactly what an offline render
-//! would: Helm's own default set for the pinned binary, the Cluster's declared
-//! API versions, and the API versions of the CustomResourceDefinitions the chart
-//! ships in `crds/`, which `--include-crds` renders alongside it. Objects the
-//! snapshot holds add their API versions, because Helm must map them.
+//! ignores `--api-versions`. Discovery therefore lists what an offline render
+//! lists, plus the `group/version/Kind` entries Helm needs to map objects:
+//!
+//! - Helm's own default API versions for the pinned binary (probed below),
+//! - the Cluster's declared API versions, and the kinds declared as
+//!   `group/version/Kind`,
+//! - the API versions and kinds of the CustomResourceDefinitions the chart ships
+//!   in `crds/`, which `--include-crds` renders alongside it, and
+//! - the built-in kinds of every listed API version ([`super::builtin`]).
+//!
+//! Nothing else: not the objects the lookup source holds, and not the kinds a
+//! chart happens to render. So `.Capabilities` is the same on the first render of
+//! a Release and on every later one, and a chart that renders a kind discovery
+//! cannot map fails with the declaration that fixes it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

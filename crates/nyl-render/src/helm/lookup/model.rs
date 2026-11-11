@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
@@ -233,9 +234,83 @@ impl<S: ObjectStore> FilteredStore<S> {
         }
     }
 
-    /// `inner` without the objects `refresh` names.
-    pub fn refreshing(inner: S, refresh: BTreeSet<ObjectRef>) -> Self {
-        Self::new(inner, move |object| !refresh.iter().any(|name| name.matches(object)))
+    /// `inner` without the objects the audit's references name.
+    pub fn refreshing(inner: S, audit: Arc<RefreshAudit>) -> Self {
+        Self::new(inner, move |object| !audit.hides(object))
+    }
+}
+
+/// The `--refresh-lookup` references of a command, and which of them hid an object
+/// from a chart's lookup. A reference that never did (a typo, or an object no chart
+/// looks up) is reported once the command is done with its lookups, so a rotation
+/// that did nothing is not silent.
+#[derive(Debug, Default)]
+pub struct RefreshAudit {
+    refs: BTreeSet<ObjectRef>,
+    hit: Mutex<BTreeSet<ObjectRef>>,
+}
+
+/// References that hid an object in any audit of this process. A direct command
+/// renders through two lookup configurations, and the reference counts as matched
+/// when either one hid its object.
+static MATCHED: Mutex<BTreeSet<ObjectRef>> = Mutex::new(BTreeSet::new());
+static REPORTED: Mutex<BTreeSet<ObjectRef>> = Mutex::new(BTreeSet::new());
+
+impl RefreshAudit {
+    pub fn new(refs: BTreeSet<ObjectRef>) -> Self {
+        Self {
+            refs,
+            hit: Mutex::default(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+
+    /// Whether the user asked to treat `object` as absent, noting the reference that did.
+    fn hides(&self, object: &Value) -> bool {
+        let mut hidden = false;
+        for reference in self.refs.iter().filter(|reference| reference.matches(object)) {
+            hidden = true;
+            self.hit
+                .lock()
+                .expect("refresh hits are not poisoned")
+                .insert(reference.clone());
+            MATCHED
+                .lock()
+                .expect("refresh hits are not poisoned")
+                .insert(reference.clone());
+        }
+        hidden
+    }
+
+    /// The references that have hidden no object so far.
+    pub fn unmatched(&self) -> Vec<ObjectRef> {
+        let hit = self.hit.lock().expect("refresh hits are not poisoned");
+        self.refs
+            .iter()
+            .filter(|reference| !hit.contains(*reference))
+            .cloned()
+            .collect()
+    }
+}
+
+impl Drop for RefreshAudit {
+    fn drop(&mut self) {
+        let matched = MATCHED.lock().expect("refresh hits are not poisoned").clone();
+        let mut reported = REPORTED.lock().expect("refresh reports are not poisoned");
+        for reference in self.unmatched() {
+            if matched.contains(&reference) || !reported.insert(reference.clone()) {
+                continue;
+            }
+            tracing::warn!(
+                "{}: --refresh-lookup {reference} matched no object that a chart looked up, so it changed nothing. \
+                 Check the spelling: Kind/namespace/name, or Kind/name for a cluster-scoped object, such as \
+                 Secret/kube-system/cilium-ca; an object the source does not hold yet is not found by it either",
+                super::REFRESH_UNMATCHED_CODE
+            );
+        }
     }
 }
 
@@ -277,40 +352,53 @@ struct StoredObject {
 
 impl ObjectSet {
     /// Index `documents`. `namespaced` says whether a kind of `(group, kind)` is
-    /// namespaced when its object names no namespace; a namespaced object that
-    /// names none lives in `default_namespace`, where its Application puts it.
+    /// namespaced; a namespaced object that names no namespace lives in
+    /// `default_namespace`, where its Application puts it.
+    ///
+    /// A kind has one scope across its objects, so discovery lists it once: what
+    /// `namespaced` says, and a kind it does not know is taken to be namespaced, as Argo CD
+    /// applies an unnamespaced custom resource into the destination namespace. An object
+    /// that names a namespace of a kind `namespaced` says is cluster-scoped is read without
+    /// one.
     pub fn from_documents(
         documents: Vec<Value>,
         namespaced: &dyn Fn(&str, &str) -> Option<bool>,
         default_namespace: &str,
     ) -> Result<Self, String> {
-        let mut by_identity = BTreeMap::new();
-        for mut document in documents {
-            let text = |document: &Value, pointer: &str| {
-                document
-                    .pointer(pointer)
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                    .map(ToOwned::to_owned)
-            };
+        let text = |document: &Value, pointer: &str| {
+            document
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        let mut identities = Vec::with_capacity(documents.len());
+        for document in &documents {
             let (Some(api_version), Some(kind), Some(name)) = (
-                text(&document, "/apiVersion"),
-                text(&document, "/kind"),
-                text(&document, "/metadata/name"),
+                text(document, "/apiVersion"),
+                text(document, "/kind"),
+                text(document, "/metadata/name"),
             ) else {
                 return Err("a document has no apiVersion, kind, or metadata.name".to_owned());
             };
-            let (group, _) = split_api_version(&api_version);
-            let mut namespace = text(&document, "/metadata/namespace");
-            let is_namespaced = match &namespace {
-                Some(_) => true,
-                None => namespaced(group, &kind).unwrap_or(false),
-            };
+            identities.push((api_version, kind, name, text(document, "/metadata/namespace")));
+        }
+        let mut scopes: BTreeMap<String, bool> = BTreeMap::new();
+        let mut by_identity = BTreeMap::new();
+        for (mut document, (api_version, kind, name, mut namespace)) in documents.into_iter().zip(identities) {
+            let group = split_api_version(&api_version).0;
+            let group_kind = format!("{group}/{kind}");
+            let is_namespaced = *scopes
+                .entry(group_kind)
+                .or_insert_with(|| namespaced(group, &kind).unwrap_or(true));
             if is_namespaced && namespace.is_none() {
                 namespace = Some(default_namespace.to_owned());
                 if let Some(metadata) = document.get_mut("metadata").and_then(Value::as_object_mut) {
                     metadata.insert("namespace".to_owned(), Value::String(default_namespace.to_owned()));
                 }
+            } else if !is_namespaced && namespace.is_some() {
+                // A cluster-scoped kind has no namespace to read it in.
+                namespace = None;
             }
             let kind_info = KindInfo::new(&api_version, &kind, is_namespaced);
             by_identity.insert(
@@ -407,6 +495,62 @@ mod tests {
         assert!(role.matches(&json!({"kind": "ClusterRole", "metadata": {"name": "admin"}})));
         assert!("Secret".parse::<ObjectRef>().is_err());
         assert!("Secret//x".parse::<ObjectRef>().is_err());
+    }
+
+    /// Catches one kind being listed twice because one of its objects names a namespace and
+    /// another does not, and an unknown scope reading as cluster-scoped.
+    #[test]
+    fn test_a_kind_has_one_scope_and_an_unknown_one_is_namespaced_in_the_destination() {
+        let set = ObjectSet::from_documents(
+            vec![
+                json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "a", "namespace": "demo"}}),
+                json!({"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "b"}}),
+                json!({"apiVersion": "example.com/v1", "kind": "Gadget", "metadata": {"name": "c"}}),
+                json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "demo", "namespace": "stray"}}),
+            ],
+            &|group, kind| (group.is_empty() && kind == "Namespace").then_some(false),
+            "apps",
+        )
+        .unwrap();
+        let kinds = set.kinds().unwrap();
+        assert_eq!(
+            kinds
+                .iter()
+                .map(|kind| (kind.kind.as_str(), kind.namespaced))
+                .collect::<Vec<_>>(),
+            [("Namespace", false), ("Gadget", true), ("Widget", true)],
+            "{kinds:?}"
+        );
+        let widget = KindInfo::new("example.com/v1", "Widget", true);
+        assert!(set.get(&widget, Some("apps"), "b").unwrap().is_some());
+        assert!(set.get(&widget, Some("demo"), "a").unwrap().is_some());
+        let gadget = KindInfo::new("example.com/v1", "Gadget", true);
+        assert!(set.get(&gadget, Some("apps"), "c").unwrap().is_some());
+        let namespace = KindInfo::new("v1", "Namespace", false);
+        assert!(set.get(&namespace, None, "demo").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_a_refresh_reference_that_hid_nothing_is_reported_as_unmatched() {
+        let audit = Arc::new(RefreshAudit::new(BTreeSet::from([
+            "Secret/demo/ca".parse().unwrap(),
+            "Secret/demo/typo".parse().unwrap(),
+        ])));
+        let store = FilteredStore::refreshing(
+            ObjectSet::from_documents(
+                vec![json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "ca", "namespace": "demo"}})],
+                &|_, _| Some(true),
+                "demo",
+            )
+            .unwrap(),
+            audit.clone(),
+        );
+        let secret = KindInfo::new("v1", "Secret", true);
+        assert!(store.get(&secret, Some("demo"), "ca").unwrap().is_none());
+        assert_eq!(
+            audit.unmatched().iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["Secret/demo/typo"]
+        );
     }
 
     #[test]

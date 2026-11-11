@@ -208,7 +208,6 @@ impl HelmTemplateExecutor {
 
         // Execute helm template
         let (output, observed) = if let Some(handle) = &self.lookup {
-            let rendered_kinds = offline_rendered_kinds(&build);
             let (output, observed) = render_with_lookup(
                 &build,
                 &LookupRender {
@@ -217,7 +216,6 @@ impl HelmTemplateExecutor {
                     chart: &resolved.path,
                     kube_version: self.kube_version.as_deref().unwrap_or_default(),
                     api_versions: &self.api_versions,
-                    rendered_kinds: &rendered_kinds,
                 },
             )?;
             handle.observe_all(&observed);
@@ -287,9 +285,12 @@ impl HelmTemplateExecutor {
             "includeCrds": self.include_crds,
             "preserveSourceComments": preserve_source_comments,
         });
-        if self.lookup.is_some() {
-            // Charts that declare no lookup keep their existing cache entries.
-            parameters["lookup"] = serde_json::Value::Bool(true);
+        if let Some(handle) = &self.lookup {
+            // Charts that declare no lookup keep their existing cache entries. Where the
+            // Release is published decides which objects its lookups read, and a record
+            // names the lookups it made under the scope they were made in, so a render for
+            // another scope (or for none, such as `--defaults-only`) never reuses it.
+            parameters["lookup"] = serde_json::json!({"scope": handle.scope_input()});
         }
         recorder.record_value("parameters", &parameters)?;
         cache.record_renderer_tools(&mut recorder)?;
@@ -424,37 +425,6 @@ impl std::fmt::Debug for HelmTemplateExecutor {
 struct HelmCacheProbe {
     key: String,
     recorder: crate::render::cache::DependencyRecorder,
-}
-
-/// The `(apiVersion, kind)` of every object an offline render of the chart
-/// produces, which a lookup render lists in discovery so Helm can map them. A
-/// chart that cannot render offline contributes none; the lookup render then
-/// learns the kinds it needs from Helm's own errors.
-fn offline_rendered_kinds(build: &dyn Fn() -> Command) -> std::collections::BTreeSet<(String, String)> {
-    let output = match build().output() {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            tracing::debug!(
-                "The offline render that lists a lookup render's kinds failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return std::collections::BTreeSet::new();
-        }
-        Err(error) => {
-            tracing::debug!("The offline render that lists a lookup render's kinds did not run: {error}");
-            return std::collections::BTreeSet::new();
-        }
-    };
-    parse_yaml_documents(&String::from_utf8_lossy(&output.stdout))
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|manifest| {
-            Some((
-                manifest.get("apiVersion")?.as_str()?.to_owned(),
-                manifest.get("kind")?.as_str()?.to_owned(),
-            ))
-        })
-        .collect()
 }
 
 /// Helper to write values to a temporary file

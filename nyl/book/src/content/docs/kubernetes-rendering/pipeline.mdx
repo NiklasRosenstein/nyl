@@ -48,8 +48,12 @@ first chart needs it. `publish-tree` verifies that the publication branch did no
 between that read and its push. Each lookup a chart makes is recorded as a render
 cache input with the digest of its result (a keyed fingerprint when it holds Secret
 data), at the Helm, Release, and target cache layers alike, and a cached render is
-reused only while every recorded lookup still returns the same result. A publication
-that cannot be read is an error, never an absent object.
+reused only while every recorded lookup still returns the same result, under the scope
+(the directory the Release is published in) the lookup was made for, so a render that
+belongs to no published Release, such as `--defaults-only`, is never reused for one that
+does. A publication that cannot be read is an error, never an absent object, and the
+API lists the same kinds to Helm whatever the publication holds, so the first render of
+a Release and every later one see the same `.Capabilities`.
 
 ## Argo CD sync waves and phases
 

@@ -8266,6 +8266,32 @@ fn test_lookup_keeps_a_published_ca_across_cold_cache_renders() {
     );
 }
 
+/// Catches a render made outside every group (`--defaults-only`, which finds nothing and so
+/// generates a CA) being reused for the published Release by a warm cache: the Helm layer's
+/// record names where the Release was published, and that must be part of its key, or the
+/// next `publish-tree` would publish the generated CA and rotate it.
+#[test]
+fn test_a_scopeless_render_is_never_reused_for_the_published_release() {
+    let (fixture, destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "lookup");
+
+    let warm = TempDir::new().unwrap();
+    let scopeless = rendered_ca(&fixture, &warm, "lookup", &["--defaults-only"]);
+    assert_ne!(
+        scopeless, ca,
+        "outside every group nothing is found, so a CA is generated"
+    );
+    assert_eq!(
+        rendered_ca(&fixture, &warm, "lookup", &[]),
+        ca,
+        "the published Release reads its CA, whatever the warm cache holds"
+    );
+    // The cache that holds the scope-less record publishes nothing new.
+    publish_with_cache(&fixture, &warm);
+    assert_eq!(published_ca(&destination, "lookup"), ca);
+}
+
 /// Catches rotation being impossible, or leaking into other renders: the named
 /// object reads as absent for one render, so the CA regenerates; the next
 /// publication then keeps the new CA.
@@ -8298,6 +8324,32 @@ fn test_refresh_lookup_regenerates_one_object_for_one_render() {
     assert_ne!(published, ca);
     publish_with_cache(&fixture, &TempDir::new().unwrap());
     assert_eq!(published_ca(&destination, "lookup"), published);
+}
+
+/// Catches a mistyped `--refresh-lookup` being silent: a reference that hides no object a chart
+/// looked up changes nothing, so the command says so, once, with a stable code. A reference
+/// that does hide one is not reported.
+#[test]
+fn test_an_unmatched_refresh_lookup_reference_is_reported() {
+    let (fixture, _destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let render = |reference: &str| {
+        nyl_with_cache(&fixture, &TempDir::new().unwrap())
+            .args([
+                "render",
+                "applications/workloads/lookup.yaml",
+                "--target",
+                "production",
+                "--refresh-lookup",
+                reference,
+            ])
+            .assert()
+            .success()
+    };
+    render("Secret/lookup/lookup-cs")
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-REFRESH-UNMATCHED"))
+        .stderr(predicate::str::contains("Secret/lookup/lookup-cs"));
+    render("Secret/lookup/lookup-ca").stderr(predicate::str::contains("NYL-HELM-LOOKUP-REFRESH-UNMATCHED").not());
 }
 
 /// Catches the first render, before anything is published, failing: with no

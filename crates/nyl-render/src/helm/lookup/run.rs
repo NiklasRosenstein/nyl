@@ -9,20 +9,18 @@ use std::sync::{Arc, OnceLock};
 use regex::Regex;
 
 use super::api::{discovery_fingerprint, ApiCapabilities, ApiState};
+use super::builtin::builtin_kinds_of;
 use super::capabilities::{
     chart_crd_kinds, declares_api_version, helm_default_api_versions, parse_declared_api_version,
 };
 use super::model::{split_api_version, KindInfo};
 use super::{
-    discovery_dependency_name, lookup_error, request_dependency_name, LookupHandle, ServerReport,
-    API_VERSION_UNDECLARED_CODE, SERVER_FAILED_CODE,
+    declare_api_version_fix, discovery_dependency_name, lookup_error, request_dependency_name, LookupHandle,
+    ServerReport, API_VERSION_UNDECLARED_CODE, HELM_UNSUPPORTED_CODE, KIND_UNDECLARED_CODE, SERVER_FAILED_CODE,
 };
 use crate::render::cache::LookupFingerprint;
 use crate::resources::ResourceScope;
 use crate::{NylError, Result};
-
-/// The most kinds a render may add to discovery after Helm failed to map them.
-const MAX_MAPPING_RETRIES: usize = 64;
 
 /// Everything Helm needs to render against the lookup API besides its command.
 pub struct LookupRender<'a> {
@@ -35,10 +33,6 @@ pub struct LookupRender<'a> {
     pub kube_version: &'a str,
     /// The declared API versions, which discovery lists.
     pub api_versions: &'a [String],
-    /// The `(apiVersion, kind)` of every object an offline render of the chart
-    /// produces. Helm maps each object it renders through discovery and cannot
-    /// map a kind discovery does not list, so discovery lists these.
-    pub rendered_kinds: &'a BTreeSet<(String, String)>,
 }
 
 /// Run the `helm template` that `build` makes with Helm's cluster replaced by
@@ -58,53 +52,30 @@ pub fn render_with_lookup(
     let scope = run.handle.scope()?;
     let store = run.handle.config().store(&scope);
 
+    // What discovery lists is fixed by the declaration and the chart, never by what the
+    // lookup source holds, so `.Capabilities` is the same on every render of a Release.
     let mut group_versions = (*helm_default_api_versions()?).clone();
-    let mut kinds = BTreeSet::new();
+    let mut declared = Vec::new();
     for entry in run.api_versions {
         let (api_version, kind) = parse_declared_api_version(entry);
         group_versions.insert(api_version.clone());
-        kinds.extend(kind.map(|kind| declared_kind(&api_version, &kind, None)));
+        declared.extend(kind.map(|kind| declared_kind(&api_version, &kind, None)));
     }
     let crd_kinds = chart_crd_kinds(run.chart)?;
     group_versions.extend(crd_kinds.iter().map(KindInfo::api_version));
-    kinds.extend(crd_kinds);
-    // Only kinds of declared API versions are listed: an API version nobody
-    // declared stays unlisted, so Helm cannot map it and the render says so.
-    kinds.extend(
-        run.rendered_kinds
-            .iter()
-            .filter(|(api_version, _)| declares_api_version(&group_versions, api_version))
-            .map(|(api_version, kind)| declared_kind(api_version, kind, None)),
-    );
-
-    // A kind Helm renders that no offline render showed (a template that
-    // depends on a lookup result) is added when Helm reports it, one retry
-    // per kind.
-    for _ in 0..=MAX_MAPPING_RETRIES {
-        let capabilities = ApiCapabilities::new(run.kube_version, group_versions.clone(), kinds.clone())
-            .map_err(|error| NylError::config(format!("Cannot declare the Kubernetes version to Helm: {error}")))?;
-        match attempt(build(), run, &capabilities, &group_versions, &scope, &store)? {
-            Attempt::Rendered(rendered) => return Ok(rendered),
-            Attempt::Unmapped { api_version, kind } => {
-                if !kinds.insert(declared_kind(&api_version, &kind, None)) {
-                    break;
-                }
-            }
-        }
-    }
-    Err(NylError::HelmChart(format!(
-        "helm could not map every kind the Helm release {:?} renders",
-        run.release_name
-    )))
-}
-
-enum Attempt {
-    Rendered((Output, BTreeMap<String, LookupFingerprint>)),
-    /// Helm rendered a kind of a declared API version that discovery does not list.
-    Unmapped {
-        api_version: String,
-        kind: String,
-    },
+    // Helm maps every object it renders, and every kind a chart looks up, through discovery:
+    // the built-in kinds of the declared API versions, the kinds declared as
+    // `group/version/Kind`, and the kinds the chart's own CRDs define. Where they list one
+    // kind twice, the CRD's scope wins over the built-in table's, which wins over a declared
+    // entry's guess.
+    let kinds = declared
+        .into_iter()
+        .chain(builtin_kinds_of(&group_versions))
+        .chain(crd_kinds)
+        .collect::<Vec<_>>();
+    let capabilities = ApiCapabilities::new(run.kube_version, group_versions.clone(), kinds)
+        .map_err(|error| NylError::config(format!("Cannot declare the Kubernetes version to Helm: {error}")))?;
+    attempt(build(), run, &capabilities, &group_versions, &scope, &store)
 }
 
 fn attempt(
@@ -114,7 +85,7 @@ fn attempt(
     declared: &BTreeSet<String>,
     scope: &super::ReleaseScope,
     store: &Arc<dyn super::ObjectStore>,
-) -> Result<Attempt> {
+) -> Result<(Output, BTreeMap<String, LookupFingerprint>)> {
     let token = random_token()?;
     let state = Arc::new(ApiState::new(capabilities.clone(), store.clone(), token.clone()));
     let server = super::ApiServer::start(state, token)?;
@@ -141,10 +112,7 @@ fn attempt(
 
     if !output.status.success() || !report.failures.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return match failure(run, &report, &stderr, declared) {
-            Failure::Unmapped { api_version, kind } => Ok(Attempt::Unmapped { api_version, kind }),
-            Failure::Error(error) => Err(error),
-        };
+        return Err(failure(run, &report, &stderr, declared));
     }
     let mut observed = report
         .observations
@@ -158,7 +126,7 @@ fn attempt(
         .collect::<BTreeMap<_, _>>();
     let discovery = discovery_fingerprint(store.as_ref()).map_err(|error| lookup_error(SERVER_FAILED_CODE, error))?;
     observed.insert(discovery_dependency_name(scope), LookupFingerprint::Plain(discovery));
-    Ok(Attempt::Rendered((output, observed)))
+    Ok((output, observed))
 }
 
 /// A kind Helm must map: the scope of a built-in kind is fixed, and any other
@@ -192,12 +160,7 @@ fn isolate_kube_environment(command: &mut Command, kubeconfig: &Path) {
     command.env("no_proxy", "127.0.0.1,localhost");
 }
 
-enum Failure {
-    Unmapped { api_version: String, kind: String },
-    Error(NylError),
-}
-
-fn failure(run: &LookupRender<'_>, report: &ServerReport, stderr: &str, declared: &BTreeSet<String>) -> Failure {
+fn failure(run: &LookupRender<'_>, report: &ServerReport, stderr: &str, declared: &BTreeSet<String>) -> NylError {
     if let Some(first) = report.failures.first() {
         let code = first.code.unwrap_or(SERVER_FAILED_CODE);
         let message = match first.code {
@@ -207,22 +170,42 @@ fn failure(run: &LookupRender<'_>, report: &ServerReport, stderr: &str, declared
                 run.release_name, first.message
             ),
         };
-        return Failure::Error(lookup_error(code, message));
+        return lookup_error(code, message);
+    }
+    if stderr.contains("unknown flag: --take-ownership") {
+        return lookup_error(
+            HELM_UNSUPPORTED_CODE,
+            format!(
+                "the Helm release {:?} declares lookup, which renders with `helm template --dry-run=server \
+                 --take-ownership` and needs Helm 3.17 or later; install the Helm version the project pins \
+                 (mise install helm). Helm said: {}",
+                run.release_name,
+                stderr.trim()
+            ),
+        );
     }
     match unmapped_kind(stderr) {
-        Some((api_version, kind)) if declares_api_version(declared, &api_version) => {
-            Failure::Unmapped { api_version, kind }
-        }
-        Some((api_version, kind)) => Failure::Error(lookup_error(
+        Some((api_version, kind)) if declares_api_version(declared, &api_version) => lookup_error(
+            KIND_UNDECLARED_CODE,
+            format!(
+                "the Helm release {:?} renders or looks up {kind} of API version {api_version}, which is declared but \
+                 whose kind a render with lookup cannot map; declare {api_version}/{kind} in the Cluster's \
+                 spec.kubernetes.apiVersions (or pass it to --kube-api-versions for a render without a target), or \
+                 ship the CustomResourceDefinition in the chart's crds/. Helm said: {}",
+                run.release_name,
+                stderr.trim()
+            ),
+        ),
+        Some((api_version, kind)) => lookup_error(
             API_VERSION_UNDECLARED_CODE,
             format!(
-                "the Helm release {:?} renders {kind} of API version {api_version}, which is not declared, so a render with \
-                 lookup cannot map it; declare {api_version} in the Cluster's spec.kubernetes.apiVersions (or pass it to \
-                 --kube-api-versions for a render without a target), or ship the CustomResourceDefinition in the chart's crds/",
-                run.release_name
+                "the Helm release {:?} renders {kind} of API version {api_version}, which is not declared, so a render \
+                 with lookup cannot map it; {}",
+                run.release_name,
+                declare_api_version_fix(&api_version)
             ),
-        )),
-        None => Failure::Error(NylError::HelmChart(format!("helm template failed: {stderr}"))),
+        ),
+        None => NylError::HelmChart(format!("helm template failed: {stderr}")),
     }
 }
 
@@ -242,14 +225,13 @@ mod tests {
     use super::*;
     use crate::helm::lookup::{LookupConfig, LookupHandle};
 
-    fn run<'a>(handle: &'a LookupHandle, rendered: &'a BTreeSet<(String, String)>) -> LookupRender<'a> {
+    fn run(handle: &LookupHandle) -> LookupRender<'_> {
         LookupRender {
             handle,
             release_name: "cilium",
             chart: Path::new("."),
             kube_version: "1.30.0",
             api_versions: &[],
-            rendered_kinds: rendered,
         }
     }
 
@@ -258,16 +240,13 @@ mod tests {
     #[test]
     fn test_an_undeclared_api_version_is_reported_with_its_fix() {
         let handle = LookupHandle::new(LookupConfig::default(), None, None);
-        let rendered = BTreeSet::new();
-        let Failure::Error(error) = failure(
-            &run(&handle, &rendered),
+        let error = failure(
+            &run(&handle),
             &ServerReport::default(),
             NO_MATCH,
             &BTreeSet::from(["v1".to_owned()]),
-        ) else {
-            panic!("an undeclared API version is an error");
-        };
-        let error = error.to_string();
+        )
+        .to_string();
         assert!(error.starts_with("NYL-HELM-LOOKUP-API-VERSION-UNDECLARED:"), "{error}");
         assert!(
             error.contains("spec.kubernetes.apiVersions") && error.contains("foo.example.com/v1"),
@@ -276,40 +255,46 @@ mod tests {
     }
 
     #[test]
-    fn test_an_unlisted_kind_of_a_declared_api_version_is_added_to_discovery() {
+    fn test_an_unlisted_kind_of_a_declared_api_version_is_reported_with_its_kind_stderr_and_fix() {
         let handle = LookupHandle::new(LookupConfig::default(), None, None);
-        let rendered = BTreeSet::new();
-        match failure(
-            &run(&handle, &rendered),
+        let error = failure(
+            &run(&handle),
             &ServerReport::default(),
             NO_MATCH,
             &BTreeSet::from(["foo.example.com/v1".to_owned()]),
-        ) {
-            Failure::Unmapped { api_version, kind } => {
-                assert_eq!((api_version.as_str(), kind.as_str()), ("foo.example.com/v1", "Widget"));
-            }
-            Failure::Error(error) => panic!("a declared API version is retried, not {error}"),
-        }
+        )
+        .to_string();
+        assert!(error.starts_with("NYL-HELM-LOOKUP-KIND-UNDECLARED:"), "{error}");
+        assert!(
+            error.contains("declare foo.example.com/v1/Widget") && error.contains("no matches for kind"),
+            "the fix names the kind and Helm's own words follow: {error}"
+        );
+    }
+
+    #[test]
+    fn test_a_helm_that_does_not_take_the_flags_is_reported_with_its_fix() {
+        let handle = LookupHandle::new(LookupConfig::default(), None, None);
+        let error = failure(
+            &run(&handle),
+            &ServerReport::default(),
+            "Error: unknown flag: --take-ownership",
+            &BTreeSet::new(),
+        )
+        .to_string();
+        assert!(error.starts_with("NYL-HELM-LOOKUP-HELM-UNSUPPORTED:"), "{error}");
+        assert!(error.contains("Helm 3.17"), "{error}");
     }
 
     #[test]
     fn test_a_failed_read_is_reported_under_its_own_code() {
         let handle = LookupHandle::new(LookupConfig::default(), None, None);
-        let rendered = BTreeSet::new();
         let report = ServerReport {
             observations: Vec::new(),
             failures: vec![crate::helm::lookup::snapshot_unavailable(
                 "the publication cannot be read",
             )],
         };
-        let Failure::Error(error) = failure(
-            &run(&handle, &rendered),
-            &report,
-            "Error: lookup failed",
-            &BTreeSet::new(),
-        ) else {
-            panic!("a failed read is an error");
-        };
+        let error = failure(&run(&handle), &report, "Error: lookup failed", &BTreeSet::new());
         assert!(
             error.to_string().starts_with("NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE:"),
             "{error}"

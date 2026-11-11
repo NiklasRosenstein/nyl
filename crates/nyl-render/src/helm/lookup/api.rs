@@ -6,11 +6,13 @@
 //!
 //! - a request without the render's token is a 401, and any method but GET a 405;
 //! - an object that does not exist is a 404, and nothing else is: a store that
-//!   fails, a path that is not an object path, or a query the API does not
-//!   implement is a 500, so Helm fails instead of reading "absent" and
+//!   fails, a path that is not an object path, a query the API does not
+//!   implement, an API version nobody declared, or an object the store holds at
+//!   another version is a 500, so Helm fails instead of reading "absent" and
 //!   generating what the object would have held;
-//! - discovery lists the API versions the render declares, and kinds only for
-//!   what the store holds.
+//! - discovery lists the API versions and kinds the render declares and nothing the
+//!   store holds, so what a chart sees in `.Capabilities` never depends on the objects
+//!   it is about to look up.
 //!
 //! Responses and their fingerprints share [`evaluate`], so a cached render
 //! revalidates a recorded lookup with exactly the answer Helm got.
@@ -21,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use super::model::{split_api_version, KindInfo, ObjectStore, StoreError};
+use super::{declare_api_version_fix, API_VERSION_UNDECLARED_CODE, VERSION_MISMATCH_CODE};
 use crate::render::cache::LookupFingerprint;
 
 const JSON: &str = "application/json";
@@ -34,20 +37,20 @@ pub struct ApiCapabilities {
     major: String,
     minor: String,
     group_versions: BTreeSet<String>,
-    /// Kinds discovery lists beyond those the store holds: the ones a render
-    /// needs Helm to map.
-    declared_kinds: BTreeSet<KindInfo>,
+    /// The kinds discovery lists: one per kind of an API version.
+    kinds: BTreeMap<(String, String), KindInfo>,
 }
 
 impl ApiCapabilities {
     /// Capabilities for the declared Kubernetes version, the declared API
     /// versions (each `group/version`, or the core `version`), and the kinds
     /// that discovery must list because Helm maps every object it renders
-    /// through discovery and cannot map a kind it does not list.
+    /// through discovery and cannot map a kind it does not list. Of two entries
+    /// for one kind of an API version the later wins.
     pub fn new(
         kube_version: &str,
         group_versions: impl IntoIterator<Item = String>,
-        declared_kinds: impl IntoIterator<Item = KindInfo>,
+        kinds: impl IntoIterator<Item = KindInfo>,
     ) -> Result<Self, String> {
         let trimmed = kube_version.trim().trim_start_matches('v');
         let mut parts = trimmed.split('.');
@@ -71,7 +74,10 @@ impl ApiCapabilities {
             major,
             minor,
             group_versions: group_versions.into_iter().collect(),
-            declared_kinds: declared_kinds.into_iter().collect(),
+            kinds: kinds
+                .into_iter()
+                .map(|kind| ((kind.api_version(), kind.kind.clone()), kind))
+                .collect(),
         })
     }
 
@@ -90,29 +96,21 @@ impl ApiCapabilities {
         })
     }
 
-    /// Every API version discovery lists: the declared ones and those of `kinds`.
-    fn all_group_versions(&self, kinds: &[KindInfo]) -> BTreeSet<String> {
+    /// Every API version discovery lists: the declared ones and those of its kinds.
+    fn all_group_versions(&self) -> BTreeSet<String> {
         let mut versions = self.group_versions.clone();
-        versions.extend(kinds.iter().map(KindInfo::api_version));
-        versions.extend(self.declared_kinds.iter().map(KindInfo::api_version));
+        versions.extend(self.kinds.values().map(KindInfo::api_version));
         versions.insert("v1".to_owned());
         versions
     }
 
-    /// The kinds discovery lists under `api_version`: the store's, and the
-    /// declared `group/version/Kind` entries.
-    fn kinds_of(&self, api_version: &str, kinds: &[KindInfo]) -> Vec<KindInfo> {
-        let mut listed = kinds
-            .iter()
+    /// The kinds discovery lists under `api_version`.
+    fn kinds_of(&self, api_version: &str) -> Vec<KindInfo> {
+        self.kinds
+            .values()
             .filter(|kind| kind.api_version() == api_version)
             .cloned()
-            .collect::<BTreeSet<_>>();
-        for declared in &self.declared_kinds {
-            if declared.api_version() == api_version && !listed.iter().any(|listed| listed.kind == declared.kind) {
-                listed.insert(declared.clone());
-            }
-        }
-        listed.into_iter().collect()
+            .collect()
     }
 }
 
@@ -280,11 +278,8 @@ impl ApiState {
     }
 
     fn discover_core(&self, aggregated: bool) -> Result<Reply, StoreError> {
-        let kinds = self.store.kinds()?;
         if aggregated {
-            let item = aggregated_item("", &["v1".to_owned()], |version| {
-                self.capabilities.kinds_of(version, &kinds)
-            });
+            let item = aggregated_item("", &["v1".to_owned()], |version| self.capabilities.kinds_of(version));
             return Ok(Reply::json(
                 200,
                 AGGREGATED_DISCOVERY,
@@ -308,9 +303,8 @@ impl ApiState {
     }
 
     fn discover_groups(&self, aggregated: bool) -> Result<Reply, StoreError> {
-        let kinds = self.store.kinds()?;
         let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for api_version in self.capabilities.all_group_versions(&kinds) {
+        for api_version in self.capabilities.all_group_versions() {
             let (group, version) = split_api_version(&api_version);
             if !group.is_empty() {
                 groups.entry(group.to_owned()).or_default().push(version.to_owned());
@@ -321,7 +315,7 @@ impl ApiState {
                 .iter()
                 .map(|(group, versions)| {
                     aggregated_item(group, versions, |version| {
-                        self.capabilities.kinds_of(&format!("{group}/{version}"), &kinds)
+                        self.capabilities.kinds_of(&format!("{group}/{version}"))
                     })
                 })
                 .collect::<Vec<_>>();
@@ -354,17 +348,22 @@ impl ApiState {
     }
 
     fn resource_list(&self, api_version: &str) -> Result<Reply, StoreError> {
-        let kinds = self.store.kinds()?;
-        if !self.capabilities.all_group_versions(&kinds).contains(api_version) {
-            return Ok(Reply::status(
-                404,
-                "NotFound",
-                "the server could not find the requested resource",
+        if !self.capabilities.all_group_versions().contains(api_version) {
+            // Only a chart's own `lookup` asks for an API version discovery did not list. Helm
+            // would fail with a bare "not found" and the render with "helm template failed", so
+            // the failure is recorded with its code and its fix.
+            return Err(StoreError::new(
+                API_VERSION_UNDECLARED_CODE,
+                format!(
+                    "a chart looked up an object of API version {api_version}, which is not declared, so a render \
+                     with lookup cannot serve it; {}",
+                    declare_api_version_fix(api_version)
+                ),
             ));
         }
         let resources = self
             .capabilities
-            .kinds_of(api_version, &kinds)
+            .kinds_of(api_version)
             .iter()
             .map(|kind| {
                 json!({
@@ -594,33 +593,79 @@ fn is_secret(object: &Value) -> bool {
 }
 
 /// Evaluate `request` against `store`.
+///
+/// An object the store holds at another version of its kind than the request names is
+/// an error, never absent: Helm would read "absent" and generate what the object holds.
 pub fn evaluate(store: &dyn ObjectStore, request: &LookupRequest) -> Result<Evaluation, StoreError> {
     let kinds = store.kinds()?;
-    let Some(kind) = kinds
+    let (group, version) = split_api_version(&request.api_version);
+    let found = kinds
         .iter()
-        .find(|kind| kind.api_version() == request.api_version && kind.plural == request.plural)
-    else {
-        return Ok(Evaluation::UnknownResource);
+        .find(|kind| kind.api_version() == request.api_version && kind.plural == request.plural);
+    let evaluation = match found {
+        None => Evaluation::UnknownResource,
+        Some(kind) => {
+            // A cluster-scoped kind has no namespace to read it in.
+            if request.namespace.is_some() && !kind.namespaced {
+                return Ok(Evaluation::UnknownResource);
+            }
+            // A namespaced kind is read in the namespace its path names.
+            let namespace = request.namespace.as_deref().filter(|_| kind.namespaced);
+            match &request.name {
+                Some(name) => match store.get(kind, namespace, name)? {
+                    Some(object) => Evaluation::Object(object),
+                    None => Evaluation::Absent {
+                        plural: kind.plural.clone(),
+                        name: name.clone(),
+                    },
+                },
+                None => Evaluation::List {
+                    kind: kind.clone(),
+                    items: store.list(kind, namespace)?,
+                },
+            }
+        }
     };
-    // A namespaced kind is read in the namespace its path names, a cluster-scoped
-    // kind in none.
-    let namespace = request.namespace.as_deref().filter(|_| kind.namespaced);
-    if request.namespace.is_some() && !kind.namespaced {
-        return Ok(Evaluation::UnknownResource);
+    let found_nothing = match &evaluation {
+        Evaluation::UnknownResource | Evaluation::Absent { .. } => true,
+        Evaluation::List { items, .. } => items.is_empty(),
+        Evaluation::Object(_) => false,
+    };
+    if found_nothing {
+        for other in kinds
+            .iter()
+            .filter(|kind| kind.group == group && kind.plural == request.plural && kind.version != version)
+        {
+            let namespace = request.namespace.as_deref().filter(|_| other.namespaced);
+            let held = match &request.name {
+                Some(name) => store.get(other, namespace, name)?.is_some(),
+                None => !store.list(other, namespace)?.is_empty(),
+            };
+            if held {
+                return Err(version_mismatch(request, other));
+            }
+        }
     }
-    match &request.name {
-        Some(name) => Ok(match store.get(kind, namespace, name)? {
-            Some(object) => Evaluation::Object(object),
-            None => Evaluation::Absent {
-                plural: kind.plural.clone(),
-                name: name.clone(),
-            },
-        }),
-        None => Ok(Evaluation::List {
-            kind: kind.clone(),
-            items: store.list(kind, namespace)?,
-        }),
-    }
+    Ok(evaluation)
+}
+
+fn version_mismatch(request: &LookupRequest, held: &KindInfo) -> StoreError {
+    let what = match (&request.name, &request.namespace) {
+        (Some(name), Some(namespace)) => format!("{} {namespace}/{name}", held.kind),
+        (Some(name), None) => format!("{} {name}", held.kind),
+        (None, _) => format!("{} objects", held.kind),
+    };
+    StoreError::new(
+        VERSION_MISMATCH_CODE,
+        format!(
+            "a chart looked up {what} as {}, but the lookup source holds it at {} (held at {}); change the chart's \
+             lookup to apiVersion {}, or pass --refresh-lookup for it to regenerate it deliberately at the new version",
+            request.api_version,
+            held.api_version(),
+            held.version,
+            held.api_version()
+        ),
+    )
 }
 
 /// A digest of what discovery lists for `store`: its kinds and where they live.
@@ -664,12 +709,14 @@ mod tests {
     }
 
     fn state(store: Arc<dyn ObjectStore>) -> ApiState {
-        let capabilities = ApiCapabilities::new(
-            "1.30",
-            ["v1", "apps/v1", "foo.example.com/v1"].map(ToOwned::to_owned),
-            [KindInfo::new("monitoring.coreos.com/v1", "ServiceMonitor", true)],
-        )
-        .unwrap();
+        let group_versions = ["v1", "apps/v1", "foo.example.com/v1", "rbac.authorization.k8s.io/v1"]
+            .map(ToOwned::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let kinds = crate::helm::lookup::builtin::builtin_kinds_of(&group_versions)
+            .chain([KindInfo::new("monitoring.coreos.com/v1", "ServiceMonitor", true)])
+            .collect::<Vec<_>>();
+        let capabilities = ApiCapabilities::new("1.30", group_versions, kinds).unwrap();
         ApiState::new(capabilities, store, TOKEN.to_owned())
     }
 
@@ -733,11 +780,12 @@ mod tests {
         }
     }
 
+    const AGGREGATED_ACCEPT: &str = "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList,application/json;g=apidiscovery.k8s.io;v=v2beta1;as=APIGroupDiscoveryList,application/json";
+
     #[test]
-    fn test_aggregated_discovery_lists_declared_versions_and_only_held_kinds() {
+    fn test_aggregated_discovery_lists_declared_versions_and_their_kinds() {
         let state = state(Arc::new(store()));
-        let accept = "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList,application/json;g=apidiscovery.k8s.io;v=v2beta1;as=APIGroupDiscoveryList,application/json";
-        let core = request(&state, "GET", "/api", Some(accept));
+        let core = request(&state, "GET", "/api", Some(AGGREGATED_ACCEPT));
         assert_eq!(core.content_type, AGGREGATED_DISCOVERY);
         let core = core.body_json();
         assert_eq!(core["apiVersion"], "apidiscovery.k8s.io/v2");
@@ -746,10 +794,15 @@ mod tests {
             .unwrap()
             .iter()
             .map(|resource| resource["responseKind"]["kind"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(kinds, ["ConfigMap", "Secret"]);
+            .collect::<BTreeSet<_>>();
+        assert!(
+            ["ConfigMap", "Secret", "Namespace", "Service"]
+                .iter()
+                .all(|kind| kinds.contains(kind)),
+            "the built-in kinds of v1 are listed: {kinds:?}"
+        );
 
-        let groups = request(&state, "GET", "/apis", Some(accept)).body_json();
+        let groups = request(&state, "GET", "/apis", Some(AGGREGATED_ACCEPT)).body_json();
         let described = groups["items"]
             .as_array()
             .unwrap()
@@ -765,13 +818,31 @@ mod tests {
         assert_eq!(
             described,
             [
-                ("apps".to_owned(), 0),
+                ("apps".to_owned(), 5),
                 ("foo.example.com".to_owned(), 0),
                 ("monitoring.coreos.com".to_owned(), 1),
-                ("rbac.authorization.k8s.io".to_owned(), 1),
+                ("rbac.authorization.k8s.io".to_owned(), 4),
             ],
-            "declared versions list no kinds unless a kind is declared or held"
+            "built-in kinds come with their API version, and a custom API version lists a kind only when it is declared"
         );
+    }
+
+    /// Catches `.Capabilities` depending on what the lookup source holds, which would
+    /// make the first render of a Release differ from every one after it.
+    #[test]
+    fn test_discovery_does_not_depend_on_what_the_store_holds() {
+        let held = state(Arc::new(store()));
+        let empty = state(Arc::new(crate::helm::lookup::model::EmptyStore));
+        let broken = state(Arc::new(Broken));
+        for path in ["/api", "/apis", "/api/v1", "/apis/apps/v1", "/apis/foo.example.com/v1"] {
+            for accept in [Some(AGGREGATED_ACCEPT), Some("application/json")] {
+                let expected = request(&held, "GET", path, accept);
+                assert_eq!(expected.status, 200, "{path}");
+                assert_eq!(request(&empty, "GET", path, accept), expected, "{path}");
+                assert_eq!(request(&broken, "GET", path, accept), expected, "{path}");
+            }
+        }
+        assert!(broken.failures().is_empty(), "discovery never reads the source");
     }
 
     #[test]
@@ -805,8 +876,27 @@ mod tests {
             (resource["name"].as_str(), resource["namespaced"].as_bool()),
             (Some("secrets"), Some(true))
         );
-        assert_eq!(get(&state, "/apis/apps/v1").body_json()["resources"], json!([]));
-        assert_eq!(get(&state, "/apis/undeclared.example.com/v1").status, 404);
+        let apps = get(&state, "/apis/apps/v1").body_json();
+        assert_eq!(apps["resources"].as_array().unwrap().len(), 5);
+        assert!(state.failures().is_empty());
+    }
+
+    /// Catches an undeclared API version surfacing as Helm's bare "not found": only a chart's
+    /// own `lookup` asks for one, and it is recorded with its code and fix.
+    #[test]
+    fn test_a_lookup_of_an_undeclared_api_version_is_a_coded_failure_with_its_fix() {
+        let state = state(Arc::new(store()));
+        let reply = get(&state, "/apis/undeclared.example.com/v1");
+        assert_eq!(reply.status, 500);
+        let failures = state.failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].code, Some("NYL-HELM-LOOKUP-API-VERSION-UNDECLARED"));
+        assert!(
+            failures[0].message.contains("undeclared.example.com/v1")
+                && failures[0].message.contains("spec.kubernetes.apiVersions"),
+            "{}",
+            failures[0].message
+        );
     }
 
     #[test]
@@ -848,22 +938,29 @@ mod tests {
         assert_eq!(list["kind"], "ConfigMapList");
     }
 
+    struct Broken;
+
+    impl ObjectStore for Broken {
+        fn kinds(&self) -> Result<Vec<KindInfo>, StoreError> {
+            Err(StoreError::new("NYL-TEST-BROKEN", "the snapshot is corrupt"))
+        }
+
+        fn get(&self, _: &KindInfo, _: Option<&str>, _: &str) -> Result<Option<Value>, StoreError> {
+            unreachable!("kinds fail first")
+        }
+
+        fn list(&self, _: &KindInfo, _: Option<&str>) -> Result<Vec<Value>, StoreError> {
+            unreachable!("kinds fail first")
+        }
+    }
+
     #[test]
     fn test_an_unreadable_store_is_a_server_error_never_not_found() {
-        struct Broken;
-        impl ObjectStore for Broken {
-            fn kinds(&self) -> Result<Vec<KindInfo>, StoreError> {
-                Err(StoreError::new("NYL-TEST-BROKEN", "the snapshot is corrupt"))
-            }
-            fn get(&self, _: &KindInfo, _: Option<&str>, _: &str) -> Result<Option<Value>, StoreError> {
-                unreachable!("kinds fail first")
-            }
-            fn list(&self, _: &KindInfo, _: Option<&str>) -> Result<Vec<Value>, StoreError> {
-                unreachable!("kinds fail first")
-            }
-        }
         let state = state(Arc::new(Broken));
-        for path in ["/api", "/apis", "/api/v1", "/api/v1/namespaces/demo/secrets/my-ca"] {
+        for path in [
+            "/api/v1/namespaces/demo/secrets/my-ca",
+            "/api/v1/namespaces/demo/secrets",
+        ] {
             let reply = get(&state, path);
             assert_eq!(reply.status, 500, "{path}");
             assert!(reply.body_json()["message"]
@@ -871,8 +968,79 @@ mod tests {
                 .unwrap()
                 .contains("NYL-TEST-BROKEN"));
         }
-        assert_eq!(state.failures().len(), 4);
+        assert_eq!(state.failures().len(), 2);
         assert!(state.observations().is_empty(), "a failed read is no observation");
+    }
+
+    /// Catches a lookup at a version the object is not held at reading as absent, which
+    /// would regenerate what the object holds.
+    #[test]
+    fn test_an_object_held_at_another_version_is_a_coded_failure_never_not_found() {
+        let store = ObjectSet::from_documents(
+            vec![
+                json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web", "namespace": "demo"}}),
+                json!({"apiVersion": "autoscaling/v1", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "api", "namespace": "demo"}}),
+            ],
+            &|_, _| Some(true),
+            "demo",
+        )
+        .unwrap();
+        let request = |path: &str| LookupRequest::from_path(path).unwrap();
+
+        // Held at v2, asked at v1: the kind exists at v1 (held for `api`), the object does not.
+        let error = evaluate(
+            &store,
+            &request("/apis/autoscaling/v1/namespaces/demo/horizontalpodautoscalers/web"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, Some("NYL-HELM-LOOKUP-VERSION-MISMATCH"));
+        assert!(
+            error.message.contains("autoscaling/v2") && error.message.contains("held at v2"),
+            "{}",
+            error.message
+        );
+        // Held at v1, asked at v2.
+        assert!(evaluate(
+            &store,
+            &request("/apis/autoscaling/v2/namespaces/demo/horizontalpodautoscalers/api")
+        )
+        .is_err());
+        // The right version finds it, and a name held nowhere is plainly absent.
+        assert!(matches!(
+            evaluate(
+                &store,
+                &request("/apis/autoscaling/v2/namespaces/demo/horizontalpodautoscalers/web")
+            ),
+            Ok(Evaluation::Object(_))
+        ));
+        assert!(matches!(
+            evaluate(
+                &store,
+                &request("/apis/autoscaling/v2/namespaces/demo/horizontalpodautoscalers/none")
+            ),
+            Ok(Evaluation::Absent { .. })
+        ));
+        // A list at a version that holds nothing, where another version holds objects.
+        let only_v2 = ObjectSet::from_documents(
+            vec![json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web", "namespace": "demo"}})],
+            &|_, _| Some(true),
+            "demo",
+        )
+        .unwrap();
+        let error = evaluate(
+            &only_v2,
+            &request("/apis/autoscaling/v1/namespaces/demo/horizontalpodautoscalers"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, Some("NYL-HELM-LOOKUP-VERSION-MISMATCH"));
+        // Through the API it is a 500 that Helm cannot read as absent.
+        let state = state(Arc::new(only_v2));
+        let reply = get(
+            &state,
+            "/apis/autoscaling/v1/namespaces/demo/horizontalpodautoscalers/web",
+        );
+        assert_eq!(reply.status, 500);
+        assert_eq!(state.failures().len(), 1);
     }
 
     #[test]
