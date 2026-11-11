@@ -21,9 +21,11 @@ import { Steps } from '@astrojs/starlight/components';
 5. Expand resources recursively (`HelmChart`, `Component`, `RemoteManifest`, aliases) with `--max-depth`. Generated resources inherit the expanding resource's [Argo CD sync wave and phase](#argo-cd-sync-waves-and-phases).
 6. Apply Kyverno policies (Global scope currently supported).
 7. Deduplicate final manifests (last occurrence wins).
-8. Take the Release's resources as its Argo CD Application deploys them
+8. Write [`k8s.nyl/checksum-sha256`](/nyl/kubernetes-rendering/pod-template-checksums/) on each Pod
+   template that sets `k8s.nyl/checksum`, from the ConfigMaps and Secrets the Release renders.
+9. Take the Release's resources as its Argo CD Application deploys them
    ([below](#the-releases-application)).
-9. Apply post-render kind filtering with `--only-kind` / `--exclude-kind`.
+10. Apply post-render kind filtering with `--only-kind` / `--exclude-kind`.
 
 </Steps>
 

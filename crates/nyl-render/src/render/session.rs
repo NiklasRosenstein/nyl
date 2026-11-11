@@ -54,6 +54,13 @@ pub struct RenderRequest<'a> {
     pub strip_empty_metadata_labels_default: bool,
     /// Resolved inputs of a Release that declares inputs, exposed as `inputs.*`.
     pub inputs: Option<&'a serde_json::Map<String, Value>>,
+    /// The `destinationNamespace` of the ApplicationGroup that deploys the
+    /// Release, which documents without a namespace take instead of the
+    /// Release's own. Pod template checksums resolve references in it.
+    pub destination_namespace: Option<&'a str>,
+    /// The namespace documents take when the file declares no Release, as
+    /// `apply` and `diff` take it from `--namespace`.
+    pub namespace_without_release: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +81,8 @@ impl<'a> RenderRequest<'a> {
             track_parent: false,
             strip_empty_metadata_labels_default: false,
             inputs: None,
+            destination_namespace: None,
+            namespace_without_release: None,
         }
     }
 }
@@ -421,7 +430,7 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
     ) -> Result<RenderedBundle> {
-        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None)
+        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None, None)
             .await
     }
 
@@ -432,10 +441,12 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
         inputs: Option<&serde_json::Map<String, Value>>,
+        destination_namespace: Option<&str>,
     ) -> Result<RenderedBundle> {
         let mut request = RenderRequest::new(path, Some(provenance_root));
         request.provenance_worktree_root = worktree_root;
         request.inputs = inputs;
+        request.destination_namespace = destination_namespace;
         self.render(request).await
     }
 
@@ -601,7 +612,40 @@ impl RenderSession {
         } else {
             apply_kyverno_policies(&manifests, &global)?
         };
-        let (manifests, duplicates) = deduplicate_manifests(manifests)?;
+        let (mut manifests, duplicates) = deduplicate_manifests(manifests)?;
+        // The checksums are derived from the final documents, after everything
+        // that can change a ConfigMap, a Secret, or a Pod template. Documents
+        // without a namespace take the group's destination namespace, else the
+        // Release's, else the one the command was given for a file without a Release.
+        let default_namespace = request
+            .destination_namespace
+            .or(release.as_ref().map(|release| release.metadata.namespace.as_str()))
+            .or(request.namespace_without_release)
+            .filter(|namespace| !namespace.trim().is_empty());
+        let options = super::pod_checksum::Options {
+            default_namespace,
+            // `--only-source-kind` renders a part of the Release, which may lack
+            // the documents a checksum reads.
+            partial: request.only_source_kind.is_some(),
+        };
+        match super::pod_checksum::apply(&mut manifests, &options) {
+            Ok(warnings) => {
+                for warning in warnings {
+                    tracing::warn!("{warning}");
+                }
+            }
+            Err(error) => {
+                let provenance = ResourceKey::from_json_value(&manifests[error.document])
+                    .ok()
+                    .and_then(|key| manifest_provenance.get(&key))
+                    .map(ToString::to_string);
+                let error = error.into_nyl();
+                return Err(match provenance {
+                    Some(provenance) => error.with_render_provenance(provenance),
+                    None => error,
+                });
+            }
+        }
         let strip_empty_metadata_labels = strip_mode.should_strip(request.strip_empty_metadata_labels_default);
         let manifests = prepare_manifests_for_output(&manifests, strip_empty_metadata_labels);
 
@@ -697,6 +741,8 @@ impl RenderSession {
                 "maxDepth": request.max_depth,
                 "trackParent": request.track_parent,
                 "stripEmptyMetadataLabelsDefault": request.strip_empty_metadata_labels_default,
+                "destinationNamespace": request.destination_namespace,
+                "namespaceWithoutRelease": request.namespace_without_release,
             }),
         )?;
         cache.record_renderer_tools(&mut recorder)?;

@@ -134,6 +134,9 @@ pub struct RenderPreflightOptions<'a> {
     pub kube_version: Option<&'a str>,
     pub kube_api_versions: &'a [String],
     pub context_override: Option<&'a str>,
+    /// `--namespace` of `apply` and `diff`: the namespace documents take when
+    /// the file declares no Release.
+    pub namespace: Option<&'a str>,
     pub cluster_client_requirement: ClusterClientRequirement,
     pub discovery_progress: DiscoveryProgress,
 }
@@ -295,7 +298,24 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     let input_values = direct_inputs
         .as_ref()
         .map(nyl_render::gitops::direct_inputs::DirectInputs::values);
+    // The group is chosen before the file renders: its `destinationNamespace`
+    // is the namespace documents without one are in, which the Pod template
+    // checksums resolve their references in.
+    let selected_group = nyl_render::gitops::direct::select_direct_group(
+        inventory
+            .as_ref()
+            .zip(resolved_target.as_ref())
+            .map(|(inventory, resolved)| (inventory, &resolved.target)),
+        path,
+        options.common.application_group.as_deref(),
+        options.common.defaults_only,
+    )?;
+    let destination_namespace = selected_group
+        .as_ref()
+        .and_then(|(group, _)| group.spec.destination_namespace.clone());
     let mut request = RenderRequest::new(path, provenance_root);
+    request.destination_namespace = destination_namespace.as_deref();
+    request.namespace_without_release = options.namespace;
     request.inputs = input_values.as_ref();
     request.path_mode = RenderPathMode::AsProvided;
     request.only_source_kind = options.common.only_source_kind.as_deref();
@@ -333,8 +353,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 .zip(resolved_target.as_ref())
                 .map(|(inventory, resolved)| (inventory, &resolved.target)),
             file: path,
-            application_group: options.common.application_group.as_deref(),
-            defaults_only: options.common.defaults_only,
+            group: selected_group,
             // Overrides, a source-kind filter, and expansion options make this
             // render differ from the target's own.
             standalone: options.common.defaults_only
@@ -454,6 +473,7 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         kube_version: args.kube_version.as_deref(),
         kube_api_versions: &args.kube_api_versions,
         context_override: args.context.as_deref(),
+        namespace: None,
         cluster_client_requirement: ClusterClientRequirement::Never,
         discovery_progress: DiscoveryProgress::Quiet,
     }))
