@@ -26,7 +26,7 @@ for the behavior `render`, `diff`, and `apply` share.
 
 ### Common Options
 
-- `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
+- `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion. A render with this option fails with `NYL-KUBERNETES-CHECKSUM-PARTIAL` when a remaining Pod template sets [`k8s.nyl/checksum`](/nyl/kubernetes-rendering/pod-template-checksums/#where-it-runs), because a digest of part of the Release would differ from the one other commands write.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
 - `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available. A project without DeploymentTargets uses `--context` instead.

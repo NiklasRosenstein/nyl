@@ -81,6 +81,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
         kube_version: None,
         kube_api_versions: &[],
         context_override: args.context.as_deref(),
+        namespace: args.namespace.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
         discovery_progress: crate::cli::commands::render::DiscoveryProgress::Quiet,
     }))

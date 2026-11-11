@@ -78,6 +78,14 @@ pub enum NylError {
         hint: String,
     },
 
+    /// A failure with a stable code (`NYL-<AREA>-<NAME>`) and the fix.
+    #[error("{code}: {message}\nHint: {fix}")]
+    Coded {
+        code: &'static str,
+        message: String,
+        fix: String,
+    },
+
     #[error("Git error: {0}")]
     Git(#[from] crate::git::GitError),
 

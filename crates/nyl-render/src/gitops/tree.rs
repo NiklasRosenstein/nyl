@@ -967,6 +967,7 @@ async fn compile_target_tree_recording(
                     worktree_root,
                     resolved_inputs.as_ref(),
                     Some(lookup_scope.clone()),
+                    group.spec.destination_namespace.as_deref(),
                 )
                 .await?;
             if let (Some(repository), Some(revision)) = (
