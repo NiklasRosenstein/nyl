@@ -1618,7 +1618,7 @@ spec:
     }
 
     async fn render_seen(session: &RenderSession) -> RenderedBundle {
-        let mut request = RenderRequest::new(Path::new("app.yaml"), None);
+        let mut request = RenderRequest::new(Path::new("app.yaml"), Some(&session.project_root));
         request.lookup_scope = Some(crate::helm::lookup::ScopeSource::new(|release| {
             Ok(Some(crate::helm::lookup::ReleaseScope {
                 directory: format!("group/{}", release.name),
