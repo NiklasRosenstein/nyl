@@ -601,7 +601,27 @@ impl RenderSession {
         } else {
             apply_kyverno_policies(&manifests, &global)?
         };
-        let (manifests, duplicates) = deduplicate_manifests(manifests)?;
+        let (mut manifests, duplicates) = deduplicate_manifests(manifests)?;
+        // The checksums are derived from the final documents, after everything
+        // that can change a ConfigMap, a Secret, or a Pod template. A partial
+        // render (`--only-source-kind`) lacks the documents they reference.
+        if request.only_source_kind.is_none() {
+            let namespace = release
+                .as_ref()
+                .map(|release| release.metadata.namespace.as_str())
+                .filter(|namespace| !namespace.trim().is_empty());
+            if let Err(error) = super::pod_checksum::apply(&mut manifests, namespace) {
+                let provenance = ResourceKey::from_json_value(&manifests[error.document])
+                    .ok()
+                    .and_then(|key| manifest_provenance.get(&key))
+                    .map(ToString::to_string);
+                let error = error.into_nyl();
+                return Err(match provenance {
+                    Some(provenance) => error.with_render_provenance(provenance),
+                    None => error,
+                });
+            }
+        }
         let strip_empty_metadata_labels = strip_mode.should_strip(request.strip_empty_metadata_labels_default);
         let manifests = prepare_manifests_for_output(&manifests, strip_empty_metadata_labels);
 
