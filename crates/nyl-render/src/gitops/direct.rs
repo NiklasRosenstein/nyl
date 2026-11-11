@@ -41,10 +41,9 @@ pub struct DirectWorkloadRequest<'a> {
     pub target: Option<(&'a GitOpsInventory, &'a DeploymentTarget)>,
     /// The Release file the command renders.
     pub file: &'a Path,
-    /// `--application-group`: the group, when the file's location does not decide.
-    pub application_group: Option<&'a str>,
-    /// `--defaults-only`: render outside every group, resolving no group source.
-    pub defaults_only: bool,
+    /// The group [`select_direct_group`] chose, with whether it renders the
+    /// file itself. `--application-group` and `--defaults-only` decide it.
+    pub group: Option<(ApplicationGroup, bool)>,
     /// The render departs from the target's, for example by `--input`
     /// overrides, so it cannot be taken from the compiled target.
     pub standalone: bool,
@@ -88,12 +87,7 @@ pub async fn resolve_direct_workload(
             destination_namespace: None,
         });
     };
-    let selected = match request.target {
-        Some((inventory, target)) if !request.defaults_only => {
-            rendering_group(inventory, target, request.file, request.application_group)?
-        }
-        _ => None,
-    };
+    let selected = request.group.clone();
     if let (Some((group, true)), Some((inventory, target)), DirectScope::Target, false) =
         (&selected, request.target, request.scope, request.standalone)
     {
@@ -112,6 +106,22 @@ pub async fn resolve_direct_workload(
         manifest_provenance: settled.manifest_provenance,
         destination_namespace: Some(settled.destination_namespace),
     })
+}
+
+/// The ApplicationGroup a direct command deploys `file` with, chosen before the
+/// file renders because its `destinationNamespace` decides where documents
+/// without a namespace go. `None` without a target, with `defaults_only`, and
+/// when no group renders the file.
+pub fn select_direct_group(
+    target: Option<(&GitOpsInventory, &DeploymentTarget)>,
+    file: &Path,
+    application_group: Option<&str>,
+    defaults_only: bool,
+) -> Result<Option<(ApplicationGroup, bool)>> {
+    match target {
+        Some((inventory, target)) if !defaults_only => rendering_group(inventory, target, file, application_group),
+        _ => Ok(None),
+    }
 }
 
 /// The enabled ApplicationGroup of the target that renders `file`, by the same

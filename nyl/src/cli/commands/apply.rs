@@ -145,6 +145,7 @@ pub async fn execute(args: ApplyArgs) -> Result<()> {
         kube_version: None,
         kube_api_versions: &[],
         context_override: args.context.as_deref(),
+        namespace: args.namespace.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
         discovery_progress: DiscoveryProgress::Announce,
     }))

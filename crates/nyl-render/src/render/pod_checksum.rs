@@ -9,8 +9,8 @@
 //! the final documents after expansion, Kyverno, and deduplication, so every
 //! command that renders a Release, from `nyl render` to `nyl publish-tree`,
 //! writes the same value. It is a pure function of those documents and the
-//! Release namespace: it reads no cluster and no file, so the render cache
-//! needs no input of its own for it.
+//! destination namespace, which the render request carries into the render
+//! cache's key: it reads no cluster and no file.
 //!
 //! # Opt-in
 //!
@@ -26,9 +26,13 @@
 //!   `#key`. Every entry must resolve, or the render fails.
 //!
 //! References resolve in the workload's namespace, as Kubernetes resolves
-//! them: its `metadata.namespace`, else the Release namespace. A resource
-//! without a namespace is in the Release namespace too, so the result does not
-//! depend on document order or on which documents spell the namespace out.
+//! them: its `metadata.namespace`, else the destination namespace. That is the
+//! namespace the Release is deployed to, which a document without one takes: the
+//! `destinationNamespace` of the ApplicationGroup that renders the Release, else
+//! the Release's own namespace (for a file without a Release, the namespace the
+//! command was given). A resource without a namespace is in it too, so the
+//! result does not depend on document order or on which documents spell the
+//! namespace out.
 //!
 //! # What is hashed
 //!
@@ -61,28 +65,38 @@ use crate::NylError;
 
 /// Prefix of the digest input. It names the serialization, so a future format
 /// cannot produce a value that this one also produces.
-pub const FORMAT_TAG: &[u8] = b"nyl.k8s/checksum/v1\0";
+const FORMAT_TAG: &[u8] = b"k8s.nyl/checksum/v1\0";
 
 /// `k8s.nyl/checksum` is neither `auto` nor a list of `Kind/name[#key]`.
-pub const MALFORMED: &str = "NYL-KUBERNETES-CHECKSUM-MALFORMED";
+const MALFORMED: &str = "NYL-KUBERNETES-CHECKSUM-MALFORMED";
 /// An explicit entry names a ConfigMap, Secret, or key the Release does not render.
-pub const NOT_FOUND: &str = "NYL-KUBERNETES-CHECKSUM-NOT-FOUND";
+const NOT_FOUND: &str = "NYL-KUBERNETES-CHECKSUM-NOT-FOUND";
 /// A reference matches more than one rendered object, or a key has two values.
-pub const AMBIGUOUS: &str = "NYL-KUBERNETES-CHECKSUM-AMBIGUOUS";
+const AMBIGUOUS: &str = "NYL-KUBERNETES-CHECKSUM-AMBIGUOUS";
 /// `k8s.nyl/checksum` is on a document that has no Pod template, or not on its Pod template.
-pub const NO_POD_TEMPLATE: &str = "NYL-KUBERNETES-CHECKSUM-NO-POD-TEMPLATE";
-/// A document sets `k8s.nyl/checksum-sha256`, which Nyl owns.
-pub const RESERVED: &str = "NYL-KUBERNETES-CHECKSUM-RESERVED";
+const NO_POD_TEMPLATE: &str = "NYL-KUBERNETES-CHECKSUM-NO-POD-TEMPLATE";
+/// A document sets `k8s.nyl/checksum-sha256` without opting in, which Nyl owns.
+const RESERVED: &str = "NYL-KUBERNETES-CHECKSUM-RESERVED";
 /// A referenced ConfigMap or Secret holds data that is not valid.
-pub const INVALID_DATA: &str = "NYL-KUBERNETES-CHECKSUM-INVALID-DATA";
+const INVALID_DATA: &str = "NYL-KUBERNETES-CHECKSUM-INVALID-DATA";
+/// A partial render (`--only-source-kind`) holds a Pod template that sets `k8s.nyl/checksum`.
+const PARTIAL: &str = "NYL-KUBERNETES-CHECKSUM-PARTIAL";
+/// `auto` found no ConfigMap or Secret the Release renders, so the digest covers nothing.
+const EMPTY: &str = "NYL-KUBERNETES-CHECKSUM-EMPTY";
+
+/// What the step needs besides the documents.
+pub(crate) struct Options<'a> {
+    /// The namespace documents without `metadata.namespace` are in.
+    pub default_namespace: Option<&'a str>,
+    /// The documents are a part of the Release, selected by `--only-source-kind`.
+    pub partial: bool,
+}
 
 /// A failure of the step, with the document it concerns.
 #[derive(Debug)]
 pub(crate) struct ChecksumError {
     /// Index of the workload document in the manifests the step ran on.
     pub document: usize,
-    /// The workload's kind, for the error's heading.
-    kind: String,
     code: &'static str,
     message: String,
     fix: String,
@@ -96,10 +110,10 @@ impl ChecksumError {
 
     /// The error as Nyl reports it: stable code and message, then the fix.
     pub(crate) fn into_nyl(self) -> NylError {
-        NylError::ResourceParse {
-            kind: self.kind,
-            message: format!("{}: {}", self.code, self.message),
-            hint: self.fix,
+        NylError::Coded {
+            code: self.code,
+            message: self.message,
+            fix: self.fix,
         }
     }
 }
@@ -170,19 +184,42 @@ type SourceIndex = HashMap<(SourceKind, String, String), Vec<usize>>;
 /// Write `k8s.nyl/checksum-sha256` on every Pod template that declares
 /// `k8s.nyl/checksum`.
 ///
-/// `default_namespace` is the Release namespace, which documents without
-/// `metadata.namespace` take.
-pub(crate) fn apply(manifests: &mut [Value], default_namespace: Option<&str>) -> Result<(), ChecksumError> {
-    let default_namespace = default_namespace.unwrap_or_default();
+/// A Pod template that already holds `k8s.nyl/checksum-sha256`, written by an
+/// earlier render of the same document, gets the value recomputed.
+///
+/// Returns the warnings, each with its stable code.
+pub(crate) fn apply(manifests: &mut [Value], options: &Options<'_>) -> Result<Vec<String>, ChecksumError> {
+    let default_namespace = options.default_namespace.unwrap_or_default();
     let workloads = collect_workloads(manifests, default_namespace)?;
+    let mut warnings = Vec::new();
     if workloads.is_empty() {
-        return Ok(());
+        return Ok(warnings);
+    }
+    if options.partial {
+        let workload = &workloads[0];
+        return Err(error(
+            &manifests[workload.index],
+            workload.index,
+            default_namespace,
+            PARTIAL,
+            format!("{ANNOTATION_CHECKSUM} is set, but this render holds only the documents `--only-source-kind` selected, which may lack the ConfigMaps and Secrets the checksum reads"),
+            "Drop `--only-source-kind` so the whole Release renders. A checksum of a part of the Release would be a different value than every other command writes.",
+        ));
     }
     let index = index_sources(manifests, default_namespace);
     let mut data = HashMap::new();
     let mut checksums = Vec::with_capacity(workloads.len());
     for workload in &workloads {
         let selected = select(manifests, &index, &mut data, workload)?;
+        if selected.is_empty() && matches!(workload.mode, Mode::Auto) {
+            warnings.push(format!(
+                "{EMPTY}: {}: {ANNOTATION_CHECKSUM} is auto, but its Pod spec references no ConfigMap or Secret that the \
+                 Release renders, so the digest covers nothing. Reference the ConfigMap or Secret from the Pod spec in \
+                 {}, or list what to hash.",
+                identity(&manifests[workload.index], default_namespace),
+                namespace_label(&workload.namespace),
+            ));
+        }
         checksums.push((workload, checksum(&selected)));
     }
     for (workload, digest) in checksums {
@@ -192,7 +229,7 @@ pub(crate) fn apply(manifests: &mut [Value], default_namespace: Option<&str>) ->
             .expect("the workload's Pod template annotations were read from this document");
         annotations.insert(ANNOTATION_CHECKSUM_SHA256.to_owned(), Value::String(digest));
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// The digest of a selection, in lowercase hex. See the module documentation
@@ -258,7 +295,6 @@ fn error(
 ) -> ChecksumError {
     ChecksumError {
         document: index,
-        kind: kind_of(document).to_owned(),
         code,
         message: format!("{}: {message}", identity(document, default_namespace)),
         fix: fix.into(),
@@ -275,65 +311,26 @@ fn collect_workloads(manifests: &[Value], default_namespace: &str) -> Result<Vec
     for (index, document) in manifests.iter().enumerate() {
         let path = template_path(kind_of(document));
         let template = document.pointer(path).filter(|template| template.is_object());
-        let own = annotations_at(document, "/metadata/annotations");
         let in_template = template.and_then(|_| annotations_at(document, &format!("{path}/metadata/annotations")));
+        let template_location = path.trim_start_matches('/').replace('/', ".");
 
-        for (location, annotations) in [
-            ("metadata.annotations".to_owned(), own),
-            (
+        reject_misplaced(document, index, default_namespace, template.is_some())?;
+
+        // An earlier render of the same document wrote the digest next to the
+        // opt-in, and it is recomputed. Without the opt-in, Nyl does not own it.
+        if in_template.is_some_and(|annotations| {
+            annotations.contains_key(ANNOTATION_CHECKSUM_SHA256) && !annotations.contains_key(ANNOTATION_CHECKSUM)
+        }) {
+            return Err(error(
+                document,
+                index,
+                default_namespace,
+                RESERVED,
+                format!("{template_location}.metadata.annotations sets {ANNOTATION_CHECKSUM_SHA256} without {ANNOTATION_CHECKSUM}; Nyl owns that key"),
                 format!(
-                    "{}.metadata.annotations",
-                    path.trim_start_matches('/').replace('/', ".")
+                    "Remove {ANNOTATION_CHECKSUM_SHA256}, or set {ANNOTATION_CHECKSUM}: auto next to it so Nyl computes it."
                 ),
-                in_template,
-            ),
-        ] {
-            if annotations.is_some_and(|annotations| annotations.contains_key(ANNOTATION_CHECKSUM_SHA256)) {
-                return Err(error(
-                    document,
-                    index,
-                    default_namespace,
-                    RESERVED,
-                    format!("{location} sets {ANNOTATION_CHECKSUM_SHA256}, which Nyl owns"),
-                    format!(
-                        "Remove {ANNOTATION_CHECKSUM_SHA256}. Nyl writes it on the Pod template that sets {ANNOTATION_CHECKSUM}; \
-                         set {ANNOTATION_CHECKSUM}: auto there, or list the ConfigMaps and Secrets it covers."
-                    ),
-                ));
-            }
-        }
-
-        if own.is_some_and(|annotations| annotations.contains_key(ANNOTATION_CHECKSUM)) {
-            let template_location = path.trim_start_matches('/').replace('/', ".");
-            return Err(if template.is_some() {
-                error(
-                    document,
-                    index,
-                    default_namespace,
-                    NO_POD_TEMPLATE,
-                    format!("{ANNOTATION_CHECKSUM} is set on the document's own metadata.annotations; Nyl reads it from the Pod template"),
-                    format!(
-                        "Move {ANNOTATION_CHECKSUM} to {template_location}.metadata.annotations, \
-                         so the checksum changes the Pod template and rolls the Pods."
-                    ),
-                )
-            } else {
-                error(
-                    document,
-                    index,
-                    default_namespace,
-                    NO_POD_TEMPLATE,
-                    format!(
-                        "{ANNOTATION_CHECKSUM} is set on a {} that has no Pod template ({template_location})",
-                        kind_of(document)
-                    ),
-                    format!(
-                        "Remove the annotation from this document. Set it on the Pod template of the workload that consumes the \
-                         ConfigMap or Secret: {template_location}.metadata.annotations of a Deployment, StatefulSet, DaemonSet, \
-                         ReplicaSet, or Job, or spec.jobTemplate.spec.template.metadata.annotations of a CronJob."
-                    ),
-                )
-            });
+            ));
         }
 
         let Some(value) = in_template.and_then(|annotations| annotations.get(ANNOTATION_CHECKSUM)) else {
@@ -365,6 +362,77 @@ fn collect_workloads(manifests: &[Value], default_namespace: &str) -> Result<Vec
         });
     }
     Ok(workloads)
+}
+
+/// Reject the annotations on the workload's own metadata, and on a CronJob's
+/// job template metadata. They are not the Pod template, which Nyl reads and
+/// writes, and a change to them rolls no Pods.
+fn reject_misplaced(
+    document: &Value,
+    index: usize,
+    default_namespace: &str,
+    has_template: bool,
+) -> Result<(), ChecksumError> {
+    let template_location = template_path(kind_of(document))
+        .trim_start_matches('/')
+        .replace('/', ".");
+    let mut elsewhere = vec![(
+        "metadata.annotations",
+        annotations_at(document, "/metadata/annotations"),
+    )];
+    if kind_of(document) == "CronJob" {
+        elsewhere.push((
+            "spec.jobTemplate.metadata.annotations",
+            annotations_at(document, "/spec/jobTemplate/metadata/annotations"),
+        ));
+    }
+    for (location, annotations) in &elsewhere {
+        let Some(annotations) = annotations else { continue };
+        if annotations.contains_key(ANNOTATION_CHECKSUM_SHA256) {
+            return Err(error(
+                document,
+                index,
+                default_namespace,
+                RESERVED,
+                format!("{location} sets {ANNOTATION_CHECKSUM_SHA256}, which Nyl owns"),
+                format!(
+                    "Remove {ANNOTATION_CHECKSUM_SHA256}. Nyl writes it on the Pod template that sets {ANNOTATION_CHECKSUM}."
+                ),
+            ));
+        }
+        if annotations.contains_key(ANNOTATION_CHECKSUM) {
+            return Err(if has_template {
+                error(
+                    document,
+                    index,
+                    default_namespace,
+                    NO_POD_TEMPLATE,
+                    format!("{ANNOTATION_CHECKSUM} is set on {location}; Nyl reads it from the Pod template"),
+                    format!(
+                        "Move {ANNOTATION_CHECKSUM} to {template_location}.metadata.annotations, \
+                         so the checksum changes the Pod template and rolls the Pods."
+                    ),
+                )
+            } else {
+                error(
+                    document,
+                    index,
+                    default_namespace,
+                    NO_POD_TEMPLATE,
+                    format!(
+                        "{ANNOTATION_CHECKSUM} is set on a {} that has no Pod template ({template_location})",
+                        kind_of(document)
+                    ),
+                    "Remove the annotation from this document. Set it on the Pod template of the workload that \
+                     consumes the ConfigMap or Secret: spec.template.metadata.annotations of a Deployment, \
+                     StatefulSet, DaemonSet, ReplicaSet, or Job, or \
+                     spec.jobTemplate.spec.template.metadata.annotations of a CronJob."
+                        .to_owned(),
+                )
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_annotation(value: &str) -> Result<Mode, String> {
@@ -569,6 +637,8 @@ fn source_data(document: &Value, kind: SourceKind) -> Result<BTreeMap<String, Ve
         entries
             .into_iter()
             .map(|(key, text)| {
+                // Kubernetes decodes base64 with Go, which ignores line breaks.
+                let text: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
                 base64::engine::general_purpose::STANDARD
                     .decode(text)
                     .map(|bytes| (key.to_owned(), bytes))
@@ -754,9 +824,19 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
+    fn apply_in(manifests: &mut [Value], namespace: Option<&str>) -> Result<Vec<String>, ChecksumError> {
+        apply(
+            manifests,
+            &Options {
+                default_namespace: namespace,
+                partial: false,
+            },
+        )
+    }
+
     /// The checksum written on the Deployment of `manifests`.
     fn run(mut manifests: Vec<Value>) -> Result<String, ChecksumError> {
-        apply(&mut manifests, Some("app"))?;
+        apply_in(&mut manifests, Some("app"))?;
         let workload = manifests.iter().find(|doc| doc["kind"] == "Deployment").unwrap();
         Ok(workload
             .pointer(&format!(
@@ -796,7 +876,7 @@ mod tests {
         }
         assert_eq!(digest, hex::encode(Sha256::digest(&input)));
         assert_eq!(
-            digest, "83a62a2013fa0f563e1f1ac76fd8d78e7c528426fe05a764cf9989eae4937f89",
+            digest, "044cd7701a07230a904677b8aa126e847d2f16daa32abbc6cdcef8041fba1aba",
             "serialization golden"
         );
     }
@@ -1066,7 +1146,7 @@ mod tests {
 
         // Without a Release namespace, documents with none match each other.
         let mut manifests = vec![workload(None), source(None)];
-        apply(&mut manifests, None).unwrap();
+        apply_in(&mut manifests, None).unwrap();
         assert!(manifests[0]
             .pointer("/spec/template/metadata/annotations")
             .and_then(|annotations| annotations.get(ANNOTATION_CHECKSUM_SHA256))
@@ -1086,7 +1166,7 @@ mod tests {
             }),
             config_map("cfg", json!({"k": "v"})),
         ];
-        apply(&mut manifests, Some("app")).unwrap();
+        apply_in(&mut manifests, Some("app")).unwrap();
         let written = manifests[0]
             .pointer("/spec/jobTemplate/spec/template/metadata/annotations")
             .unwrap();
@@ -1105,12 +1185,12 @@ mod tests {
             config_map("cfg", json!({"k": "v"})),
         ];
         let mut manifests = original.clone();
-        apply(&mut manifests, Some("app")).unwrap();
+        apply_in(&mut manifests, Some("app")).unwrap();
         assert_eq!(manifests, original);
     }
 
     #[test]
-    fn test_errors_carry_stable_codes_and_fixes() {
+    fn test_errors_for_references_values_and_the_annotation_itself() {
         let cfg = || config_map("cfg", json!({"k": "v"}));
         let cases: Vec<(Vec<Value>, &str, &str)> = vec![
             (
@@ -1154,14 +1234,66 @@ mod tests {
             (vec![explicit("ConfigMap/cfg#")], MALFORMED, "invalid key"),
             (vec![explicit("auto,ConfigMap/cfg")], MALFORMED, "not `Kind/name`"),
             (vec![explicit("AUTO")], MALFORMED, "not `Kind/name`"),
+        ];
+        assert_failures(cases);
+
+        let non_string = {
+            let mut document = explicit("auto");
+            document["spec"]["template"]["metadata"]["annotations"][ANNOTATION_CHECKSUM] = json!(true);
+            document
+        };
+        assert_eq!(failure(vec![non_string]).code(), MALFORMED);
+    }
+
+    /// Each case fails with its code, the expected text, and a fix.
+    fn assert_failures(cases: Vec<(Vec<Value>, &str, &str)>) {
+        for (manifests, code, expected) in cases {
+            let error = failure(manifests);
+            assert_eq!(error.code(), code, "{}", error.message);
+            let rendered = error.into_nyl().to_string();
+            assert!(rendered.contains(code) && rendered.contains(expected), "{rendered}");
+            assert!(rendered.contains("Hint:"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn test_errors_for_reserved_and_misplaced_annotations() {
+        let cfg = || config_map("cfg", json!({"k": "v"}));
+        let cases: Vec<(Vec<Value>, &str, &str)> = vec![
             (
                 vec![{
                     let mut document = explicit("auto");
-                    document["spec"]["template"]["metadata"]["annotations"][ANNOTATION_CHECKSUM_SHA256] = json!("abc");
+                    let annotations = document["spec"]["template"]["metadata"]["annotations"]
+                        .as_object_mut()
+                        .unwrap();
+                    annotations.remove(ANNOTATION_CHECKSUM);
+                    annotations.insert(ANNOTATION_CHECKSUM_SHA256.to_owned(), json!("abc"));
                     document
                 }],
                 RESERVED,
-                "which Nyl owns",
+                "without k8s.nyl/checksum",
+            ),
+            (
+                vec![{
+                    let mut document = cfg();
+                    document["kind"] = json!("Pod");
+                    document["metadata"]["annotations"] = json!({ANNOTATION_CHECKSUM: "auto"});
+                    document
+                }],
+                NO_POD_TEMPLATE,
+                "has no Pod template",
+            ),
+            (
+                vec![json!({
+                    "apiVersion": "batch/v1", "kind": "CronJob",
+                    "metadata": {"name": "nightly", "namespace": "app"},
+                    "spec": {"jobTemplate": {
+                        "metadata": {"annotations": {ANNOTATION_CHECKSUM: "auto"}},
+                        "spec": {"template": {"spec": {"containers": []}}},
+                    }},
+                })],
+                NO_POD_TEMPLATE,
+                "Move k8s.nyl/checksum to spec.jobTemplate.spec.template.metadata.annotations",
             ),
             (
                 vec![{
@@ -1193,20 +1325,7 @@ mod tests {
                 "Move k8s.nyl/checksum to spec.template.metadata.annotations",
             ),
         ];
-        for (manifests, code, expected) in cases {
-            let error = failure(manifests);
-            assert_eq!(error.code(), code, "{}", error.message);
-            let rendered = error.into_nyl().to_string();
-            assert!(rendered.contains(code) && rendered.contains(expected), "{rendered}");
-            assert!(rendered.contains("Hint:"), "{rendered}");
-        }
-
-        let non_string = {
-            let mut document = explicit("auto");
-            document["spec"]["template"]["metadata"]["annotations"][ANNOTATION_CHECKSUM] = json!(true);
-            document
-        };
-        assert_eq!(failure(vec![non_string]).code(), MALFORMED);
+        assert_failures(cases);
     }
 
     #[test]
@@ -1214,6 +1333,119 @@ mod tests {
         let error = failure(vec![explicit("ConfigMap/missing")]);
         assert_eq!(error.document, 0);
         let rendered = error.into_nyl().to_string();
-        assert!(rendered.starts_with("Invalid Deployment: NYL-KUBERNETES-CHECKSUM-NOT-FOUND: Deployment app/web"));
+        assert!(rendered.starts_with("NYL-KUBERNETES-CHECKSUM-NOT-FOUND: Deployment app/web"));
+    }
+
+    #[test]
+    fn test_the_destination_namespace_is_the_default_and_may_differ_from_the_releases() {
+        // The group deploys the Release to `prod`, whatever the Release's own
+        // namespace is: the ConfigMap names `prod`, the Deployment names none.
+        let in_prod = |auto: &str| {
+            let mut workload = explicit(auto);
+            workload["metadata"].as_object_mut().unwrap().remove("namespace");
+            let mut source = config_map("cfg", json!({"k": "v"}));
+            source["metadata"]["namespace"] = json!("prod");
+            vec![workload, source]
+        };
+        for annotation in ["auto", "ConfigMap/cfg"] {
+            let mut manifests = in_prod(annotation);
+            manifests[0]["spec"]["template"]["spec"] =
+                json!({"containers": [{"name": "c", "envFrom": [{"configMapRef": {"name": "cfg"}}]}]});
+            let warnings = apply_in(&mut manifests, Some("prod")).unwrap();
+            assert!(warnings.is_empty(), "{annotation}: {warnings:?}");
+            let written = manifests[0].pointer("/spec/template/metadata/annotations").unwrap();
+            assert_eq!(
+                written[ANNOTATION_CHECKSUM_SHA256],
+                checksum_of("ConfigMap/cfg", vec![config_map("cfg", json!({"k": "v"}))]),
+                "{annotation}"
+            );
+            // In the Release's namespace instead, the reference does not resolve.
+            let mut manifests = in_prod(annotation);
+            let outcome = apply_in(&mut manifests, Some("glance"));
+            assert_eq!(outcome.is_err(), annotation != "auto", "{annotation}");
+        }
+    }
+
+    #[test]
+    fn test_a_digest_written_by_an_earlier_render_is_recomputed() {
+        let sources = || vec![config_map("cfg", json!({"k": "v"}))];
+        let mut once = vec![explicit("ConfigMap/cfg")];
+        once.extend(sources());
+        apply_in(&mut once, Some("app")).unwrap();
+        let mut again = once.clone();
+        apply_in(&mut again, Some("app")).unwrap();
+        assert_eq!(again, once);
+
+        // A stale digest is overwritten, so rendering Nyl's own output after an edit is correct.
+        let mut stale = once.clone();
+        stale[1]["data"]["k"] = json!("edited");
+        apply_in(&mut stale, Some("app")).unwrap();
+        assert_ne!(stale[0], once[0]);
+    }
+
+    #[test]
+    fn test_a_partial_render_refuses_a_checksum_it_cannot_compute() {
+        let mut manifests = vec![explicit("auto")];
+        let error = apply(
+            &mut manifests,
+            &Options {
+                default_namespace: Some("app"),
+                partial: true,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), PARTIAL);
+        assert!(error.into_nyl().to_string().contains("Drop `--only-source-kind`"));
+
+        // Without an opt-in there is nothing to compute, and a partial render is fine.
+        let mut plain = vec![config_map("cfg", json!({"k": "v"}))];
+        assert!(apply(
+            &mut plain,
+            &Options {
+                default_namespace: None,
+                partial: true
+            }
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_base64_may_contain_line_breaks_as_kubernetes_allows() {
+        let plain = secret("s", json!({"data": {"p": b64(b"password")}}));
+        for wrapped in ["cGFzc3dvcmQ=\n", "cGFz\r\nc3dvcmQ=", "cGFzc3dv\ncmQ=\n"] {
+            let digest = checksum_of("Secret/s", vec![secret("s", json!({"data": {"p": wrapped}}))]);
+            assert_eq!(digest, checksum_of("Secret/s", vec![plain.clone()]), "{wrapped:?}");
+        }
+    }
+
+    #[test]
+    fn test_empty_items_select_every_key_like_kubernetes() {
+        let spec = |items: Value| json!({"containers": [], "volumes": [{"name": "v", "configMap": {"name": "cfg", "items": items}}]});
+        let sources = || vec![config_map("cfg", json!({"a": "1", "b": "2"}))];
+        let digest = |items: Value| {
+            let mut manifests = vec![deployment("auto", spec(items))];
+            manifests.extend(sources());
+            run(manifests).unwrap()
+        };
+        assert_eq!(digest(json!([])), checksum_of("ConfigMap/cfg", sources()));
+        assert_eq!(digest(json!([{"path": "x"}])), checksum_of("ConfigMap/cfg", sources()));
+        assert_eq!(
+            digest(json!([{"key": "a", "path": "x"}])),
+            checksum_of("ConfigMap/cfg#a", sources())
+        );
+    }
+
+    #[test]
+    fn test_auto_that_selects_nothing_warns_with_its_code() {
+        let mut manifests = vec![explicit("auto"), config_map("unreferenced", json!({"k": "v"}))];
+        let warnings = apply_in(&mut manifests, Some("app")).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("NYL-KUBERNETES-CHECKSUM-EMPTY: Deployment app/web"),
+            "{warnings:?}"
+        );
+        // An explicit list that selects nothing is the author's own statement.
+        let mut manifests = vec![explicit("ConfigMap/empty"), config_map("empty", json!({}))];
+        assert!(apply_in(&mut manifests, Some("app")).unwrap().is_empty());
     }
 }
