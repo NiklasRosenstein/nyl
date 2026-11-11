@@ -141,6 +141,8 @@ release the fields applied as <code dir="auto">nyl</code>, as with
 <a href="/nyl/reference/cli/apply/#field-ownership-options"><code dir="auto">nyl apply</code></a>.</li>
 <li><code dir="auto">--take-over</code> - Roll back a release an environment owns anyway, recording no
 owner, as with <a href="/nyl/reference/cli/apply/"><code dir="auto">nyl apply</code></a>.</li>
+<li><code dir="auto">--hook-timeout &#x3C;SECONDS></code> - How long each wait for hooks and workloads lasts, as with
+<a href="/nyl/reference/cli/apply/#hook-options"><code dir="auto">nyl apply</code></a>.</li>
 </ul>
 <div class="sl-heading-wrapper level-h4"><h4 id="examples">Examples</h4><a class="sl-anchor-link" href="#examples"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Examples”</span></a></div>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># Roll back to the revision before the current one (with confirmation)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">nyl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">rollback</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">my-app</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--namespace</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">default</span></div></div><div class="ec-line"><div class="code">
@@ -152,6 +154,11 @@ audit trail is preserved and a rollback can itself be rolled back.</li>
 <li>Pruning matches <code dir="auto">nyl apply</code> semantics: resources present in the previously
 deployed revision but absent from the rolled-back revision are deleted, unless
 their Argo CD sync options keep them.</li>
+<li>The stored manifest holds the revision’s hooks, and a rollback syncs it as
+<a href="/nyl/reference/cli/apply/#hooks-and-sync-waves"><code dir="auto">nyl apply</code></a> does: it runs the
+<code dir="auto">PreSync</code> hooks of the revision it applies before its resources, and the
+<code dir="auto">PostSync</code> hooks after them, as an Argo CD sync of that revision would. Hooks are
+not tracked, so a rollback neither prunes nor restores one.</li>
 <li>A clear error is returned if the release or the requested revision does not
 exist, or if there is no previous revision to roll back to.</li>
 </ul>
@@ -168,6 +175,13 @@ such as managed Namespaces, unless <code dir="auto">--confirm-delete</code> is p
 <li><code dir="auto">--take-over</code> - Delete a release an environment owns anyway (see <a href="/nyl/reference/cli/apply/"><code dir="auto">nyl apply --take-over</code></a>). Resources are deleted in reverse apply order, waiting for each kind to terminate before the next, as a prune does.</li>
 <li><code dir="auto">--dry-run</code> - Show what would be deleted without deleting it</li>
 </ul>
+<p>A purge deletes the objects the release tracks and the hooks the latest revision’s
+manifest holds, which no revision tracks: a finished hook Job, or a ServiceAccount or
+Role a hook created, would otherwise outlive the release. It runs no hook: Argo CD runs
+<code dir="auto">PreDelete</code> and <code dir="auto">PostDelete</code> hooks when it removes an Application, and Nyl does not
+when it removes a Release. When the latest revision declares such a hook (or Helm’s
+<code dir="auto">pre-delete</code> or <code dir="auto">post-delete</code>), the command warns with <code dir="auto">NYL-KUBERNETES-HOOK-IGNORED</code>,
+naming it, and goes ahead.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="see-also">See Also</h2><a class="sl-anchor-link" href="#see-also"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “See Also”</span></a></div>
 <ul>
 <li><a href="/nyl/reference/cli/apply/"><code dir="auto">apply</code></a> - Apply manifests and record release revisions</li>
