@@ -42,7 +42,7 @@ behavior `render`, `diff`, and `apply` share.
 - `--allow-secret-inputs` - Let the project secrets provider and `NYL_*` environment variables affect the output, as for the tree commands. Without it, templates see neither.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
-- `--refresh-lookup <KIND/NAMESPACE/NAME>` - Treat this object as absent for this render, so a chart that declares [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) generates it again, such as a CA for rotation (`Secret/kube-system/cilium-ca`; `Kind/name` for a cluster-scoped object). Repeatable.
+- `--refresh-lookup <KIND/NAMESPACE/NAME>` - Regenerate this object, which a chart with [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) reads, for this render, for example to rotate a CA. `Kind/name` for a cluster-scoped object. Repeatable.
 - `--refresh` - Bypass cached rendering results and replace successful entries.
 - `--no-cache` - Perform no persistent cache reads or writes.
 
