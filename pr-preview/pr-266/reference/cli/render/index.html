@@ -103,7 +103,7 @@ behavior <code dir="auto">render</code>, <code dir="auto">diff</code>, and <code
 <li><code dir="auto">--allow-secret-inputs</code> - Let the project secrets provider and <code dir="auto">NYL_*</code> environment variables affect the output, as for the tree commands. Without it, templates see neither.</li>
 <li><code dir="auto">--max-depth &#x3C;MAX_DEPTH></code> - Maximum evaluation depth for recursive resource expansion (default: 10)</li>
 <li><code dir="auto">--track-parent</code> - Track parent resource information in annotations</li>
-<li><code dir="auto">--refresh-lookup &#x3C;KIND/NAMESPACE/NAME></code> - Treat this object as absent for this render, so a chart that declares <a href="/nyl/pr-preview/pr-266/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup"><code dir="auto">spec.lookup</code></a> generates it again, such as a CA for rotation (<code dir="auto">Secret/kube-system/cilium-ca</code>; <code dir="auto">Kind/name</code> for a cluster-scoped object). Repeatable.</li>
+<li><code dir="auto">--refresh-lookup &#x3C;KIND/NAMESPACE/NAME></code> - Regenerate this object, which a chart with <a href="/nyl/pr-preview/pr-266/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup"><code dir="auto">spec.lookup</code></a> reads, for this render, for example to rotate a CA. <code dir="auto">Kind/name</code> for a cluster-scoped object. Repeatable.</li>
 <li><code dir="auto">--refresh</code> - Bypass cached rendering results and replace successful entries.</li>
 <li><code dir="auto">--no-cache</code> - Perform no persistent cache reads or writes.</li>
 </ul>
