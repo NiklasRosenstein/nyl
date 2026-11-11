@@ -19,7 +19,7 @@
 //! is absent.
 
 pub mod api;
-mod builtin;
+pub(crate) mod builtin;
 pub mod capabilities;
 mod model;
 mod run;
@@ -29,7 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 pub use model::{
-    join_api_version, EmptyStore, FilteredStore, KindInfo, ObjectRef, ObjectSet, ObjectStore, RefreshAudit, StoreError,
+    join_api_version, split_api_version, EmptyStore, FilteredStore, KindInfo, ObjectRef, ObjectSet, ObjectStore,
+    RefreshAudit, StoreError,
 };
 pub use run::{render_with_lookup, LookupRender};
 pub use server::{ApiServer, ServerReport};
@@ -98,6 +99,9 @@ pub const LIVE_REFUSED_CODE: &str = "NYL-HELM-LOOKUP-LIVE-REFUSED";
 pub const LIVE_NEEDS_CLUSTER_CODE: &str = "NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER";
 /// The code of the error for a live cluster that cannot be read.
 pub const LIVE_UNAVAILABLE_CODE: &str = "NYL-HELM-LOOKUP-LIVE-UNAVAILABLE";
+/// The code of the error for an object the cluster holds that no revision or publication of the
+/// Release lists, which a lookup can neither return nor read as absent.
+pub const LIVE_UNRECORDED_CODE: &str = "NYL-HELM-LOOKUP-LIVE-UNRECORDED";
 /// The code of the error for a rendered or looked-up kind that discovery does not list.
 pub const KIND_UNDECLARED_CODE: &str = "NYL-HELM-LOOKUP-KIND-UNDECLARED";
 /// The code of the error for an object a chart looks up at another API version than it is held at.

@@ -354,6 +354,10 @@ fn test_build_refuses_live_lookups() {
     }
     assert!(!deploy_exists(&world));
     build(&ctx, &["--lookup=snapshot"], &unit()).unwrap();
+    // The option takes its value as a separate argument too, as `nyl render` accepts it.
+    build(&ctx, &["--lookup", "snapshot"], &unit()).unwrap();
+    let error = build(&ctx, &["--lookup"], &unit()).unwrap_err();
+    assert!(error.to_string().contains("--lookup takes a value"), "{error}");
 }
 
 /// Catches arguments the driver does not own being passed over, or two modes

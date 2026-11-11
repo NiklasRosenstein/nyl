@@ -6,10 +6,15 @@
 //! has already chosen the cluster. Helm still talks only to the local API Nyl
 //! serves ([`crate::helm::lookup`]); this module is what that API reads from.
 //!
-//! - Only GET and LIST reach the cluster, and only for objects that belong to
-//!   the Release being rendered: the resources its latest recorded revision
-//!   applied (`nyl apply` records one), and, with a target, the objects its last
-//!   publication holds. Anything else is absent, as in a snapshot.
+//! - Only GET reaches the cluster, and only for objects that belong to the Release
+//!   being rendered: the resources its latest recorded revision applied (`nyl apply`
+//!   records one), and, with a target, the objects its last publication holds. A list
+//!   is answered by reading those members one by one, never by listing the cluster.
+//!   An object the cluster holds that no member list names is not read as absent:
+//!   the lookup fails with `NYL-HELM-LOOKUP-LIVE-UNRECORDED`, because a Release
+//!   installed by Helm or by an older Nyl, or whose state was lost, would otherwise
+//!   regenerate what the cluster still holds. An object a member list holds at
+//!   another version fails with `NYL-HELM-LOOKUP-VERSION-MISMATCH`.
 //! - A cluster that cannot be read is an error, never an absent object.
 //! - What the cluster holds can change under a cache without Nyl observing it,
 //!   so a render that used live lookups is never cached.
@@ -18,11 +23,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use kube::api::{Api, DynamicObject, ListParams};
+use kube::api::{Api, DynamicObject};
 use serde_json::Value;
 
 use super::state::{KubernetesReleaseStorage, ReleaseStorage};
-use crate::helm::lookup::{KindInfo, LookupBackend, ObjectStore, ReleaseScope, StoreError, LIVE_UNAVAILABLE_CODE};
+use crate::helm::lookup::{
+    split_api_version, KindInfo, LookupBackend, ObjectRef, ObjectStore, ReleaseScope, StoreError,
+    LIVE_UNAVAILABLE_CODE, LIVE_UNRECORDED_CODE,
+};
 
 /// The live Helm `lookup` of a command that selects a cluster with `--context`
 /// and has no GitOps configuration: the objects of the Release's latest
@@ -236,6 +244,34 @@ impl Inner {
         Ok(found)
     }
 
+    /// The kind of `api_version` that the cluster serves under the resource name `plural`.
+    fn served_kind(&self, api_version: &str, plural: &str) -> std::result::Result<Option<KindInfo>, StoreError> {
+        let client = self.client()?;
+        let (client_ref, api_version_ref) = (&client, api_version);
+        let listed = self.block_on(|| async move {
+            if api_version_ref.contains('/') {
+                client_ref.list_api_group_resources(api_version_ref).await
+            } else {
+                client_ref.list_core_api_resources(api_version_ref).await
+            }
+        });
+        let resources = match listed {
+            Ok(resources) => resources,
+            // The cluster serves no such API version.
+            Err(kube::Error::Api(status)) if status.code == 404 => return Ok(None),
+            Err(error) => return Err(unavailable(error)),
+        };
+        Ok(resources
+            .resources
+            .into_iter()
+            .find(|resource| resource.name == plural && !resource.name.contains('/'))
+            .map(|resource| {
+                let mut kind = KindInfo::new(api_version, &resource.kind, resource.namespaced);
+                kind.plural = resource.name;
+                kind
+            }))
+    }
+
     fn api(
         &self,
         resource: &kube::core::ApiResource,
@@ -270,6 +306,46 @@ impl LiveStore {
             name: name.to_owned(),
         }))
     }
+
+    /// The kind of the same group, kind, namespace, and name that the Release holds at another
+    /// version than `kind`'s.
+    fn member_at_other_version(
+        &self,
+        kind: &KindInfo,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> std::result::Result<Option<KindInfo>, StoreError> {
+        Ok(self
+            .members()?
+            .iter()
+            .find(|member| {
+                member.kind == kind.kind
+                    && member.name == name
+                    && member.namespace.as_deref() == namespace
+                    && member.api_version != kind.api_version()
+                    && split_api_version(&member.api_version).0 == kind.group
+            })
+            .map(|member| KindInfo::new(&member.api_version, &member.kind, member.namespace.is_some())))
+    }
+
+    /// One member of the Release, read from the cluster; `None` once it is gone.
+    fn read_member(
+        &self,
+        kind: &KindInfo,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> std::result::Result<Option<Value>, StoreError> {
+        let Some(resource) = self.inner.resource(kind)? else {
+            return Ok(None);
+        };
+        let api = self.inner.api(&resource, kind.namespaced, namespace)?;
+        let api = &api;
+        let found = self
+            .inner
+            .block_on(|| async move { api.get_opt(name).await })
+            .map_err(unavailable)?;
+        found.map(|object| object_value(&resource, &object)).transpose()
+    }
 }
 
 impl ObjectStore for LiveStore {
@@ -283,15 +359,43 @@ impl ObjectStore for LiveStore {
             .collect())
     }
 
+    /// The kinds the Release holds, and otherwise the kinds the cluster serves: a
+    /// request for an object of a kind the Release holds none of must still reach the
+    /// check for an unrecorded object of that kind.
+    fn kind_of(&self, api_version: &str, plural: &str) -> std::result::Result<Option<KindInfo>, StoreError> {
+        if let Some(kind) = self
+            .kinds()?
+            .into_iter()
+            .find(|kind| kind.api_version() == api_version && kind.plural == plural)
+        {
+            return Ok(Some(kind));
+        }
+        self.inner.served_kind(api_version, plural)
+    }
+
     fn get(
         &self,
         kind: &KindInfo,
         namespace: Option<&str>,
         name: &str,
     ) -> std::result::Result<Option<Value>, StoreError> {
-        if !self.is_member(kind, namespace, name)? {
+        if self.scope.is_none() {
+            // A render that belongs to no Release owns nothing, so the cluster is not read.
             return Ok(None);
         }
+        if self.is_member(kind, namespace, name)? {
+            return self.read_member(kind, namespace, name);
+        }
+        if let Some(held) = self.member_at_other_version(kind, namespace, name)? {
+            return Err(crate::helm::lookup::api::version_mismatch(
+                namespace,
+                Some(name),
+                &kind.api_version(),
+                &held,
+            ));
+        }
+        // Not a member. The cluster may still hold it, and then it is neither returned
+        // (the Release does not own it as far as Nyl knows) nor read as absent.
         let Some(resource) = self.inner.resource(kind)? else {
             return Ok(None);
         };
@@ -301,25 +405,42 @@ impl ObjectStore for LiveStore {
             .inner
             .block_on(|| async move { api.get_opt(name).await })
             .map_err(unavailable)?;
-        found.map(|object| object_value(&resource, &object)).transpose()
+        if found.is_none() {
+            return Ok(None);
+        }
+        let reference = ObjectRef {
+            kind: kind.kind.clone(),
+            namespace: namespace.map(ToOwned::to_owned),
+            name: name.to_owned(),
+        };
+        Err(StoreError::new(
+            LIVE_UNRECORDED_CODE,
+            format!(
+                "the cluster holds {reference}, but no recorded revision or publication of the Release lists it, so a \
+                 chart's lookup can neither return it nor read it as absent, which would regenerate what the cluster \
+                 holds. Apply the Release once without live lookups (`nyl apply --lookup=snapshot`, which generates \
+                 the object afresh and records it, so later applies keep it), or pass `--refresh-lookup {reference}` \
+                 to regenerate it deliberately"
+            ),
+        ))
     }
 
+    /// The members of the kind in the namespace, read one by one: the cluster is never listed.
     fn list(&self, kind: &KindInfo, namespace: Option<&str>) -> std::result::Result<Vec<Value>, StoreError> {
-        let Some(resource) = self.inner.resource(kind)? else {
-            return Ok(Vec::new());
-        };
-        let api = self.inner.api(&resource, kind.namespaced, namespace)?;
-        let api = &api;
-        let listed = self
-            .inner
-            .block_on(|| async move { api.list(&ListParams::default()).await })
-            .map_err(unavailable)?;
+        let wanted = self
+            .members()?
+            .iter()
+            .filter(|member| {
+                member.api_version == kind.api_version()
+                    && member.kind == kind.kind
+                    && namespace.is_none_or(|namespace| member.namespace.as_deref() == Some(namespace))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let mut objects = Vec::new();
-        for object in listed.items {
-            let object_namespace = object.metadata.namespace.as_deref();
-            let name = object.metadata.name.as_deref().unwrap_or_default();
-            if self.is_member(kind, object_namespace, name)? {
-                objects.push(object_value(&resource, &object)?);
+        for member in wanted {
+            if let Some(object) = self.read_member(kind, member.namespace.as_deref(), &member.name)? {
+                objects.push(object);
             }
         }
         objects.sort_by_key(|object| {
@@ -436,12 +557,20 @@ mod tests {
                 json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "foreign", "namespace": "demo"}, "data": {"x": "eA=="}}),
                 json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "published", "namespace": "demo"}}),
                 json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "foreign-cm", "namespace": "demo"}}),
+                json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "web", "namespace": "demo"}}),
+                json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": {"name": "stranger", "namespace": "demo"}}),
             ],
             &|_, _| Some(true),
             "demo",
         )
         .unwrap();
-        let capabilities = ApiCapabilities::new("1.30.0", ["v1".to_owned()], []).unwrap();
+        // The cluster serves the built-in kinds of the API versions it declares.
+        let group_versions = ["v1", "autoscaling/v1", "autoscaling/v2"]
+            .map(ToOwned::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let kinds = crate::helm::lookup::builtin::builtin_kinds_of(&group_versions).collect::<Vec<_>>();
+        let capabilities = ApiCapabilities::new("1.30.0", group_versions, kinds).unwrap();
         ApiServer::start(
             Arc::new(ApiState::new(capabilities, Arc::new(objects), "token".to_owned())),
             "token".to_owned(),
@@ -501,9 +630,10 @@ mod tests {
         let found = store.get(&secret, Some("demo"), "my-ca").unwrap().unwrap();
         assert_eq!(found["data"]["ca"], "Y2E=");
         assert_eq!(found["kind"], "Secret");
-        assert!(
-            store.get(&secret, Some("demo"), "foreign").unwrap().is_none(),
-            "an object of the cluster that no revision or publication of the Release holds is absent"
+        assert_eq!(
+            store.get(&secret, Some("demo"), "foreign").unwrap_err().code,
+            Some("NYL-HELM-LOOKUP-LIVE-UNRECORDED"),
+            "an object of the cluster that no revision or publication of the Release holds is not returned"
         );
         assert!(store.get(&secret, Some("demo"), "missing").unwrap().is_none());
         assert_eq!(names(store.list(&secret, Some("demo")).unwrap()), ["my-ca"]);
@@ -516,6 +646,113 @@ mod tests {
         assert!(
             !live.cacheable(),
             "what a cluster holds changes without Nyl observing it"
+        );
+    }
+
+    /// Catches a Release installed by Helm or an older Nyl, or whose state was lost, regenerating
+    /// what the cluster holds: an object the cluster has that no revision or publication lists
+    /// is neither returned nor read as absent, and the user can still rotate it deliberately.
+    #[tokio::test]
+    async fn test_an_object_the_cluster_holds_but_no_revision_lists_is_a_coded_failure() {
+        let server = cluster();
+        let live = LiveLookup::new(config(&server).await, None)
+            .unwrap()
+            .with_release_storage(Arc::new(Revision(vec![key("Secret", "demo", "my-ca")])));
+        let store = live.store(&scope());
+        let secret = KindInfo::new("v1", "Secret", true);
+
+        let error = store.get(&secret, Some("demo"), "foreign").unwrap_err();
+        assert_eq!(error.code, Some("NYL-HELM-LOOKUP-LIVE-UNRECORDED"));
+        assert!(
+            error.message.contains("Secret/demo/foreign")
+                && error.message.contains("--refresh-lookup Secret/demo/foreign")
+                && error.message.contains("nyl apply --lookup=snapshot"),
+            "the fix names both ways out: {}",
+            error.message
+        );
+        // What the cluster does not hold is plainly absent, and members are unaffected.
+        assert!(store.get(&secret, Some("demo"), "missing").unwrap().is_none());
+        assert!(store.get(&secret, Some("demo"), "my-ca").unwrap().is_some());
+
+        // A kind the Release holds nothing of still reaches the check, through the request path.
+        let request =
+            crate::helm::lookup::api::LookupRequest::from_path("/api/v1/namespaces/demo/configmaps/foreign-cm")
+                .unwrap();
+        let error = crate::helm::lookup::api::evaluate(&store, &request).unwrap_err();
+        assert_eq!(error.code, Some("NYL-HELM-LOOKUP-LIVE-UNRECORDED"));
+
+        // `--refresh-lookup` regenerates it deliberately: the object reads as absent.
+        let audit = Arc::new(crate::helm::lookup::RefreshAudit::new(BTreeSet::from([
+            "Secret/demo/foreign".parse().unwrap(),
+        ])));
+        let refreshed = crate::helm::lookup::FilteredStore::refreshing(store, audit.clone());
+        assert!(refreshed.get(&secret, Some("demo"), "foreign").unwrap().is_none());
+        assert!(audit.unmatched().is_empty());
+    }
+
+    /// Catches a lookup at another version reading as absent: the Release recorded the object at
+    /// autoscaling/v2, and the chart asks for it as autoscaling/v1.
+    #[tokio::test]
+    async fn test_a_member_looked_up_at_another_version_is_a_coded_failure() {
+        let server = cluster();
+        let revision = ResourceKey {
+            gvk: GroupVersionKind::from_api_version_kind("autoscaling/v2", "HorizontalPodAutoscaler").unwrap(),
+            namespace: Some("demo".to_owned()),
+            name: "web".to_owned(),
+        };
+        let live = LiveLookup::new(config(&server).await, None)
+            .unwrap()
+            .with_release_storage(Arc::new(Revision(vec![revision])));
+        let store = live.store(&scope());
+        let request = crate::helm::lookup::api::LookupRequest::from_path(
+            "/apis/autoscaling/v1/namespaces/demo/horizontalpodautoscalers/web",
+        )
+        .unwrap();
+        let error = crate::helm::lookup::api::evaluate(&store, &request).unwrap_err();
+        assert_eq!(error.code, Some("NYL-HELM-LOOKUP-VERSION-MISMATCH"));
+        assert!(error.message.contains("held at v2"), "{}", error.message);
+        // At the version it is held at it is found.
+        let request = crate::helm::lookup::api::LookupRequest::from_path(
+            "/apis/autoscaling/v2/namespaces/demo/horizontalpodautoscalers/web",
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::helm::lookup::api::evaluate(&store, &request),
+            Ok(crate::helm::lookup::api::Evaluation::Object(_))
+        ));
+    }
+
+    /// Catches a list reading the whole cluster: it reads the members one by one, so a cluster
+    /// that holds thousands of objects of a kind is never listed and a list needs no more access
+    /// than a get.
+    #[tokio::test]
+    async fn test_a_list_reads_the_members_one_by_one_and_never_lists_the_cluster() {
+        let server = cluster();
+        let live = LiveLookup::new(config(&server).await, None)
+            .unwrap()
+            .with_release_storage(Arc::new(Revision(vec![
+                key("Secret", "demo", "my-ca"),
+                key("Secret", "demo", "gone"),
+            ])));
+        let store = live.store(&scope());
+        let secret = KindInfo::new("v1", "Secret", true);
+        assert_eq!(
+            names(store.list(&secret, Some("demo")).unwrap()),
+            ["my-ca"],
+            "a member that is gone is skipped, and an object that is not a member is not listed"
+        );
+        assert_eq!(names(store.list(&secret, None).unwrap()), ["my-ca"]);
+        drop(live);
+        let report = server.finish();
+        let requests = report
+            .observations
+            .iter()
+            .map(|observation| crate::helm::lookup::api::LookupRequest::from_key(&observation.request).unwrap())
+            .collect::<Vec<_>>();
+        assert!(!requests.is_empty());
+        assert!(
+            requests.iter().all(|request| request.name.is_some()),
+            "only gets reached the cluster: {requests:?}"
         );
     }
 

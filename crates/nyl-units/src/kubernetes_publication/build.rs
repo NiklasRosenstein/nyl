@@ -68,7 +68,8 @@ impl Arguments {
     fn parse(args: &[OsString]) -> DriverResult<Self> {
         let mut mode = None;
         let mut shared_catalog = false;
-        for arg in args {
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
             let next = match arg.to_str() {
                 Some("--diff") => Mode::Diff,
                 Some("--push") => Mode::Push,
@@ -77,12 +78,33 @@ impl Arguments {
                     continue;
                 }
                 // The tree reads lookups from the target's last publication, the
-                // default, so naming it changes nothing; the cluster cannot decide it.
+                // default, so naming it changes nothing, in either spelling of the
+                // option; the cluster cannot decide it.
                 Some("--lookup=snapshot") => continue,
+                Some("--lookup") if args.as_slice().first().and_then(|value| value.to_str()) == Some("snapshot") => {
+                    args.next();
+                    continue;
+                }
+                Some("--lookup") if args.as_slice().is_empty() => {
+                    return Err(DriverError::before_effects(format!(
+                        "{ARGUMENT}: --lookup takes a value; a publication accepts --lookup snapshot or --lookup=snapshot"
+                    )));
+                }
                 Some(lookup) if lookup == "--lookup" || lookup.starts_with("--lookup=") => {
+                    let named = if lookup == "--lookup" {
+                        format!(
+                            "--lookup {}",
+                            args.as_slice()
+                                .first()
+                                .map(|value| value.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        )
+                    } else {
+                        lookup.to_owned()
+                    };
                     return Err(DriverError::before_effects(format!(
                         "{}: a publication renders what Git declares and publishes, so it reads the Helm lookups of its \
-                         charts from the target's last publication and never from a live cluster; {lookup} is not accepted",
+                         charts from the target's last publication and never from a live cluster; {named} is not accepted",
                         nyl_render::helm::lookup::LIVE_REFUSED_CODE
                     )));
                 }

@@ -353,10 +353,13 @@ fn test_a_cached_render_is_reused_only_while_its_lookups_return_the_same_results
     assert_eq!(cached(snapshot_with_ca()), reused);
 }
 
-/// Catches live lookups not reaching Helm: a chart reuses the CA the cluster
-/// holds, read through Nyl's own client, and still sees nothing outside its Release.
-#[tokio::test]
-async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
+/// A fake live cluster that holds the CA and two ConfigMaps, and the lookup of a Release that
+/// owns the `members` of it, with `refresh` objects treated as absent. The server is returned
+/// so that it outlives the render.
+async fn live_handle(
+    members: &'static [(&'static str, &'static str)],
+    refresh: &[&str],
+) -> (nyl_render::helm::lookup::ApiServer, LookupHandle) {
     use nyl_render::helm::lookup::api::{ApiCapabilities, ApiState};
     use nyl_render::helm::lookup::ApiServer;
     use nyl_render::kubernetes::lookup::{LiveLookup, ObjectIdentity, PublishedMembers};
@@ -372,7 +375,18 @@ async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
         "demo",
     )
     .unwrap();
-    let capabilities = ApiCapabilities::new("1.30.0", ["v1".to_owned()], []).unwrap();
+    // The fake cluster serves what the chart's objects need: Helm reads each object it renders,
+    // the chart's CustomResourceDefinition among them.
+    let capabilities = ApiCapabilities::new(
+        "1.30.0",
+        ["v1".to_owned(), "apiextensions.k8s.io/v1".to_owned()],
+        [
+            KindInfo::new("v1", "Secret", true),
+            KindInfo::new("v1", "ConfigMap", true),
+            KindInfo::new("apiextensions.k8s.io/v1", "CustomResourceDefinition", false),
+        ],
+    )
+    .unwrap();
     let server = ApiServer::start(
         Arc::new(ApiState::new(capabilities, Arc::new(cluster), "token".to_owned())),
         "token".to_owned(),
@@ -383,22 +397,22 @@ async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
         .await
         .unwrap();
     config.proxy_url = None;
-    // The Release owns the CA and one of the two ConfigMaps.
     let owned = |kind: &str, name: &str| ObjectIdentity {
         api_version: "v1".to_owned(),
         kind: kind.to_owned(),
         namespace: Some("demo".to_owned()),
         name: name.to_owned(),
     };
-    let members: PublishedMembers = Arc::new(move |_| Ok(vec![owned("Secret", "my-ca"), owned("ConfigMap", "cm-a")]));
+    let members: PublishedMembers =
+        Arc::new(move |_| Ok(members.iter().map(|(kind, name)| owned(kind, name)).collect::<Vec<_>>()));
     let live = LiveLookup::new(config, Some(members)).unwrap();
-
-    let directory = TempDir::new().unwrap();
-    let chart = chart(directory.path(), &[]);
     // The Release is named by its publication alone here: the fake cluster keeps
     // no release revisions, which a real one lists by label.
     let handle = LookupHandle::new(
-        LookupConfig::new(Arc::new(live), BTreeSet::new()),
+        LookupConfig::new(
+            Arc::new(live),
+            refresh.iter().map(|reference| reference.parse().unwrap()).collect(),
+        ),
         Some(ReleaseIdentity {
             name: "web".to_owned(),
             namespace: "demo".to_owned(),
@@ -411,6 +425,17 @@ async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
             }))
         })),
     );
+    (server, handle)
+}
+
+/// Catches live lookups not reaching Helm: a chart reuses the CA the cluster
+/// holds, read through Nyl's own client, and still sees nothing outside its Release.
+#[tokio::test]
+async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
+    // The Release owns the CA and one of the two ConfigMaps.
+    let (_server, handle) = live_handle(&[("Secret", "my-ca"), ("ConfigMap", "cm-a")], &[]).await;
+    let directory = TempDir::new().unwrap();
+    let chart = chart(directory.path(), &[]);
     let manifests = render(&chart, Some(handle)).unwrap();
     assert_eq!(
         secret_data(&manifests),
@@ -422,6 +447,27 @@ async fn test_a_chart_reuses_what_the_live_cluster_holds_for_its_release() {
         "cm-a",
         "a ConfigMap the cluster holds but the Release does not own is absent"
     );
+}
+
+/// Catches a Release installed by Helm or an older Nyl, or whose state was lost, regenerating
+/// the CA the cluster holds: the cluster has the CA, no revision or publication of the Release
+/// lists it, and the render fails with the code and the two ways out instead of reading absent.
+#[tokio::test]
+async fn test_a_chart_looking_up_an_object_the_release_does_not_record_fails_instead_of_regenerating_it() {
+    let (_server, handle) = live_handle(&[("ConfigMap", "cm-a")], &[]).await;
+    let directory = TempDir::new().unwrap();
+    let chart = chart(directory.path(), &[]);
+    let error = render(&chart, Some(handle)).unwrap_err().to_string();
+    assert!(error.contains("NYL-HELM-LOOKUP-LIVE-UNRECORDED"), "{error}");
+    assert!(
+        error.contains("--refresh-lookup Secret/demo/my-ca") && error.contains("nyl apply --lookup=snapshot"),
+        "{error}"
+    );
+
+    // Rotating it deliberately regenerates the CA.
+    let (_server, handle) = live_handle(&[("ConfigMap", "cm-a")], &["Secret/demo/my-ca"]).await;
+    let manifests = render(&chart, Some(handle)).unwrap();
+    assert_ne!(secret_data(&manifests)["tls.crt"], json!("TElWRS1DRVJU"));
 }
 
 const CAPABILITIES_TEMPLATE: &str = r#"apiVersion: v1

@@ -385,11 +385,24 @@ reproduce.
 
 `render`, `diff`, and `apply` can read the cluster instead of the publication with
 `--lookup=live`. Helm still talks only to the local API and never gets the cluster or
-its credentials: the API reads the cluster through Nyl's own client, with GET and LIST
-only, and only for objects that belong to the Release. Those are the resources of the
-Release's latest recorded revision (`nyl apply` records one) and, with a target, the
-objects its last publication holds; any other object, whatever the cluster holds, is
-absent.
+its credentials: the API reads the cluster through Nyl's own client, with GET only, and
+only for objects that belong to the Release. Those are the resources of the Release's
+latest recorded revision (`nyl apply` records one) and, with a target, the objects its
+last publication holds. A `lookup` that lists a kind reads those objects one by one and
+never lists the cluster, so it needs no more access than a get.
+
+An object the cluster holds that is not among those is not returned, and it is not read
+as absent either, because that would regenerate what the cluster still holds: a Release
+that Helm or an older Nyl installed, or whose state was lost, would get a new CA on its
+next `nyl apply --context`. The render fails with
+`NYL-HELM-LOOKUP-LIVE-UNRECORDED`, naming the object, and there are two ways out: apply
+the Release once without live lookups (`nyl apply --lookup=snapshot`), which generates the
+object afresh and records it, so later applies keep it; or pass
+`--refresh-lookup Kind/namespace/name` to regenerate that object deliberately. Helm reads
+each object it renders before applying it, so an unrecorded object that the chart renders
+fails the same way. An object that does not exist in the cluster is absent, and an object a
+revision recorded at another version than the chart looks it up at fails with
+`NYL-HELM-LOOKUP-VERSION-MISMATCH`.
 
 - Without GitOps configuration, `--context` already chose the cluster, so the live
   cluster is the default source there (`--lookup=snapshot` finds nothing instead, since
@@ -474,6 +487,7 @@ a warning on stderr is not an error.
 | `NYL-HELM-LOOKUP-HELM-UNSUPPORTED` | The Helm binary does not take the flags a render with `lookup` needs (Helm 3.17 or later). Install the Helm version the project pins. |
 | `NYL-HELM-LOOKUP-REFRESH-UNMATCHED` | A warning: a `--refresh-lookup` reference hid no object that a chart looked up, so it changed nothing. Check its spelling. |
 | `NYL-HELM-LOOKUP-LIVE-UNAVAILABLE` | `--lookup=live` could not read the cluster, or the release revisions that say which objects belong to the Release. Nothing is treated as absent. Check the connection and the credentials, or render without `--lookup=live` to read the last publication. |
+| `NYL-HELM-LOOKUP-LIVE-UNRECORDED` | `--lookup=live` found an object in the cluster that no recorded revision or publication of the Release lists, so it is neither returned nor read as absent. Apply the Release once with `nyl apply --lookup=snapshot` so a revision records its objects, or pass `--refresh-lookup Kind/namespace/name` to regenerate the object deliberately. |
 | `NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER` | `--lookup=live` was given where no cluster is selected. Pass `--target`, or `--context` in a project without GitOps configuration. |
 | `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree or publication command (`render-tree`, `diff-tree`, `publish-tree`, `nyl build -- --push`) was given `--lookup=live`. Publications read lookups from the last publication only; use `render`, `diff`, or `apply` for live lookups. |
 | `NYL-HELM-LOOKUP-FAILED` | The lookup API could not answer a request Helm made, for example one it does not implement. The message names the request. |

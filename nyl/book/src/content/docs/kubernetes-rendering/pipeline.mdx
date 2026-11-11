@@ -57,7 +57,9 @@ a Release and every later one see the same `.Capabilities`.
 
 `render`, `diff`, and `apply` can read the cluster instead (`--lookup=live`, the default
 for `--context` without GitOps configuration), through Nyl's own client, for the
-Release's own objects only. A render that did is never cached, and tree and
+Release's own objects only, read one by one, and an object the cluster holds that no
+revision or publication of the Release lists is an error, not an absent object. A render
+that did is never cached, and tree and
 publication commands refuse the flag. `diff --lookup=live` can differ from the
 publication, which holds what was last published, not what the cluster holds now.
 

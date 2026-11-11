@@ -98,6 +98,13 @@ impl ObjectRef {
     }
 }
 
+impl ObjectRef {
+    /// Whether this reference names the object of `kind` in `namespace` called `name`.
+    pub fn names(&self, kind: &str, namespace: Option<&str>, name: &str) -> bool {
+        self.kind == kind && self.name == name && self.namespace.as_deref() == namespace.filter(|ns| !ns.is_empty())
+    }
+}
+
 impl FromStr for ObjectRef {
     type Err = String;
 
@@ -176,8 +183,18 @@ impl std::fmt::Display for StoreError {
 ///
 /// Calls may block; the API runs them off its async threads.
 pub trait ObjectStore: Send + Sync {
-    /// The kinds discovery lists. Only kinds the store holds objects of.
+    /// The kinds the store holds objects of.
     fn kinds(&self) -> Result<Vec<KindInfo>, StoreError>;
+
+    /// The kind of `api_version` that a request names by its `plural`, when the
+    /// store can tell. A store that holds objects answers for the kinds it holds; one
+    /// that reads from a server may know more kinds than it holds objects of.
+    fn kind_of(&self, api_version: &str, plural: &str) -> Result<Option<KindInfo>, StoreError> {
+        Ok(self
+            .kinds()?
+            .into_iter()
+            .find(|kind| kind.api_version() == api_version && kind.plural == plural))
+    }
 
     /// One object, or `None` when it does not exist.
     fn get(&self, kind: &KindInfo, namespace: Option<&str>, name: &str) -> Result<Option<Value>, StoreError>;
@@ -190,6 +207,10 @@ pub trait ObjectStore: Send + Sync {
 impl<T: ObjectStore + ?Sized> ObjectStore for std::sync::Arc<T> {
     fn kinds(&self) -> Result<Vec<KindInfo>, StoreError> {
         (**self).kinds()
+    }
+
+    fn kind_of(&self, api_version: &str, plural: &str) -> Result<Option<KindInfo>, StoreError> {
+        (**self).kind_of(api_version, plural)
     }
 
     fn get(&self, kind: &KindInfo, namespace: Option<&str>, name: &str) -> Result<Option<Value>, StoreError> {
@@ -219,11 +240,17 @@ impl ObjectStore for EmptyStore {
     }
 }
 
+/// Whether the object of a kind, in a namespace, with a name, is hidden.
+type NamePredicate = Box<dyn Fn(&KindInfo, Option<&str>, &str) -> bool + Send + Sync>;
+
 /// Hides objects from another store: those outside its scope, and those the
 /// user asked to treat as absent.
 pub struct FilteredStore<S> {
     inner: S,
     admits: Box<dyn Fn(&Value) -> bool + Send + Sync>,
+    /// Whether an object is hidden by its name alone, which spares the store a read
+    /// (and a failure) for an object the user asked to treat as absent.
+    hides_name: NamePredicate,
 }
 
 impl<S: ObjectStore> FilteredStore<S> {
@@ -231,12 +258,18 @@ impl<S: ObjectStore> FilteredStore<S> {
         Self {
             inner,
             admits: Box::new(admits),
+            hides_name: Box::new(|_, _, _| false),
         }
     }
 
     /// `inner` without the objects the audit's references name.
     pub fn refreshing(inner: S, audit: Arc<RefreshAudit>) -> Self {
-        Self::new(inner, move |object| !audit.hides(object))
+        let by_name = audit.clone();
+        Self {
+            inner,
+            admits: Box::new(move |object| !audit.hides(object)),
+            hides_name: Box::new(move |kind, namespace, name| by_name.hides_name(&kind.kind, namespace, name)),
+        }
     }
 }
 
@@ -270,8 +303,22 @@ impl RefreshAudit {
 
     /// Whether the user asked to treat `object` as absent, noting the reference that did.
     fn hides(&self, object: &Value) -> bool {
+        self.note(self.refs.iter().filter(|reference| reference.matches(object)))
+    }
+
+    /// Whether the user asked to treat the object of this kind, namespace, and name as
+    /// absent, noting the reference that did.
+    fn hides_name(&self, kind: &str, namespace: Option<&str>, name: &str) -> bool {
+        self.note(
+            self.refs
+                .iter()
+                .filter(|reference| reference.names(kind, namespace, name)),
+        )
+    }
+
+    fn note<'a>(&self, matched: impl Iterator<Item = &'a ObjectRef>) -> bool {
         let mut hidden = false;
-        for reference in self.refs.iter().filter(|reference| reference.matches(object)) {
+        for reference in matched {
             hidden = true;
             self.hit
                 .lock()
@@ -319,7 +366,14 @@ impl<S: ObjectStore> ObjectStore for FilteredStore<S> {
         self.inner.kinds()
     }
 
+    fn kind_of(&self, api_version: &str, plural: &str) -> Result<Option<KindInfo>, StoreError> {
+        self.inner.kind_of(api_version, plural)
+    }
+
     fn get(&self, kind: &KindInfo, namespace: Option<&str>, name: &str) -> Result<Option<Value>, StoreError> {
+        if (self.hides_name)(kind, namespace, name) {
+            return Ok(None);
+        }
         Ok(self
             .inner
             .get(kind, namespace, name)?
