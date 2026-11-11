@@ -280,22 +280,14 @@ nyl render --target production app.yaml
 
 ## Reusing generated objects with `lookup`
 
-Some charts generate secrets once and reuse them later: they call Helm's `lookup`
-for an existing Secret and run `genCA` or `genSignedCert` only when it finds
-none. Cilium's chart does this for its TLS CA. Nyl renders charts offline, where
-`lookup` finds nothing, so such a chart generates a new CA, and different bytes,
-whenever the render cache is cold.
+Some charts generate a secret on first install and read it back with Helm's `lookup`
+afterwards: they call `genCA` or `randAlphaNum` only when `lookup` finds nothing.
+Cilium's chart does this for its Hubble CA. Nyl renders charts without a cluster, so
+`lookup` finds nothing and such a chart generates new bytes on every cold render.
 
-Declare `spec.lookup` on the HelmChart to let `lookup` read the objects of the
-chart's Release instead:
+Set `spec.lookup: {}` to let `lookup` read the objects the Release last published:
 
 ```yaml
-apiVersion: k8s.nyl/v1
-kind: Release
-metadata:
-  name: cilium
-  namespace: kube-system
----
 apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
@@ -306,191 +298,90 @@ spec:
     repository: https://helm.cilium.io
     name: cilium
     version: 1.17.6
-  values:
-    hubble:
-      tls:
-        auto:
-          method: helm
   lookup: {}
 ```
 
-`lookup: {}` takes no fields. It is off by default, and a chart without it renders
-exactly as before. Where the objects come from is not part of the declaration: the
-command that renders chooses, and every command that renders the same target takes
-the same path.
+`lookup` is opt-in. A chart without it renders exactly as before.
 
-### What `lookup` reads
+### What `lookup` sees
 
-With a DeploymentTarget, `lookup` reads the target's last publication: the objects
-that `publish-tree` last published for this Release, at the commit of the
-publication branch that `fromPublication` Release inputs read. `render`,
-`diff`, `apply`, `render-tree`, `diff-tree`, `publish-tree`, and the publication
-unit all read it, so they agree.
-
-- `lookup` sees only the objects of the Release being rendered, the files that the
-  [ownership index](/nyl/kubernetes-gitops/rendered-layout/#ownership-index) lists
-  beneath `<group output>/<release>/`. Every other object is absent, including the
-  objects of other Releases and anything the cluster holds that no publication does.
-  A namespaced object that sets no namespace is in the namespace its Application
-  deploys to.
-- The first render has nothing to read: before the publication branch exists, or
-  before the Release is published, every lookup is absent and the chart generates.
-  After `publish-tree`, later renders find what it published and keep it. Generate
-  once, publish, and the CA stays.
-- A render without a target, and `--defaults-only` (which renders outside every
-  ApplicationGroup), read nothing: `lookup` is always absent there. The chart still
-  renders through the lookup API, which needs `--kube-version` and
-  `--kube-api-versions` as for any targetless Helm render.
-- The publication is read lazily, the first time a chart that declares `lookup`
-  needs it, so a target whose charts declare none never reads it. A normal render
-  refreshes the publication branch first, as `fromPublication` does; `--offline`
-  reads the cached branch head.
-- `nyl validate` and `nyl vendor` refresh the publication branch when they can and
-  otherwise use the cached branch head, so they work as an offline pre-step. A
-  publication that can be neither fetched nor found in the cache reads as empty there,
-  as it does for `fromPublication`: these commands run before anything is published, so
-  an unreachable, never-cached branch is treated as not existing yet. Every other command
-  fails with `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE` instead.
-- A direct `render`, `diff`, or `apply` with a target reads the publication at the
-  same commit its `fromPublication` inputs and the compiled target read, fetched once.
-
-An unreadable publication is never read as an absent one, because that would
-silently regenerate a CA. A publication that cannot be fetched, a branch that was
-never cached when `--offline` is given, an unparsable ownership index, a file
-missing from the tree, and a file whose bytes do not match the index all fail the
-render with `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE`. [`--lookup=live`](#reading-the-live-cluster)
-reads the cluster instead.
+- Only the objects of the Release being rendered, as the target's last publication
+  holds them. That is the commit `fromPublication` inputs read. Other Releases and
+  the cluster are invisible.
+- Before the Release is first published, or without a target, nothing is found and the
+  chart generates. After `publish-tree`, later renders read back what was published.
+- Only what the chart looks up stays stable. A value the chart generates on every
+  render, such as a leaf certificate it signs each time, still changes.
+- A publication that can't be read fails the render with
+  `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE`; it is never treated as empty. The exceptions
+  are `nyl validate` and `nyl vendor`, which treat a publication that was never fetched
+  and can't be fetched as empty. `--offline` reads the cached publication.
 
 ### Rotating a generated object
 
-`--refresh-lookup <Kind/namespace/name>` treats one object as absent for one render,
-so the chart generates it again; use `Kind/name` for a cluster-scoped object. Every
-command that renders a target takes it, and it can be repeated:
+`--refresh-lookup Kind/namespace/name` (`Kind/name` for a cluster-scoped object) hides
+one object for one render, so the chart generates it again. It is repeatable and works
+with every command that renders a target:
 
 ```bash
 nyl publish-tree --target production --refresh-lookup Secret/kube-system/cilium-ca
 ```
 
-A reference that hides no object that a chart looked up, because of a typo or because
-no chart looks the object up, changes nothing and is reported as a warning with
-`NYL-HELM-LOOKUP-REFRESH-UNMATCHED` when the command finishes; an object that the
-source does not hold yet is not found by it either.
-
-The next render without the flag reads the rotated object from the new publication
-and keeps it. `render`, `diff`, and `apply` with the flag show or apply the rotated
-object without publishing it, which a later `render` without the flag does not
-reproduce.
+Publish the result to keep the new object: `render`, `diff` and `apply` with the flag
+only show or apply it. A reference that matches no lookup warns with
+`NYL-HELM-LOOKUP-REFRESH-UNMATCHED`.
 
 ### Reading the live cluster
 
-`render`, `diff`, and `apply` can read the cluster instead of the publication with
-`--lookup=live`. Helm still talks only to the local API and never gets the cluster or
-its credentials: the API reads the cluster through Nyl's own client, with GET only, and
-only for objects that belong to the Release. Those are the resources of the Release's
-latest recorded revision (`nyl apply` records one) and, with a target, the objects its
-last publication holds. A `lookup` that lists a kind reads those objects one by one and
-never lists the cluster, so it needs no more access than a get.
+`render`, `diff` and `apply` read from the cluster instead with `--lookup=live`. It is
+the default with `--context` and no GitOps configuration.
 
-An object the cluster holds that is not among those is not returned, and it is not read
-as absent either, because that would regenerate what the cluster still holds: a Release
-that Helm or an older Nyl installed, or whose state was lost, would get a new CA on its
-next `nyl apply --context`. The render fails with
-`NYL-HELM-LOOKUP-LIVE-UNRECORDED`, naming the object, and there are two ways out: apply
-the Release once without live lookups (`nyl apply --lookup=snapshot`), which generates the
-object afresh and records it, so later applies keep it; or pass
-`--refresh-lookup Kind/namespace/name` to regenerate that object deliberately. Helm reads
-each object it renders before applying it, so an unrecorded object that the chart renders
-fails the same way. An object that does not exist in the cluster is absent, and an object a
-revision recorded at another version than the chart looks it up at fails with
-`NYL-HELM-LOOKUP-VERSION-MISMATCH`.
-
-- Without GitOps configuration, `--context` already chose the cluster, so the live
-  cluster is the default source there (`--lookup=snapshot` finds nothing instead, since
-  there is no publication). With a target, the publication stays the default.
-- `render --target <name> --lookup=live` connects to the Cluster for this alone, as
-  `diff` and `apply` do; `--context` then selects how to reach it.
-- A render that reads the cluster is never cached: what the cluster holds changes
-  without Nyl observing it, so every render looks it up again.
-- A cluster that cannot be read is an error (`NYL-HELM-LOOKUP-LIVE-UNAVAILABLE`), never
-  an absent object. `--lookup=live` without a target or `--context` has no cluster to
-  read (`NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER`).
-- `render-tree`, `diff-tree`, `publish-tree`, `nyl build -- --push`, and the publication
-  unit refuse `--lookup=live` (`NYL-HELM-LOOKUP-LIVE-REFUSED`), as they accept no
-  `--context`: what a cluster holds today must not decide what Git publishes.
-
-`diff --lookup=live` can legitimately differ from the publication: the cluster holds
-the object as it is now, which may be a CA that was rotated there, or one that was
-never published, while the publication holds what `publish-tree` last wrote. The two
-diverge exactly when the cluster is not what Git declares; compare with a plain `diff`
-to see the difference.
-
-### Caching and diagnostics
-
-The lookups a render makes are cache inputs. Nyl records each lookup with a digest
-of its result, or that the object is absent, and reuses a cached render only while
-every lookup still returns the same result, so a cache hit never assumes what an
-object holds. A result that holds Secret data is recorded only as a fingerprint keyed
-by the local cache, never as a guessable digest. Nothing Nyl logs contains the
-contents of an object.
+- `lookup` still sees only the Release's own objects: those in its latest revision
+  recorded by `nyl apply`, plus, with a target, those in its publication. Nyl reads each
+  one with a GET. Helm never talks to the cluster.
+- If the cluster holds an object outside that set, the render fails with
+  `NYL-HELM-LOOKUP-LIVE-UNRECORDED` instead of regenerating it. Releases installed by
+  Helm or an older Nyl hit this. Run `nyl apply --lookup=snapshot` once to record them,
+  or pass `--refresh-lookup` to regenerate the object on purpose.
+- Live renders are never cached.
+- Tree and publication commands refuse `--lookup=live`: what a cluster holds must not
+  decide what Git publishes.
 
 ### How it works
 
-A chart that declares `lookup` renders with `helm template --dry-run=server`
-against a read-only Kubernetes API that Nyl serves on 127.0.0.1 for the duration of
-that chart's render. Helm never gets a cluster or credentials: it reads a temporary
-kubeconfig that trusts only the certificate generated for that render and carries a
-random token, and `HELM_KUBE*` variables are cleared from its environment. The API
-answers GET and LIST of the Release's objects, refuses everything else, and answers
-`500` rather than `404` for anything it cannot answer, so Helm fails instead of
-generating what a missing answer would hide.
+Nyl runs `helm template --dry-run=server` against a read-only Kubernetes API that it
+serves on 127.0.0.1 for the duration of that chart's render. Helm gets no real cluster
+and no credentials. The API answers "not found" only when the object is really absent;
+anything it can't answer fails the render instead of letting the chart generate.
 
-Helm ignores `--kube-version` and `--api-versions` in this mode, so the API reports
-the Cluster's declared Kubernetes version and lists, as `.Capabilities.APIVersions`:
+Each lookup result is a render cache input (Secret data only as a keyed fingerprint),
+so a cached render is reused only while every lookup returns the same result.
 
-- Helm's default API versions, read from the Helm binary Nyl runs;
-- the Cluster's declared `spec.kubernetes.apiVersions`;
-- the API versions and kinds of the CustomResourceDefinitions in the chart's `crds/`
-  directory (and its unpacked subcharts'), and
-- the built-in Kubernetes kinds of every API version listed, from a table that is part
-  of Nyl.
+Requirements:
 
-Nothing else is listed: not the objects the publication holds, and not what the chart
-renders, so `.Capabilities` is the same on the first render of a Release and on every
-later one. It differs from an offline render in one way: the built-in kinds appear as
-`group/version/Kind` entries as well, because Helm cannot map an object through a
-version that lists no kinds, so `.Capabilities.APIVersions.Has "apps/v1/Deployment"` is
-true here.
-
-Helm maps every object it renders, and every kind a chart looks up, through this list.
-A custom resource kind that no `crds/` directory defines has to be declared as
-`group/version/Kind` in `spec.kubernetes.apiVersions` (or `--kube-api-versions` without a
-target), for example `monitoring.coreos.com/v1/ServiceMonitor`; declaring only
-`monitoring.coreos.com/v1` is not enough for a render with `lookup`. The failures name the
-declaration that fixes them (see the table below). The render needs Helm 3.17 or later,
-because it passes `--take-ownership`; the Helm version a project pins is recent enough.
-
-An object that a chart looks up at another version than the publication holds it at
-(for example `autoscaling/v1` for an object published as `autoscaling/v2`) fails with
-`NYL-HELM-LOOKUP-VERSION-MISMATCH` and never reads as absent.
-
-Charts that declare `lookup` also see Helm's own `contains CRDs` warning on stderr;
-a warning on stderr is not an error.
+- Helm 3.17 or later.
+- `.Capabilities.APIVersions` comes from Helm's defaults, the Cluster's
+  `spec.kubernetes.apiVersions`, the chart's `crds/`, and Nyl's table of built-in kinds.
+  It never depends on what the publication holds, so it is the same on every render. It
+  also lists built-in kinds as `group/version/Kind` entries.
+- A custom resource kind with no CRD in the chart's `crds/` must be declared as
+  `group/version/Kind`, for example `monitoring.coreos.com/v1/ServiceMonitor`.
 
 ### Errors
 
 | Code | Meaning and fix |
 | --- | --- |
-| `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE` | The publication that `lookup` reads cannot be read, or is corrupt. Nothing is treated as absent. Check network access to the publication repository; with `--offline`, render once without it so the branch is cached; for a corrupt publication, restore the file or republish. |
-| `NYL-HELM-LOOKUP-API-VERSION-UNDECLARED` | A chart that declares `lookup` renders, or looks up, an object of an API version no declaration covers. Declare the API version in `Cluster.spec.kubernetes.apiVersions`, or ship its CustomResourceDefinition in the chart's `crds/`. |
-| `NYL-HELM-LOOKUP-KIND-UNDECLARED` | A chart renders or looks up a kind that is not built in, whose API version is declared but that no declaration lists. Declare `group/version/Kind` in `Cluster.spec.kubernetes.apiVersions`, or ship its CustomResourceDefinition in the chart's `crds/`. Helm's own message follows. |
-| `NYL-HELM-LOOKUP-VERSION-MISMATCH` | A chart looks up an object at another version than the publication holds it at. Look it up at the version named, or pass `--refresh-lookup` for the object to regenerate it deliberately. |
-| `NYL-HELM-LOOKUP-HELM-UNSUPPORTED` | The Helm binary does not take the flags a render with `lookup` needs (Helm 3.17 or later). Install the Helm version the project pins. |
-| `NYL-HELM-LOOKUP-REFRESH-UNMATCHED` | A warning: a `--refresh-lookup` reference hid no object that a chart looked up, so it changed nothing. Check its spelling. |
-| `NYL-HELM-LOOKUP-LIVE-UNAVAILABLE` | `--lookup=live` could not read the cluster, or the release revisions that say which objects belong to the Release. Nothing is treated as absent. Check the connection and the credentials, or render without `--lookup=live` to read the last publication. |
-| `NYL-HELM-LOOKUP-LIVE-UNRECORDED` | `--lookup=live` found an object in the cluster that no recorded revision or publication of the Release lists, so it is neither returned nor read as absent. Apply the Release once with `nyl apply --lookup=snapshot` so a revision records its objects, or pass `--refresh-lookup Kind/namespace/name` to regenerate the object deliberately. |
-| `NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER` | `--lookup=live` was given where no cluster is selected. Pass `--target`, or `--context` in a project without GitOps configuration. |
-| `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree or publication command (`render-tree`, `diff-tree`, `publish-tree`, `nyl build -- --push`) was given `--lookup=live`. Publications read lookups from the last publication only; use `render`, `diff`, or `apply` for live lookups. |
-| `NYL-HELM-LOOKUP-FAILED` | The lookup API could not answer a request Helm made, for example one it does not implement. The message names the request. |
+| `NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE` | The publication can't be read or is corrupt. Check access to the publication repository; with `--offline`, render once online first; for a corrupt publication, republish. |
+| `NYL-HELM-LOOKUP-API-VERSION-UNDECLARED` | The chart renders or looks up an API version nothing declares. Declare it in `Cluster.spec.kubernetes.apiVersions`, or ship its CRD in the chart's `crds/`. |
+| `NYL-HELM-LOOKUP-KIND-UNDECLARED` | The chart renders or looks up a custom kind nothing declares. Declare `group/version/Kind`, or ship its CRD in `crds/`. |
+| `NYL-HELM-LOOKUP-VERSION-MISMATCH` | The object is held at a different API version than the chart asks for. Look it up at that version, or `--refresh-lookup` it to regenerate. |
+| `NYL-HELM-LOOKUP-HELM-UNSUPPORTED` | Helm is older than 3.17. Install the Helm version the project pins. |
+| `NYL-HELM-LOOKUP-REFRESH-UNMATCHED` | Warning: a `--refresh-lookup` reference matched no lookup. Check its spelling. |
+| `NYL-HELM-LOOKUP-LIVE-UNAVAILABLE` | `--lookup=live` couldn't read the cluster or the Release's revisions. Check the connection, or drop `--lookup=live`. |
+| `NYL-HELM-LOOKUP-LIVE-UNRECORDED` | The cluster holds an object no revision or publication of the Release lists. Run `nyl apply --lookup=snapshot` once, or `--refresh-lookup` the object. |
+| `NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER` | `--lookup=live` without a cluster. Pass `--target`, or `--context` without GitOps configuration. |
+| `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree or publication command got `--lookup=live`. Use `render`, `diff` or `apply` for live lookups. |
+| `NYL-HELM-LOOKUP-FAILED` | The lookup API couldn't answer a request Helm made. The message names the request. |
 
 ## Sync waves and phases
 
