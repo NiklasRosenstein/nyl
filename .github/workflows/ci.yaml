@@ -52,8 +52,10 @@ jobs:
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
 
+      # cargo-audit 0.23.0 ships no signed prebuilt binary; keep --only-signed and pin
+      # the newest version that has one.
       - name: Install cargo-audit
-        run: cargo binstall cargo-audit --no-confirm --disable-strategies compile --only-signed --disable-telemetry
+        run: cargo binstall cargo-audit@0.22.1 --no-confirm --disable-strategies compile --only-signed --disable-telemetry
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
