@@ -99,6 +99,21 @@ impl PublicationLookup {
         }
     }
 
+    /// Read the publication at `base`, when it is this publication's and no lookup
+    /// resolved one yet. The state a render reads from the publication, through
+    /// `fromPublication` or a lookup, is then read at one commit.
+    pub fn adopt_base(&self, base: Option<&PublicationBase>) {
+        let Some(base) = base.filter(|base| base.is_for(&self.inner.url, &self.inner.branch, &self.inner.prefix))
+        else {
+            return;
+        };
+        self.inner
+            .base
+            .lock()
+            .expect("the base is not poisoned")
+            .get_or_insert_with(|| Ok(base.clone()));
+    }
+
     /// The publication base the lookups read, when any lookup needed it.
     pub fn resolved_base(&self) -> Option<PublicationBase> {
         self.inner

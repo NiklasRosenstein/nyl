@@ -751,6 +751,7 @@ async fn compile_target_tree_recording(
     } else {
         None
     };
+    lookup.adopt_base(publication_base.as_ref());
     // Pinned state is relative to the prefix of the base it came with.
     let pinned_state_files = options.pinned_state_files.as_ref().filter(|_| {
         options
