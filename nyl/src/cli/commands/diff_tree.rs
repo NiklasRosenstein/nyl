@@ -47,6 +47,9 @@ pub struct DiffTreeArgs {
     #[command(flatten)]
     pub progress: TreeProgressArgs,
 
+    #[command(flatten)]
+    pub lookup: nyl_render::helm::lookup::LookupArgs,
+
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
@@ -270,6 +273,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
         publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(args.offline),
+        refresh_lookup: args.lookup.refresh(),
         ..TreeRenderOptions::default()
     };
     let rendered = compile_target_tree_cached_with_observer_and_options(

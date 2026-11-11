@@ -63,6 +63,11 @@ pub struct TreeRenderOptions {
     /// them. Part of the render-cache key, since the values are rendered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orchestrated_inputs: Option<super::inputs::OrchestratedInputs>,
+    /// Objects the Helm `lookup` of the target's charts treats as absent for
+    /// this render, which regenerates what a chart reads from them (a CA, for
+    /// rotation). Part of the cache key, since it changes what renders.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub refresh_lookup: BTreeSet<crate::helm::lookup::ObjectRef>,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -531,6 +536,18 @@ async fn compile_target_tree_recording(
         );
     }
     let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
+    // Every Release of the target reads its lookups from the target's own
+    // publication, which is read the first time a chart's lookup needs it.
+    let lookup = super::lookup::PublicationLookup::for_target(
+        inventory,
+        &target,
+        &cluster,
+        options.publication_read,
+        cache,
+        options.publication_base.as_ref(),
+    )?;
+    let lookup_config =
+        crate::helm::lookup::LookupConfig::new(std::sync::Arc::new(lookup.clone()), options.refresh_lookup.clone());
     let central_session = if options.allow_secret_inputs {
         RenderSession::for_target_with_secret_inputs(
             &inventory.project_root,
@@ -542,7 +559,8 @@ async fn compile_target_tree_recording(
         RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?
     }
     .with_cache(cache.cloned())
-    .with_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
+    .with_git_offline(options.publication_read == super::inputs::PublicationRead::Cached)
+    .with_lookup(Some(lookup_config.clone()));
     let selection = options.selection.clone();
     selection.validate()?;
     let control_digest = partial::control_digest(inventory, &target, &cluster, &argocd, &repository)?;
@@ -661,6 +679,7 @@ async fn compile_target_tree_recording(
         if let Some(session) = &mut source.source_session {
             session.set_cache(cache.cloned());
             session.set_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
+            session.set_lookup(Some(lookup_config.clone()));
         }
         prepared_groups.push(PreparedGroup {
             group_resource_path,
@@ -768,6 +787,7 @@ async fn compile_target_tree_recording(
         repository: &repository,
         repository_source_path: repository_path.as_deref(),
         record,
+        lookup: &lookup_config,
     };
     let input_digests = release_inputs.index_entries()?;
     let mut cache_probe = prepare_target_cache(
@@ -786,7 +806,7 @@ async fn compile_target_tree_recording(
     } else {
         None
     } {
-        compiled.publication_base = publication_base;
+        compiled.publication_base = publication_base.or_else(|| lookup.resolved_base());
         observer.finished();
         // A hit's probe holds exactly the stored record's inputs, re-read.
         let dependencies = cache_probe.filter(|_| record).map(|probe| TargetDependencies {
@@ -891,6 +911,7 @@ async fn compile_target_tree_recording(
         };
         let mut claimed_source_files = BTreeSet::new();
         let project_paths = inventory.paths();
+        let lookup_scope = super::lookup::group_scope(&group);
 
         for source_file in &source.files {
             claimed_source_files.insert(manifest_path_identity(&source_file.path));
@@ -944,6 +965,7 @@ async fn compile_target_tree_recording(
                     provenance_root,
                     worktree_root,
                     resolved_inputs.as_ref(),
+                    Some(lookup_scope.clone()),
                 )
                 .await?;
             if let (Some(repository), Some(revision)) = (
@@ -1355,6 +1377,9 @@ async fn compile_target_tree_recording(
         &publication_snapshot,
         &files,
     );
+    // What the lookups read is state read from the publication, so the
+    // publication must not move under it.
+    let publication_base = publication_base.or_else(|| lookup.resolved_base());
     let compiled = CompiledTargetTree {
         publication_report,
         publication_snapshot: Some(publication_snapshot),
@@ -1410,8 +1435,13 @@ struct TargetCacheInputs<'a> {
     /// Whether the compile returns its dependency record, which keeps a
     /// probe even without a cache.
     record: bool,
+    /// How the Releases' Helm `lookup` is answered, to revalidate what a cached
+    /// target recorded.
+    lookup: &'a crate::helm::lookup::LookupConfig,
 }
 
+// One record of every input of the target; splitting it would hide which inputs are recorded.
+#[allow(clippy::too_many_lines)]
 fn prepare_target_cache(
     inventory: &GitOpsInventory,
     inputs: &TargetCacheInputs<'_>,
@@ -1514,6 +1544,9 @@ fn prepare_target_cache(
     let base = record.then(|| recorder.clone());
     if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
         recorder.replay_filesystem_dependencies(previous)?;
+        // What the Releases looked up is an input of the target: it is reused
+        // only while every lookup still returns what it did.
+        recorder.replay_lookup_dependencies(previous, inputs.lookup);
     }
     let cacheable = recorder.is_cacheable();
     Ok(Some(TargetCacheProbe {

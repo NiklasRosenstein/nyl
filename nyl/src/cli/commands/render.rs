@@ -84,6 +84,9 @@ pub struct RenderOptions {
     pub release_only: bool,
 
     #[command(flatten)]
+    pub lookup: nyl_render::helm::lookup::LookupArgs,
+
+    #[command(flatten)]
     pub cache: cache::RenderCacheArgs,
 }
 
@@ -265,6 +268,23 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
         .as_deref()
         .and_then(Path::parent)
         .or_else(|| path.is_absolute().then(|| path.parent()).flatten());
+    // With a target, the Helm `lookup` of charts that declare it reads the
+    // target's last publication, exactly as `render-tree` reads it.
+    let direct_lookup = match (&inventory, &resolved_target) {
+        (Some(inventory), Some(resolved)) => Some(nyl_render::gitops::lookup::direct_lookup(
+            inventory,
+            &resolved.target,
+            &resolved.cluster,
+            path,
+            options.common.application_group.as_deref(),
+            options.common.defaults_only,
+            nyl_render::gitops::inputs::PublicationRead::from_offline(options.offline),
+            Some(&render_cache),
+            options.common.lookup.refresh(),
+        )?),
+        _ => None,
+    };
+    session.set_lookup(direct_lookup.as_ref().map(|lookup| lookup.config.clone()));
     let direct_inputs = nyl_render::gitops::direct_inputs::resolve_direct_inputs(
         &nyl_render::gitops::direct_inputs::DirectInputContext {
             project_root: &project_root,
@@ -302,6 +322,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     request.max_depth = options.common.max_depth;
     request.track_parent = options.common.track_parent;
     request.strip_empty_metadata_labels_default = false;
+    request.lookup_scope = direct_lookup.as_ref().map(|lookup| lookup.scope.clone());
     let rendered = Box::pin(session.render(request)).await?;
     if let (Some(inputs), Some(release)) = (&direct_inputs, &rendered.release) {
         nyl_render::gitops::inputs::verify_rendered_declarations(path, &inputs.declarations, release)?;
@@ -352,6 +373,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             tree_options: nyl_render::gitops::TreeRenderOptions {
                 allow_secret_inputs: options.common.allow_secret_inputs,
                 publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(options.offline),
+                refresh_lookup: options.common.lookup.refresh(),
                 ..nyl_render::gitops::TreeRenderOptions::default()
             },
         },

@@ -32,6 +32,9 @@ pub struct PublishTreeArgs {
     #[command(flatten)]
     pub progress: TreeProgressArgs,
 
+    #[command(flatten)]
+    pub lookup: nyl_render::helm::lookup::LookupArgs,
+
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
@@ -183,6 +186,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
             releases: args.releases.iter().cloned().collect(),
         },
         allow_secret_inputs: args.source.allow_secret_inputs,
+        refresh_lookup: args.lookup.refresh(),
         ..TreeRenderOptions::default()
     };
     let compiled = compile_target_tree_cached_with_observer_and_options(
@@ -195,7 +199,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     .await?;
     let clean = if dirty && !args.source.allow_dirty {
         Some(
-            compile_clean_head(
+            Box::pin(compile_clean_head(
                 &inventory,
                 &compiled,
                 &target_name,
@@ -207,7 +211,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
                     publication_base: compiled.publication_base.clone(),
                     ..render_options
                 },
-            )
+            ))
             .await?,
         )
     } else {
