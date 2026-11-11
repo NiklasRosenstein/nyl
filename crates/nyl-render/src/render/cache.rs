@@ -383,6 +383,34 @@ pub struct RecordedDependency {
     pub digest: String,
 }
 
+/// Dependency kinds of Helm `lookup` results, which a cached render revalidates
+/// by asking the lookup source again: see [`LookupReplay`].
+pub const LOOKUP_DEPENDENCY_KINDS: [&str; 3] = ["lookup", "lookup-secret", "lookup-discovery"];
+
+/// What one Helm `lookup` request, or the discovery a render saw, returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LookupFingerprint {
+    /// The object does not exist (a list is never absent; it is empty).
+    Absent,
+    /// SHA-256 of a result that holds no Secret data.
+    Plain(String),
+    /// The canonical bytes of a result that holds Secret data. The recorder
+    /// fingerprints them with the cache-local key; they are never persisted
+    /// and never digested without it.
+    Secret(Vec<u8>),
+}
+
+/// Answers a recorded lookup again from the current source of lookups.
+///
+/// A cached render that made lookups is reused only when every recorded lookup
+/// still returns what it did. `None` means the source cannot answer now, which
+/// the recorder treats as a changed input, so the render runs and reports why.
+pub trait LookupReplay {
+    /// The result of the lookup recorded as `name` now, or `None` when it
+    /// cannot be determined.
+    fn evaluate(&self, name: &str) -> Option<LookupFingerprint>;
+}
+
 /// Dependencies and the artifact produced from them by one successful action.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -534,10 +562,13 @@ impl DependencyRecorder {
         Ok(())
     }
 
+    /// The dependencies a cached render discovers while it runs and a later
+    /// run revalidates: files and directories it read, and Helm lookups it made
+    /// (see [`Self::replay_lookup_dependencies`]).
     pub fn filesystem_dependencies(&self) -> BTreeMap<String, RecordedDependency> {
         self.dependencies
             .iter()
-            .filter(|(_, dependency)| matches!(dependency.kind.as_str(), "file" | "directory"))
+            .filter(|(_, dependency)| is_discovered_kind(&dependency.kind))
             .map(|(name, dependency)| (name.clone(), dependency.clone()))
             .collect()
     }
@@ -546,9 +577,70 @@ impl DependencyRecorder {
         self.dependencies.extend(
             dependencies
                 .iter()
-                .filter(|(_, dependency)| matches!(dependency.kind.as_str(), "file" | "directory"))
+                .filter(|(_, dependency)| is_discovered_kind(&dependency.kind))
                 .map(|(name, dependency)| (name.clone(), dependency.clone())),
         );
+    }
+
+    /// Records what a Helm lookup returned. A result that holds Secret data is
+    /// fingerprinted with the cache-local key, like any other sensitive input.
+    pub fn record_lookup(&mut self, name: impl Into<String>, fingerprint: &LookupFingerprint) {
+        let dependency = match fingerprint {
+            LookupFingerprint::Absent => RecordedDependency {
+                kind: "lookup".to_string(),
+                digest: "absent".to_string(),
+            },
+            LookupFingerprint::Plain(digest) => RecordedDependency {
+                kind: "lookup".to_string(),
+                digest: digest.clone(),
+            },
+            LookupFingerprint::Secret(bytes) => RecordedDependency {
+                kind: "lookup-secret".to_string(),
+                digest: hmac_sha256(&self.secret_key, bytes),
+            },
+        };
+        self.dependencies.insert(name.into(), dependency);
+    }
+
+    /// Records what the discovery a lookup render saw returned.
+    pub fn record_lookup_discovery(&mut self, name: impl Into<String>, digest: String) {
+        self.dependencies.insert(
+            name.into(),
+            RecordedDependency {
+                kind: "lookup-discovery".to_string(),
+                digest,
+            },
+        );
+    }
+
+    /// Asks `replay` the lookups a previous record made, and records what they
+    /// return now, so a cached render is reused only while every one still
+    /// returns what it did. A lookup `replay` cannot answer records as changed.
+    /// Returns what the lookups it could answer returned.
+    pub fn replay_lookup_dependencies(
+        &mut self,
+        record: &DependencyRecord,
+        replay: &dyn LookupReplay,
+    ) -> BTreeMap<String, LookupFingerprint> {
+        let mut replayed = BTreeMap::new();
+        for (name, dependency) in &record.dependencies {
+            if !LOOKUP_DEPENDENCY_KINDS.contains(&dependency.kind.as_str()) {
+                continue;
+            }
+            let Some(fingerprint) = replay.evaluate(name) else {
+                tracing::debug!(lookup = %name, "Recorded lookup cannot be answered now; treating it as changed");
+                self.record_bytes(name.clone(), dependency.kind.clone(), b"unavailable");
+                continue;
+            };
+            match &fingerprint {
+                LookupFingerprint::Plain(digest) if dependency.kind == "lookup-discovery" => {
+                    self.record_lookup_discovery(name.clone(), digest.clone());
+                }
+                _ => self.record_lookup(name.clone(), &fingerprint),
+            }
+            replayed.insert(name.clone(), fingerprint);
+        }
+        replayed
     }
 
     /// Records public template context normally and sensitive context with the cache-local key.
@@ -891,6 +983,16 @@ impl RenderCache {
     }
 }
 
+fn is_discovered_kind(kind: &str) -> bool {
+    matches!(kind, "file" | "directory") || LOOKUP_DEPENDENCY_KINDS.contains(&kind)
+}
+
+/// A digest of the Helm binary on `PATH`: its path and `helm version --short`.
+/// What Helm reports as its default API versions depends on it.
+pub(crate) fn helm_fingerprint() -> String {
+    tool_dependency("helm", &["version", "--short"]).digest
+}
+
 fn find_executable(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -1126,6 +1228,68 @@ mod tests {
         assert_ne!(
             first_recording.dependencies["token"].digest,
             second_recording.dependencies["token"].digest
+        );
+    }
+
+    #[test]
+    fn lookup_results_with_secret_data_use_the_cache_local_key() {
+        let root = tempfile::TempDir::new().unwrap();
+        let other_root = tempfile::TempDir::new().unwrap();
+        let cache = RenderCache::with_root(root.path(), CacheMode::Default).unwrap();
+        let other = RenderCache::with_root(other_root.path(), CacheMode::Default).unwrap();
+        let (mut recording, mut other_recording) = (cache.recorder(), other.recorder());
+        let secret = LookupFingerprint::Secret(br#"{"data":{"ca.crt":"c2VjcmV0"}}"#.to_vec());
+        recording.record_lookup("lookup:ca", &secret);
+        other_recording.record_lookup("lookup:ca", &secret);
+        recording.record_lookup("lookup:cm", &LookupFingerprint::Plain(sha256_hex(b"cm")));
+        recording.record_lookup("lookup:absent", &LookupFingerprint::Absent);
+
+        let recorded = &recording.dependencies["lookup:ca"];
+        assert_eq!(recorded.kind, "lookup-secret");
+        assert_ne!(
+            recorded.digest,
+            sha256_hex(br#"{"data":{"ca.crt":"c2VjcmV0"}}"#),
+            "a Secret result is never recorded as a guessable plain digest"
+        );
+        assert_ne!(recorded.digest, other_recording.dependencies["lookup:ca"].digest);
+        assert_eq!(recording.dependencies["lookup:cm"].digest, sha256_hex(b"cm"));
+        assert_eq!(recording.dependencies["lookup:absent"].digest, "absent");
+    }
+
+    #[test]
+    fn replayed_lookups_are_recorded_as_they_return_now_and_unanswerable_ones_as_changed() {
+        struct Now(BTreeMap<String, LookupFingerprint>);
+        impl LookupReplay for Now {
+            fn evaluate(&self, name: &str) -> Option<LookupFingerprint> {
+                self.0.get(name).cloned()
+            }
+        }
+        let root = tempfile::TempDir::new().unwrap();
+        let cache = RenderCache::with_root(root.path(), CacheMode::Default).unwrap();
+        let mut previous = cache.recorder();
+        previous.record_lookup("lookup:same", &LookupFingerprint::Plain("a".to_owned()));
+        previous.record_lookup("lookup:moved", &LookupFingerprint::Absent);
+        previous.record_lookup("lookup:gone", &LookupFingerprint::Absent);
+        previous.record_lookup_discovery("lookup-discovery:release", "kinds".to_owned());
+        let record = previous.clone().finish("helm", String::new());
+
+        let now = Now(BTreeMap::from([
+            ("lookup:same".to_owned(), LookupFingerprint::Plain("a".to_owned())),
+            ("lookup:moved".to_owned(), LookupFingerprint::Plain("b".to_owned())),
+            (
+                "lookup-discovery:release".to_owned(),
+                LookupFingerprint::Plain("kinds".to_owned()),
+            ),
+        ]));
+        let mut current = cache.recorder();
+        let replayed = current.replay_lookup_dependencies(&record, &now);
+
+        assert_eq!(replayed.len(), 3, "only answerable lookups are reported as replayed");
+        let current = current.finish("helm", String::new());
+        assert_eq!(
+            record.changed_inputs(&current),
+            ["lookup:gone", "lookup:moved"],
+            "a lookup that returns something else, or cannot be answered, changes the inputs"
         );
     }
 

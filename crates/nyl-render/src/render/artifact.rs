@@ -530,6 +530,8 @@ pub struct ArtifactResolver {
     vendor: Option<DirectoryVendorStore>,
     render_cache: Option<RenderCache>,
     materialized_root: PathBuf,
+    /// How the Helm `lookup` of the Release being rendered is answered.
+    lookup: Option<crate::helm::lookup::LookupHandle>,
     _owned_transient_root: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
@@ -576,8 +578,22 @@ impl ArtifactResolver {
             vendor,
             render_cache,
             materialized_root,
+            lookup: None,
             _owned_transient_root: owned_transient_root,
         })
+    }
+
+    /// Answer the Helm `lookup` of the charts rendered through this resolver
+    /// from `handle`, which belongs to one Release.
+    #[must_use]
+    pub fn with_lookup(mut self, handle: Option<crate::helm::lookup::LookupHandle>) -> Self {
+        self.lookup = handle;
+        self
+    }
+
+    /// The lookups of the Release being rendered, when it has any source.
+    pub fn lookup_handle(&self) -> Option<&crate::helm::lookup::LookupHandle> {
+        self.lookup.as_ref()
     }
 
     /// Use cached Git refs without contacting chart remotes.

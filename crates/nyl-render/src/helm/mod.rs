@@ -8,6 +8,7 @@ use crate::resources::ChartRef;
 use crate::{NylError, Result};
 use std::path::{Path, PathBuf};
 
+pub mod lookup;
 mod oci;
 mod template;
 pub use oci::OciChartPuller;

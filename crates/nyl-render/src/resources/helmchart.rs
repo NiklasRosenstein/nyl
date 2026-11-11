@@ -90,6 +90,16 @@ impl ObjectMetadata {
     }
 }
 
+/// Lets Helm's `lookup` read the objects of the chart's Release.
+///
+/// Declare it as `lookup: {}`. It takes no fields: where the objects come from
+/// is chosen by the command that renders (the target's last publication, or the
+/// live cluster with `--lookup=live`), never by the declaration, so a chart renders
+/// the same way for every command that takes the same path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HelmChartLookup {}
+
 /// HelmChart specification
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +115,23 @@ pub struct HelmChartSpec {
     /// Defaults to true when unset.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "includeCrds")]
     pub include_crds: Option<bool>,
+
+    /// Lets the chart's Helm `lookup` read the objects of the Release it belongs
+    /// to, so a chart that reuses what it generated earlier, such as a Secret
+    /// holding a CA, finds it when it renders again.
+    ///
+    /// Declare it as `lookup: {}`. `lookup` then reads the Release's objects from the
+    /// target's last publication (or, with `--lookup=live`, from the cluster) and sees
+    /// nothing else: any other object is absent. Without a target, or before the
+    /// Release is published, nothing is found and the chart generates.
+    ///
+    /// Charts that declare it render through Helm's server-side dry run against a
+    /// read-only API that Nyl serves on 127.0.0.1 for the duration of the render;
+    /// Helm never gets a cluster or credentials. The Cluster's declared Kubernetes
+    /// version and API versions describe that API, plus the API versions of
+    /// CustomResourceDefinitions the chart ships in `crds/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup: Option<HelmChartLookup>,
 }
 
 impl Default for HelmChartSpec {
@@ -113,6 +140,7 @@ impl Default for HelmChartSpec {
             chart: ChartRef::default(),
             values: serde_json::Value::Object(serde_json::Map::new()),
             include_crds: None,
+            lookup: None,
         }
     }
 }
@@ -123,11 +151,11 @@ impl Default for HelmChartSpec {
 ///
 /// ## When needed
 ///
-/// Use this optional resource to render a Helm chart with explicit chart coordinates and values.
+/// Use this optional resource to render a Helm chart with explicit chart coordinates and values. Declare `spec.lookup` for a chart that reuses objects it generated earlier through Helm's `lookup`, such as a CA Secret.
 ///
 /// ## If omitted
 ///
-/// Nyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither.
+/// Nyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither. Without `spec.lookup`, the chart renders offline and `lookup` finds nothing.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::catalog::resource_example(super::catalog::ResourceKind::HelmChart))]
@@ -356,6 +384,44 @@ spec:
         );
         let yaml = serde_saphyr::to_string(&helm_chart).unwrap();
         assert!(!yaml.contains("includeCrds"));
+    }
+
+    #[test]
+    fn test_lookup_is_declared_as_an_empty_object_and_off_by_default() {
+        let declared = r"
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+  lookup: {}
+";
+        let chart: HelmChart = serde_saphyr::from_str(declared).unwrap();
+        assert_eq!(chart.spec.lookup, Some(HelmChartLookup {}));
+        assert!(serde_saphyr::to_string(&chart).unwrap().contains("lookup:"));
+
+        let omitted: HelmChart = serde_saphyr::from_str(&declared.replace("  lookup: {}\n", "")).unwrap();
+        assert_eq!(omitted.spec.lookup, None);
+        assert!(!serde_saphyr::to_string(&omitted).unwrap().contains("lookup"));
+    }
+
+    #[test]
+    fn test_lookup_takes_no_fields() {
+        let yaml = r"
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: test
+spec:
+  chart:
+    name: mychart
+  lookup:
+    source: live
+";
+        let error = serde_saphyr::from_str::<HelmChart>(yaml).unwrap_err().to_string();
+        assert!(error.contains("unknown field"), "{error}");
     }
 
     #[test]
