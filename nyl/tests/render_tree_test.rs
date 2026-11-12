@@ -8482,3 +8482,59 @@ fn test_lookup_without_a_target_finds_nothing_and_generates() {
         "{stdout}"
     );
 }
+
+/// Catches a tree or publication depending on what a cluster holds today:
+/// every command that renders a tree for Git refuses `--lookup=live` with its
+/// code, before it renders anything, while naming the default source is fine.
+#[test]
+fn test_tree_commands_refuse_live_lookups() {
+    let (fixture, _destination, _seed) = lookup_fixture();
+    let output = TempDir::new().unwrap();
+    for args in [
+        vec![
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.path().to_str().unwrap(),
+        ],
+        vec!["diff-tree", "--target", "production", "--against", "published"],
+        vec!["publish-tree", "--target", "production"],
+    ] {
+        nyl_with_cache(&fixture, &TempDir::new().unwrap())
+            .args(&args)
+            .arg("--lookup=live")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("NYL-HELM-LOOKUP-LIVE-REFUSED"));
+    }
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args([
+            "render-tree",
+            "--target",
+            "production",
+            "--output-dir",
+            output.path().to_str().unwrap(),
+            "--lookup=snapshot",
+        ])
+        .assert()
+        .success();
+}
+
+/// Catches `--lookup=live` rendering with nothing to read: without a target or a
+/// context there is no cluster, which the error says.
+#[test]
+fn test_live_lookup_needs_a_cluster() {
+    let fixture = TempDir::new().unwrap();
+    fs::write(fixture.path().join("nyl.toml"), "").unwrap();
+    fs::write(
+        fixture.path().join("app.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n",
+    )
+    .unwrap();
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args(["render", "app.yaml", "--lookup=live"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER"));
+}

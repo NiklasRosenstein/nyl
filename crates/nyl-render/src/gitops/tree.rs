@@ -68,6 +68,12 @@ pub struct TreeRenderOptions {
     /// rotation). Part of the cache key, since it changes what renders.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub refresh_lookup: BTreeSet<crate::helm::lookup::ObjectRef>,
+    /// Where the Helm `lookup` of the target's charts reads from instead of the
+    /// target's publication: the live cluster, for `render`, `diff`, and
+    /// `apply` only. Tree and publication commands never set it. A render that
+    /// used it is never cached.
+    #[serde(skip)]
+    pub lookup_backend: Option<super::lookup::LookupBackendOverride>,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
@@ -546,8 +552,12 @@ async fn compile_target_tree_recording(
         cache,
         options.publication_base.as_ref(),
     )?;
-    let lookup_config =
-        crate::helm::lookup::LookupConfig::new(std::sync::Arc::new(lookup.clone()), options.refresh_lookup.clone());
+    let lookup_config = match &options.lookup_backend {
+        Some(backend) => crate::helm::lookup::LookupConfig::new(backend.0.clone(), options.refresh_lookup.clone()),
+        None => {
+            crate::helm::lookup::LookupConfig::new(std::sync::Arc::new(lookup.clone()), options.refresh_lookup.clone())
+        }
+    };
     let central_session = if options.allow_secret_inputs {
         RenderSession::for_target_with_secret_inputs(
             &inventory.project_root,

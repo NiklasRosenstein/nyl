@@ -336,6 +336,30 @@ fn test_push_publishes_a_target_no_environment_owns() {
     assert_eq!(git(&world.bare(), &["rev-parse", "refs/heads/deploy"]), head);
 }
 
+/// Catches a publication reading what a cluster holds today: `--lookup=live`
+/// is refused with its code before anything is rendered or published, and the
+/// default source can be named.
+#[test]
+fn test_build_refuses_live_lookups() {
+    let world = World::new();
+    let id = identity();
+    let ctx = context(&world, DriverOperation::Build, Some(&id));
+    for args in [vec!["--push", "--lookup=live"], vec!["--lookup", "live"]] {
+        let error = build(&ctx, &args, &unit()).unwrap_err();
+        assert!(!error.effects_possible());
+        assert!(
+            error.to_string().starts_with("NYL-HELM-LOOKUP-LIVE-REFUSED:"),
+            "{error}"
+        );
+    }
+    assert!(!deploy_exists(&world));
+    build(&ctx, &["--lookup=snapshot"], &unit()).unwrap();
+    // The option takes its value as a separate argument too, as `nyl render` accepts it.
+    build(&ctx, &["--lookup", "snapshot"], &unit()).unwrap();
+    let error = build(&ctx, &["--lookup"], &unit()).unwrap_err();
+    assert!(error.to_string().contains("--lookup takes a value"), "{error}");
+}
+
 /// Catches arguments the driver does not own being passed over, or two modes
 /// combined into a publication nobody compared first.
 #[test]

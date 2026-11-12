@@ -56,6 +56,7 @@ reads or writes. The two flags are mutually exclusive.
 `--refresh-lookup <KIND/NAMESPACE/NAME>` regenerates one object that a chart with
 [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) reads, for example to rotate a CA
 (`Secret/kube-system/cilium-ca`; `Kind/name` for a cluster-scoped object). Repeatable.
+The tree commands refuse `--lookup=live` (`NYL-HELM-LOOKUP-LIVE-REFUSED`).
 
 Tree rendering excludes the project secrets provider and `NYL_*` process
 environment by default. Pass `--allow-secret-inputs` to the individual

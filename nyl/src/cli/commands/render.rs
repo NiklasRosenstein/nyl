@@ -9,6 +9,7 @@ use crate::cli::commands::cluster::{
     load_cluster_kube_config, resolve_cluster_source, resolve_target_cluster_from_inventory, ClusterSource,
     ResolvedTargetCluster,
 };
+use nyl_render::helm::lookup::{LookupSource, LIVE_NEEDS_CLUSTER_CODE};
 use nyl_render::{
     config::ProjectConfig,
     kubernetes::{KubeClient, KubeRsClient, ResourceKey},
@@ -292,8 +293,10 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             )?,
         },
     )?;
-    // With a target, the Helm `lookup` of charts that declare it reads the
-    // target's last publication, exactly as `render-tree` reads it.
+    // The Helm `lookup` of charts that declare it reads the target's last
+    // publication, exactly as `render-tree` reads it. `--lookup=live`, and
+    // `--context` without GitOps configuration, read the cluster instead.
+    let live_config = live_lookup_config(&options, &source, resolved_target.as_ref()).await?;
     let direct_lookup = match (&inventory, &resolved_target) {
         (Some(inventory), Some(resolved)) => Some(nyl_render::gitops::lookup::direct_lookup(
             inventory,
@@ -305,13 +308,26 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
             nyl_render::gitops::inputs::PublicationRead::from_offline(options.offline),
             Some(&render_cache),
             options.common.lookup.refresh(),
+            live_config.clone(),
             direct_inputs
                 .as_ref()
                 .and_then(|inputs| inputs.publication_base.as_ref()),
         )?),
         _ => None,
     };
-    session.set_lookup(direct_lookup.as_ref().map(|lookup| lookup.config.clone()));
+    let context_lookup = match (&source, live_config) {
+        (ClusterSource::LiveContext(_), Some(config)) => Some(nyl_render::kubernetes::lookup::context_lookup(
+            config,
+            options.common.lookup.refresh(),
+        )?),
+        _ => None,
+    };
+    let (lookup_config, lookup_scope) = match (&direct_lookup, context_lookup) {
+        (Some(lookup), _) => (Some(lookup.config.clone()), Some(lookup.scope.clone())),
+        (None, Some((config, scope))) => (Some(config), Some(scope)),
+        (None, None) => (None, None),
+    };
+    session.set_lookup(lookup_config);
     if let Some(base) = direct_inputs
         .as_ref()
         .and_then(|inputs| inputs.publication_base.as_ref())
@@ -345,7 +361,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     request.max_depth = options.common.max_depth;
     request.track_parent = options.common.track_parent;
     request.strip_empty_metadata_labels_default = false;
-    request.lookup_scope = direct_lookup.as_ref().map(|lookup| lookup.scope.clone());
+    request.lookup_scope = lookup_scope;
     let rendered = Box::pin(session.render(request)).await?;
     if let (Some(inputs), Some(release)) = (&direct_inputs, &rendered.release) {
         nyl_render::gitops::inputs::verify_rendered_declarations(path, &inputs.declarations, release)?;
@@ -396,6 +412,7 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
                 allow_secret_inputs: options.common.allow_secret_inputs,
                 publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(options.offline),
                 refresh_lookup: options.common.lookup.refresh(),
+                lookup_backend: direct_lookup.as_ref().and_then(|lookup| lookup.live.clone()),
                 // The compiled target reads the publication at the commit the inputs and
                 // the lookups above read, not at one it fetches again.
                 publication_base: direct_inputs
@@ -459,6 +476,40 @@ pub async fn run_render_preflight(options: RenderPreflightOptions<'_>) -> Result
     })
 }
 
+/// Whether the Helm `lookup` of this command reads the live cluster: when
+/// `--lookup=live` says so, and by default where `--context` already chose the
+/// cluster without GitOps configuration. It needs a cluster to read.
+pub fn uses_live_lookup(requested: Option<LookupSource>, source: &ClusterSource) -> Result<bool> {
+    match (requested, source) {
+        (Some(LookupSource::Live), ClusterSource::None) => Err(NylError::Other(format!(
+            "{LIVE_NEEDS_CLUSTER_CODE}: --lookup=live reads the cluster, but no cluster is selected; pass --target, or --context in a \
+             project without GitOps configuration"
+        ))),
+        (Some(LookupSource::Live), _) | (None, ClusterSource::LiveContext(_)) => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+/// The kube config the live Helm `lookup` reads through, when it reads live.
+async fn live_lookup_config(
+    options: &RenderPreflightOptions<'_>,
+    source: &ClusterSource,
+    resolved: Option<&ResolvedTargetCluster>,
+) -> Result<Option<kube::Config>> {
+    if !uses_live_lookup(options.common.lookup.lookup, source)? {
+        return Ok(None);
+    }
+    match (source, resolved) {
+        (ClusterSource::Target(_), Some(resolved)) => Ok(Some(
+            load_cluster_kube_config(&resolved.cluster, options.context_override).await?,
+        )),
+        (ClusterSource::LiveContext(context), _) => {
+            Ok(Some(KubeRsClient::load_kube_config(None, Some(context)).await?))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn announce_discovery(progress: DiscoveryProgress) {
     if progress == DiscoveryProgress::Announce {
         tracing::info!("Discovering Kubernetes API resources");
@@ -508,7 +559,10 @@ pub async fn execute(args: RenderArgs) -> Result<()> {
         discovery_progress: DiscoveryProgress::Quiet,
     }))
     .await?;
-    if args.context.is_some() && preflight.resolved_target.is_some() {
+    if args.context.is_some()
+        && preflight.resolved_target.is_some()
+        && args.common.lookup.lookup != Some(nyl_render::helm::lookup::LookupSource::Live)
+    {
         tracing::warn!("--context is ignored: rendering for a DeploymentTarget never connects to Kubernetes");
     }
 
@@ -570,4 +624,31 @@ fn output_manifests(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decide(requested: Option<LookupSource>, source: &ClusterSource) -> std::result::Result<bool, String> {
+        uses_live_lookup(requested, source).map_err(|error| error.to_string())
+    }
+
+    /// Catches the lookup source being decided differently per command: a target
+    /// reads its publication unless live is asked for, a `--context` without
+    /// GitOps configuration reads the cluster it already chose unless the
+    /// snapshot is asked for, and live needs a cluster.
+    #[test]
+    fn test_lookup_source_follows_the_selected_cluster() {
+        let target = ClusterSource::Target("production".to_owned());
+        let context = ClusterSource::LiveContext("kind-dev".to_owned());
+        assert_eq!(decide(None, &target), Ok(false));
+        assert_eq!(decide(Some(LookupSource::Snapshot), &target), Ok(false));
+        assert_eq!(decide(Some(LookupSource::Live), &target), Ok(true));
+        assert_eq!(decide(None, &context), Ok(true));
+        assert_eq!(decide(Some(LookupSource::Snapshot), &context), Ok(false));
+        assert_eq!(decide(None, &ClusterSource::None), Ok(false));
+        let error = decide(Some(LookupSource::Live), &ClusterSource::None).unwrap_err();
+        assert!(error.starts_with("NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER:"), "{error}");
+    }
 }

@@ -156,6 +156,7 @@ struct SilentTreeRenderObserver;
 impl TreeRenderObserver for SilentTreeRenderObserver {}
 
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
+    args.lookup.refuse_live("publish-tree")?;
     args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
     nyl_render::gitops::shared_catalog::validate_with_samples(&inventory)?;

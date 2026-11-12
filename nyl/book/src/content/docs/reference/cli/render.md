@@ -42,6 +42,7 @@ behavior `render`, `diff`, and `apply` share.
 - `--allow-secret-inputs` - Let the project secrets provider and `NYL_*` environment variables affect the output, as for the tree commands. Without it, templates see neither.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
+- `--lookup <snapshot|live>` - Where a chart with [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) reads from: the target's last publication (`snapshot`, the default with a target) or the cluster (`live`, the default with `--context` and no GitOps configuration). See [Reading the live cluster](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reading-the-live-cluster).
 - `--refresh-lookup <KIND/NAMESPACE/NAME>` - Regenerate this object, which a chart with [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) reads, for this render, for example to rotate a CA. `Kind/name` for a cluster-scoped object. Repeatable.
 - `--refresh` - Bypass cached rendering results and replace successful entries.
 - `--no-cache` - Perform no persistent cache reads or writes.
@@ -51,7 +52,7 @@ behavior `render`, `diff`, and `apply` share.
 - `--offline` - Resolve Git charts from cached refs and read `fromPublication` Release inputs at the cached publication branch head, as with `render-tree --offline`.
 - `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless render of Helm charts. With `--target`, the Cluster's committed capabilities apply.
 - `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless render, comma-separated or repeated.
-- `--context <CONTEXT>` - Without GitOps configuration, render with this kube context's live Kubernetes version and API versions, in place of `--kube-version` and `--kube-api-versions`. With a DeploymentTarget, `render` uses the Cluster's committed capabilities, never connects, and ignores the flag with a warning.
+- `--context <CONTEXT>` - Without GitOps configuration, render with this kube context's live Kubernetes version and API versions, in place of `--kube-version` and `--kube-api-versions`. With a DeploymentTarget, `render` uses the Cluster's committed capabilities, never connects (except for `--lookup=live`, where `--context` selects how to reach the Cluster), and otherwise ignores the flag with a warning.
 
 ## Examples
 

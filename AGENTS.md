@@ -575,7 +575,12 @@ src/
   for (a Helm cache key includes it). An unreadable source is an error, never
   an absent object, and so is an object held at another version than it was
   looked up at. What the lookup API lists as `.Capabilities` never depends on
-  what the source holds or on what the chart renders.
+  what the source holds or on what the chart renders. Live lookups
+  (`--lookup=live`, `render`, `diff`, and `apply` only) are never cached, read
+  only the Release's own objects one by one (never a cluster-wide list), fail
+  on an object the cluster holds that no recorded revision or publication of
+  the Release lists instead of reading it as absent, and are refused by tree
+  and publication commands like `--context`.
 - The rendered ownership index describes published ownership and provenance;
   it is not a complete render-cache key.
 - Corrupt, incomplete, or unavailable cache state is a cache miss. It must not

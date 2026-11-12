@@ -597,12 +597,9 @@ fn is_secret(object: &Value) -> bool {
 /// An object the store holds at another version of its kind than the request names is
 /// an error, never absent: Helm would read "absent" and generate what the object holds.
 pub fn evaluate(store: &dyn ObjectStore, request: &LookupRequest) -> Result<Evaluation, StoreError> {
-    let kinds = store.kinds()?;
     let (group, version) = split_api_version(&request.api_version);
-    let found = kinds
-        .iter()
-        .find(|kind| kind.api_version() == request.api_version && kind.plural == request.plural);
-    let evaluation = match found {
+    let found = store.kind_of(&request.api_version, &request.plural)?;
+    let evaluation = match &found {
         None => Evaluation::UnknownResource,
         Some(kind) => {
             // A cluster-scoped kind has no namespace to read it in.
@@ -632,7 +629,8 @@ pub fn evaluate(store: &dyn ObjectStore, request: &LookupRequest) -> Result<Eval
         Evaluation::Object(_) => false,
     };
     if found_nothing {
-        for other in kinds
+        for other in store
+            .kinds()?
             .iter()
             .filter(|kind| kind.group == group && kind.plural == request.plural && kind.version != version)
         {
@@ -642,15 +640,26 @@ pub fn evaluate(store: &dyn ObjectStore, request: &LookupRequest) -> Result<Eval
                 None => !store.list(other, namespace)?.is_empty(),
             };
             if held {
-                return Err(version_mismatch(request, other));
+                return Err(version_mismatch(
+                    request.namespace.as_deref(),
+                    request.name.as_deref(),
+                    &request.api_version,
+                    other,
+                ));
             }
         }
     }
     Ok(evaluation)
 }
 
-fn version_mismatch(request: &LookupRequest, held: &KindInfo) -> StoreError {
-    let what = match (&request.name, &request.namespace) {
+/// The error for an object a chart looks up at `requested` that the source holds as `held`.
+pub(crate) fn version_mismatch(
+    namespace: Option<&str>,
+    name: Option<&str>,
+    requested: &str,
+    held: &KindInfo,
+) -> StoreError {
+    let what = match (name, namespace) {
         (Some(name), Some(namespace)) => format!("{} {namespace}/{name}", held.kind),
         (Some(name), None) => format!("{} {name}", held.kind),
         (None, _) => format!("{} objects", held.kind),
@@ -658,9 +667,9 @@ fn version_mismatch(request: &LookupRequest, held: &KindInfo) -> StoreError {
     StoreError::new(
         VERSION_MISMATCH_CODE,
         format!(
-            "a chart looked up {what} as {}, but the lookup source holds it at {} (held at {}); change the chart's \
-             lookup to apiVersion {}, or pass --refresh-lookup for it to regenerate it deliberately at the new version",
-            request.api_version,
+            "a chart looked up {what} as {requested}, but the lookup source holds it at {} (held at {}); change the \
+             chart's lookup to apiVersion {}, or pass --refresh-lookup for it to regenerate it deliberately at the \
+             new version",
             held.api_version(),
             held.version,
             held.api_version()

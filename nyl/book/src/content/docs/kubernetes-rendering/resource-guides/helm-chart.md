@@ -331,6 +331,22 @@ Publish the result to keep the new object: `render`, `diff` and `apply` with the
 only show or apply it. A reference that matches no lookup warns with
 `NYL-HELM-LOOKUP-REFRESH-UNMATCHED`.
 
+### Reading the live cluster
+
+`render`, `diff` and `apply` read from the cluster instead with `--lookup=live`. It is
+the default with `--context` and no GitOps configuration.
+
+- `lookup` still sees only the Release's own objects: those in its latest revision
+  recorded by `nyl apply`, plus, with a target, those in its publication. Nyl reads each
+  one with a GET. Helm never talks to the cluster.
+- If the cluster holds an object outside that set, the render fails with
+  `NYL-HELM-LOOKUP-LIVE-UNRECORDED` instead of regenerating it. Releases installed by
+  Helm or an older Nyl hit this. Run `nyl apply --lookup=snapshot` once to record them,
+  or pass `--refresh-lookup` to regenerate the object on purpose.
+- Live renders are never cached.
+- Tree and publication commands refuse `--lookup=live`: what a cluster holds must not
+  decide what Git publishes.
+
 ### How it works
 
 Nyl runs `helm template --dry-run=server` against a read-only Kubernetes API that it
@@ -361,6 +377,10 @@ Requirements:
 | `NYL-HELM-LOOKUP-VERSION-MISMATCH` | The object is held at a different API version than the chart asks for. Look it up at that version, or `--refresh-lookup` it to regenerate. |
 | `NYL-HELM-LOOKUP-HELM-UNSUPPORTED` | Helm is older than 3.17. Install the Helm version the project pins. |
 | `NYL-HELM-LOOKUP-REFRESH-UNMATCHED` | Warning: a `--refresh-lookup` reference matched no lookup. Check its spelling. |
+| `NYL-HELM-LOOKUP-LIVE-UNAVAILABLE` | `--lookup=live` couldn't read the cluster or the Release's revisions. Check the connection, or drop `--lookup=live`. |
+| `NYL-HELM-LOOKUP-LIVE-UNRECORDED` | The cluster holds an object no revision or publication of the Release lists. Run `nyl apply --lookup=snapshot` once, or `--refresh-lookup` the object. |
+| `NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER` | `--lookup=live` without a cluster. Pass `--target`, or `--context` without GitOps configuration. |
+| `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree or publication command got `--lookup=live`. Use `render`, `diff` or `apply` for live lookups. |
 | `NYL-HELM-LOOKUP-FAILED` | The lookup API couldn't answer a request Helm made. The message names the request. |
 
 ## Sync waves and phases

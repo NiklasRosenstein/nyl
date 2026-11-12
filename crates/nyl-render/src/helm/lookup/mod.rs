@@ -19,7 +19,7 @@
 //! is absent.
 
 pub mod api;
-mod builtin;
+pub(crate) mod builtin;
 pub mod capabilities;
 mod model;
 mod run;
@@ -28,16 +28,35 @@ mod server;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-pub use model::{EmptyStore, FilteredStore, KindInfo, ObjectRef, ObjectSet, ObjectStore, RefreshAudit, StoreError};
+pub use model::{
+    join_api_version, split_api_version, EmptyStore, FilteredStore, KindInfo, ObjectRef, ObjectSet, ObjectStore,
+    RefreshAudit, StoreError,
+};
 pub use run::{render_with_lookup, LookupRender};
 pub use server::{ApiServer, ServerReport};
 
 use crate::render::cache::{DependencyRecorder, LookupFingerprint, LookupReplay};
 use crate::{NylError, Result};
 
+/// Where the Helm `lookup` of a chart that declares `spec.lookup` reads from.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookupSource {
+    /// The target's last publication, restricted to the Release's objects.
+    Snapshot,
+    /// The live cluster, through Nyl's own client, restricted to the Release's objects.
+    /// Only `render`, `diff`, and `apply` read it.
+    Live,
+}
+
 /// The options every command that renders Helm charts takes for their `lookup`.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct LookupArgs {
+    /// Where a chart's `lookup` reads from. `snapshot` (the default with a target) is the
+    /// target's last publication; `live` reads the cluster instead, and is the default for
+    /// `--context` without GitOps configuration. Tree and publication commands refuse `live`.
+    #[arg(long = "lookup", value_enum, value_name = "SOURCE")]
+    pub lookup: Option<LookupSource>,
+
     /// Treat this object as absent for this render, so a chart's `lookup` regenerates what it
     /// would have reused from it, such as a CA, for rotation. Written as `Kind/namespace/name`, or
     /// `Kind/name` for a cluster-scoped object, such as `Secret/kube-system/cilium-ca`. Repeatable.
@@ -46,6 +65,22 @@ pub struct LookupArgs {
 }
 
 impl LookupArgs {
+    /// Refuse `--lookup=live` for a command that renders what Git publishes: a
+    /// tree or publication must not depend on what a cluster holds today.
+    pub fn refuse_live(&self, command: &str) -> Result<()> {
+        if self.lookup == Some(LookupSource::Live) {
+            return Err(lookup_error(
+                LIVE_REFUSED_CODE,
+                format!(
+                    "{command} does not accept --lookup=live: tree and publication commands render what Git declares \
+                     and publishes, so what a cluster holds today must not decide it. Use `nyl render`, `nyl diff`, or \
+                     `nyl apply` for live lookups, or drop the flag to read the target's last publication"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// The objects to treat as absent.
     pub fn refresh(&self) -> BTreeSet<ObjectRef> {
         self.refresh_lookup.iter().cloned().collect()
@@ -58,6 +93,15 @@ pub const SNAPSHOT_UNAVAILABLE_CODE: &str = "NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABL
 pub const API_VERSION_UNDECLARED_CODE: &str = "NYL-HELM-LOOKUP-API-VERSION-UNDECLARED";
 /// The code of the error for a lookup request the API could not answer.
 pub const SERVER_FAILED_CODE: &str = "NYL-HELM-LOOKUP-FAILED";
+/// The code of the refusal of `--lookup=live` by a tree or publication command.
+pub const LIVE_REFUSED_CODE: &str = "NYL-HELM-LOOKUP-LIVE-REFUSED";
+/// The code of `--lookup=live` where no cluster is selected.
+pub const LIVE_NEEDS_CLUSTER_CODE: &str = "NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER";
+/// The code of the error for a live cluster that cannot be read.
+pub const LIVE_UNAVAILABLE_CODE: &str = "NYL-HELM-LOOKUP-LIVE-UNAVAILABLE";
+/// The code of the error for an object the cluster holds that no revision or publication of the
+/// Release lists, which a lookup can neither return nor read as absent.
+pub const LIVE_UNRECORDED_CODE: &str = "NYL-HELM-LOOKUP-LIVE-UNRECORDED";
 /// The code of the error for a rendered or looked-up kind that discovery does not list.
 pub const KIND_UNDECLARED_CODE: &str = "NYL-HELM-LOOKUP-KIND-UNDECLARED";
 /// The code of the error for an object a chart looks up at another API version than it is held at.
@@ -87,6 +131,8 @@ pub struct ReleaseScope {
     /// is found.
     pub directory: String,
     pub namespace: String,
+    /// The Release itself, which a live cluster identifies its objects by.
+    pub release: Option<ReleaseIdentity>,
 }
 
 impl ReleaseScope {
@@ -95,6 +141,7 @@ impl ReleaseScope {
         Self {
             directory: String::new(),
             namespace: String::new(),
+            release: None,
         }
     }
 
@@ -113,6 +160,7 @@ impl ReleaseScope {
         Some(Self {
             directory: directory.to_owned(),
             namespace: namespace.to_owned(),
+            release: None,
         })
     }
 }
@@ -205,6 +253,12 @@ impl LookupConfig {
 
 impl LookupReplay for LookupConfig {
     fn evaluate(&self, name: &str) -> Option<LookupFingerprint> {
+        // A source that changes without Nyl observing it cannot confirm what a
+        // cached render looked up, so nothing cached from another source is
+        // reused for it.
+        if !self.cacheable() {
+            return None;
+        }
         if let Some(rest) = name.strip_prefix(DISCOVERY_PREFIX) {
             let scope = ReleaseScope::from_key(rest)?;
             let store = self.store(&scope);
@@ -229,6 +283,7 @@ fn split_request_name(rest: &str) -> Option<(ReleaseScope, String)> {
         ReleaseScope {
             directory: directory.to_owned(),
             namespace: namespace.to_owned(),
+            release: None,
         },
         request.to_owned(),
     ))
@@ -245,7 +300,7 @@ pub fn discovery_dependency_name(scope: &ReleaseScope) -> String {
 }
 
 /// The Helm release a render belongs to, as its own file declares it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ReleaseIdentity {
     pub name: String,
     pub namespace: String,
@@ -409,6 +464,7 @@ mod tests {
         ReleaseScope {
             directory: "platform/web".to_owned(),
             namespace: "demo".to_owned(),
+            release: None,
         }
     }
 
