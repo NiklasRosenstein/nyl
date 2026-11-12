@@ -28,6 +28,11 @@
       },
       "type": "object"
     },
+    "HelmChartLookup": {
+      "additionalProperties": false,
+      "description": "Lets Helm's `lookup` read the objects of the chart's Release.\n\nDeclare it as `lookup: {}`. It takes no fields: where the objects come from\nis chosen by the command that renders (the target's last publication, or the\nlive cluster with `--lookup=live`), never by the declaration, so a chart renders\nthe same way for every command that takes the same path.",
+      "type": "object"
+    },
     "HelmChartSpec": {
       "additionalProperties": false,
       "description": "HelmChart specification",
@@ -42,6 +47,17 @@
             "boolean",
             "null"
           ]
+        },
+        "lookup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HelmChartLookup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lets the chart's Helm `lookup` read the objects of the Release it belongs\nto, so a chart that reuses what it generated earlier, such as a Secret\nholding a CA, finds it when it renders again.\n\nDeclare it as `lookup: {}`. `lookup` then reads the Release's objects from the\ntarget's last publication (or, with `--lookup=live`, from the cluster) and sees\nnothing else: any other object is absent. Without a target, or before the\nRelease is published, nothing is found and the chart generates.\n\nCharts that declare it render through Helm's server-side dry run against a\nread-only API that Nyl serves on 127.0.0.1 for the duration of the render;\nHelm never gets a cluster or credentials. The Cluster's declared Kubernetes\nversion and API versions describe that API, plus the API versions of\nCustomResourceDefinitions the chart ships in `crds/`."
         },
         "values": {
           "default": null,
@@ -91,7 +107,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Expands a local or remote Helm chart into Kubernetes manifests.\n\nNyl renders the chart and recursively processes its output. Cluster and target values are template inputs; pass values to the chart explicitly through `spec.values`.\n\n## When needed\n\nUse this optional resource to render a Helm chart with explicit chart coordinates and values.\n\n## If omitted\n\nNyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither.",
+  "description": "Expands a local or remote Helm chart into Kubernetes manifests.\n\nNyl renders the chart and recursively processes its output. Cluster and target values are template inputs; pass values to the chart explicitly through `spec.values`.\n\n## When needed\n\nUse this optional resource to render a Helm chart with explicit chart coordinates and values. Declare `spec.lookup` for a chart that reuses objects it generated earlier through Helm's `lookup`, such as a CA Secret.\n\n## If omitted\n\nNyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither. Without `spec.lookup`, the chart renders offline and `lookup` finds nothing.",
   "examples": [
     {
       "apiVersion": "k8s.nyl/v1",

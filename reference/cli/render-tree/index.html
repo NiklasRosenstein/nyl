@@ -97,6 +97,10 @@ names.</p>
 <p><code dir="auto">--refresh</code> bypasses render cache reads and repopulates successful entries.
 <code dir="auto">--no-cache</code> uses ephemeral source storage and performs no persistent cache
 reads or writes. The two flags are mutually exclusive.</p>
+<p><code dir="auto">--refresh-lookup &#x3C;KIND/NAMESPACE/NAME></code> regenerates one object that a chart with
+<a href="/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup"><code dir="auto">spec.lookup</code></a> reads, for example to rotate a CA
+(<code dir="auto">Secret/kube-system/cilium-ca</code>; <code dir="auto">Kind/name</code> for a cluster-scoped object). Repeatable.
+The tree commands refuse <code dir="auto">--lookup=live</code> (<code dir="auto">NYL-HELM-LOOKUP-LIVE-REFUSED</code>).</p>
 <p>Tree rendering excludes the project secrets provider and <code dir="auto">NYL_*</code> process
 environment by default. Pass <code dir="auto">--allow-secret-inputs</code> to the individual
 <code dir="auto">render-tree</code>, <code dir="auto">diff-tree</code>, or <code dir="auto">publish-tree</code> invocation when trusted central
