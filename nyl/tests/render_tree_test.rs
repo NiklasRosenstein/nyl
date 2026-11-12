@@ -8101,3 +8101,384 @@ fn a_target_does_not_change_reconciler_by_a_publication() {
         .failure()
         .stderr(predicate::str::contains("NYL-TREE-RECONCILER-CHANGED"));
 }
+
+// Helm `lookup` from the target's last publication. These tests run the real
+// `helm` binary the project pins.
+
+const LOOKUP_CA_TEMPLATE: &str = r#"{{- $ca := lookup "v1" "Secret" .Release.Namespace "lookup-ca" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lookup-ca
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+{{- if $ca }}
+  ca.crt: {{ index $ca.data "ca.crt" }}
+{{- else }}
+  ca.crt: {{ (genCA "lookup-ca" 365).Cert | b64enc }}
+{{- end }}
+"#;
+
+/// Reads another Release's Secret, which `lookup` must not see.
+const LOOKUP_SCOPE_TEMPLATE: &str = r#"{{- $other := lookup "v1" "Secret" "plain" "lookup-ca" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scope
+  namespace: {{ .Release.Namespace }}
+data:
+  otherReleaseSecretVisible: {{ not (empty $other) | quote }}
+"#;
+
+/// A target whose `lookup` Release declares `spec.lookup` and whose `plain`
+/// Release renders the same chart without it, with a committed source.
+fn lookup_fixture() -> (TempDir, TempDir, TempDir) {
+    let (fixture, destination, seed, _) = publication_fixture();
+    let chart = fixture.path().join("charts/ca-chart");
+    fs::create_dir_all(chart.join("templates")).unwrap();
+    fs::write(
+        chart.join("Chart.yaml"),
+        "apiVersion: v2\nname: ca-chart\nversion: 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(chart.join("templates/ca.yaml"), LOOKUP_CA_TEMPLATE).unwrap();
+    fs::write(chart.join("templates/scope.yaml"), LOOKUP_SCOPE_TEMPLATE).unwrap();
+    for (release, lookup) in [("lookup", "  lookup: {}\n"), ("plain", "")] {
+        fs::write(
+            fixture.path().join(format!("applications/workloads/{release}.yaml")),
+            format!(
+                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: {release}\n  namespace: {release}\n---\napiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: {release}\n  namespace: {release}\nspec:\n  chart:\n    name: ./charts/ca-chart\n{lookup}"
+            ),
+        )
+        .unwrap();
+    }
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Add the lookup releases");
+    (fixture, destination, seed)
+}
+
+/// The CA a release published: the `ca.crt` of its Secret.
+fn published_ca(destination: &TempDir, release: &str) -> String {
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let commit = published_commit(&repository, "deploy/production");
+    let bytes = published_file(
+        &repository,
+        &commit,
+        &format!("production/workloads/{release}/secret/{release}/lookup-ca.yaml"),
+    );
+    let secret: serde_json::Value = serde_saphyr::from_str(&String::from_utf8(bytes).unwrap()).unwrap();
+    secret["data"]["ca.crt"]
+        .as_str()
+        .expect("the Secret holds a CA")
+        .to_owned()
+}
+
+fn nyl_with_cache(fixture: &TempDir, cache: &TempDir) -> Command {
+    let mut command = Command::cargo_bin("nyl").unwrap();
+    command
+        .current_dir(fixture.path())
+        .env("NYL_CACHE_DIR", cache.path())
+        .timeout(std::time::Duration::from_secs(120));
+    command
+}
+
+/// The CA of a release as `nyl render` prints it.
+fn rendered_ca(fixture: &TempDir, cache: &TempDir, release: &str, extra: &[&str]) -> String {
+    let assert = nyl_with_cache(fixture, cache)
+        .args([
+            "render",
+            &format!("applications/workloads/{release}.yaml"),
+            "--target",
+            "production",
+        ])
+        .args(extra)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let secret = serde_saphyr::from_multiple::<serde_json::Value>(&stdout)
+        .unwrap()
+        .into_iter()
+        .find(|document| document["kind"] == "Secret")
+        .expect("the release renders its Secret");
+    secret["data"]["ca.crt"].as_str().unwrap().to_owned()
+}
+
+fn publish_with_cache(fixture: &TempDir, cache: &TempDir) {
+    nyl_with_cache(fixture, cache)
+        .args(["publish-tree", "--target", "production"])
+        .assert()
+        .success();
+}
+
+/// Catches a Cilium-style CA being regenerated whenever the render cache is
+/// cold: once the CA is published, every command that renders the target reads
+/// it back, whether it is cold-cache `publish-tree`, `render`, or `diff-tree`.
+#[test]
+fn test_lookup_keeps_a_published_ca_across_cold_cache_renders() {
+    let (fixture, destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "lookup");
+    assert!(!ca.is_empty());
+
+    // A source change elsewhere, published from a cold cache, keeps the CA.
+    let api = fixture.path().join("applications/workloads/api.yaml");
+    let changed = fs::read_to_string(&api)
+        .unwrap()
+        .replace("\ndata:\n", "\ndata:\n  revision: second\n");
+    fs::write(&api, changed).unwrap();
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Change the api");
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    assert_eq!(published_ca(&destination, "lookup"), ca);
+
+    // `lookup` sees only its own Release: the `plain` Release's published
+    // Secret is invisible to it, though the publication holds it.
+    assert!(!published_ca(&destination, "plain").is_empty());
+    let repository = Repository::open_bare(destination.path()).unwrap();
+    let scope = published_file(
+        &repository,
+        &published_commit(&repository, "deploy/production"),
+        "production/workloads/lookup/configmap/lookup/scope.yaml",
+    );
+    let scope: serde_json::Value = serde_saphyr::from_str(&String::from_utf8(scope).unwrap()).unwrap();
+    assert_eq!(scope["data"]["otherReleaseSecretVisible"], "false");
+
+    // Direct commands read the same publication.
+    assert_eq!(rendered_ca(&fixture, &TempDir::new().unwrap(), "lookup", &[]), ca);
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args([
+            "diff-tree",
+            "--target",
+            "production",
+            "--against",
+            "published",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("workloads/plain/secret/plain/lookup-ca.yaml"))
+        .stdout(predicate::str::contains("workloads/lookup/").not());
+
+    // A release that does not declare `lookup` regenerates its CA every render.
+    assert_ne!(
+        rendered_ca(&fixture, &TempDir::new().unwrap(), "plain", &[]),
+        rendered_ca(&fixture, &TempDir::new().unwrap(), "plain", &[])
+    );
+}
+
+/// Catches a render made outside every group (`--defaults-only`, which finds nothing and so
+/// generates a CA) being reused for the published Release by a warm cache: the Helm layer's
+/// record names where the Release was published, and that must be part of its key, or the
+/// next `publish-tree` would publish the generated CA and rotate it.
+#[test]
+fn test_a_scopeless_render_is_never_reused_for_the_published_release() {
+    let (fixture, destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "lookup");
+
+    let warm = TempDir::new().unwrap();
+    let scopeless = rendered_ca(&fixture, &warm, "lookup", &["--defaults-only"]);
+    assert_ne!(
+        scopeless, ca,
+        "outside every group nothing is found, so a CA is generated"
+    );
+    assert_eq!(
+        rendered_ca(&fixture, &warm, "lookup", &[]),
+        ca,
+        "the published Release reads its CA, whatever the warm cache holds"
+    );
+    // The cache that holds the scope-less record publishes nothing new.
+    publish_with_cache(&fixture, &warm);
+    assert_eq!(published_ca(&destination, "lookup"), ca);
+}
+
+/// Catches rotation being impossible, or leaking into other renders: the named
+/// object reads as absent for one render, so the CA regenerates; the next
+/// publication then keeps the new CA.
+#[test]
+fn test_refresh_lookup_regenerates_one_object_for_one_render() {
+    let (fixture, destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "lookup");
+    let rotated = rendered_ca(
+        &fixture,
+        &TempDir::new().unwrap(),
+        "lookup",
+        &["--refresh-lookup", "Secret/lookup/lookup-ca"],
+    );
+    assert_ne!(rotated, ca, "the refreshed CA is generated again");
+    assert_eq!(rendered_ca(&fixture, &TempDir::new().unwrap(), "lookup", &[]), ca);
+
+    // Rotation through the publication: the new CA is published and then kept.
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args([
+            "publish-tree",
+            "--target",
+            "production",
+            "--refresh-lookup",
+            "Secret/lookup/lookup-ca",
+        ])
+        .assert()
+        .success();
+    let published = published_ca(&destination, "lookup");
+    assert_ne!(published, ca);
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    assert_eq!(published_ca(&destination, "lookup"), published);
+}
+
+/// Catches a mistyped `--refresh-lookup` being silent: a reference that hides no object a chart
+/// looked up changes nothing, so the command says so, once, with a stable code. A reference
+/// that does hide one is not reported.
+#[test]
+fn test_an_unmatched_refresh_lookup_reference_is_reported() {
+    let (fixture, _destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let render = |reference: &str| {
+        nyl_with_cache(&fixture, &TempDir::new().unwrap())
+            .args([
+                "render",
+                "applications/workloads/lookup.yaml",
+                "--target",
+                "production",
+                "--refresh-lookup",
+                reference,
+            ])
+            .assert()
+            .success()
+    };
+    render("Secret/lookup/lookup-cs")
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-REFRESH-UNMATCHED"))
+        .stderr(predicate::str::contains("Secret/lookup/lookup-cs"));
+    render("Secret/lookup/lookup-ca").stderr(predicate::str::contains("NYL-HELM-LOOKUP-REFRESH-UNMATCHED").not());
+}
+
+/// Catches the first render, before anything is published, failing: with no
+/// publication the lookups are absent and the chart generates.
+#[test]
+fn test_lookup_generates_before_the_release_is_published() {
+    let (fixture, _destination, _seed) = lookup_fixture();
+    let ca = rendered_ca(&fixture, &TempDir::new().unwrap(), "lookup", &[]);
+    assert!(!ca.is_empty());
+}
+
+/// Catches an unreadable publication reading as an absent one, which would
+/// silently regenerate a CA: a publication that was never fetched for an
+/// offline render, or whose files do not match its index, is an error with a
+/// stable code.
+#[test]
+fn test_lookup_reports_a_publication_it_cannot_read() {
+    let (fixture, destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args([
+            "render",
+            "applications/workloads/lookup.yaml",
+            "--target",
+            "production",
+            "--offline",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE"));
+
+    // Corrupt: a published file no longer matches the ownership index.
+    let checkout = TempDir::new().unwrap();
+    let clone = Repository::clone(destination.path().to_str().unwrap(), checkout.path()).unwrap();
+    let mut config = clone.config().unwrap();
+    config.set_str("user.name", "Nyl Tests").unwrap();
+    config.set_str("user.email", "nyl-tests@example.invalid").unwrap();
+    let remote_branch = clone
+        .find_branch("origin/deploy/production", git2::BranchType::Remote)
+        .unwrap();
+    let commit = remote_branch.get().peel_to_commit().unwrap();
+    clone.branch("deploy/production", &commit, true).unwrap();
+    clone.set_head("refs/heads/deploy/production").unwrap();
+    clone
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    fs::write(
+        checkout.path().join("production/workloads/lookup/secret/lookup/lookup-ca.yaml"),
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: lookup-ca\n  namespace: lookup\ndata:\n  ca.crt: dGFtcGVyZWQ=\n",
+    )
+    .unwrap();
+    commit_all(&clone, "Tamper");
+    clone
+        .find_remote("origin")
+        .unwrap()
+        .push(&["refs/heads/deploy/production:refs/heads/deploy/production"], None)
+        .unwrap();
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args(["render", "applications/workloads/lookup.yaml", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-SNAPSHOT-UNAVAILABLE"))
+        .stderr(predicate::str::contains("does not match its digest"));
+}
+
+/// Catches a cached render depending on an assumed lookup result: a render
+/// cached before the CA was published is not reused once the publication holds
+/// one, while an unchanged publication keeps being served from the cache.
+#[test]
+fn test_cached_renders_revalidate_what_their_charts_looked_up() {
+    let (fixture, destination, _seed) = lookup_fixture();
+    let warm = TempDir::new().unwrap();
+    let before_publication = rendered_ca(&fixture, &warm, "lookup", &[]);
+
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let published = published_ca(&destination, "lookup");
+    assert_ne!(
+        published, before_publication,
+        "the cold publication generated its own CA"
+    );
+    assert_eq!(
+        rendered_ca(&fixture, &warm, "lookup", &[]),
+        published,
+        "the warm cache holds a render from before the publication, which its lookups no longer match"
+    );
+
+    nyl_with_cache(&fixture, &warm)
+        .env("RUST_LOG", "nyl_render=debug")
+        .args(["render", "applications/workloads/lookup.yaml", "--target", "production"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Reusing cached"));
+}
+
+/// Catches a chart that declares `lookup` failing where there is nothing to read:
+/// without a target the lookups are absent, and the chart generates.
+#[test]
+fn test_lookup_without_a_target_finds_nothing_and_generates() {
+    let fixture = TempDir::new().unwrap();
+    fs::write(fixture.path().join("nyl.toml"), "").unwrap();
+    let chart = fixture.path().join("charts/ca-chart");
+    fs::create_dir_all(chart.join("templates")).unwrap();
+    fs::write(
+        chart.join("Chart.yaml"),
+        "apiVersion: v2\nname: ca-chart\nversion: 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(chart.join("templates/ca.yaml"), LOOKUP_CA_TEMPLATE).unwrap();
+    fs::write(
+        fixture.path().join("lookup.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: lookup\n  namespace: lookup\nspec:\n  chart:\n    name: ./charts/ca-chart\n  lookup: {}\n",
+    )
+    .unwrap();
+    let cache = TempDir::new().unwrap();
+    let assert = nyl_with_cache(&fixture, &cache)
+        .args([
+            "render",
+            "lookup.yaml",
+            "--kube-version",
+            "1.31.4",
+            "--kube-api-versions",
+            "v1",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("kind: Secret") && stdout.contains("ca.crt: "),
+        "{stdout}"
+    );
+}

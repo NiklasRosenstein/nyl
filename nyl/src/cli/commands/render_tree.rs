@@ -28,6 +28,9 @@ pub struct RenderTreeArgs {
     #[command(flatten)]
     pub progress: TreeProgressArgs,
 
+    #[command(flatten)]
+    pub lookup: nyl_render::helm::lookup::LookupArgs,
+
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
@@ -112,6 +115,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         TreeRenderOptions {
             allow_secret_inputs: args.allow_secret_inputs,
             publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(args.offline),
+            refresh_lookup: args.lookup.refresh(),
             ..TreeRenderOptions::default()
         },
     )

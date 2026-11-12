@@ -30,9 +30,17 @@ import { Steps } from '@astrojs/starlight/components';
 </Steps>
 
 Bundle expansion and parsed Helm output are cached by their complete observed
-inputs. `--refresh` bypasses cache reads and replaces successful entries;
+inputs, including what a chart's Helm `lookup` returned ([below](#helm-lookup)). `--refresh` bypasses cache reads and replaces successful entries;
 `--no-cache` disables persistent reads and writes. `diff` and `apply` always
 perform their live-cluster work even when desired-manifest rendering is reused.
+
+## Helm `lookup`
+
+A [HelmChart with `spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) renders with Helm's server-side
+dry run against a read-only Kubernetes API that Nyl serves locally. The API answers
+from the Release's own objects in the target's last publication, so `render`, `diff`,
+`apply` and the tree commands all see the same objects. Each lookup result is a cache
+input, so a cached render is reused only while every lookup returns the same result.
 
 ## Argo CD sync waves and phases
 

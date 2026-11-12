@@ -9,6 +9,7 @@ pub mod discovery;
 pub mod inputs;
 pub mod instances;
 pub mod layout;
+pub mod lookup;
 pub mod observation;
 pub mod project_scope;
 pub mod provenance;

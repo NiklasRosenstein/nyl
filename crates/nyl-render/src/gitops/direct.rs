@@ -127,7 +127,7 @@ pub fn select_direct_group(
 /// The enabled ApplicationGroup of the target that renders `file`, by the same
 /// file selection as `render-tree`, or the one `--application-group` names,
 /// with whether that group renders the file itself.
-fn rendering_group(
+pub(super) fn rendering_group(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
     file: &Path,

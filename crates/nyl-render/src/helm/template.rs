@@ -1,6 +1,7 @@
 /// Helm template command building and execution
+use super::lookup::{record_observed, render_with_lookup, LookupHandle, LookupRender};
 use super::ResolvedChart;
-use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome};
+use crate::render::cache::{CacheLayer, CacheMode, CacheOutcome, LookupFingerprint};
 use crate::{NylError, Result};
 use std::process::Command;
 
@@ -32,6 +33,10 @@ pub struct HelmTemplateExecutor {
     include_crds: bool,
 
     gitops_cache: Option<crate::gitops::GitOpsCache>,
+
+    /// Present when the chart declares `spec.lookup`: Helm's `lookup` reads the
+    /// Release's objects from a local read-only API instead of finding nothing.
+    lookup: Option<LookupHandle>,
 }
 
 impl HelmTemplateExecutor {
@@ -42,7 +47,17 @@ impl HelmTemplateExecutor {
             api_versions: Vec::new(),
             include_crds: true,
             gitops_cache: None,
+            lookup: None,
         }
+    }
+
+    /// Render with `lookup` answered from `handle`, which is how a chart that
+    /// declares `spec.lookup` renders. Without it, Helm renders offline and
+    /// `lookup` finds nothing.
+    #[must_use]
+    pub fn with_lookup(mut self, handle: Option<LookupHandle>) -> Self {
+        self.lookup = handle;
+        self
     }
 
     /// Set the Kubernetes version
@@ -179,20 +194,38 @@ impl HelmTemplateExecutor {
         };
 
         // Build command using shared build_command method
-        let mut cmd = self.build_command(HelmTemplateParams {
-            resolved,
-            release_name,
-            release_namespace,
-            values_file: values_file.as_ref().map(|f| f.path()),
-        });
+        let build = || {
+            self.build_command(HelmTemplateParams {
+                resolved,
+                release_name,
+                release_namespace,
+                values_file: values_file.as_ref().map(|f| f.path()),
+            })
+        };
 
         // Log the command being executed
-        tracing::debug!("Executing helm command: {:?}", cmd);
+        tracing::debug!("Executing helm command: {:?}", build());
 
         // Execute helm template
-        let output = cmd
-            .output()
-            .map_err(|e| NylError::Process(format!("Failed to execute helm: {}", e)))?;
+        let (output, observed) = if let Some(handle) = &self.lookup {
+            let (output, observed) = render_with_lookup(
+                &build,
+                &LookupRender {
+                    handle,
+                    release_name,
+                    chart: &resolved.path,
+                    kube_version: self.kube_version.as_deref().unwrap_or_default(),
+                    api_versions: &self.api_versions,
+                },
+            )?;
+            handle.observe_all(&observed);
+            (output, observed)
+        } else {
+            let output = build()
+                .output()
+                .map_err(|e| NylError::Process(format!("Failed to execute helm: {}", e)))?;
+            (output, std::collections::BTreeMap::new())
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -208,7 +241,7 @@ impl HelmTemplateExecutor {
         } else {
             parse_yaml_documents(&stdout)
         }?;
-        self.store_cache(cache_probe, &manifests)?;
+        self.store_cache(cache_probe, &manifests, &observed)?;
         Ok(manifests)
     }
 
@@ -231,33 +264,66 @@ impl HelmTemplateExecutor {
             resolved.path.display(),
             release_namespace.unwrap_or_default()
         );
+        if self.lookup.as_ref().is_some_and(|handle| !handle.config().cacheable()) {
+            // The source of the lookups can change without Nyl observing it,
+            // so nothing rendered from it is stored or reused.
+            cache.observe(
+                CacheLayer::Helm,
+                CacheOutcome::Bypassed,
+                &[format!("Helm lookup reads {}", self.lookup_description())],
+            );
+            return Ok((None, None));
+        }
         let mut recorder = cache.recorder();
         recorder.record_filesystem_path(&resolved.path)?;
-        recorder.record_value(
-            "parameters",
-            &serde_json::json!({
-                "releaseName": release_name,
-                "releaseNamespace": release_namespace,
-                "values": values,
-                "kubeVersion": self.kube_version,
-                "apiVersions": self.api_versions,
-                "includeCrds": self.include_crds,
-                "preserveSourceComments": preserve_source_comments,
-            }),
-        )?;
+        let mut parameters = serde_json::json!({
+            "releaseName": release_name,
+            "releaseNamespace": release_namespace,
+            "values": values,
+            "kubeVersion": self.kube_version,
+            "apiVersions": self.api_versions,
+            "includeCrds": self.include_crds,
+            "preserveSourceComments": preserve_source_comments,
+        });
+        if let Some(handle) = &self.lookup {
+            // Charts that declare no lookup keep their existing cache entries. Where the
+            // Release is published decides which objects its lookups read, and a record
+            // names the lookups it made under the scope they were made in, so a render for
+            // another scope (or for none, such as `--defaults-only`) never reuses it.
+            parameters["lookup"] = serde_json::json!({"scope": handle.scope_input()});
+        }
+        recorder.record_value("parameters", &parameters)?;
         cache.record_renderer_tools(&mut recorder)?;
+        // The lookups a previous render of this chart made are inputs too: the
+        // record is reused only while each still returns what it did.
+        let previous = if cache.bypasses_render_artifacts() {
+            None
+        } else {
+            cache.load_record("helm", &key)?
+        };
+        let replayed = match (&self.lookup, &previous) {
+            (Some(handle), Some(previous)) => recorder.replay_lookup_dependencies(previous, handle.config()),
+            _ => std::collections::BTreeMap::new(),
+        };
         let current = recorder.clone().finish("helm", String::new());
         let cached = if cache.bypasses_render_artifacts() {
             cache.observe(CacheLayer::Helm, CacheOutcome::Refreshed, &[]);
             None
         } else {
-            match cache.load_record("helm", &key)? {
+            match previous {
                 None => {
                     cache.observe(CacheLayer::Helm, CacheOutcome::Miss, &[]);
                     None
                 }
                 Some(previous) if previous.same_inputs(&current) => {
                     let cached = cache.load_artifact("helm", &previous.artifact_digest)?;
+                    if cached.is_some() {
+                        // A reused render looked up what its record says, so
+                        // the layers above record it as their own input.
+                        if let Some(handle) = &self.lookup {
+                            handle.observe_all(&replayed);
+                        }
+                    }
                     cache.observe(
                         CacheLayer::Helm,
                         if cached.is_some() {
@@ -285,10 +351,17 @@ impl HelmTemplateExecutor {
         Ok((Some(HelmCacheProbe { key, recorder }), cached))
     }
 
-    fn store_cache(&self, probe: Option<HelmCacheProbe>, manifests: &[serde_json::Value]) -> Result<()> {
-        let (Some(cache), Some(probe)) = (&self.gitops_cache, probe) else {
+    fn store_cache(
+        &self,
+        probe: Option<HelmCacheProbe>,
+        manifests: &[serde_json::Value],
+        lookups: &std::collections::BTreeMap<String, LookupFingerprint>,
+    ) -> Result<()> {
+        let (Some(cache), Some(mut probe)) = (&self.gitops_cache, probe) else {
             return Ok(());
         };
+        // What the chart looked up is an input of what it rendered.
+        record_observed(&mut probe.recorder, lookups);
         if !probe.recorder.is_cacheable() {
             return Ok(());
         }
@@ -298,6 +371,12 @@ impl HelmTemplateExecutor {
         cache.store_record("helm", &probe.key, &probe.recorder.finish("helm", digest))?;
         cache.observe(CacheLayer::Helm, CacheOutcome::Stored, &[]);
         Ok(())
+    }
+
+    fn lookup_description(&self) -> String {
+        self.lookup
+            .as_ref()
+            .map_or_else(String::new, |handle| handle.config().describe())
     }
 
     /// Check if helm is installed and available
@@ -338,6 +417,7 @@ impl std::fmt::Debug for HelmTemplateExecutor {
             .field("api_versions", &self.api_versions)
             .field("include_crds", &self.include_crds)
             .field("gitops_cache", &self.gitops_cache.as_ref().map(|_| "configured"))
+            .field("lookup", &self.lookup.as_ref().map(|handle| handle.config().describe()))
             .finish()
     }
 }

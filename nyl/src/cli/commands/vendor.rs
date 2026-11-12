@@ -86,13 +86,13 @@ async fn sync(args: VendorRenderArgs) -> Result<()> {
     let targets = selected_targets(&inventory, &args.target)?;
     let cache = GitOpsCache::new(&inventory.project_root, CacheMode::Default)?.with_vendor_population(args.refresh);
     let _reporter = cache.reporter();
-    let compiled = compile_targets(
+    let compiled = Box::pin(compile_targets(
         &inventory,
         &targets,
         &cache,
         args.progress,
         TreeRenderOptions::default(),
-    )
+    ))
     .await?;
     nyl_render::validation::vendor_schemas(&inventory, &compiled, false, !args.target.is_empty(), args.refresh).await?;
     let result = writer.sync(&cache.observed_artifacts(), !args.target.is_empty())?;
@@ -116,7 +116,7 @@ async fn check(args: VendorCheckArgs) -> Result<()> {
         publication_read: PublicationRead::FreshOrCached,
         ..TreeRenderOptions::default()
     };
-    let compiled = compile_targets(&inventory, &targets, &cache, args.progress, options).await?;
+    let compiled = Box::pin(compile_targets(&inventory, &targets, &cache, args.progress, options)).await?;
     nyl_render::validation::vendor_schemas(&inventory, &compiled, true, !args.target.is_empty(), false).await?;
     writer.check(&cache.observed_artifacts(), args.target.is_empty())?;
     let schema_root = nyl_render::validation::store::vendor_root(&inventory.project_root, &inventory.project_config)?;

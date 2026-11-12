@@ -402,6 +402,7 @@ async fn expand_resource(
                     chart: chart_ref,
                     values,
                     include_crds: None,
+                    lookup: None,
                 },
             };
 
@@ -443,6 +444,7 @@ async fn expand_resource(
                     },
                     values,
                     include_crds: None,
+                    lookup: None,
                 },
             };
 
@@ -743,7 +745,14 @@ fn render_helm_chart(
         .with_kube_version(kube_version.to_string())
         .with_api_versions(api_versions.to_vec())
         .with_include_crds(chart.spec.include_crds.unwrap_or(true))
-        .with_gitops_cache(gitops_cache.cloned());
+        .with_gitops_cache(gitops_cache.cloned())
+        .with_lookup(chart.spec.lookup.as_ref().map(|_| {
+            // A chart that declares lookup renders against the lookup API even
+            // where no source was configured: then nothing is found.
+            artifact_resolver.lookup_handle().cloned().unwrap_or_else(|| {
+                crate::helm::lookup::LookupHandle::new(crate::helm::lookup::LookupConfig::default(), None, None)
+            })
+        }));
 
     // Default namespace to "default" for deterministic rendering
     let namespace = chart.release_namespace().or(Some("default"));
