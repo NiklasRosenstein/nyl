@@ -4,24 +4,29 @@ use dialoguer::Confirm;
 
 use crate::{
     cli::apply_output::{ApplyRenderer, Phase, PhaseTiming},
-    cli::commands::apply::{
-        collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, ReleaseRecorder,
-        DEFAULT_APPLY_CONCURRENCY,
-    },
-    cli::commands::cluster::load_target_kube_config,
+    cli::commands::apply::{HandoffArgs, SyncWaitArgs, DEFAULT_APPLY_CONCURRENCY},
+    cli::commands::cluster::{resolve_command_cluster, CommandCluster},
 };
 use nyl_render::{
     config::ProjectConfig,
-    kubernetes::{KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering},
+    kubernetes::{
+        fence::{ReleaseClaim, Requester},
+        lifecycle::{
+            collapse_rendered_duplicates, ensure_namespace_exists, ApplySettings, Interruption, ObjectScopes,
+            ReleaseRecorder, RevisionPolicy,
+        },
+        KubeClient, KubeRsClient, KubernetesReleaseStorage, ReleaseState, ReleaseStorage, ResourceOrdering,
+        ScopeResolver,
+    },
     NylError, Result,
 };
 
 /// Roll back a release to a previously stored revision
 #[derive(Args, Debug)]
 pub struct RollbackArgs {
-    /// deployment target whose cluster stores the release
+    /// Deployment target whose cluster stores the release. Optional when exactly one target is configured.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
 
     /// Release name
     pub name: String,
@@ -38,7 +43,7 @@ pub struct RollbackArgs {
     #[arg(short, long)]
     pub yes: bool,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 
@@ -55,9 +60,20 @@ pub struct RollbackArgs {
     /// Prune resources whose Argo CD sync option is `Prune=confirm` (see `nyl apply --confirm-prune`).
     #[arg(long)]
     pub confirm_prune: bool,
+
+    /// Roll back a release an environment owns anyway, recording no owner (see `nyl apply --take-over`).
+    #[arg(long)]
+    pub take_over: bool,
+
+    #[command(flatten)]
+    pub handoff: HandoffArgs,
+
+    #[command(flatten)]
+    pub waits: SyncWaitArgs,
 }
 
 pub async fn execute(args: RollbackArgs) -> Result<()> {
+    let ownership = args.handoff.ownership()?;
     // Read configuration before anything is recorded, so a broken nyl.toml fails
     // the rollback before it leaves a revision behind.
     let history_limit = match args.history_limit {
@@ -66,8 +82,8 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     };
 
     // Create Kubernetes clients
-    let config = load_target_kube_config(&args.target, args.context.as_deref()).await?;
-    let client = kube::Client::try_from(config)?;
+    let cluster = resolve_command_cluster(args.target.as_deref(), args.context.as_deref()).await?;
+    let client = kube::Client::try_from(cluster.config.clone())?;
     let kube_client = KubeRsClient::from_client(client.clone()).await?;
     let storage = KubernetesReleaseStorage::new(client);
 
@@ -112,12 +128,19 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
     // Revisions recorded before duplicates were collapsed at apply time may still
     // hold several documents for one object; apply only the last, as apply did.
     let mut duplicates = std::collections::HashMap::new();
-    let (mut manifests, mut scopes) = collapse_rendered_duplicates(&kube_client, manifests, &mut duplicates).await?;
+    let (mut manifests, mut scopes) =
+        prepare_rollback_manifests(&kube_client, &cluster, manifests, &mut duplicates).await?;
 
-    // Sort resources into apply order (Argo CD's kind order), record the rollback as
+    // Sort resources into apply order (CRDs, Namespaces, then Argo CD's kind order), record the rollback as
     // a new revision before touching the cluster, and apply.
     ResourceOrdering::sort_by_priority(&mut manifests)?;
-    ensure_namespace_exists(&kube_client, &args.namespace).await?;
+    ensure_namespace_exists(&kube_client, &args.namespace, &ownership).await?;
+    let claim = ReleaseClaim {
+        requester: Requester::Manual {
+            take_over: args.take_over,
+        },
+        publication: cluster.publication,
+    };
     let recorder = ReleaseRecorder::reserve(
         &storage,
         &args.name,
@@ -126,6 +149,7 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
         false,
         &kube_client,
         &mut scopes,
+        &claim,
     )
     .await?;
 
@@ -143,13 +167,29 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
             ApplySettings {
                 concurrency,
                 history_limit,
+                // A rollback is an explicit change of the release, so it is always recorded.
+                revisions: RevisionPolicy::Always,
                 confirm_prune: args.confirm_prune,
+                ownership: &ownership,
+                protected: None,
+                waits: args.waits.settings(),
+                unapplied: None,
             },
-            &mut timings,
+            Interruption {
+                interrupt: async {
+                    let _ = tokio::signal::ctrl_c().await;
+                },
+                escalate: async {
+                    let _ = tokio::signal::ctrl_c().await;
+                    std::process::exit(130)
+                },
+            },
             &mut |event| renderer.event(event),
         )
         .await?;
-    renderer.summary(&run.report(&timings));
+    timings.push(PhaseTiming::new(Phase::Apply, run.apply_elapsed));
+    timings.push(PhaseTiming::new(Phase::Release, run.release_elapsed));
+    renderer.summary(&crate::cli::apply_output::report_of(&run, &timings));
     run.error("Rollback").map_or(Ok(()), Err)
 }
 
@@ -159,6 +199,25 @@ pub async fn execute(args: RollbackArgs) -> Result<()> {
 /// defaults to the revision immediately before the latest one (i.e. undo the most
 /// recent deployment). Returns a clear error when the release or revision does not
 /// exist, or when there is no previous revision to roll back to.
+/// The stored manifests, prepared for a rollback: documents for one object collapsed
+/// and every kind's scope resolved as `apply` resolves it, from the manifests' CRDs,
+/// then the capabilities of the target's Cluster that `cluster` carries, then the
+/// live cluster.
+async fn prepare_rollback_manifests(
+    kube_client: &dyn KubeClient,
+    cluster: &CommandCluster,
+    manifests: Vec<serde_json::Value>,
+    duplicates: &mut std::collections::HashMap<nyl_render::kubernetes::ResourceKey, usize>,
+) -> Result<(Vec<serde_json::Value>, ObjectScopes)> {
+    collapse_rendered_duplicates(
+        kube_client,
+        manifests,
+        duplicates,
+        ScopeResolver::from_capabilities(cluster.capabilities.as_ref()),
+    )
+    .await
+}
+
 async fn resolve_rollback_target(
     storage: &dyn ReleaseStorage,
     name: &str,
@@ -206,136 +265,53 @@ async fn resolve_rollback_target(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use chrono::Utc;
-    use nyl_render::kubernetes::{ReleaseInfo, ReleaseStatus};
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use nyl_render::kubernetes::ReleaseStatus;
 
-    /// In-memory release storage for testing (mirrors the mock in `state.rs`).
-    pub(crate) struct MockReleaseStorage {
-        releases: Arc<Mutex<HashMap<(String, u32), ReleaseState>>>,
-    }
+    use nyl_render::kubernetes::memory::InMemoryReleaseStorage as MockReleaseStorage;
 
-    impl MockReleaseStorage {
-        pub(crate) fn new() -> Self {
-            Self {
-                releases: Arc::new(Mutex::new(HashMap::new())),
-            }
-        }
-    }
+    use nyl_render::kubernetes::memory::sample_release as make_release;
 
-    #[async_trait::async_trait]
-    impl ReleaseStorage for MockReleaseStorage {
-        async fn save_release(&self, release: &ReleaseState) -> Result<()> {
-            let mut store = self.releases.lock().unwrap();
-            let key = (
-                format!("{}/{}", release.release_namespace, release.release_name),
-                release.revision,
-            );
-            if store.contains_key(&key) {
-                return Err(NylError::Kubernetes(format!(
-                    "revision {} already exists",
-                    release.revision
-                )));
-            }
-            store.insert(key, release.clone());
-            Ok(())
-        }
+    /// Rollback resolves each kind's scope through the capabilities its `CommandCluster`
+    /// carries: here the Cluster records `Widget` as cluster-scoped while the live
+    /// cluster says namespaced, so the object's identity drops its namespace only with
+    /// them.
+    #[tokio::test]
+    async fn test_prepare_rollback_manifests_resolves_scope_through_the_command_clusters_capabilities() {
+        let widget = serde_json::json!({"apiVersion": "example.com/v1", "kind": "Widget",
+            "metadata": {"name": "w", "namespace": "app"}});
+        let key = nyl_render::kubernetes::ResourceKey::from_json_value(&widget).unwrap();
+        let cluster = |capabilities| CommandCluster {
+            config: kube::Config::new("http://localhost".parse().unwrap()),
+            publication: None,
+            capabilities,
+        };
+        let declared = nyl_render::resources::ClusterKubernetesCapabilities {
+            kube_version: None,
+            api_versions: vec!["example.com/v1/Widget".to_owned()],
+            cluster_scoped_kinds: vec!["example.com/Widget".to_owned()],
+            vendored_crds: false,
+        };
+        let live = nyl_render::kubernetes::MockKubeClient::new();
 
-        async fn complete_release(&self, release: &ReleaseState) -> Result<()> {
-            let mut store = self.releases.lock().unwrap();
-            let key = (
-                format!("{}/{}", release.release_namespace, release.release_name),
-                release.revision,
-            );
-            if !store.contains_key(&key) {
-                return Err(NylError::Config(format!("revision {} not found", release.revision)));
-            }
-            store.insert(key, release.clone());
-            Ok(())
-        }
+        let (_, scopes) = prepare_rollback_manifests(
+            &live,
+            &cluster(Some(declared)),
+            vec![widget.clone()],
+            &mut std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scopes.identity(&key).namespace, None);
 
-        async fn get_latest_release(&self, release_name: &str, namespace: &str) -> Result<Option<ReleaseState>> {
-            let revisions = self.list_revisions(release_name, namespace).await?;
-            match revisions.iter().max() {
-                Some(latest) => self.get_release(release_name, namespace, *latest).await,
-                None => Ok(None),
-            }
-        }
-
-        async fn get_release(
-            &self,
-            release_name: &str,
-            namespace: &str,
-            revision: u32,
-        ) -> Result<Option<ReleaseState>> {
-            let store = self.releases.lock().unwrap();
-            let key = format!("{namespace}/{release_name}");
-            Ok(store.get(&(key, revision)).cloned())
-        }
-
-        async fn list_revisions(&self, release_name: &str, namespace: &str) -> Result<Vec<u32>> {
-            let store = self.releases.lock().unwrap();
-            let key_prefix = format!("{namespace}/{release_name}");
-            let mut revisions: Vec<u32> = store
-                .keys()
-                .filter(|(c, _)| c == &key_prefix)
-                .map(|(_, r)| *r)
-                .collect();
-            revisions.sort_unstable();
-            Ok(revisions)
-        }
-
-        async fn update_release_status(
-            &self,
-            release_name: &str,
-            namespace: &str,
-            revision: u32,
-            status: ReleaseStatus,
-            error: Option<String>,
-        ) -> Result<()> {
-            let mut store = self.releases.lock().unwrap();
-            let key = format!("{namespace}/{release_name}");
-            if let Some(release) = store.get_mut(&(key, revision)) {
-                release.status = status;
-                release.error = error;
-            }
-            Ok(())
-        }
-
-        async fn list_releases(&self, _namespace: Option<&str>) -> Result<Vec<ReleaseInfo>> {
-            Ok(vec![])
-        }
-
-        async fn delete_release(&self, release_name: &str, namespace: &str, revision: u32) -> Result<()> {
-            let mut store = self.releases.lock().unwrap();
-            store.remove(&(format!("{namespace}/{release_name}"), revision));
-            Ok(())
-        }
-
-        async fn delete_all_revisions(&self, release_name: &str, namespace: &str) -> Result<u32> {
-            let revisions = self.list_revisions(release_name, namespace).await?;
-            let count = u32::try_from(revisions.len())
-                .map_err(|e| NylError::Other(format!("Too many revisions to count: {}", e)))?;
-            for revision in revisions {
-                self.delete_release(release_name, namespace, revision).await?;
-            }
-            Ok(count)
-        }
-    }
-
-    pub(crate) fn make_release(name: &str, namespace: &str, revision: u32, status: ReleaseStatus) -> ReleaseState {
-        ReleaseState {
-            release_name: name.to_string(),
-            release_namespace: namespace.to_string(),
-            revision,
-            resource_keys: vec![],
-            manifest: format!("# manifest for revision {revision}"),
-            status,
-            rendered_at: Utc::now(),
-            applied_at: Some(Utc::now()),
-            error: None,
-        }
+        let (_, scopes) = prepare_rollback_manifests(
+            &live,
+            &cluster(None),
+            vec![widget],
+            &mut std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scopes.identity(&key).namespace.as_deref(), Some("app"));
     }
 
     async fn seed(storage: &MockReleaseStorage, name: &str, ns: &str, revisions: &[u32]) {
@@ -424,7 +400,7 @@ pub(crate) mod tests {
     /// revision applied), not just the numerically previous secret.
     #[tokio::test]
     async fn test_collect_live_state_spans_failed_revision_to_last_deployed() {
-        use crate::cli::commands::apply::collect_live_state;
+        use nyl_render::kubernetes::lifecycle::collect_live_state;
         use nyl_render::kubernetes::{GroupVersionKind, ResourceKey};
 
         let key = |name: &str| ResourceKey {

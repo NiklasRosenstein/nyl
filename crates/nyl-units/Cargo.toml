@@ -25,6 +25,13 @@ glob = { workspace = true }
 # Docker context ignore patterns; already a workspace dependency.
 regex = { workspace = true }
 base64 = { workspace = true }
+# Reading Argo CD Applications through the Kubernetes API of the control-plane
+# Cluster (kube) or the Argo CD API server (reqwest), each on a runtime of its own.
+kube = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+# The process-level crypto provider the kube client needs (see `argocd::block_on`).
+rustls = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,6 +45,10 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# A client that behaves like an API server where the mock is lenient, in tests.
+async-trait = { workspace = true }
+# File URLs for the test publication repository on every platform.
+url = { workspace = true }
 
 [[test]]
 name = "fake_publication_test"

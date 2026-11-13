@@ -13,10 +13,12 @@ use nyl_core::orchestration::state::{DesiredUnit, Lifecycle, Operation, Operator
 use nyl_core::orchestration::time::Duration;
 use serde_json::{json, Value};
 
+use super::peers::Peers;
 use super::run::{execution_credentials, project_path, unit_timeout, RunContext, RunRequest};
 use super::state::{commit, read, summary, with_lease, Requested};
 use super::Context;
 use crate::report::StateOperationReport;
+use crate::rules::peers::{Need, Problem};
 use crate::rules::transitions::{apply_to, Applied, Event};
 
 /// A read-only CLI preparation of an explicitly requested worktree spec.
@@ -137,23 +139,20 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
             let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
             driver.validate_spec(spec).map_err(invalid)?;
             let (env, secrets) = execution_credentials(context, driver, spec).map_err(invalid)?;
+            // The claims of every other environment decide whether the scope is
+            // free, so each is required: one that cannot be used or read is an
+            // error, with the same code and fix as for any required read.
             let mut claims = BTreeMap::new();
-            if let Some(finding) = request.environment_errors.values().next() {
-                return Err(finding.clone());
-            }
-            for (environment, location) in &request.environments {
-                let mut state = if *environment == request.environment {
-                    snapshot.clone()
-                } else {
-                    base.store
-                        .snapshot(location)
-                        .map_err(|error| invalid(format!("cannot check ownership in {environment}: {error}")))?
-                };
-                if *environment == request.environment {
-                    state.desired.insert(options.unit.clone(), unit.clone());
-                }
+            let peers = Peers::of(request);
+            for environment in peers.others(&request.environment) {
+                let state = peers
+                    .read(base.store, environment, Need::Required)
+                    .map_err(Problem::into_finding)?;
                 claims.insert(environment.clone(), state);
             }
+            let mut own = snapshot.clone();
+            own.desired.insert(options.unit.clone(), unit.clone());
+            claims.insert(request.environment.clone(), own);
             if let Some(finding) =
                 crate::rules::desired::check_ownership_with_snapshots(&BTreeMap::new(), &claims, context.drivers)
                     .into_iter()
@@ -187,12 +186,14 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                     .renderer
                     .render(&worktree, &request.environment, revision)
                     .map_err(|error| invalid(error.to_string()))?;
-                super::sources::validate_local_inputs(context.sources, driver, spec, revision).map_err(invalid)?;
+                super::sources::validate_local_inputs(context.sources, driver, spec, revision, None)
+                    .map_err(invalid)?;
                 let roots = super::sources::prepare_source_roots(
                     context.sources,
                     driver,
                     spec,
                     revision,
+                    None,
                     &rendered.project_dir,
                     &directory.join("contexts"),
                     Some((&worktree, revision)),
@@ -275,6 +276,8 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 deadline: timeout.after(now),
             };
             let execution = ExecutionContext {
+                instances: context.instances,
+                clock: base.clock,
                 unit: nyl_core::orchestration::ids::UnitAddress::new(request.environment.clone(), options.unit.clone()),
                 operation: DriverOperation::Exec,
                 worktree,
@@ -294,6 +297,8 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                 commit_identity: context.commit_identity,
                 cache_dir: context.cache_dir(),
                 teardown_wait: None,
+                incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+                dirty_source: false,
             };
             let status = match driver.exec(&execution, &unit, &options.arguments) {
                 Ok(Supported::Supported(status)) => status,

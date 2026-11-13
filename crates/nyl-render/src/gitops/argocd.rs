@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use crate::resources::{ApplicationDeletionPolicy, ClusterDestination, GitOpsSyncPolicy};
 use crate::{NylError, Result};
 
-const FOREGROUND_FINALIZER: &str = "resources-finalizer.argocd.argoproj.io";
-const BACKGROUND_FINALIZER: &str = "resources-finalizer.argocd.argoproj.io/background";
+pub(super) const FOREGROUND_FINALIZER: &str = "resources-finalizer.argocd.argoproj.io";
+pub(super) const BACKGROUND_FINALIZER: &str = "resources-finalizer.argocd.argoproj.io/background";
 
 /// Validated inputs for an Argo CD Application backed by a plain Git directory.
 pub struct DirectoryApplicationInput {

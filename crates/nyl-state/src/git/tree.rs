@@ -15,6 +15,45 @@ pub type Files = BTreeMap<String, Vec<u8>>;
 /// Why a store without a commit identity refuses to write.
 pub const READ_ONLY: &str = "the state store was opened read-only, without a commit identity";
 
+/// `file` of each directory directly beneath `parent` in `commit`'s tree,
+/// keyed by its path from the root; nothing else is read. This is how a ref
+/// shared by many environments is listed without reading their units.
+pub fn read_children(repository: &Repository, commit: Option<Oid>, parent: &str, file: &str) -> StateResult<Files> {
+    let mut files = Files::new();
+    let Some(commit) = commit else {
+        return Ok(files);
+    };
+    let root = repository
+        .find_commit(commit)
+        .and_then(|commit| commit.tree())
+        .map_err(unavailable)?;
+    let parent = parent.trim_matches('/');
+    let directory = if parent.is_empty() {
+        root
+    } else {
+        match root.get_path(std::path::Path::new(parent)) {
+            Ok(entry) if entry.kind() == Some(git2::ObjectType::Tree) => {
+                repository.find_tree(entry.id()).map_err(unavailable)?
+            }
+            _ => return Ok(files),
+        }
+    };
+    for entry in &directory {
+        if entry.kind() != Some(git2::ObjectType::Tree) {
+            continue;
+        }
+        let Ok(name) = entry.name() else { continue };
+        let child = repository.find_tree(entry.id()).map_err(unavailable)?;
+        let Some(found) = child.get_name(file) else { continue };
+        if found.kind() != Some(git2::ObjectType::Blob) {
+            continue;
+        }
+        let blob = repository.find_blob(found.id()).map_err(unavailable)?;
+        files.insert(format!("{}{name}/{file}", prefix(parent)), blob.content().to_vec());
+    }
+    Ok(files)
+}
+
 /// Every file of `commit`'s tree, or nothing for no commit.
 pub fn read(repository: &Repository, commit: Option<Oid>) -> StateResult<Files> {
     let mut files = Files::new();

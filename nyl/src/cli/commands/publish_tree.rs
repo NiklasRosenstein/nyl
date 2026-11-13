@@ -26,9 +26,14 @@ pub struct PublishTreeArgs {
     pub validation: nyl_render::validation::ValidationArgs,
     #[command(flatten)]
     pub cache: TreeCacheArgs,
+    #[command(flatten)]
+    pub project_scope: nyl_render::gitops::project_scope::ProjectScopeArgs,
 
     #[command(flatten)]
     pub progress: TreeProgressArgs,
+
+    #[command(flatten)]
+    pub lookup: nyl_render::helm::lookup::LookupArgs,
 
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
@@ -36,6 +41,12 @@ pub struct PublishTreeArgs {
     /// DeploymentTarget to publish. Defaults to the sole configured target.
     #[arg(long)]
     pub target: Option<String>,
+    /// Replace these ApplicationGroups, retaining the rest of the published tree.
+    #[arg(long = "application-group")]
+    pub application_groups: Vec<String>,
+    /// Replace these group-qualified Releases (<applicationGroup>/<release>).
+    #[arg(long = "release")]
+    pub releases: Vec<String>,
     /// Commit message for a changed rendered tree.
     #[arg(long)]
     pub message: Option<String>,
@@ -145,8 +156,10 @@ struct SilentTreeRenderObserver;
 impl TreeRenderObserver for SilentTreeRenderObserver {}
 
 pub async fn execute(args: PublishTreeArgs) -> Result<()> {
+    args.lookup.refuse_live("publish-tree")?;
     args.validation.validate_outputs(false, &[], &[])?;
     let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+    nyl_render::gitops::shared_catalog::validate_with_samples(&inventory)?;
     let target_name = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
     let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target_name)?;
     let nyl_render::gitops::provenance::WorktreeSourceState {
@@ -169,7 +182,12 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     let _cache_reporter = cache.reporter();
     let mut progress = TreeProgressReporter::new(args.progress, None);
     let render_options = TreeRenderOptions {
+        selection: nyl_render::gitops::tree::partial::PublicationSelection {
+            application_groups: args.application_groups.iter().cloned().collect(),
+            releases: args.releases.iter().cloned().collect(),
+        },
         allow_secret_inputs: args.source.allow_secret_inputs,
+        refresh_lookup: args.lookup.refresh(),
         ..TreeRenderOptions::default()
     };
     let compiled = compile_target_tree_cached_with_observer_and_options(
@@ -182,7 +200,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
     .await?;
     let clean = if dirty && !args.source.allow_dirty {
         Some(
-            compile_clean_head(
+            Box::pin(compile_clean_head(
                 &inventory,
                 &compiled,
                 &target_name,
@@ -194,7 +212,7 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
                     publication_base: compiled.publication_base.clone(),
                     ..render_options
                 },
-            )
+            ))
             .await?,
         )
     } else {
@@ -218,6 +236,16 @@ pub async fn execute(args: PublishTreeArgs) -> Result<()> {
         (&inventory, &compiled, dirty)
     };
     nyl_render::validation::validate_tree(&args.validation, publication_inventory, compiled).await?;
+    print_partial_summary(&compiled.publication_report);
+    if let Some(shared) = &compiled.shared_catalog {
+        // The manifest is published by a KubernetesPublication unit, which has a build for it.
+        tracing::warn!(
+            target = target_name,
+            catalog = shared.name,
+            "The target shares catalog {}, whose manifest publish-tree does not publish; a KubernetesPublication unit of the target publishes it (nyl build <unit> -- --shared-catalog --push)",
+            shared.name
+        );
+    }
     publish_compiled(
         &args,
         publication_inventory,
@@ -278,6 +306,7 @@ fn publish_compiled(
             target: target_name,
             cluster: &compiled.cluster.metadata.name,
         },
+        &compiled.publication_report,
     );
     let desired = compiled.owned_files();
     let prepared = prepare_publication(
@@ -294,7 +323,10 @@ fn publish_compiled(
                 source_dirty,
             )?,
             options: compiled.reconcile_options(false),
+            ignore_project_scope_contraction: args.project_scope.ignore_project_scope_contraction,
+            cluster_kubernetes: compiled.cluster.spec.kubernetes.as_ref(),
             publication_base: compiled.publication_base.as_ref(),
+            takeover: None,
             auth: &auth,
         },
         &message,
@@ -517,7 +549,15 @@ fn publication_current_commit(
         .repository_name
         .as_deref()
         .unwrap_or(&compiled.repository.repo_url);
-    if index.target != compiled.target.metadata.name
+    let published_snapshot = index.compilation.as_ref().and_then(|value| {
+        <nyl_render::gitops::tree::partial::PublicationSnapshot as serde::Deserialize>::deserialize(value).ok()
+    });
+    let same_policy = published_snapshot
+        .as_ref()
+        .zip(compiled.publication_snapshot.as_ref())
+        .is_some_and(|(published, current)| current.same_policy(published));
+    if !same_policy
+        || index.target != compiled.target.metadata.name
         || index.cluster != compiled.cluster.metadata.name
         || index.publication.repository != repository
         || index.publication.revision != compiled.target.spec.publication.revision
@@ -537,6 +577,26 @@ fn publication_current_commit(
     Ok((index.files == desired).then_some(published_commit))
 }
 
+/// The summary of a partial publication; a full publication prints none.
+fn print_partial_summary(report: &nyl_render::gitops::tree::partial::PublicationReport) {
+    if report.selection.is_full() {
+        return;
+    }
+    println!(
+        "Partial publication at {}: {} rendered, {} retained, {} removed",
+        report.baseline_commit.as_deref().unwrap_or("none"),
+        report.rendered_releases.len(),
+        report.retained_releases.len(),
+        report.removed_releases.len()
+    );
+    for path in &report.changed_shared_files {
+        println!("  Shared artifact: {}", path.display());
+    }
+    for release in &report.skipped_releases {
+        println!("  Not published (unselected new Release): {release}");
+    }
+}
+
 fn source_repository_url(repository: &Repository) -> Option<String> {
     repository
         .find_remote("origin")
@@ -544,7 +604,11 @@ fn source_repository_url(repository: &Repository) -> Option<String> {
         .and_then(|remote| remote.url().ok().map(nyl_git::sanitize_url))
 }
 
-fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<'_>) -> String {
+fn publication_commit_message(
+    subject: &str,
+    provenance: &PublicationProvenance<'_>,
+    report: &nyl_render::gitops::tree::partial::PublicationReport,
+) -> String {
     let mut message = subject.trim_end().to_owned();
     message.push_str("\n\n");
     if let Some(source_repository) = provenance.source_repository {
@@ -556,6 +620,28 @@ fn publication_commit_message(subject: &str, provenance: &PublicationProvenance<
     }
     writeln!(message, "Nyl-Deployment-Target: {}", provenance.target).expect("writing to a String cannot fail");
     write!(message, "Nyl-Cluster: {}", provenance.cluster).expect("writing to a String cannot fail");
+    if !report.selection.is_full() {
+        write!(
+            message,
+            "\nNyl-Publication-Base: {}\nNyl-Publication-Selection: {}",
+            report.baseline_commit.as_deref().unwrap_or("none"),
+            report
+                .selection
+                .application_groups
+                .iter()
+                .map(|group| format!("group:{group}"))
+                .chain(
+                    report
+                        .selection
+                        .releases
+                        .iter()
+                        .map(|release| format!("release:{release}"))
+                )
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .expect("writing to a String cannot fail");
+    }
     message
 }
 
@@ -634,6 +720,7 @@ mod tests {
                 target: "production",
                 cluster: "prod-eu-1",
             },
+            &nyl_render::gitops::tree::partial::PublicationReport::default(),
         );
 
         assert_eq!(

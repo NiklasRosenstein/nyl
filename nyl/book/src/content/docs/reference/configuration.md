@@ -23,6 +23,10 @@ example a local ApplicationGroup `spec.source.path`:
   `/applications/web`.
 - A path must stay inside the worktree and must not traverse a symbolic link.
 
+Cluster and DeploymentTarget [`spec.valuesFrom[].file`](/nyl/kubernetes-gitops/targets-and-clusters/#file-backed-values)
+paths use the resource's source directory as their relative base. Their `/`
+form uses the same Git worktree root.
+
 The two forms name the same directory only for one `nyl.toml` location, such as
 `nyl/nyl.toml` for the examples above. Relative paths move with `nyl.toml`:
 use them for Releases kept together with the configuration. Rooted paths do
@@ -65,9 +69,9 @@ gitops_scaffold_path = "config"
 
 ## Release history
 
-`nyl apply` and `nyl release rollback` record every revision of a release as a
-Kubernetes Secret in the release namespace. Limit how many revisions each
-release keeps:
+`nyl apply` and `nyl release rollback` record each revision of a release as a
+Kubernetes Secret in the release namespace; an apply that [changed nothing](/nyl/reference/cli/apply/#apply-order-and-progress)
+records none. Limit how many revisions each release keeps:
 
 ```toml
 [release]
@@ -81,6 +85,9 @@ history_limit = 10
   are deleted. A failed apply deletes nothing, so the last known-good revision
   and anything still live stay recorded.
 - `nyl apply --history-limit <N>` overrides the setting for one invocation.
+
+History retention applies to imperative `nyl apply` and `nyl release rollback`.
+It does not affect rendered GitOps trees or publication compatibility.
 
 ## Remote artifact vendoring
 

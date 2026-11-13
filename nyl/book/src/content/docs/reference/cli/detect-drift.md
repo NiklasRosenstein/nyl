@@ -13,7 +13,9 @@ when one is current.
 Drift and attestations answer different questions. Drift says whether a unit
 must execute again: a drifted unit is work for the next reconcile.
 Attestations are evidence that dependents and promotion require, such as a
-smoke test or a publication's Argo CD health.
+smoke test or a publication's Argo CD health; a `dependsOn` entry or
+`fromUnit` [requires them](/nyl/orchestration/runs/#requiring-attestations)
+with `evidence: attested` or `attestations`.
 
 :::note
 Orchestration is being built. `nyl attest` asks drivers to attest; recording
@@ -47,6 +49,18 @@ deadline. A check that passes its deadline fails with a timeout
 A unit without a current receipt is reported as `no-receipt`, and a unit
 whose kind cannot detect drift as `unsupported`; neither is skipped silently.
 
+A [`KubernetesPublication`](/nyl/orchestration/resource-guides/kubernetes-publication/#execution-key-and-result)
+compares the publication branch with the tree it renders. When its target uses
+`reconciler: {direct: {}}`, it also [compares the cluster](/nyl/kubernetes-gitops/workflow/direct-reconciler/#detecting-drift)
+with what the unit last applied, with a server-side apply dry run as Nyl's field
+manager, so a changed field Nyl manages or a deleted object is `drifted` and the
+summary names the Release and the first eight objects. It needs the unit's
+admitted `KUBECONFIG`, the Cluster's declared context, and `get`, `patch` (for the
+dry runs), and access to the Release state Secrets, plus `get` on
+customresourcedefinitions and `list` on apiservices when a kind is not served; a cluster it cannot read is
+`unknown` (`NYL-DRIFT-UNKNOWN`, with the reason and the fix), never `clean`.
+Run `nyl diff --target <target>` on a Release's file to see each change in full.
+
 `detect-drift` and `attest` do not import runs, so they refuse a lease that
 [`nyl lease break`](/nyl/reference/cli/state/#nyl-lease-break) broke while
 the broken run is not imported yet, writing nothing; a check with nothing
@@ -77,7 +91,10 @@ unit's recovery policy, and the `NYL-DRIFT-DETECTED` fix names it per unit:
 | `manual` | `inspect` or `manual` | repair it with `nyl reconcile -e <env> --unit <unit> --reapply --reason <text> --approve <unit>` |
 
 A repair writes a new receipt and drops the unit's drift record in the
-same commit; detect drift again to check the new receipt. See
+same commit; detect drift again to check the new receipt. A pipeline that
+wants the check and the repair as one command, under one lease and in one
+transition commit, runs [`nyl reconcile --detect-drift`](/nyl/reference/cli/reconcile/#drift),
+which uses this check. See
 [drift repair](/nyl/orchestration/resource-guides/environment/#drift-repair).
 
 ## nyl attest
@@ -101,9 +118,26 @@ attest are left out of the report; one named with `--unit` is reported
 failed, reports the unit `unknown` (`NYL-ATTEST-UNKNOWN`, exit 2) and records
 nothing for it; the attestations recorded earlier stay.
 
+A [`KubernetesPublication` that declares `observe: {}`](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd)
+attests `accepted` and `healthy` by reading Argo CD, through the way its
+ArgoCDInstance declares and the credential the unit admits, and lists each
+Application's running publication and health in the details (`deployments`). A failing
+attestation exits 3 (`NYL-ATTESTATION-FAILED`); an Argo CD that cannot be
+read, a rejected or expired credential, or an unreadable publication branch is
+`unknown`: exit 2 and nothing recorded. A stored attestation whose result is unchanged is rewritten with its new time once it is older than 15 minutes, so a repeated `attest` within that interval still writes nothing.
+
 An attestation belongs to the receipt it names: a new receipt starts with
 its attestations pending until `attest` runs again, or until its reconcile
-step attests it.
+step attests it, and the reconcile that records the new receipt drops the
+earlier receipt's attestations. A unit that depends on an attestation stays
+[blocked](/nyl/orchestration/runs/#requiring-attestations) until a pass is
+recorded for the current receipt, and `attest` is what records it: the next
+`reconcile` runs the blocked unit, and no `attest` is needed between the two
+for a unit that attested itself in its `command`.
+
+[`nyl observe`](/nyl/reference/cli/observe/) is the third check of current
+receipts: it reads the observed values of units whose kind reads them, and
+shares these options, leases, and exit codes.
 
 ## Cancellation and several environments
 

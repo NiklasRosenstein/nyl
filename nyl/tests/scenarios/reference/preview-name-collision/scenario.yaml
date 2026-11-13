@@ -1,0 +1,15 @@
+# Scenario 2's tier-1 variant "name collision": an applicationNameTemplate that
+# ignores the target's name would give every instance the same Argo CD names,
+# so `nyl validate` rejects it, naming the sample instances that collide.
+contract: design/reference-scenarios.md#scenario-2-preview-closed-with-its-pull-request
+milestone: M5
+tiers: [1]
+project: ../preview/project
+steps:
+  - nyl: [validate]
+    exit: 0
+  - commit: {branch: main, message: "Name Applications after the Release only", apply: patches/collide}
+  - nyl: [validate]
+    exit: 1
+    expect:
+      messages: [sample]

@@ -13,8 +13,8 @@ use serde_json::Value;
 
 use super::ids::{CommitId, EnvironmentName, RunId, Uid, UnitName};
 use super::state::{
-    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservedUnit, Run, Signal,
-    StateLocation, StateRecord,
+    ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord, ObservedUnit,
+    Run, Signal, StateLocation, StateRecord,
 };
 use super::time::{Duration, Timestamp};
 use crate::resources::environment::Environment;
@@ -27,6 +27,19 @@ pub trait Clock: Send + Sync {
     /// Wait, such as for a `delay` teardown wait. A test clock advances
     /// instead of sleeping.
     fn wait(&self, duration: Duration);
+}
+
+/// A clock that stands still: `now` is fixed and a wait returns at once. For
+/// calls that never wait, such as `nyl build`.
+#[derive(Debug, Clone, Copy)]
+pub struct FrozenClock(pub Timestamp);
+
+impl Clock for FrozenClock {
+    fn now(&self) -> Timestamp {
+        self.0
+    }
+
+    fn wait(&self, _duration: Duration) {}
 }
 
 /// New identifiers: UUIDv7 uids for incarnations and run IDs.
@@ -128,6 +141,11 @@ pub struct EnvironmentSnapshot {
     /// The latest drift detection per unit (`observed/units/<unit>/drift.yaml`),
     /// as `nyl detect-drift` writes it. Contract: [Drift](../../../../design/orchestration-core.md#drift).
     pub drift: BTreeMap<UnitName, DriftRecord>,
+    /// The latest observed values per unit
+    /// (`observed/units/<unit>/observations.yaml`), as the driver's `observe`
+    /// read them for the unit's current receipt. Contract:
+    /// [Observed values](../../../../design/orchestration-core.md#observed-values).
+    pub observations: BTreeMap<UnitName, ObservationRecord>,
     /// Driver attestations by unit and name
     /// (`observed/units/<unit>/attestations.yaml`, one record per unit).
     pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
@@ -147,6 +165,9 @@ pub struct TransitionChanges {
     /// A unit's latest drift detection; `None` removes it. Written by
     /// `nyl detect-drift`, and removed with a new receipt.
     pub drift: BTreeMap<UnitName, Option<DriftRecord>>,
+    /// A unit's observed values; `None` removes them. Written by reconcile
+    /// and `nyl observe`, and removed with a new receipt.
+    pub observations: BTreeMap<UnitName, Option<ObservationRecord>>,
     /// The complete set of a unit's driver attestations by name; `None`
     /// removes all. Written by `nyl attest`, and by reconcile with a receipt.
     pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
@@ -175,6 +196,7 @@ impl TransitionChanges {
             && self.observed.is_empty()
             && self.artifacts.is_empty()
             && self.drift.is_empty()
+            && self.observations.is_empty()
             && self.attestations.is_empty()
     }
 }
@@ -225,12 +247,40 @@ pub struct RunState {
 }
 
 /// One finished unit of a run: the desired document it executed, with its
-/// uid, and its receipt or condition with the receipt's artifacts.
+/// uid, and its receipt or condition with the receipt's artifacts,
+/// attestations, and observed values.
+///
+/// The attestations and the observation record belong to the receipt in
+/// `observed` and to no other: a run that imports the checkpoint takes them
+/// only together with that exact receipt, by execution key, run, and
+/// incarnation. A checkpoint of a failure or an `uncertain` outcome carries
+/// none. Contract:
+/// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 3.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkpoint {
     pub desired: DesiredUnit,
     pub observed: ObservedUnit,
     pub artifacts: BTreeMap<String, ArtifactDocument>,
+    /// The receipt's attestations by name, as the run recorded them. Each
+    /// keeps its own `at`: import never re-stamps one.
+    pub attestations: BTreeMap<String, Attestation>,
+    /// The observed values the run read for the receipt, with their own
+    /// `observedAt` times.
+    pub observations: Option<ObservationRecord>,
+}
+
+impl Checkpoint {
+    /// A checkpoint of `observed` as `desired` produced it, with `artifacts`
+    /// and no attestations or observed values.
+    pub fn new(desired: DesiredUnit, observed: ObservedUnit, artifacts: BTreeMap<String, ArtifactDocument>) -> Self {
+        Self {
+            desired,
+            observed,
+            artifacts,
+            attestations: BTreeMap::new(),
+            observations: None,
+        }
+    }
 }
 
 /// The coordination refs of one environment.
@@ -314,6 +364,13 @@ pub trait StateStore: Send + Sync {
 
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
+
+    /// The `state.yaml` of every directory directly beneath `location.path`
+    /// that has one: how instances of an EnvironmentTemplate that share a
+    /// ref are found. Stores that keep no shared refs list none.
+    fn list_records(&self, _location: &StateLocation) -> StateResult<Vec<StateRecord>> {
+        Ok(Vec::new())
+    }
 
     /// Read the state as of `tips` instead of the refs' current tips, for
     /// `nyl get --state-revision`. A tip of `None` reads that side as empty.
@@ -647,6 +704,23 @@ pub trait SourceResolver: Send + Sync {
     }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
+    /// Keep `commit` fetchable with the keep ref `reference` of this
+    /// repository, a ref of its own for this commit that is never moved:
+    /// created when absent, left alone when it already names `commit`, and an
+    /// error when it names another commit. Contract:
+    /// [Instances](../../../../design/orchestration-core.md#instances),
+    /// `keepSource`. A resolver that keeps nothing succeeds without effect.
+    fn keep(&self, reference: &str, commit: &CommitId) -> SourceResult<()> {
+        let _ = (reference, commit);
+        Ok(())
+    }
+    /// Remove the keep refs under `prefix` (`<prefix>/<commit>`), except the
+    /// one for `except`, and return the refs it left alone because they do not
+    /// name the commit their name says: they are not this instance's.
+    fn release(&self, prefix: &str, except: Option<&CommitId>) -> SourceResult<Vec<String>> {
+        let _ = (prefix, except);
+        Ok(Vec::new())
+    }
 }
 
 /// Local source-cache refs for worktree snapshots, keyed by base commit and tree.
@@ -702,6 +776,8 @@ pub struct RenderedSource {
     pub project_dir: String,
     /// The Environment with group defaults applied.
     pub environment: Environment,
+    /// The template's terms when the environment is an instance, read at this commit.
+    pub instance: Option<super::instance::InstanceTerms>,
     pub units: BTreeMap<UnitName, RenderedUnit>,
 }
 
@@ -715,25 +791,11 @@ pub trait SourceRenderer: Send + Sync {
     ) -> SourceResult<RenderedSource>;
 }
 
-/// What an Argo CD observer reports for a target's workload Applications.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplicationsObservation {
-    /// The Applications that still exist; empty when all are gone.
-    Remaining(Vec<String>),
-    /// The observer could not read them, such as for missing credentials.
-    Failed(String),
-}
-
 /// Reads a named project secret at execution, never during key calculation.
 /// Errors must not contain secret values. Strings remain strings; other
 /// values are serialized to compact JSON by the shell.
 pub trait SecretProvider: Send + Sync {
     fn get(&self, key: &str) -> Result<Value, String>;
-}
-
-/// Reads Argo CD for teardown waits and health evidence.
-pub trait ArgoObserver: Send + Sync {
-    fn workload_applications(&self, target: &str) -> ApplicationsObservation;
 }
 
 /// The terminal of a run that waits on a teardown: when its stdin is a

@@ -142,7 +142,7 @@ pub fn select_group(
             Ok(Some(requested.to_owned()))
         } else if disabled.contains(requested) {
             Err(NylError::config(format!(
-                "--application-group {requested:?} is disabled on DeploymentTarget {target:?}, so render-tree ignores its bindings; enable it, or pass --defaults-only"
+                "--application-group {requested:?} is disabled or renders to nothing on DeploymentTarget {target:?}, so render-tree ignores its bindings; enable it, or pass --defaults-only"
             )))
         } else {
             Err(NylError::config(format!(

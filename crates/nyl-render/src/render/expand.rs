@@ -15,7 +15,7 @@ use crate::resources::{
 };
 use crate::template::TemplateContext;
 use crate::{NylError, Result};
-use nyl_core::constants::{API_VERSION, API_VERSION_COMPONENTS};
+use nyl_core::constants::{legacy, API_VERSION, API_VERSION_COMPONENTS};
 
 /// Filter resources by source kind (before expansion)
 #[cfg(test)]
@@ -94,8 +94,8 @@ const MAX_REMOTE_MANIFEST_BYTES: usize = 30 * 1024 * 1024;
 
 /// Check if an API version looks like it might be a Nyl resource API version
 pub(crate) fn is_nyl_like_api_version(api_version: &str) -> bool {
-    // Check if it contains the Nyl domain
-    if api_version.contains("nyl.niklasrosenstein.github.com") {
+    // Pre-`.nyl` API versions are rejected with their replacement.
+    if api_version.contains(legacy::API_GROUP) {
         return true;
     }
 
@@ -109,7 +109,7 @@ pub(crate) fn is_nyl_like_api_version(api_version: &str) -> bool {
         API_VERSION_COMPONENTS,
         nyl_core::constants::API_VERSION_GITOPS,
         nyl_core::constants::API_VERSION_K8S_GITOPS,
-        "nyl.niklasrosenstein.github.com/v1",
+        legacy::API_VERSION,
     ];
 
     for api_ver in &nyl_api_versions {
@@ -283,8 +283,37 @@ fn render_chart_reference(chart: Option<&serde_json::Value>) -> String {
     reference
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Expand `resource` into the resources it generates, which inherit its Argo
+/// CD sync wave and phase ([`super::sync_order`]). A resource that does not
+/// expand generates only itself.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_resource(
+    resource: &serde_json::Value,
+    context: &TemplateContext,
+    config: &ProjectConfig,
+    kube_version: &str,
+    api_versions: &[String],
+    track_parent: bool,
+    gitops_cache: Option<&RenderCache>,
+    artifact_resolver: &crate::render::artifact::ArtifactResolver,
+) -> Result<Vec<serde_json::Value>> {
+    let mut generated = expand_resource(
+        resource,
+        context,
+        config,
+        kube_version,
+        api_versions,
+        track_parent,
+        gitops_cache,
+        artifact_resolver,
+    )
+    .await?;
+    super::sync_order::inherit_sync_order(resource, &mut generated);
+    Ok(generated)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn expand_resource(
     resource: &serde_json::Value,
     context: &TemplateContext,
     config: &ProjectConfig,
@@ -301,8 +330,7 @@ pub(crate) async fn generate_resource(
 
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         // Parse as HelmChart and render
-        let chart: HelmChart = serde_json::from_value(resource.clone())
-            .map_err(|e| NylError::Config(format!("Failed to parse HelmChart: {}", e)))?;
+        let chart: HelmChart = nyl_core::resources::parse_resource(resource, "HelmChart")?;
         let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
 
         Ok(apply_parent_tracking_annotations(
@@ -332,8 +360,7 @@ pub(crate) async fn generate_resource(
             .is_some()
     {
         // Parse as Component and render via the existing Helm path
-        let mut component: NylComponent = serde_json::from_value(resource.clone())
-            .map_err(|e| NylError::Config(format!("Failed to parse Component: {}", e)))?;
+        let mut component: NylComponent = nyl_core::resources::parse_resource(resource, "Component")?;
         if let Some(target) = config.get_alias_target_for_kind(&component.api_version, &component.kind) {
             component.kind = target.to_string();
         }
@@ -375,6 +402,7 @@ pub(crate) async fn generate_resource(
                     chart: chart_ref,
                     values,
                     include_crds: None,
+                    lookup: None,
                 },
             };
 
@@ -416,6 +444,7 @@ pub(crate) async fn generate_resource(
                     },
                     values,
                     include_crds: None,
+                    lookup: None,
                 },
             };
 
@@ -716,7 +745,14 @@ fn render_helm_chart(
         .with_kube_version(kube_version.to_string())
         .with_api_versions(api_versions.to_vec())
         .with_include_crds(chart.spec.include_crds.unwrap_or(true))
-        .with_gitops_cache(gitops_cache.cloned());
+        .with_gitops_cache(gitops_cache.cloned())
+        .with_lookup(chart.spec.lookup.as_ref().map(|_| {
+            // A chart that declares lookup renders against the lookup API even
+            // where no source was configured: then nothing is found.
+            artifact_resolver.lookup_handle().cloned().unwrap_or_else(|| {
+                crate::helm::lookup::LookupHandle::new(crate::helm::lookup::LookupConfig::default(), None, None)
+            })
+        }));
 
     // Default namespace to "default" for deterministic rendering
     let namespace = chart.release_namespace().or(Some("default"));

@@ -12,13 +12,23 @@ nyl release <SUBCOMMAND> [OPTIONS]
 
 ## Description
 
-Every `nyl apply` records a release revision, storing the full rendered manifest
+Every `nyl apply` that changes the release records a release revision (one that
+changes nothing keeps the latest, see [`apply`](/nyl/reference/cli/apply/#apply-order-and-progress)), storing the full rendered manifest
 and the set of applied resources in a Kubernetes Secret in the release namespace.
+The Secret has type `k8s.nyl/release.v1` and the labels `k8s.nyl/release` (the
+release name) and `k8s.nyl/revision`; revisions recorded under the
+[deprecated labels](/nyl/reference/deprecations/#labels-and-annotations-in-the-nyl-api-groups)
+are still read.
 The `release` subcommands let you inspect that history and roll back to a previous
 revision. Configure `[release] history_limit` in
 [`nyl.toml`](/nyl/reference/configuration/#release-history) or pass
 `nyl apply --history-limit` to change how many revisions are kept (five by
 default; `0` keeps all). A successful rollback applies the `nyl.toml` limit too.
+
+Every subcommand takes `--target <TARGET>`, optional when exactly one
+DeploymentTarget is configured, and `--context <CONTEXT>`. Without GitOps
+configuration, `--context` alone selects the cluster that stores the releases;
+see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
 
 ## Subcommands
 
@@ -53,7 +63,8 @@ nyl release history <NAME> --namespace <NAMESPACE> [OPTIONS]
 ```
 
 Show the revision history of a release, including each revision's status and
-timestamps.
+timestamps. A revision's timestamps are those of the apply that recorded it: later
+applies that changed nothing do not add a revision or move them.
 
 ### rollback
 
@@ -77,7 +88,8 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
 - `-r, --revision <REVISION>` - Revision to roll back to. Defaults to the revision
   immediately before the latest one (i.e. undo the most recent deployment).
 - `-y, --yes` - Skip the confirmation prompt
-- `--context <CONTEXT>` - Kubernetes context to use
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`, as for
+  [`nyl apply`](/nyl/reference/cli/apply/): the target's declared `live.context` is used and the current context never is, and without either the current context is used only when the Cluster's destination server can be checked against it. Without GitOps configuration, it selects the cluster instead
 - `--concurrency <N>` - Maximum number of resources applied or pruned at the same
   time (default: 8; `1` applies serially). See [`nyl apply`](/nyl/reference/cli/apply/#apply-order-and-progress).
 - `--history-limit <N>` - Keep at most `N` release revisions, deleting the oldest
@@ -85,6 +97,13 @@ creates revision 5 whose content is identical to revision 2, marks revision 4 as
   history_limit` in [`nyl.toml`](/nyl/reference/configuration/#release-history).
 - `--confirm-prune` - Also prune resources whose sync option is `Prune=confirm`,
   as with [`nyl apply`](/nyl/reference/cli/apply/#release-options).
+- `--handoff[=<MANAGER>]` - Apply as `MANAGER` (default `argocd-controller`) and
+  release the fields applied as `nyl`, as with
+  [`nyl apply`](/nyl/reference/cli/apply/#field-ownership-options).
+- `--take-over` - Roll back a release an environment owns anyway, recording no
+  owner, as with [`nyl apply`](/nyl/reference/cli/apply/).
+- `--hook-timeout <SECONDS>` - How long each wait for hooks and workloads lasts, as with
+  [`nyl apply`](/nyl/reference/cli/apply/#hook-options).
 
 #### Examples
 
@@ -103,6 +122,11 @@ nyl release rollback my-app --namespace default --revision 2 --yes
 - Pruning matches `nyl apply` semantics: resources present in the previously
   deployed revision but absent from the rolled-back revision are deleted, unless
   their Argo CD sync options keep them.
+- The stored manifest holds the revision's hooks, and a rollback syncs it as
+  [`nyl apply`](/nyl/reference/cli/apply/#hooks-and-sync-waves) does: it runs the
+  `PreSync` hooks of the revision it applies before its resources, and the
+  `PostSync` hooks after them, as an Argo CD sync of that revision would. Hooks are
+  not tracked, so a rollback neither prunes nor restores one.
 - A clear error is returned if the release or the requested revision does not
   exist, or if there is no previous revision to roll back to.
 
@@ -120,7 +144,16 @@ such as managed Namespaces, unless `--confirm-delete` is passed. See
 
 - `--no-purge` - Delete only the release records, not the resources
 - `--confirm-delete` - Also delete resources whose sync option is `Delete=confirm`
+- `--take-over` - Delete a release an environment owns anyway (see [`nyl apply --take-over`](/nyl/reference/cli/apply/)). Resources are deleted in reverse apply order, waiting for each kind to terminate before the next, as a prune does.
 - `--dry-run` - Show what would be deleted without deleting it
+
+A purge deletes the objects the release tracks and the hooks the latest revision's
+manifest holds, which no revision tracks: a finished hook Job, or a ServiceAccount or
+Role a hook created, would otherwise outlive the release. It runs no hook: Argo CD runs
+`PreDelete` and `PostDelete` hooks when it removes an Application, and Nyl does not
+when it removes a Release. When the latest revision declares such a hook (or Helm's
+`pre-delete` or `post-delete`), the command warns with `NYL-KUBERNETES-HOOK-IGNORED`,
+naming it, and goes ahead.
 
 ## See Also
 

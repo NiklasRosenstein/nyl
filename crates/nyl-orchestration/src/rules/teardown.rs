@@ -78,8 +78,8 @@ pub struct TeardownInputs<'a> {
     /// completed; the units they depend on wait with them.
     pub waiting: &'a BTreeSet<UnitName>,
     /// Unmet blocking readiness requirements per unit, from the preflight
-    /// ([`super::teardown_readiness`]).
-    pub readiness: &'a BTreeMap<UnitName, super::teardown_readiness::Readiness>,
+    /// (`Driver::teardown_readiness`).
+    pub readiness: &'a BTreeMap<UnitName, nyl_core::orchestration::driver::TeardownReadiness>,
     /// `retained` tombstones the run drops (a kind change of their name, or
     /// a release under `teardown --all`): they wait for their deleting
     /// dependents like every other leaving unit (Q6).
@@ -150,12 +150,7 @@ pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
         .iter()
         // A unit whose wait goes on is tearing down; the run reports it.
         .filter(|(name, _)| !inputs.waiting.contains(*name))
-        .filter(|(name, unit)| {
-            deleting(unit)
-                || inputs.drops.contains(*name)
-                || (matches!(unit.lifecycle, Lifecycle::Held { .. })
-                    && inputs.options.named.is_some_and(|named| named.contains(*name)))
-        })
+        .filter(|(name, unit)| is_candidate(name, unit, inputs.drops, inputs.options))
         .map(|(name, _)| name)
         .collect();
     let waiting_on = waiting_dependencies(&dependencies, inputs.waiting);
@@ -228,6 +223,27 @@ pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
             .collect();
     }
     plan
+}
+
+/// Whether `unit` is a unit this invocation may decide to leave: on its way
+/// out, dropped by a release, or held and named by `nyl teardown --unit`.
+fn is_candidate(name: &UnitName, unit: &DesiredUnit, drops: &BTreeSet<UnitName>, options: TeardownOptions<'_>) -> bool {
+    deleting(unit)
+        || drops.contains(name)
+        || (matches!(unit.lifecycle, Lifecycle::Held { .. }) && options.named.is_some_and(|named| named.contains(name)))
+}
+
+/// Whether any unit of `desired` may leave. Only then do consumers in other
+/// environments matter ([`TeardownInputs::external_dependents`]), so only then
+/// does a run read the other environments to find them.
+pub fn leaves(
+    desired: &BTreeMap<UnitName, DesiredUnit>,
+    drops: &BTreeSet<UnitName>,
+    options: TeardownOptions<'_>,
+) -> bool {
+    desired
+        .iter()
+        .any(|(name, unit)| is_candidate(name, unit, drops, options))
 }
 
 /// Whether a desired document is on its way out: deleting, or held with a
@@ -398,6 +414,52 @@ pub fn dependencies(units: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitNam
             producers.retain(|producer| producer != name && units.contains_key(producer));
             (name.clone(), producers)
         })
+        .collect()
+}
+
+/// The warnings `plan` and `reconcile` give for units that stay in the
+/// ownership set and would be torn down when they leave it: each unmet
+/// requirement and each remnant their driver finds
+/// ([`nyl_core::orchestration::driver::Driver::teardown_readiness`]), with
+/// the setting that fixes it, so the problem is known long before a teardown
+/// runs. A unit that would be retained, held markers, and units whose driver
+/// states no requirements give none. Contract: [Kubernetes publication
+/// unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+pub fn readiness_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Item = &'a DesiredUnit>) -> Vec<Finding> {
+    units
+        .into_iter()
+        .filter(|unit| !unit.is_held_marker())
+        .filter(|unit| super::desired::deletion_intent(drivers, unit) == DeletionIntent::Teardown)
+        .filter_map(|unit| {
+            let driver = drivers.get(&unit.unit.api_version, &unit.unit.kind)?;
+            match driver.teardown_readiness(unit) {
+                Ok(nyl_core::orchestration::driver::Supported::Supported(readiness)) => Some(readiness),
+                _ => None,
+            }
+        })
+        .flat_map(|readiness| readiness.blocking.into_iter().chain(readiness.remnants))
+        .collect()
+}
+
+/// What the removal of an instance nobody attends would wait for: the
+/// findings of each unit's driver
+/// ([`nyl_core::orchestration::driver::Driver::unattended_teardown`]),
+/// shown by `nyl state init --template` because every instance is torn down
+/// some day, and by nothing that tears down with an operator present.
+pub fn unattended_warnings<'a>(drivers: &DriverSet, units: impl IntoIterator<Item = &'a DesiredUnit>) -> Vec<Finding> {
+    units
+        .into_iter()
+        .filter(|unit| !unit.is_held_marker())
+        .filter(|unit| super::desired::deletion_intent(drivers, unit) == DeletionIntent::Teardown)
+        .filter_map(|unit| {
+            Some(
+                drivers
+                    .get(&unit.unit.api_version, &unit.unit.kind)?
+                    .unattended_teardown(unit),
+            )
+        })
+        .flatten()
         .collect()
 }
 
@@ -869,5 +931,130 @@ mod tests {
         assert_eq!(case.plan().wave, names(&["release"]));
         case.desired.remove(&name("release"));
         assert_eq!(case.plan().wave, names(&["producer"]));
+    }
+
+    /// Catches a unit that stays in the ownership set going unwarned about a
+    /// teardown that cannot complete or leaves objects behind, and a unit
+    /// that would be retained, or one whose driver states no requirements,
+    /// being warned about a teardown it will not run.
+    #[test]
+    fn test_readiness_warnings_cover_teardown_units_with_findings() {
+        let unready = fixtures::desired("web", "Publication", json!({"unreadyTeardown": true}), "web");
+        let ready = fixtures::desired("api", "Publication", json!({"unreadyTeardown": false}), "api");
+        let silent = fixtures::desired("db", "Publication", json!({}), "db");
+        let retained = fixtures::desired(
+            "kept",
+            "Publication",
+            json!({"unreadyTeardown": true, "deletionPolicy": "Retain"}),
+            "kept",
+        );
+        let command = fixtures::desired("job", "Command", json!({"unreadyTeardown": true}), "job");
+        let warnings = readiness_warnings(&drivers(), [&unready, &ready, &silent, &retained, &command]);
+        assert_eq!(
+            warnings.iter().map(|warning| warning.code).collect::<Vec<_>>(),
+            vec![Code::TeardownCatalogManualSync, Code::TeardownCatalogRemains]
+        );
+        assert!(warnings.iter().all(|warning| warning.message.starts_with("dev/web: ")));
+    }
+
+    fn held(unit: &str, deletion: Option<Deletion>) -> DesiredUnit {
+        let mut document = fixtures::desired(unit, "Publication", json!({}), unit);
+        document.lifecycle = Lifecycle::Held {
+            hold: Hold {
+                since: "2026-09-24T10:00:00Z".parse().unwrap(),
+                by: "alice".to_owned(),
+                reason: None,
+                pending: None,
+            },
+            deletion,
+        };
+        document
+    }
+
+    /// `leaves` decides whether a run reads the other environments for
+    /// consumers, so it must be true exactly when the plan decides about any
+    /// unit: a `leaves` that is false while the plan would tear down, retain,
+    /// release, or hold a unit lets a teardown go on without seeing the
+    /// consumers that protect it, and one that is true with nothing to decide
+    /// makes every run depend on every other environment.
+    #[test]
+    fn test_leaves_is_true_exactly_when_the_plan_decides_about_a_unit() {
+        let tombstone = {
+            let mut unit = fixtures::desired("cache", "Command", json!({}), "cache");
+            unit.lifecycle = Lifecycle::Retained {
+                tombstone: Tombstone {
+                    since: "2026-09-24T10:00:00Z".parse().unwrap(),
+                    receipt: None,
+                },
+            };
+            unit
+        };
+        let pending_deletion = Deletion {
+            hold: false,
+            reason: DeletionReason::Teardown,
+            intent: DeletionIntent::Teardown,
+            teardown: Some(TeardownProgress::Pending),
+            requested: None,
+        };
+        let named = Box::leak(Box::new(BTreeSet::from([name("api")])));
+        let cases = vec![
+            ("no units", Case::new(vec![])),
+            (
+                "active units only",
+                Case::new(vec![fixtures::desired("web", "Publication", json!({}), "web")]),
+            ),
+            (
+                "a teardown",
+                Case::new(vec![teardown("network", json!({})), teardown("account", json!({}))]),
+            ),
+            (
+                "a retention",
+                Case::new(vec![deleting(
+                    "image",
+                    json!({}),
+                    DeletionReason::Omission,
+                    DeletionIntent::Retain,
+                )]),
+            ),
+            ("a tombstone nothing drops", Case::new(vec![tombstone.clone()])),
+            ("a held unit nobody names", Case::new(vec![held("api", None)])),
+            (
+                "a held unit with a pending deletion",
+                Case::new(vec![held("api", Some(pending_deletion))]),
+            ),
+        ];
+        let mut with_options = Vec::new();
+        for (label, case) in cases {
+            with_options.push((label.to_owned(), case.desired.clone(), case.drops.clone(), case.options));
+        }
+        // The same units under other invocations: a named held unit, and a release.
+        let mut named_held = Case::new(vec![held("api", None)]);
+        named_held.options.named = Some(named);
+        with_options.push((
+            "a held unit named by --unit".to_owned(),
+            named_held.desired,
+            BTreeSet::new(),
+            named_held.options,
+        ));
+        let mut release = Case::new(vec![tombstone]);
+        release.drops.insert(name("cache"));
+        with_options.push((
+            "a released unit".to_owned(),
+            release.desired,
+            release.drops,
+            release.options,
+        ));
+        for (label, desired, drops, options) in with_options {
+            let case = Case {
+                external: BTreeMap::new(),
+                desired: desired.clone(),
+                options,
+                waiting: BTreeSet::new(),
+                drops: drops.clone(),
+            };
+            let plan = case.plan();
+            let decides = !plan.ready.is_empty() || !plan.pending.is_empty();
+            assert_eq!(leaves(&desired, &drops, options), decides, "{label}: {plan:?}");
+        }
     }
 }

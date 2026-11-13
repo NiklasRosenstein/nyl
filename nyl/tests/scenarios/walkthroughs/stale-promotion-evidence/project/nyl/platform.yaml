@@ -35,6 +35,7 @@ kind: DeploymentTarget
 metadata:
   name: dev
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: dev}
   applicationGroupSelector:
     matchLabels: {app: web}
@@ -51,6 +52,7 @@ kind: DeploymentTarget
 metadata:
   name: prod
 spec:
+  reconciler: {argocd: {}}
   clusterRef: {name: prod}
   applicationGroupSelector:
     matchLabels: {app: web}
@@ -105,4 +107,3 @@ metadata:
   labels: {dev: 'true', prod: 'true'}
 spec:
   target: '{{ values.target }}'
-  mode: publish

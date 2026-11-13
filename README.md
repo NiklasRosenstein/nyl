@@ -4,6 +4,10 @@ Nyl is a fast Kubernetes manifest generator built in Rust, with Helm-based compo
 
 Everything Nyl does is declared in Git, and every command takes the same path over those declarations: a render on a laptop while bootstrapping a cluster is the render CI publishes for Argo CD.
 
+Python 3.11+ users can install `nyl` from PyPI to render and inspect manifests
+through a separately installed Nyl CLI. See the [Python client](python/README.md)
+for installation, resource selectors, container helpers, and rendered-manifest tests.
+
 ## Highlights
 
 - Component-oriented workflow (Helm chart-backed resources)
@@ -12,7 +16,7 @@ Everything Nyl does is declared in Git, and every command takes the same path ov
 - Kubernetes-shaped Cluster and DeploymentTarget configuration
 - `render`, `diff`, and `apply` commands
 - Rendered manifest GitOps workflow for ArgoCD, Flux, or plain `kubectl`
-- CI image with Nyl, Helm, Git, SOPS, and Kyverno CLI
+- CI image with Nyl, Helm, Git, Git LFS, SOPS, and Kyverno CLI
 
 ## Quick Start
 

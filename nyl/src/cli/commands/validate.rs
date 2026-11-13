@@ -158,6 +158,11 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
     }
     let inventory = nyl_render::gitops::discover_gitops_inventory(project_root, None, crate::resource_catalogue())?;
     nyl_render::gitops::validate_gitops_inventory(&inventory)?;
+    // Which instances exist is state, which validation never reads: each
+    // template is checked through sample instances, so names that would
+    // collide across instances are found before any exists.
+    let samples = crate::orchestration::project::sample_instances(&inventory);
+    let inventory = inventory.with_instances(samples);
     report.warnings.extend(
         crate::orchestration::project::validate_environments(&inventory)?
             .into_iter()
@@ -203,15 +208,14 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     let renderer = nyl_render::gitops::units::UnitSourceRenderer::new(
         crate::orchestration::session::project_dir(inventory),
         crate::resource_catalogue(),
-    );
+    )
+    .with_instances(inventory.instances.clone());
     // The worktree is rendered as it is, committed or not; the commit only labels it.
     let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
-    let (environments, _) = crate::orchestration::project::declared(inventory);
+    let names: Vec<EnvironmentName> = nyl_render::gitops::instances::environment_names(inventory)?;
     let mut issues = Vec::new();
     let mut rendered_sources = std::collections::BTreeMap::new();
-    for environment in &environments {
-        let name =
-            EnvironmentName::new(&environment.metadata.name).map_err(|error| NylError::config(error.to_string()))?;
+    for name in names {
         let source = renderer
             .render(&inventory.worktree_root, &name, &commit)
             .map_err(|error| NylError::config(error.to_string()))?;
@@ -223,7 +227,8 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     for finding in nyl_orchestration::rules::desired::check_ownership(&rendered_sources, &wiring.drivers) {
         issues.push(finding.to_string());
     }
-    if let Err(finding) = nyl_orchestration::rules::multi_environment::validate_sources(&rendered_sources) {
+    let instances = nyl_render::gitops::instances::instance_only_names(inventory)?;
+    if let Err(finding) = nyl_orchestration::rules::multi_environment::validate_sources(&rendered_sources, &instances) {
         issues.push(finding.to_string());
     }
     if issues.is_empty() {
@@ -240,13 +245,18 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     }
 }
 
-/// Compile every DeploymentTarget and check generated Argo CD names across them.
+/// Compile every DeploymentTarget, inline ones included, and check generated
+/// Argo CD names across them.
 ///
 /// A target an environment's publication unit places compiles with
 /// placeholders for the bindings orchestration resolves, and its `fromUnit`
 /// references are checked against that environment's units instead. Other
 /// targets compile as `render-tree` does, so those bindings stay rejected.
-async fn validate_targets(inventory: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
+async fn validate_targets(declared: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
+    // The inline targets of the environments' publication units are targets
+    // like any other: they compile, and their generated names join the check.
+    let extended = nyl_render::gitops::units::with_inline_targets(declared)?;
+    let inventory = &extended;
     let target_names = inventory
         .resources
         .values()
@@ -278,9 +288,17 @@ async fn validate_targets(inventory: &nyl_render::gitops::GitOpsInventory) -> Re
             }
             target_options.orchestrated_inputs = Some(nyl_render::gitops::inputs::OrchestratedInputs::Placeholders);
         }
-        compiled.push(nyl_render::gitops::compile_target_tree_with_options(inventory, &target, target_options).await?);
+        compiled.push(
+            Box::pin(nyl_render::gitops::compile_target_tree_with_options(
+                inventory,
+                &target,
+                target_options,
+            ))
+            .await?,
+        );
     }
-    nyl_render::gitops::validate_compiled_argocd_names(inventory, &compiled)
+    nyl_render::gitops::validate_compiled_argocd_names(inventory, &compiled)?;
+    nyl_render::gitops::validate_compiled_direct_targets(&compiled)
 }
 
 #[cfg(test)]

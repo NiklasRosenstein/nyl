@@ -2,16 +2,17 @@ use clap::{Args, ValueEnum};
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    cli::commands::apply::{prepare_desired_manifests, ObjectScopes},
-    cli::commands::render::{run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions},
+use crate::cli::commands::render::{
+    run_render_preflight, ClusterClientRequirement, RenderOptions, RenderPreflightOptions,
 };
 use nyl_render::{
     kubernetes::{
         extract_name,
+        hooks::{self, HookTask, IgnoredHook, ReleasePlan},
+        lifecycle::{prepare_desired_manifests, prunable_keys, ObjectScopes},
         prune::{prune_decision, PruneDecision},
         DiffEngine, GroupVersionKind, KubeClient, KubernetesReleaseStorage, ObjectIdentity, ReleaseStatus,
-        ReleaseStorage, ResourceKey,
+        ReleaseStorage, ResourceKey, ScopeResolver,
     },
     NylError, Result,
 };
@@ -42,7 +43,7 @@ pub struct DiffArgs {
     #[arg(long)]
     pub namespace: Option<String>,
 
-    /// Kubernetes context to use
+    /// Kubernetes context: overrides the target Cluster's context, or selects a cluster when no GitOps configuration is declared
     #[arg(long)]
     pub context: Option<String>,
 
@@ -73,15 +74,17 @@ pub struct DiffArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn execute(args: DiffArgs) -> Result<()> {
     args.common.validation.check_complete(args.append_release)?;
-    let preflight = run_render_preflight(RenderPreflightOptions {
+    // Boxed: the render future is large, and Windows debug builds run on a 1 MiB main stack.
+    let preflight = Box::pin(run_render_preflight(RenderPreflightOptions {
         common: &args.common,
         offline: false,
         kube_version: None,
         kube_api_versions: &[],
         context_override: args.context.as_deref(),
+        namespace: args.namespace.as_deref(),
         cluster_client_requirement: ClusterClientRequirement::Required,
         discovery_progress: crate::cli::commands::render::DiscoveryProgress::Quiet,
-    })
+    }))
     .await?;
 
     let desired_manifests = preflight.manifests;
@@ -104,11 +107,20 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
 
     // Resolve namespaces and collapse duplicates exactly as `nyl apply` does.
     let destination_namespace = preflight.destination_namespace.as_deref().unwrap_or(&release_namespace);
+    // The same scope order as `apply`: the manifest's CRDs, the target Cluster's
+    // recorded capabilities, then the live cluster.
+    let capabilities = ScopeResolver::from_capabilities(
+        preflight
+            .resolved_target
+            .as_ref()
+            .and_then(|resolved| resolved.cluster.spec.kubernetes.as_ref()),
+    );
     let (ready, mut scopes) = prepare_desired_manifests(
         &kube_client,
         desired_manifests,
         &mut duplicates,
         Some(destination_namespace),
+        capabilities,
     )
     .await?;
 
@@ -155,7 +167,7 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
             .resolved_target
             .as_ref()
             .map(|target| target.cluster.metadata.name.as_str()),
-        None,
+        preflight.live_kube_version.as_deref(),
         nyl_render::validation::ManifestValidationInput {
             manifests: &desired_manifests,
             source: &args.common.path,
@@ -185,6 +197,9 @@ pub async fn execute(args: DiffArgs) -> Result<()> {
     }
 
     // 9. Display diff
+    if let Some(finding) = hooks::delete_hook_finding(&diff_result.ignored_hooks) {
+        tracing::warn!("{finding}");
+    }
     if args.summary {
         display_summary(&diff_result, &duplicates);
     } else {
@@ -257,6 +272,11 @@ struct DiffResult {
     kept: Vec<(ResourceKey, PruneDecision)>,
     unchanged: Vec<ResourceKey>,
     errors: Vec<(ResourceKey, String)>, // (key, error_message)
+    /// The hook runs `nyl apply` would make, in the order they run. They are not
+    /// changes: they count in no total and do not set the exit status.
+    hooks: Vec<HookTask>,
+    /// Hooks `nyl apply` leaves out for having no sync phase.
+    ignored_hooks: Vec<IgnoredHook>,
 }
 
 impl DiffResult {
@@ -282,27 +302,34 @@ async fn compute_diff_from_live(
     scopes: &mut ObjectScopes,
     confirm_prune: bool,
 ) -> Result<DiffResult> {
+    // Hooks are no resources: they run, and are neither created, changed, nor
+    // deleted by the apply, so they are previewed apart ([`DiffResult::hooks`]).
+    let plan = ReleasePlan::of(desired_manifests)?;
+    let desired_manifests = plan.resources.as_slice();
     // Build set of desired objects. Previous keys are compared by object identity,
     // as `nyl apply` prunes, so a changed apiVersion is not shown as a deletion.
     let desired_keys: Vec<ResourceKey> = desired_manifests
         .iter()
         .map(ResourceKey::from_json_value)
         .collect::<Result<_>>()?;
+    let untracked = plan.untracked_keys();
     if let Some(previous) = previous_state {
         scopes.load(client, &previous.resource_keys).await;
     }
-    let desired_objects: HashSet<ObjectIdentity> = desired_keys.iter().map(|key| scopes.identity(key)).collect();
-    let mut seen_previous = HashSet::new();
-    let removed_keys: Vec<ResourceKey> = previous_state
-        .map(|state| state.resource_keys.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter(|key| {
-            let identity = scopes.identity(key);
-            !desired_objects.contains(&identity) && seen_previous.insert(identity)
-        })
-        .cloned()
-        .collect();
+    scopes.load(client, &untracked).await;
+    // What `nyl apply` would prune: the same decision, so a diff shows what the apply
+    // deletes, and an object an earlier revision tracked and is a hook now stays.
+    let removed_keys: Vec<ResourceKey> = prunable_keys(
+        previous_state
+            .map(|state| state.resource_keys.as_slice())
+            .unwrap_or_default(),
+        &desired_keys,
+        &untracked,
+        scopes,
+    )
+    .into_iter()
+    .cloned()
+    .collect();
 
     // Fetch live resources for desired manifests
     let mut live_resources = HashMap::new();
@@ -437,7 +464,64 @@ async fn compute_diff_from_live(
         kept,
         unchanged,
         errors,
+        hooks: plan.hooks,
+        ignored_hooks: plan.ignored,
     })
+}
+
+/// The lines of the hooks section: what `nyl apply` would run, in the order it runs
+/// it, as phase, wave, object, and delete policies. Empty without hooks.
+fn hook_lines(hooks: &[HookTask]) -> Vec<String> {
+    hooks
+        .iter()
+        .map(|hook| {
+            let policies = hook
+                .delete_policies
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{:<8} wave {:>3}  {}  (delete: {})",
+                hook.phase.to_string(),
+                hook.wave,
+                hook.key,
+                policies
+            )
+        })
+        .collect()
+}
+
+/// The lines of the hooks `nyl apply` leaves out without a warning: they name no sync
+/// phase and are no delete hook (Helm's `test` and the rollback hooks), so they
+/// change nothing, as in Argo CD. A delete hook has its warning.
+fn left_out_lines(ignored: &[IgnoredHook]) -> Vec<String> {
+    ignored
+        .iter()
+        .filter(|hook| !hook.delete)
+        .map(|hook| format!("{}  ({})", hook.key, hook.reason))
+        .collect()
+}
+
+/// Print the hooks that would run, apart from the changes: they are not resources
+/// the apply adds, changes, or deletes, and do not count as changes. Hooks the
+/// apply leaves out follow as information.
+fn print_hooks(hooks: &[HookTask], ignored: &[IgnoredHook]) {
+    if !hooks.is_empty() {
+        println!("{}", "Hooks that would run:".cyan().bold());
+        for line in hook_lines(hooks) {
+            println!("  {} {line}", "▶".cyan());
+        }
+        println!();
+    }
+    let left_out = left_out_lines(ignored);
+    if !left_out.is_empty() {
+        println!("{}", "Hooks left out, as Argo CD leaves them out:".bright_black());
+        for line in left_out {
+            println!("  {} {line}", "·".bright_black());
+        }
+        println!();
+    }
 }
 
 /// Show resources kept by their Prune sync option, with what keeps them.
@@ -542,6 +626,8 @@ fn display_diff(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) {
         println!();
     }
 
+    print_hooks(&diff.hooks, &diff.ignored_hooks);
+
     // Summary with colors
     print_summary(diff, duplicates);
 }
@@ -574,6 +660,7 @@ fn display_summary(diff: &DiffResult, duplicates: &HashMap<ResourceKey, usize>) 
         println!();
     }
 
+    print_hooks(&diff.hooks, &diff.ignored_hooks);
     print_summary(diff, duplicates);
 }
 
@@ -875,13 +962,25 @@ mod tests {
         async fn get_api_versions(&self) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn is_namespaced(&self, _gvk: &GroupVersionKind) -> Result<bool> {
+        async fn is_namespaced(&self, gvk: &GroupVersionKind) -> Result<bool> {
+            if self
+                .error_gvks
+                .contains(&(gvk.group.clone(), gvk.version.clone(), gvk.kind.clone()))
+            {
+                return Err(NylError::ApiResourceNotFound(gvk.kind.clone()));
+            }
             Ok(true)
         }
         fn default_namespace(&self) -> &'static str {
             "default"
         }
-        async fn delete_resource(&self, _gvk: &GroupVersionKind, _namespace: Option<&str>, _name: &str) -> Result<()> {
+        async fn delete_resource_with(
+            &self,
+            _gvk: &GroupVersionKind,
+            _namespace: Option<&str>,
+            _name: &str,
+            _options: &nyl_render::kubernetes::DeleteOptions,
+        ) -> Result<()> {
             Ok(())
         }
         async fn get_normalized_resource(
@@ -890,6 +989,10 @@ mod tests {
             _field_manager: &str,
         ) -> Result<DynamicObject> {
             Ok(resource.clone())
+        }
+
+        async fn release_field_manager(&self, _resource: &DynamicObject, _field_manager: &str) -> Result<bool> {
+            Ok(false)
         }
     }
 
@@ -930,6 +1033,54 @@ mod tests {
         assert!(cr_entry.is_some(), "ClusterPolicy should appear in added");
         let note = cr_entry.unwrap().1.as_ref().expect("should have a note");
         assert!(!note.is_error, "note should not be an error when CRD is in manifests");
+        assert!(note.message.contains("CRD will be installed"));
+        assert_eq!(result.total_error_count(), 0);
+    }
+
+    /// A namespaced custom resource without a namespace, of a CRD that only the manifest
+    /// defines, is shown in the namespace `apply` would put it in, as added and waiting
+    /// for the CRD, not as an error.
+    #[tokio::test]
+    async fn test_diff_new_namespaced_crd_resource_takes_the_destination_namespace() {
+        let crd = json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": { "name": "widgets.example.com" },
+            "spec": {
+                "group": "example.com",
+                "names": { "kind": "Widget", "plural": "widgets" },
+                "versions": [{ "name": "v1", "served": true, "storage": true }],
+                "scope": "Namespaced"
+            }
+        });
+        let widget = json!({
+            "apiVersion": "example.com/v1",
+            "kind": "Widget",
+            "metadata": { "name": "first" }
+        });
+        let client = SelectiveApiResourceNotFoundClient::new([("example.com", "v1", "Widget")]);
+        let (ready, mut scopes) = prepare_desired_manifests(
+            &client,
+            vec![widget, crd],
+            &mut HashMap::new(),
+            Some("app"),
+            ScopeResolver::default(),
+        )
+        .await
+        .unwrap();
+
+        let result = compute_diff_from_live(&client, &ready, None, DiffMode::Raw, &mut scopes, false)
+            .await
+            .unwrap();
+
+        let (key, note) = result
+            .added
+            .iter()
+            .find(|(key, _)| key.gvk.kind == "Widget")
+            .expect("the Widget is added");
+        assert_eq!(key.namespace.as_deref(), Some("app"));
+        let note = note.as_ref().expect("the Widget carries a note");
+        assert!(!note.is_error);
         assert!(note.message.contains("CRD will be installed"));
         assert_eq!(result.total_error_count(), 0);
     }
@@ -1024,6 +1175,7 @@ mod tests {
             rendered_at: chrono::Utc::now(),
             applied_at: None,
             error: None,
+            meta: nyl_render::kubernetes::ReleaseMeta::default(),
         };
         let client = nyl_render::kubernetes::MockKubeClient::new();
 
@@ -1039,5 +1191,74 @@ mod tests {
         .unwrap();
 
         assert!(result.deleted.is_empty());
+    }
+
+    fn job(name: &str, annotations: serde_json::Value) -> serde_json::Value {
+        json!({"apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": name, "namespace": "app", "annotations": annotations}})
+    }
+
+    /// A hook is previewed in its own section, in the order it runs, and is not a
+    /// resource the apply adds, changes, or deletes: it joins no count, so it
+    /// cannot set the exit status of `--exit-code`. A hook a revision tracked as an
+    /// ordinary resource is not shown as deleted, because `apply` does not prune it.
+    #[tokio::test]
+    async fn test_diff_previews_hooks_apart_from_the_changes() {
+        let manifests = vec![
+            job("smoke-test", json!({"argocd.argoproj.io/hook": "PostSync"})),
+            job(
+                "migrate",
+                json!({"helm.sh/hook": "pre-install", "helm.sh/hook-weight": "-1",
+                    "helm.sh/hook-delete-policy": "hook-succeeded"}),
+            ),
+            job("helm-test", json!({"helm.sh/hook": "test"})),
+        ];
+        let previous = nyl_render::kubernetes::ReleaseState {
+            release_name: "app".to_string(),
+            release_namespace: "app".to_string(),
+            revision: 1,
+            resource_keys: vec![ResourceKey {
+                gvk: GroupVersionKind::from_api_version_kind("batch/v1", "Job").unwrap(),
+                namespace: Some("app".to_string()),
+                name: "migrate".to_string(),
+            }],
+            manifest: String::new(),
+            status: ReleaseStatus::Deployed,
+            rendered_at: chrono::Utc::now(),
+            applied_at: None,
+            error: None,
+            meta: nyl_render::kubernetes::ReleaseMeta::default(),
+        };
+        let client = nyl_render::kubernetes::MockKubeClient::new();
+
+        let result = compute_diff_from_live(
+            &client,
+            &manifests,
+            Some(&previous),
+            DiffMode::Raw,
+            &mut ObjectScopes::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.added.is_empty() && result.modified.is_empty() && result.deleted.is_empty());
+        assert_eq!(result.total_error_count(), 0);
+        assert_eq!(
+            hook_lines(&result.hooks),
+            [
+                "PreSync  wave  -1  Job app/migrate  (delete: HookSucceeded)",
+                "PostSync wave   0  Job app/smoke-test  (delete: BeforeHookCreation)",
+            ]
+        );
+        assert_eq!(result.ignored_hooks.len(), 1, "a Helm test hook has no sync phase");
+        assert!(
+            hooks::delete_hook_finding(&result.ignored_hooks).is_none(),
+            "a Helm test hook is left out silently: only delete hooks are worth a warning"
+        );
+        assert_eq!(
+            left_out_lines(&result.ignored_hooks),
+            ["Job app/helm-test  (it declares helm.sh/hook: test, which names no sync phase)"]
+        );
     }
 }

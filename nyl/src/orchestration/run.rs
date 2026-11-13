@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::driver::{DriverSet, ToolRunner};
-use nyl_core::orchestration::ports::{ArgoObserver, Clock, CommitIdentity, IdGenerator, OperatorPrompt};
+use nyl_core::orchestration::ports::{Clock, CommitIdentity, IdGenerator, OperatorPrompt};
 use nyl_orchestration::fault::FaultInjector;
 use nyl_orchestration::shell::run::Cancellation;
 
@@ -45,10 +45,6 @@ pub struct Wiring<'a> {
     /// only when stdin is a terminal (`from_process` detects it). Tests pass
     /// `None` or a scripted prompt.
     pub prompt: Option<&'a dyn OperatorPrompt>,
-    /// The Argo CD observer of `teardownWait: observe`; `None` until M5
-    /// brings a real one (an `observe` wait without one is uncertain).
-    /// Tests pass a `FakeObserver`.
-    pub observer: Option<&'a dyn ArgoObserver>,
     /// Live unit events, delivered on stderr by production wiring.
     pub progress: Option<&'a dyn nyl_core::orchestration::progress::ProgressObserver>,
 }
@@ -81,9 +77,9 @@ pub struct ProcessWiring {
 }
 
 impl ProcessWiring {
-    /// The built-in drivers (plus the fake kinds with the `test-kinds`
-    /// feature, sharing an empty script), the process runner, and no faults,
-    /// never cancelled.
+    /// The built-in drivers (the fake kinds instead with the `test-kinds`
+    /// feature, sharing an empty script, unless `tier2` runs the real
+    /// tools), the process runner, and no faults, never cancelled.
     pub fn new() -> Self {
         Self::cancelled_by(Cancellation::new())
     }
@@ -91,17 +87,11 @@ impl ProcessWiring {
     /// [`Self::new`], cancelled when `cancellation` is set: the process
     /// runner forwards its signal to every running tool's process group.
     pub fn cancelled_by(cancellation: Cancellation) -> Self {
-        #[cfg(feature = "test-kinds")]
-        let drivers = {
-            let script = nyl_units::fake::Script::new();
-            #[cfg(feature = "tier2")]
-            let drivers = nyl_units::registry::with_fake_publication(&script, crate::resource_catalogue());
-            #[cfg(not(feature = "tier2"))]
-            let drivers = nyl_units::registry::with_test_kinds(&script, crate::resource_catalogue());
-            drivers
-        };
-        #[cfg(not(feature = "test-kinds"))]
-        let drivers = nyl_units::registry::builtin();
+        #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
+        let drivers =
+            nyl_units::registry::with_test_kinds(&nyl_units::fake::Script::new(), crate::resource_catalogue());
+        #[cfg(not(all(feature = "test-kinds", not(feature = "tier2"))))]
+        let drivers = nyl_units::registry::builtin(crate::resource_catalogue());
         Self {
             ids: crate::orchestration::ids::UuidV7,
             drivers,
@@ -176,7 +166,6 @@ impl<'a> Wiring<'a> {
             process_env: unicode_env(std::env::vars_os()),
             cancellation: owned.cancellation.clone(),
             prompt: owned.prompt.as_ref().map(|prompt| prompt as &dyn OperatorPrompt),
-            observer: None,
             progress: Some(&TerminalProgress),
         })
     }

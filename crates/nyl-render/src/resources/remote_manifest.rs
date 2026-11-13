@@ -65,8 +65,7 @@ impl RemoteManifest {
 
     /// Parse a RemoteManifest from a JSON value
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
-        serde_json::from_value(value.clone())
-            .map_err(|e| CoreError::Config(format!("Invalid RemoteManifest resource: {}", e)))
+        nyl_core::resources::parse_resource(value, "RemoteManifest")
     }
 
     /// Validate the RemoteManifest configuration

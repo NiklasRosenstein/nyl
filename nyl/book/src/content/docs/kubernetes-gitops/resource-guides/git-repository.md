@@ -16,9 +16,8 @@ kind: DeploymentTarget
 metadata:
   name: production
 spec:
+  reconciler: {argocd: {instanceRef: {name: primary}}}
   clusterRef:
-    name: primary
-  argocdRef:
     name: primary
   publication:
     repositoryRef:

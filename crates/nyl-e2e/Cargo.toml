@@ -1,0 +1,26 @@
+[package]
+name = "nyl-e2e"
+description = "Cluster end-to-end suite: drives the real nyl binary against kind, a local registry, a Git server, and a reconciler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The suite runs the `nyl` executable as a subprocess, exactly as a user or a CI
+# job does, so it depends on no Nyl crate. `cargo test --workspace` runs its unit
+# tests; the cluster scenarios run only when the `nyl-e2e` binary is invoked.
+[lib]
+name = "nyl_e2e"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nyl-e2e"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

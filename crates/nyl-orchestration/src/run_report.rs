@@ -33,6 +33,8 @@ pub enum ReportKind {
     DetectDriftReport,
     /// `nyl attest`: per unit its [`UnitCheck`] with its attestations.
     AttestReport,
+    /// `nyl observe`: per unit its [`UnitCheck`] with its observations.
+    ObserveReport,
     /// `nyl teardown`: per unit its [`UnitResult`], exit categories as for reconcile.
     TeardownReport,
 }
@@ -138,12 +140,16 @@ impl ExitCategory {
         }
     }
 
-    /// The category an error finding contributes: a held lease is
-    /// incomplete (2), a lost lease or a cancelled run uncertain (4),
+    /// The category an error finding contributes: a held lease, or an
+    /// instance limit, renewal, or removal that waits, is incomplete (2), a lost lease or a cancelled run uncertain (4),
     /// anything else an error (1).
     pub fn of_finding(finding: &Finding) -> Self {
         match finding.code {
-            Code::LeaseHeld | Code::LeaseBroken => Self::Incomplete,
+            Code::LeaseHeld
+            | Code::LeaseBroken
+            | Code::InstanceLimit
+            | Code::InstanceRenewed
+            | Code::InstanceRemovalPending => Self::Incomplete,
             Code::LeaseLost | Code::RunCancelled | Code::RunUnimported => Self::Uncertain,
             _ => Self::Error,
         }
@@ -154,6 +160,41 @@ impl Serialize for ExitCategory {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u8(self.code())
     }
+}
+
+/// What a template instance's report says about its lifecycle.
+///
+/// Contract: [Expiry](../../../../design/orchestration-core.md#expiry).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceReport {
+    /// The EnvironmentTemplate.
+    pub template: String,
+    /// The recorded expiry, as the command saw it when it started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<nyl_core::orchestration::time::Timestamp>,
+    /// Whether the instance was expired when the command started.
+    pub expired: bool,
+    /// What the command did about expiry, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<InstanceAction>,
+}
+
+/// What a reconcile did about an instance's expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstanceAction {
+    /// Activity moved `expiresAt` to now plus `ttl`.
+    Extended,
+    /// The instance was expired: its teardown completed and its state was deleted.
+    Removed,
+    /// The instance was expired, and its teardown waits for `allowTeardown` or `--allow-teardown`.
+    RemovalPending,
+    /// The instance was expired, and its removal did not finish: a teardown
+    /// waits, failed, or is uncertain, so state and resources remain.
+    RemovalIncomplete,
+    /// The fleet reconcile skipped the instance because another run holds its lease.
+    Busy,
 }
 
 /// One environment of a report.
@@ -204,9 +245,16 @@ pub struct EnvironmentRunReport {
     /// `reapplied`, with the requester and reason.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reapplied: Vec<UnitName>,
+    /// Per unit, the observed values whose recorded value or `pending` state
+    /// the operation changed: the transition summary's `observationsChanged`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub observations_changed: BTreeMap<UnitName, Vec<String>>,
     /// The transition commits written, by state ref side (`desired`, `observed`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commits: BTreeMap<&'static str, CommitId>,
+    /// The environment's lifecycle, for an instance of an EnvironmentTemplate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<InstanceReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<Finding>,
     pub warnings: Vec<Finding>,
@@ -231,10 +279,44 @@ impl EnvironmentRunReport {
             recovered: Vec::new(),
             drift_repaired: Vec::new(),
             reapplied: Vec::new(),
+            observations_changed: BTreeMap::new(),
             commits: BTreeMap::new(),
+            instance: None,
             errors: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    /// The fleet reconcile's rule for an instance another run holds: when the
+    /// report's errors say the lease is held, it is [`Self::mark_busy`]; a
+    /// held lease is not a failure of the run that skips it. Whether it did.
+    pub fn skip_when_busy(&mut self) -> bool {
+        let held = self.errors.iter().any(|finding| finding.code == Code::LeaseHeld);
+        if held {
+            self.mark_busy();
+        }
+        held
+    }
+
+    /// Report the instance as skipped because another run holds its lease:
+    /// the fleet reconcile's `busy`, which is not a failure. The lease
+    /// findings become warnings, and the exit category no longer counts the
+    /// instance, because only the instances a fleet run processed decide it.
+    pub fn mark_busy(&mut self) {
+        let (held, errors): (Vec<_>, Vec<_>) = std::mem::take(&mut self.errors)
+            .into_iter()
+            .partition(|finding| finding.code == Code::LeaseHeld);
+        self.errors = errors;
+        self.warnings.extend(held);
+        if let Some(instance) = &mut self.instance {
+            instance.action = Some(InstanceAction::Busy);
+        }
+        self.exit = self
+            .errors
+            .iter()
+            .map(ExitCategory::of_finding)
+            .fold(ExitCategory::Ok, ExitCategory::most_severe);
+        self.complete = false;
     }
 
     /// Units in the shell's dispatch/dependency order, with a stable fallback.
@@ -306,11 +388,24 @@ impl EnvironmentRunReport {
             reapplied: None,
             details: BTreeMap::new(),
         };
+        if !self.observations_changed.is_empty() {
+            summary.details.insert(
+                "observationsChanged".to_owned(),
+                serde_json::json!(self.observations_changed),
+            );
+        }
         for (name, unit) in &self.units {
             if let (Some(approval), Some(serde_json::Value::Object(entry))) =
                 (&unit.approval, summary.units.get_mut(name))
             {
                 entry.insert("approval".to_owned(), serde_json::json!(approval));
+            }
+            // What `reconcile --detect-drift` found, so the commit records
+            // the drift behind a repair or a drifted result.
+            if let (Some(check), Some(serde_json::Value::Object(entry))) =
+                (&unit.drift_check, summary.units.get_mut(name))
+            {
+                entry.insert("driftCheck".to_owned(), serde_json::json!(check));
             }
         }
         summary
@@ -363,32 +458,38 @@ fn unit_exit(kind: ReportKind, unit: &UnitReport) -> ExitCategory {
                 ExitCategory::Ok
             }
         }
-        ReportKind::ReconcileReport | ReportKind::TeardownReport => match unit.result {
-            Some(UnitResult::Failed { .. }) => ExitCategory::Failed,
-            Some(UnitResult::Uncertain { .. }) => ExitCategory::Uncertain,
-            Some(
-                UnitResult::Current
-                // Recording a teardown request on a held unit is all a
-                // teardown of it does, so it succeeds.
-                | UnitResult::Held { recorded: true, .. }
-                | UnitResult::Executed { .. }
-                | UnitResult::Imported { .. }
-                | UnitResult::Recovered { .. }
-                | UnitResult::Removed
-                | UnitResult::Retained
-                | UnitResult::Released { .. },
-            )
-            | None => ExitCategory::Ok,
-            Some(
-                UnitResult::Blocked { .. }
-                | UnitResult::AwaitingApproval
-                | UnitResult::Held { .. }
-                | UnitResult::Drifted
-                | UnitResult::PendingTeardown { .. }
-                | UnitResult::TearingDown { .. },
-            ) => ExitCategory::Incomplete,
-        },
-        ReportKind::DetectDriftReport | ReportKind::AttestReport => crate::rules::checks::unit_exit(unit),
+        ReportKind::ReconcileReport | ReportKind::TeardownReport => {
+            let result = match unit.result {
+                Some(UnitResult::Failed { .. }) => ExitCategory::Failed,
+                Some(UnitResult::Uncertain { .. }) => ExitCategory::Uncertain,
+                Some(
+                    UnitResult::Current
+                    // Recording a teardown request on a held unit is all a
+                    // teardown of it does, so it succeeds.
+                    | UnitResult::Held { recorded: true, .. }
+                    | UnitResult::Executed { .. }
+                    | UnitResult::Imported { .. }
+                    | UnitResult::Recovered { .. }
+                    | UnitResult::Removed
+                    | UnitResult::Retained
+                    | UnitResult::Released { .. },
+                )
+                | None => ExitCategory::Ok,
+                Some(
+                    UnitResult::Blocked { .. }
+                    | UnitResult::AwaitingApproval
+                    | UnitResult::Held { .. }
+                    | UnitResult::Drifted
+                    | UnitResult::PendingTeardown { .. }
+                    | UnitResult::TearingDown { .. },
+                ) => ExitCategory::Incomplete,
+            };
+            // A drift check of `reconcile --detect-drift` that could not conclude.
+            result.most_severe(crate::rules::checks::reconcile_drift_exit(unit.drift_check.as_ref()))
+        }
+        ReportKind::DetectDriftReport | ReportKind::AttestReport | ReportKind::ObserveReport => {
+            crate::rules::checks::unit_exit(unit)
+        }
         ReportKind::StatusReport => match (unit.state, unit.condition) {
             // A held or deleting unit with a condition exits by its
             // condition, which still needs a run or `nyl recover`.
@@ -489,6 +590,13 @@ pub struct UnitReport {
     /// What `detect-drift` or `attest` found; `None` in other reports.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub check: Option<UnitCheck>,
+    /// What `reconcile --detect-drift` found when it checked this unit's
+    /// current receipt before selecting units; `None` for a unit it did not
+    /// check and in every other report. Nested, because a reconcile's own
+    /// `result` flattens its fields next to it. Contract:
+    /// [Drift](../../../../design/orchestration-core.md#drift).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift_check: Option<CheckResult>,
     /// The failure or uncertainty message, kept out of the commit summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -562,6 +670,7 @@ impl UnitReport {
             blocked_by: Vec::new(),
             plan_error: None,
             check: None,
+            drift_check: None,
             message: None,
             last_run: None,
             condition: None,
@@ -591,6 +700,21 @@ pub struct UnitCheck {
     /// The driver's attestations of the current receipt, by name (`attest`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub attestations: BTreeMap<String, AttestationResult>,
+    /// Each declared observation as the read found it, by name (`observe`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub observations: BTreeMap<String, ObservationStatus>,
+}
+
+/// One observed value as a `nyl observe` read found it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "observation", rename_all = "kebab-case")]
+pub enum ObservationStatus {
+    /// The read found a value, which is now recorded.
+    Value { value: serde_json::Value },
+    /// The system holds no value for the current receipt yet.
+    Pending { reason: String },
+    /// The read failed; the last recorded value for the receipt stays usable.
+    Failed { reason: String },
 }
 
 impl From<CheckResult> for UnitCheck {
@@ -599,6 +723,7 @@ impl From<CheckResult> for UnitCheck {
         Self {
             result,
             attestations: BTreeMap::new(),
+            observations: BTreeMap::new(),
         }
     }
 }
@@ -615,6 +740,9 @@ pub enum CheckResult {
     },
     /// `attest`: the driver attested the receipt; the results are the attestations.
     Attested,
+    /// `observe`: the driver read the unit's observed values; the results are
+    /// the observations.
+    Observed,
     Unknown {
         reason: String,
     },
@@ -631,6 +759,7 @@ impl CheckResult {
             Self::Clean => "clean",
             Self::Drifted { .. } => "drifted",
             Self::Attested => "attested",
+            Self::Observed => "observed",
             Self::Unknown { .. } => "unknown",
             Self::NoReceipt => "no-receipt",
             Self::Unsupported => "unsupported",
@@ -692,11 +821,24 @@ pub enum ReceiptState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlockedBy {
     pub pointer: String,
+    /// The producer's environment, when it is another environment's unit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<EnvironmentName>,
     /// The producer, when a reference waits for one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<UnitName>,
-    /// A stable reason, such as `no-current-receipt`.
+    /// A stable reason: `no-current-receipt`, `attestation-pending`,
+    /// `attestation-failing`, `observation-pending`, `planned-change`, or
+    /// `producer-unavailable`; the text of any other blocker.
     pub reason: String,
+    /// The attestation of `unit` the consumer waits for, for the two
+    /// attestation reasons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<String>,
+    /// The observed value of `unit` the consumer waits for, for
+    /// `observation-pending`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<String>,
 }
 
 #[cfg(test)]
@@ -779,8 +921,11 @@ mod tests {
         let mut waiting = UnitReport::new("Command");
         waiting.blocked_by.push(BlockedBy {
             pointer: "/values/vpc".to_owned(),
+            environment: None,
             unit: Some(unit_name("network")),
             reason: "no-current-receipt".to_owned(),
+            attestation: None,
+            observation: None,
         });
         let mut plan = report(vec![("database", waiting)]);
         plan.finish(ReportKind::PlanReport);

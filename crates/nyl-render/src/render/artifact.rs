@@ -17,7 +17,8 @@ const SOURCE_CACHE_VERSION: &str = "v1";
 /// such as `git-blob`: existing entries keep their meaning. A Nyl that does
 /// not know a kind rejects the lock with a parse error, so a project using
 /// one needs a Nyl that supports it. A change to the shape or meaning of
-/// existing entries adds a version and a migration.
+/// existing entries either bumps the version with a migration or changes it
+/// in place; which one is decided per change (AGENTS.md, state-file formats).
 const VENDOR_LOCK_VERSION: u32 = 1;
 
 /// The complete user-controlled selector for one remote renderer input.
@@ -529,6 +530,8 @@ pub struct ArtifactResolver {
     vendor: Option<DirectoryVendorStore>,
     render_cache: Option<RenderCache>,
     materialized_root: PathBuf,
+    /// How the Helm `lookup` of the Release being rendered is answered.
+    lookup: Option<crate::helm::lookup::LookupHandle>,
     _owned_transient_root: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
@@ -575,8 +578,22 @@ impl ArtifactResolver {
             vendor,
             render_cache,
             materialized_root,
+            lookup: None,
             _owned_transient_root: owned_transient_root,
         })
+    }
+
+    /// Answer the Helm `lookup` of the charts rendered through this resolver
+    /// from `handle`, which belongs to one Release.
+    #[must_use]
+    pub fn with_lookup(mut self, handle: Option<crate::helm::lookup::LookupHandle>) -> Self {
+        self.lookup = handle;
+        self
+    }
+
+    /// The lookups of the Release being rendered, when it has any source.
+    pub fn lookup_handle(&self) -> Option<&crate::helm::lookup::LookupHandle> {
+        self.lookup.as_ref()
     }
 
     /// Use cached Git refs without contacting chart remotes.

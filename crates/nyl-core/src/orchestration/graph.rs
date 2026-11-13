@@ -8,8 +8,9 @@
 //! The graph is data: `nyl-orchestration`'s `rules::graph` extracts it from
 //! desired documents and orders it. Edges exist before values do, so a
 //! reference whose producer has no current receipt is still an edge, and a
-//! later CI export can carry unresolved data edges. The format is versioned:
-//! a change adds a version.
+//! later CI export can carry unresolved data edges. The format is versioned;
+//! whether a change bumps the version or changes it in place is decided per
+//! change (AGENTS.md, state-file formats).
 
 use std::collections::BTreeMap;
 
@@ -70,5 +71,7 @@ pub enum EdgeSource {
         output: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifact: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<String>,
     },
 }

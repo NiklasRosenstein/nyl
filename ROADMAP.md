@@ -44,6 +44,7 @@ stable for references from issues and pull requests:
 | M7 | Continuous operation and scope decision |
 | M8 | Provider-neutral CI execution and first GitLab adapter |
 | M9 | Domain modeling for units and Releases |
+| M10 | Direct reconciler for Kubernetes publications |
 
 ## Product direction
 
@@ -254,6 +255,7 @@ apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata: {name: dev}
 spec:
+  reconciler: {argocd: {}}
   # existing fields unchanged
   releaseInputs:
     platform/web:
@@ -286,6 +288,10 @@ spec:
 - Direct `nyl render`, `diff`, and `apply` apply the selected target's bindings
   and take the Release from the compiled target, so they match `render-tree`,
   and accept `--input`/`--inputs` overrides that tree commands never accept.
+  In a project without DeploymentTargets they render against the live
+  capabilities of the kube context `--context` names, an explicit opt-in that
+  tree and publication commands never accept, so plain-Argo CD and
+  non-GitOps users can use them.
 - Remote ApplicationGroups receive inputs exactly like local groups, as they
   already receive target `values`; the platform's binding key is the admission.
 - Resolved inputs participate in the dependency recorder and render-cache key.
@@ -375,17 +381,33 @@ Cluster.
   payloads stay outside Git.
 - The Kubernetes publication unit wraps `render-tree` and `publish-tree` for one
   DeploymentTarget, because one target owns one publication tree and ownership
-  index. Its desired unit contains the resolved Release input snapshot, keyed by
-  `<applicationGroup>/<release>`; its recorded result is the published commit
-  and index digest.
+  index. Its desired unit contains the Release inputs only orchestration can
+  resolve (`fromUnit`, and later `fromPromotion`) as the pinned input snapshot,
+  keyed by `<applicationGroup>/<release>`, and the target's effective teardown
+  settings, which the driver records when it resolves the unit; the other
+  bindings resolve inside the render and enter its execution key. Its recorded
+  result is the published commit and index digest. The unit may declare its
+  target inline, which then compiles and publishes as any target does. The
+  published index records the owning unit incarnation, and a publication
+  refuses a prefix another existing incarnation owns; the shell answers
+  whether an incarnation still exists through a generic directory, so the
+  rule stays in the driver. The driver also judges its target's teardown
+  readiness from the recorded settings, and shared code only displays the
+  findings.
   Publication is a receipt; Argo CD acceptance and observed health are the
   unit's `accepted` and `healthy` attestations (see "Attestations" under
   health evidence), so a publication-only result cannot satisfy a dependency
-  that requires a healthy deployment.
-- In observe mode, the publication unit's observed values read a field of a
+  that requires a healthy deployment. A unit that declares `observe: {}` reads the
+  reconciler of its target (Argo CD) through one driver-owned,
+  reconciler-neutral reader whose neutral reading one set of shared rules
+  judges, declared on the ArgoCDInstance (see "Health evidence"), and the
+  same reading serves the `observe` `teardownWait`.
+- With `observe: {}`, the publication unit's observed values read a field of a
   resource its target renders, from the target's Cluster, once the
   Application owning that resource runs the current publication. Reading
-  needs workload-cluster credentials that publication alone does not.
+  needs workload-cluster credentials that publication alone does not: the
+  workload Cluster's own declared context in the kubeconfig the unit admits,
+  never ambient kube configuration.
 
 **Command unit (M3).** A constrained escape hatch for tools without a driver:
 
@@ -507,12 +529,22 @@ Evidence beyond a receipt is an **attestation**: a named pass or fail result
 about one unit's current receipt or an environment's recorded state, written by
 the unit's driver during `reconcile` or when `nyl attest` asks it, or by people
 and external systems through `nyl attest --name … --result …`. A
-KubernetesPublication in observe mode attests `accepted` and `healthy` from
+KubernetesPublication that declares `observe: {}` attests `accepted` and `healthy` from
 Argo CD, matching each Application's running revision to the publication
 commit that introduced it and listing them in the attestations' details.
-Attestations are recorded where the credentials exist, typically in CI, and
-decisions read the recorded evidence. Attestations are evidence for promotion
-and dependents; drift, which `nyl detect-drift` records, is separate: it is a
+Argo CD is read one of two ways, declared once in Git on the ArgoCDInstance
+(`spec.access`): the Kubernetes API of its control-plane Cluster, through the
+Cluster's declared local context and the kubeconfig the unit admits, or the
+Argo CD API server, at a declared address with a token the unit admits. The
+credential is never read from anywhere but the unit's admitted environment,
+and an observation that cannot establish a result records nothing rather than
+a failure. A target that declares the direct reconciler is read the same way
+through Nyl's own release state in its Cluster (M10). Attestations are recorded where the credentials exist, typically in
+CI, and decisions read the recorded evidence. Attestations are evidence for promotion
+and dependents: a `dependsOn` entry or `fromUnit` requires them with
+`evidence: attested` or named `attestations`, and its consumer stays blocked
+until the producer's current receipt has them passing, with no age limit
+(`maxAttestationAge` belongs to promotion paths); drift, which `nyl detect-drift` records, is separate: it is a
 reason for the next reconcile to act, not evidence. Argo CD health means Kubernetes considers the resources
 ready, not that the application works; application-level checks are further
 attestations. The [promotion contract](design/promotion.md#health-evidence)
@@ -614,6 +646,17 @@ Reports retain completed results on operational failure and distinguish invalid
 resources from unchecked inputs; rendering caches retain the provenance needed
 for identical reports on cache hits.
 
+Scoped tree publication keeps one target-wide ownership boundary and
+compare-and-swap transaction. Selected groups or Releases replace only their
+published ownership; retained manifests supply complete-tree validation context.
+Versioned Release metadata preserves mixed source provenance. The shared render
+API exposes selection and the pinned publication base for orchestration callers;
+a scoped result cannot establish target-wide source freshness. See
+[partial publication](design/partial-publication.md). The KubernetesPublication
+driver continues to publish the full target. M5 adds environment and unit
+ownership in the version 3 index, which stays readable without an owner; scoped receipts and promotion
+coverage need an explicit caller contract before it adopts selection.
+
 `nyl.toml` may sit at the repository root or beside the configuration in
 `nyl/`, where Nyl finds it from the root. Local paths, such as ApplicationGroup
 sources, unit sources, and `fromFile`, share one resolver: relative to the
@@ -625,16 +668,58 @@ processing belong to this path. Every input affecting rendered bytes, including
 resolved Release inputs, participates in dependency recording; cache entries are
 disposable and never establish execution success.
 
-Kubernetes delivery distinguishes publication for an external reconciler,
-publication plus observation, and direct application through Nyl. Observation of
-Argo CD does not authorize Nyl to apply or prune its workloads. Reusing Nyl's
-direct Kubernetes lifecycle inside orchestration requires explicit compatibility
-decisions about release history, pruning, and readiness.
+Kubernetes delivery is chosen by the DeploymentTarget, never by the unit that
+places it, and the choice is always written down (`reconciler` is required and
+has no default): publication for an external reconciler
+(`reconciler: {argocd: …}`), publication plus observation of it (`observe: {}`),
+or the **direct reconciler** (`reconciler: {direct: {}}`, M10), where Nyl applies the target's
+Releases to its Cluster itself. Observing Argo CD never authorizes Nyl to apply
+or prune its workloads; a direct target has no Argo CD, so nothing else
+applies them. The direct reconciler reuses `nyl apply`'s mechanics (server-side
+apply, pruning by release state, the `Prune` and `Delete` sync options, the
+Namespace policies) through one implementation in `nyl-render` that the command
+and the publication driver both call, and keeps the invariants of the Argo CD
+path:
+
+- The tree is still published, without Applications, AppProjects, or a catalog,
+  as the receipt, the provenance record, and the input of promotion. Git is
+  published first and the cluster applied second, so the cluster never runs
+  bytes no commit holds, and a release revision cites its publication commit.
+- Credentials come only from the unit's admitted `KUBECONFIG` and the Cluster's
+  declared `live.context`; the context's server must match the declared
+  destination.
+- The release state in the cluster records the owning unit incarnation and the
+  publication it was applied for, and a Release is fenced like a published
+  prefix: another existing owner, or a manual `nyl apply`, is refused. A
+  target's reconciler is part of the publication's identity, so switching one
+  is refused, never an edit.
+- `observe: {waitHealthy: {timeout}}` makes a reconcile wait for health, for the
+  direct reconciler and both Argo CD access methods alike: it polls the
+  target's reader with backoff on the injected clock and records the same
+  `accepted` and `healthy` attestations as `nyl attest`, or fails retryably on
+  the timeout. Without it, reconcile does not wait.
+- `observe: {}` reads Nyl's own release state and the rollout status of the
+  workloads through a second `ReconcilerReader`; the shared evaluation, the
+  attestations, and the teardown wait do not change, and teardown deletes in
+  the cluster in two phases behind `teardownWait`, keeping the Namespaces that
+  hold the release state until the wait ends.
+
+Nothing in the engine, the state formats, or the CLI workflows knows the
+direct reconciler: it belongs to the target's declaration, to `nyl-render`, and
+to the publication driver. The
+[contract](design/orchestration-core.md#direct-reconciler) has the details and
+the open questions.
 
 ## User and machine interfaces
 
 Preserve `nyl render`, `diff`, `apply`, `render-tree`, and `publish-tree` with their
 Kubernetes meanings. Release inputs extend them without new required flags.
+
+The pure Python `nyl` client invokes the installed CLI's single-file `render`
+entry point and inspects its emitted manifests. Rust owns configuration,
+validation, rendering, and caching; Python holds no orchestration state or
+render cache. Full-tree inspection requires a documented manifest inventory,
+because publication trees also contain ownership indexes and state files.
 
 `nyl comment upsert` publishes supplied Markdown as a sticky PR/MR comment on
 GitHub, GitLab, or Forgejo. Report generation remains separate from posting;
@@ -702,7 +787,7 @@ policy.
 | plan | Preview effects and unresolved inputs without executing |
 | reconcile | Resolve source into desired state and drive ready units through dependency waves |
 | status | Inspect intent, evidence, progress, promotion lineage, and blockers |
-| detect-drift | Check whether current receipts still hold and record drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`) |
+| detect-drift | Check whether current receipts still hold and record drift without writing receipts; the next `reconcile` repairs drifted converging units by default (`driftRepair`), and `reconcile --detect-drift` checks and repairs in one run under one lease |
 | promote | Move a proven source commit and selected values into the target environment, or open a change for review |
 | teardown | Tear down a unit: complete a deletion, replace a selected unit, or with `--hold` keep it down |
 | hold / resume | Freeze a unit so no changes to it are reconciled, without touching its resources; resume lifts the freeze |
@@ -747,7 +832,6 @@ reasons to delay independent work.
 
 | Decision | Needed by |
 | --- | --- |
-| Argo CD control-plane credentials for health checks in CI | M5/M6 |
 | Command unit isolation beyond the declared environment | M7 |
 | Plugin driver protocol, registration, and pinning | M7 |
 | Built-in approver lookups beyond GitHub, starting with GitLab protected-environment approvals | After M3 |
@@ -785,6 +869,8 @@ reasons to delay independent work.
 - [Git worktrees](crates/nyl-render/src/git/worktree.rs)
 - [Direct Kubernetes application](nyl/src/cli/commands/apply.rs)
 - [Kubernetes release state](crates/nyl-render/src/kubernetes/state.rs)
+- [Direct reconciler](design/orchestration-core.md#direct-reconciler): the M10
+  proposal for applying a target's Releases through the publication unit
 
 These are navigation aids, not frozen API guarantees.
 

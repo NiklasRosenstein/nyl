@@ -1,0 +1,34 @@
+# Crash injection: killed after `kubernetes` executed and its observed value
+# was read, before the lease update that starts `dns`. The dead run's
+# checkpoint carries the value with the receipt, so the next run imports both
+# and executes `dns` on it, though the value cannot be read again
+# (design/orchestration-core.md, Runs and leases and Observed values).
+contract: design/orchestration-core.md#runs-and-leases
+milestone: M5
+tiers: [1]                            # scripts faults and the observer
+project: ../../walkthroughs/observed-value/project
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - driver: {unit: kubernetes, operation: observe, outcome: succeeded, outputs: {ingressIp: 203.0.113.10}}
+  - fault: {point: before-lease-update, unit: dns}   # kubernetes checkpointed and read, dns never started
+  - nyl: [reconcile, -e, dev]
+    killed: true
+  - clock: {advance: 39m}             # one minute before the deadline of the resolution before dns's phase: 30m plus 10m grace
+  - nyl: [reconcile, -e, dev]
+    exit: 2                           # the dead run's lease and run ref are still within their deadline
+    expect:
+      codes: [NYL-LEASE-HELD]
+      commits: {desired: 0, observed: 0}
+  - clock: {advance: 2m}              # past the deadline
+  - driver: {unit: kubernetes, operation: observe, outcome: failed}   # the next run cannot read it again
+  - nyl: [reconcile, -e, dev]
+    exit: 0
+    expect:
+      imported: [kubernetes]          # the receipt, with the value its run read for it
+      executed: [dns]                 # resolved from the imported value
+      codes: [NYL-OBSERVATION-FAILED]
+      commits: {desired: 1, observed: 1}
+      get:
+        args: [get, observation, kubernetes/ingressIp, -e, dev]
+        value: 203.0.113.10

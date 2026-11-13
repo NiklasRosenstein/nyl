@@ -12,7 +12,7 @@ use crate::rules::desired::{self as desired_rules, LifecycleOutcome, LifecycleWr
 use crate::rules::lifecycle::{self, Event as LifecycleEvent, Next};
 use crate::rules::teardown::{self as teardown_rules, Pending, TeardownInputs, TeardownOptions};
 use crate::rules::transitions::{self, Applied, Event};
-use nyl_core::orchestration::driver::{DriverError, DriverResult, WaitCompletion};
+use nyl_core::orchestration::driver::{DriverError, DriverResult, IncarnationDirectory, WaitCompletion};
 use nyl_core::orchestration::state::{
     DeletionIntent, DeletionReason, Hold, Request, TeardownProgress, TeardownWaiting,
 };
@@ -50,7 +50,7 @@ pub(super) struct Life {
     /// Units the run tore down, released, retained, or tried to.
     pub(super) attempted: BTreeSet<UnitName>,
     /// Cached preflight results, including successful checks and remnants.
-    pub(super) readiness: BTreeMap<UnitName, crate::rules::teardown_readiness::Readiness>,
+    pub(super) readiness: BTreeMap<UnitName, nyl_core::orchestration::driver::TeardownReadiness>,
     /// The unit after which `--fail-fast` stopped the run.
     pub(super) stopped: Option<UnitName>,
     /// The hold signals the run acted on.
@@ -265,6 +265,9 @@ struct Job<'j> {
     directory: PathBuf,
     completion: Option<WaitCompletion>,
     approved_digest: Option<nyl_core::orchestration::ids::ChangeDigest>,
+    /// The artifacts the unit's last executions recorded, so a driver can
+    /// tell what it published before, such as a tree's last commit.
+    artifacts: BTreeMap<String, ArtifactDocument>,
 }
 
 /// One teardown call's result.
@@ -349,6 +352,14 @@ impl Reconcile<'_, '_, '_> {
         }
         // Every leaving unit this run did not finish reports why it waits.
         let plan = self.leaving_plan(life, inputs, observed);
+        // Consumers of a leaving unit that cannot be seen are an error of the
+        // run, besides the units it keeps waiting: the other environments are required.
+        let leaves = teardown_rules::leaves(&life.desired, &life.releases, inputs.options);
+        if let Err(finding) = self.session.external_dependents(&life.desired, leaves) {
+            if !self.report.errors.contains(&finding) {
+                self.report.errors.push(finding);
+            }
+        }
         for (name, pending) in &plan.pending {
             if life.results.contains_key(name) || matches!(pending, Pending::NotNamed) {
                 continue;
@@ -400,7 +411,8 @@ impl Reconcile<'_, '_, '_> {
         inputs: &LeaveInputs<'_>,
         observed: &BTreeMap<UnitName, ObservedUnit>,
     ) -> teardown_rules::TeardownPlan {
-        let external = self.session.external_dependents(&life.desired);
+        let leaves = teardown_rules::leaves(&life.desired, &life.releases, inputs.options);
+        let external = self.session.external_dependents(&life.desired, leaves);
         let mut plan = teardown_rules::plan(&TeardownInputs {
             external_dependents: external.as_ref().unwrap_or(&BTreeMap::new()),
             environment: self.environment(),
@@ -438,7 +450,7 @@ impl Reconcile<'_, '_, '_> {
             }
             life.readiness.insert(
                 name.clone(),
-                readiness(self.context().drivers, self.environment(), name, unit).unwrap_or_default(),
+                readiness(self.context().drivers, unit).unwrap_or_default(),
             );
         }
     }
@@ -539,6 +551,19 @@ impl Reconcile<'_, '_, '_> {
                 self.source_missing(life, name, &unit, "it records no sourceRevision");
                 continue;
             };
+            if let (Some(source), Some(recorded)) = (inputs.source, &unit.source_revision) {
+                if source != recorded {
+                    self.report.warnings.push(Finding::new(
+                        Code::SourceOverride,
+                        format!(
+                            "unit {name} of {environment} tears down with the files of {source}, not its recorded \
+                             source commit {recorded}"
+                        ),
+                        "check that the revision still holds what the unit needs to be destroyed; the substitution \
+                         is recorded in the transition commit",
+                    ));
+                }
+            }
             runnable.push((name.clone(), unit, commit));
         }
         if runnable.is_empty() {
@@ -565,9 +590,17 @@ impl Reconcile<'_, '_, '_> {
                         directory: session.execution_directory(name),
                         completion: None,
                         approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
+                        artifacts: artifacts.get(name).cloned().unwrap_or_default(),
                     })
                     .collect();
-                run_jobs(context, &session.slots, &environment, inputs.project_dir, jobs)
+                run_jobs(
+                    context,
+                    &session.slots,
+                    &environment,
+                    inputs.project_dir,
+                    jobs,
+                    &session.incarnations,
+                )
             };
             for call in results {
                 if call.killed {
@@ -836,11 +869,7 @@ impl Reconcile<'_, '_, '_> {
         );
         if let Some(document) = document {
             observed.insert(name.clone(), document.clone());
-            let checkpoint = Checkpoint {
-                desired: in_progress,
-                observed: document,
-                artifacts: artifacts.get(name).cloned().unwrap_or_default(),
-            };
+            let checkpoint = Checkpoint::new(in_progress, document, artifacts.get(name).cloned().unwrap_or_default());
             self.checkpointed = true;
             if let Err(error) = self.write_run(Some(&checkpoint)) {
                 let finding = store_error(&environment, &error);
@@ -920,8 +949,7 @@ impl Reconcile<'_, '_, '_> {
                 from: context.base.runner.clone(),
             }
         } else {
-            let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-            let strategy = crate::rules::teardown_wait::strategy(spec);
+            let strategy = super::wait::strategy(context, &unit);
             let now = context.base.clock.now();
             let end = crate::rules::teardown_wait::ends(strategy, &waiting)
                 .unwrap_or_else(|| unit_timeout(context.drivers, &unit).after(now))
@@ -1010,7 +1038,9 @@ impl Reconcile<'_, '_, '_> {
                 directory: session.execution_directory(name),
                 completion: Some(completion),
                 approved_digest: session.request.approvals.units.get(name).cloned().flatten(),
+                artifacts: artifacts.get(name).cloned().unwrap_or_default(),
             }],
+            &session.incarnations,
         );
         for call in results {
             if call.killed {
@@ -1128,15 +1158,11 @@ impl Reconcile<'_, '_, '_> {
 /// states no requirements.
 pub(super) fn readiness(
     drivers: &DriverSet,
-    environment: &EnvironmentName,
-    name: &UnitName,
     unit: &DesiredUnit,
-) -> Option<crate::rules::teardown_readiness::Readiness> {
+) -> Option<nyl_core::orchestration::driver::TeardownReadiness> {
     let driver = drivers.get(&unit.unit.api_version, &unit.unit.kind)?;
-    match driver.teardown_settings(unit) {
-        Ok(Supported::Supported(settings)) => {
-            Some(crate::rules::teardown_readiness::evaluate(environment, name, &settings))
-        }
+    match driver.teardown_readiness(unit) {
+        Ok(Supported::Supported(readiness)) => Some(readiness),
         Ok(Supported::Unsupported) | Err(_) => None,
     }
 }
@@ -1148,6 +1174,7 @@ fn run_jobs(
     environment: &EnvironmentName,
     project_dir: &str,
     jobs: Vec<Job<'_>>,
+    incarnations: &dyn IncarnationDirectory,
 ) -> Vec<Call> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
@@ -1161,7 +1188,7 @@ fn run_jobs(
                     None,
                 )
                 .into_event();
-                scope.spawn(move || call(context, slots, environment, project_dir, job, &progress))
+                scope.spawn(move || call(context, slots, environment, project_dir, job, &progress, incarnations))
             })
             .collect();
         handles.into_iter().map(join).collect()
@@ -1169,6 +1196,7 @@ fn run_jobs(
 }
 
 /// One driver teardown call.
+#[allow(clippy::too_many_lines)] // Checkout, credentials, the driver call, and its progress, in order.
 fn call(
     context: &RunContext<'_>,
     slots: &Slots,
@@ -1176,6 +1204,7 @@ fn call(
     project_dir: &str,
     job: Job<'_>,
     progress: &nyl_core::orchestration::progress::UnitProgress,
+    incarnations: &dyn IncarnationDirectory,
 ) -> Call {
     let name = job.unit.unit.name.clone();
     let now = context.base.clock.now();
@@ -1206,6 +1235,7 @@ fn call(
                 context.sources,
                 job.slot,
                 &job.commit,
+                job.unit.source_revision.as_ref(),
                 driver,
                 job.unit.resolved_spec.as_ref().unwrap_or(&job.unit.spec),
                 project_dir,
@@ -1251,9 +1281,11 @@ fn call(
         deadline,
     };
     let execution = ExecutionContext {
+        instances: context.instances,
+        clock: context.base.clock,
         secrets,
         interactive: false,
-        artifacts: BTreeMap::new(),
+        artifacts: job.artifacts,
         source_roots,
         unit: UnitAddress::new(environment.clone(), name.clone()),
         operation: DriverOperation::Teardown,
@@ -1269,6 +1301,8 @@ fn call(
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
         teardown_wait: job.completion,
+        incarnations,
+        dirty_source: false,
     };
     let outcome = driver.teardown(&execution, job.unit);
     let killed = context.base.faults.at(FaultPoint::AfterEffect, Some(&name)) == FaultAction::Kill;
@@ -1324,12 +1358,14 @@ pub(super) fn mark_teardowns(
     for name in names {
         let unit = life.desired[&name].clone();
         let in_set = ownership.contains(&name);
+        let expired = request.lifecycle.expired.is_some();
         let reason = match (all, in_set) {
+            (true, _) if expired => DeletionReason::Expired,
             (true, _) => DeletionReason::Decommission,
             (false, true) => DeletionReason::Replace,
             (false, false) => DeletionReason::Teardown,
         };
-        let hold = (request.lifecycle.hold || (all && in_set)).then(|| Hold {
+        let hold = (request.lifecycle.hold || (all && in_set && !expired)).then(|| Hold {
             since: now,
             by: context.base.requested_by.clone(),
             reason: Some(hold_reason(request.reason.as_deref())),

@@ -58,6 +58,8 @@ Common fields every kind shares:
 | --- | --- |
 | `enabled` | `false` leaves the environment's ownership set. Default `true`. |
 | `outputs` | The outputs the unit declares, each with a `type` and optionally `sensitive: true`. |
+| `observations` | The [observed values](#observed-values) the unit declares, for kinds that read them, each with a `type`, an optional `maxAge`, and the kind's own `from`. |
+| `observationWait` | How long a run that executed the unit [waits](#observed-values) for its pending observed values, within `timeout`. Default `0s`. |
 | `dependsOn` | Units that must have a current receipt first, for ordering without a data reference. |
 | `timeout` | The deadline of one execution, at most `7d`. |
 | `env` | `passthrough`, the names of runner variables the unit may read, and `secrets`, mapping variable names to project secret keys. Missing credentials stop the unit before execution. |
@@ -65,8 +67,10 @@ Common fields every kind shares:
 ## References between units
 
 `{fromUnit: {unit: <name>, output: <output>}}` stands for an output of
-another unit's current receipt, and `{fromUnit: {unit: <name>, artifact: <name>,
-pointer: /…}}` for a value inside one of its artifacts. A reference replaces
+another unit's current receipt, `{fromUnit: {unit: <name>, artifact: <name>,
+pointer: /…}}` for a value inside one of its artifacts, and
+`{fromUnit: {unit: <name>, observation: <name>}}` for one of its
+[observed values](#observed-values). A reference replaces
 the whole value it stands for, at any depth of the fields a kind accepts
 references in, such as a Command's `values`. References add a dependency on
 their producer, as `dependsOn` does. A cycle is rejected with
@@ -83,10 +87,169 @@ state, as `plan` and `reconcile` do before reading it: the producer must exist
 and declare the output as non-sensitive. An artifact reference is checked only
 for the producer's existence.
 
-References and `dependsOn` entries require a current receipt, evidence
-`published`. Requiring `evidence: attested` or naming `attestations` is
-rejected with `NYL-ATTESTATIONS-UNSUPPORTED` until units record attestations
-in a later milestone, rather than accepting a receipt without them.
+### Requiring attestations
+
+A receipt says a unit ran, not that what it did works. A `dependsOn` entry or a
+`fromUnit` reference can require more of its producer with `evidence` and
+`attestations`:
+
+```yaml
+dependsOn:
+  - {unit: kubernetes, attestations: [healthy]}   # smoke tests run against healthy workloads
+values:
+  endpoint: {fromUnit: {unit: service, output: endpoint, evidence: attested}}
+```
+
+- `evidence: published` (the default) requires a current receipt.
+  `evidence: attested` also requires every attestation the producer declares to
+  pass, and a producer that declares none is satisfied by its receipt.
+- `attestations: [a, b]` requires exactly those, whatever `evidence` says. Each
+  must be one the producer declares: the names its kind produces, such as
+  `accepted` and `healthy` for a [publication that declares
+  `observe: {}`](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd), and the
+  names in its `spec.attestations`. Naming another is an error
+  (`NYL-ATTESTATION-UNDECLARED`), which `nyl validate` reports too.
+- An attestation declared with `from: external` is supplied only by a person
+  or an external system, and Nyl cannot record those yet
+  (`nyl attest --name … --result …` arrives with promotion). Requiring one,
+  by name or through `evidence: attested` on a producer that declares one, is
+  an error (`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`) rather than a consumer
+  that waits forever; require the names the producer's driver observes
+  instead. `nyl validate` reports it for producers in the same environment;
+  for another environment's producer, `plan` and `reconcile` do.
+- An attestation counts only for the receipt it names. A producer that
+  executes again starts with its attestations pending, and a pass recorded
+  for the earlier receipt no longer counts.
+- A consumer whose producer has a current receipt but lacks the evidence is
+  **blocked**, exit 2, and reports why: `attestation-pending` when nothing is
+  recorded for the receipt, `attestation-failing` when the recorded result is
+  `fail`, with the producer and the attestation, and a warning with the fix
+  (`NYL-ATTESTATION-PENDING` or `NYL-ATTESTATION-FAILING`). `plan` and `status`
+  show the same blocker.
+
+Attestations are recorded by [`nyl attest`](/nyl/reference/cli/detect-drift/#nyl-attest),
+typically in CI where the credentials exist, and by a unit that attests itself
+in its `reconcile`, such as a [Command](/nyl/orchestration/resource-guides/command/)
+whose `command` writes `NYL_ATTESTATIONS`. Every `reconcile` resolves again, so
+a blocked consumer runs in the first run after a pass is recorded, or in a later
+wave of the run in which its producer attested itself. Requiring an attestation
+adds no age limit: the recorded pass for the current receipt is enough, and a
+re-verified system simply keeps it fresh. A consumer that already ran stays
+`current` when the producer is attested again after executing, provided its own
+inputs did not change.
+
+A `dependsOn` entry gates a consumer but gives it no input, so a consumer with
+only `dependsOn` does not run again when only its producer's receipt changes:
+once the new receipt has its attestations, the consumer is `current` and
+nothing executes. To run a smoke test against each new version, make the
+version an input: read an output or artifact field of the producer that
+changes with it, such as its version, image digest, or endpoint, with
+`fromUnit`. When the value changes, the consumer's execution key changes and
+it runs, after the new receipt's attestations pass if the reference requires
+them:
+
+```yaml
+values:
+  version: {fromUnit: {unit: service, output: version, attestations: [healthy]}}
+``` The attestation `maxAttestationAge` limit belongs to
+promotion paths.
+
+### Observed values
+
+An output is produced by executing a unit. Some facts only appear after, such
+as the address a cloud load balancer assigns to a published Service, and can
+change while the unit's execution key stays the same. A unit whose kind reads
+such facts declares them under `observations`, and its driver reads them from
+the system the unit manages:
+
+```yaml
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata: {name: kubernetes}
+spec:
+  target: '{{ values.target }}'
+  observe: {}
+  observations:
+    ingressIp:
+      type: string
+      from:                 # the kind's own source; here a published resource's field
+        resource: {apiVersion: v1, kind: Service, namespace: ingress, name: ingress-nginx}
+        pointer: /status/loadBalancer/ingress/0/ip
+  observationWait: 10m
+  env: {passthrough: [KUBECONFIG]}
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata: {name: dns}
+spec:
+  command: ['./dns.sh']
+  values:
+    address: {fromUnit: {unit: kubernetes, observation: ingressIp}}
+```
+
+`type` is one of the output types, checked on every read; `maxAge` is how old
+the last successful read may get before the value stops resolving. What `from`
+means belongs to the kind: its driver validates it and Nyl never reads it. A
+kind that reads no observed values rejects `observations`
+(`NYL-OBSERVATIONS-UNSUPPORTED`), and an observation is never sensitive.
+
+Observed values are committed in plain text to the state repository, where
+everyone who can read it can read them: observe only non-secret fields. A kind
+may reject some sources (a publication never reads Secrets or a whole
+resource), but cannot tell what a ConfigMap or a custom resource holds.
+
+An observed value is an observation of the producer's *current receipt*, never
+part of it. It is recorded in the observed state
+(`observed/units/<unit>/observations.yaml`), and the commit that records a new
+receipt, a re-execution with the same key included, removes the previous receipt's values, so a value read from what ran
+before never satisfies a reference.
+
+- **When Nyl reads.** `reconcile` reads every unit with a current receipt that
+  declares observations once, before it resolves the unit's consumers,
+  including a unit it does not execute: this is how an address that changed by
+  itself reaches its consumers in one run. A run that executes a unit with an
+  `observationWait` then reads again about every 15 seconds, until every value
+  has a value or the wait has passed since the execution finished (within the
+  unit's `timeout`). It waits only when no other unit is ready, so units that do
+  not depend on the value are not held back. With the default `0s` a run reads
+  once, and a value that is not there stays `pending` for a later run.
+  [`nyl observe`](/nyl/reference/cli/observe/) reads and records without
+  executing anything, for jobs that hold read credentials a reconcile may
+  lack.
+- **Pending, failed, stale.** A read finds a value, `pending` (the system has
+  not caught up, with the driver's reason), or `failed` (it could not read, such
+  as for missing credentials). A consumer of a pending value is **blocked**,
+  exit 2, with `NYL-OBSERVATION-PENDING` and the reason. A failed read keeps the
+  last recorded value for the receipt and warns with `NYL-OBSERVATION-FAILED`; a
+  value older than its `maxAge` is pending for its consumers.
+- **A changed value is work for the next reconcile.** It is neither drift nor
+  evidence: the producer's receipt still holds, and `driftRepair` does not
+  apply. The value enters its consumers' execution keys, so each of them runs
+  again like for any changed input, under its own
+  [`approval`](#approvals), while the producer does not execute. `nyl status`
+  and `nyl plan` show such a consumer as `ready`, and `nyl observe` names it
+  with `NYL-OBSERVATION-CHANGED`. They find consumers from the stored documents,
+  without rendering. That includes a consumer in another environment that reads
+  the value through a reference with `environment`: `nyl observe -e <producer
+  environment>` reads the other environments' state without taking a lease or
+  writing, and names it with its environment (`prod/dns`) and the fix
+  `nyl reconcile -e prod`, and `nyl status -e prod` shows it `ready` once the
+  producer environment records another value than the one it resolved. What a
+  problem with one of those environments means follows
+  [Other environments](#other-environments): `observe` only advises, so one it
+  cannot use is a `NYL-STATE-UNAVAILABLE` warning and its consumers are not
+  compared, while `status` requires the producers it compares against. A consumer in another environment that waits
+  for a value that has now arrived is found the same way: `nyl observe` names it
+  as ready, and `nyl status -e prod` shows it `ready` rather than `blocked`.
+- **What is written.** The record changes only when a value arrives, changes,
+  or becomes pending again, or when the last successful read is older than an
+  hour (half the `maxAge` when that is shorter), so an unchanged read writes
+  nothing. The transition commit lists the observations that changed under
+  `observationsChanged`.
+
+`nyl get observation <unit>/<name> -e <env>` prints the recorded value, resolved
+like the reference would. References to another declared environment read the
+other environment's recorded values.
 
 ## Source commit
 
@@ -213,7 +376,8 @@ same outputs leaves its consumers current, and a unit that must run again
 whenever a producer is recreated says so in its inputs, for example by
 reading an output that changes with every creation. A unit whose latest
 drift record is `drifted` runs again too, as
-[Recovery](/nyl/orchestration/recovery/#repairing-drift) describes.
+[Recovery](/nyl/orchestration/recovery/#repairing-drift) describes, and
+`nyl reconcile --detect-drift` records that drift first, in the same run.
 
 The execution key is a digest of everything that decides what the unit does:
 its resolved spec, including the values its references resolved to, the
@@ -346,6 +510,11 @@ imported: []
 driftRepaired: [config]
 ```
 
+With `nyl reconcile --detect-drift`, a unit's entry also carries `driftCheck`,
+what the run's [drift check](/nyl/orchestration/recovery/#detecting-drift-in-a-reconcile)
+found for it, such as `"driftCheck":{"check":"drifted","summary":"…"}`; a unit
+the run did not check has none.
+
 Lifecycle work adds its details: `released` and `retained` list the units
 and what they left in place, `allowDependents` the tombstones an override
 passed, `confirmedRemoval` how a publication's teardown wait ended,
@@ -450,7 +619,11 @@ producer plan changes a referenced unit, the consumer plan waits and names
 that producer's planned change, even when `--unit` hides it from the producer's
 report. A producer cannot be torn down while other
 environments' stored desired units reference it unless `--allow-dependents`
-permits that action.
+permits that action. Instances of an
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/#reading-declared-environments)
+read declared environments the same way and protect their producers the same
+way; they are consumers only, and a reference that names an instance as its
+producer fails with `NYL-REFERENCE-INSTANCE-PRODUCER`.
 
 In a selection containing several environments, unit options must name their
 environment: `--unit services/api` and `--approve services/api=<digest>`.
@@ -464,3 +637,36 @@ held units and units awaiting teardown whose source no longer declares them.
 If an environment's state cannot be read, environments
 that claim native resources are refused until access returns; independent
 units without resource claims can still run.
+
+### Other environments
+
+A command reads an environment other than its own for one of two reasons, and
+the reason decides what a problem there means, whatever kind of problem it is:
+
+| The command reads it | An invalid declaration or unreadable state is |
+| --- | --- |
+| **Required**: it cannot do its job without it, such as the producer environment a unit's reference resolves from (`plan`, `reconcile`, `status`, `get units`), or every other environment when a unit is leaving, because any of them may hold a consumer | An error with a code and a fix: `NYL-STATE-UNAVAILABLE`, or the environment's own code |
+| **Advisory**: it reads it only to give advice, such as the scan of [`nyl observe`](/nyl/reference/cli/observe/) for consumers elsewhere whose input changed | A `NYL-STATE-UNAVAILABLE` warning that names the environment, and a fix that points to `nyl validate` |
+| Not at all | Not judged |
+
+An environment the command's `-e` names is always required. A state URL that is
+not a URL, a `repositoryRef` that names no GitRepository, a repository that
+cannot be read, and an environment nobody declares count alike. A broken
+declaration of an environment a command does not read never fails it:
+`nyl reconcile -e dev`, `nyl plan -e dev`, `nyl status -e dev`, and
+`nyl observe -e dev` run while the state URL of `prod` is malformed, with
+two exceptions that follow from what they need:
+
+- A unit that is leaving needs the consumers in every other environment and
+  in every instance of every template, so with one of them unusable, the
+  reconcile fails with `NYL-STATE-UNAVAILABLE` (exit 1) and the unit stays in
+  state. A template whose state URL is malformed counts: its instances are
+  unknown, not absent.
+- Units that claim native resources, such as OpenTofu, are checked against the
+  stored claims of every environment. With one environment's declaration
+  invalid, `reconcile -e dev` runs only when dev's units claim no native
+  resources; otherwise it fails with the invalid declaration's own message,
+  and its fix names `nyl validate`.
+
+[`nyl validate`](/nyl/reference/cli/validate/) reports every invalid
+declaration as an error, all of them in one run, so a pipeline catches them.

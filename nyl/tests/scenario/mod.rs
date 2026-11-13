@@ -8,9 +8,11 @@
 
 #![allow(dead_code)] // Each test binary uses part of the harness.
 
+pub mod cross;
 pub mod format;
 #[cfg(feature = "tier2")]
 pub mod native;
+pub mod observing;
 pub mod runner;
 pub mod shell;
 pub mod world;
@@ -20,7 +22,7 @@ use std::path::{Path, PathBuf};
 use format::{Milestone, Scenario};
 
 /// The milestone this harness has reached.
-pub const REACHED: Milestone = Milestone(4);
+pub const REACHED: Milestone = Milestone(5);
 
 /// A scenario file and its parsed content.
 pub struct Loaded {

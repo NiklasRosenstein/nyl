@@ -7,10 +7,12 @@
 pub mod environment;
 pub mod git_source;
 mod gitops;
+pub mod parse;
 pub mod schema;
 pub mod strict;
 pub mod units;
 
 pub use git_source::{GitSource, ReadGitRepository};
 pub use gitops::*;
+pub use parse::parse_resource;
 pub use strict::DenyUnknownFields;

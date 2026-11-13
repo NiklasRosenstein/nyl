@@ -13,9 +13,12 @@ Examples:
 Behavior:
   1. Verifies git working tree is clean
   2. Updates the workspace version in Cargo.toml and Cargo.lock
-  3. Commits the version bump
-  4. Creates a git tag (default: v<version>)
-  5. Pushes current branch and the tag to origin
+  3. For a final release, renames .changelog/_unreleased.toml to
+     .changelog/<version>.toml with today's release-date; a prerelease
+     (for example 0.2.1-rc.1) leaves the unreleased entries in place
+  4. Commits the version bump and changelog in one commit
+  5. Creates a git tag (default: v<version>)
+  6. Pushes current branch and the tag to origin
 EOF
 }
 
@@ -73,12 +76,33 @@ if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; t
   exit 1
 fi
 
-# Restore the manifest and lockfile if any step before the commit fails, so
-# the clean-tree check does not block a re-run.
-restore_manifests() {
+# A final release moves the unreleased changelog entries into the version's
+# file. A prerelease keeps them for the final release.
+unreleased_changelog=".changelog/_unreleased.toml"
+release_changelog=""
+if [[ "$version" != *-* ]]; then
+  release_changelog=".changelog/${version%%+*}.toml"
+  if [[ ! -f "$unreleased_changelog" ]]; then
+    echo "error: ${unreleased_changelog} is missing; add the release's changelog entries first" >&2
+    exit 1
+  fi
+  if [[ -e "$release_changelog" ]]; then
+    echo "error: ${release_changelog} already exists" >&2
+    exit 1
+  fi
+fi
+
+# Restore the manifests and the changelog if any step before the commit
+# fails, so the clean-tree check does not block a re-run.
+restore_worktree() {
+  git reset -q -- Cargo.toml Cargo.lock .changelog
   git checkout -- Cargo.toml Cargo.lock
+  if [[ -n "$release_changelog" ]]; then
+    rm -f "$release_changelog"
+    git checkout -- "$unreleased_changelog"
+  fi
 }
-trap restore_manifests ERR
+trap restore_worktree ERR
 
 tmp_file="$(mktemp)"
 
@@ -110,10 +134,20 @@ mv "${tmp_file}" Cargo.toml
 
 # Refresh the Cargo.lock entries of every workspace member from the bumped
 # manifest, then confirm the lockfile is consistent with it.
-cargo update --workspace --offline
-cargo metadata --locked --offline --no-deps --format-version 1 >/dev/null
+cargo update --workspace
+cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
 git add Cargo.toml Cargo.lock
+
+if [[ -n "$release_changelog" ]]; then
+  {
+    printf 'release-date = "%s"\n\n' "$(date -u +%Y-%m-%d)"
+    cat "$unreleased_changelog"
+  } > "$release_changelog"
+  git rm -q "$unreleased_changelog"
+  git add "$release_changelog"
+fi
+
 git commit -m "chore(release): bump nyl to ${version}"
 trap - ERR
 git tag "${tag}"

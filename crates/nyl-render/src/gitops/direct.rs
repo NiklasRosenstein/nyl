@@ -41,10 +41,9 @@ pub struct DirectWorkloadRequest<'a> {
     pub target: Option<(&'a GitOpsInventory, &'a DeploymentTarget)>,
     /// The Release file the command renders.
     pub file: &'a Path,
-    /// `--application-group`: the group, when the file's location does not decide.
-    pub application_group: Option<&'a str>,
-    /// `--defaults-only`: render outside every group, resolving no group source.
-    pub defaults_only: bool,
+    /// The group [`select_direct_group`] chose, with whether it renders the
+    /// file itself. `--application-group` and `--defaults-only` decide it.
+    pub group: Option<(ApplicationGroup, bool)>,
     /// The render departs from the target's, for example by `--input`
     /// overrides, so it cannot be taken from the compiled target.
     pub standalone: bool,
@@ -88,12 +87,7 @@ pub async fn resolve_direct_workload(
             destination_namespace: None,
         });
     };
-    let selected = match request.target {
-        Some((inventory, target)) if !request.defaults_only => {
-            rendering_group(inventory, target, request.file, request.application_group)?
-        }
-        _ => None,
-    };
+    let selected = request.group.clone();
     if let (Some((group, true)), Some((inventory, target)), DirectScope::Target, false) =
         (&selected, request.target, request.scope, request.standalone)
     {
@@ -114,10 +108,26 @@ pub async fn resolve_direct_workload(
     })
 }
 
+/// The ApplicationGroup a direct command deploys `file` with, chosen before the
+/// file renders because its `destinationNamespace` decides where documents
+/// without a namespace go. `None` without a target, with `defaults_only`, and
+/// when no group renders the file.
+pub fn select_direct_group(
+    target: Option<(&GitOpsInventory, &DeploymentTarget)>,
+    file: &Path,
+    application_group: Option<&str>,
+    defaults_only: bool,
+) -> Result<Option<(ApplicationGroup, bool)>> {
+    match target {
+        Some((inventory, target)) if !defaults_only => rendering_group(inventory, target, file, application_group),
+        _ => Ok(None),
+    }
+}
+
 /// The enabled ApplicationGroup of the target that renders `file`, by the same
 /// file selection as `render-tree`, or the one `--application-group` names,
 /// with whether that group renders the file itself.
-fn rendering_group(
+pub(super) fn rendering_group(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
     file: &Path,
@@ -156,6 +166,27 @@ fn rendering_group(
             file.display()
         ))),
     }
+}
+
+/// The documents of the files of `files` beneath `directory`, in path order:
+/// one Release's resources as a tree lays them out. A direct command takes them
+/// from the compiled target and the publication driver from the tree it pushed,
+/// both through this function, so what is applied is what the tree holds.
+pub fn release_documents(files: &std::collections::BTreeMap<PathBuf, Vec<u8>>, directory: &Path) -> Result<Vec<Value>> {
+    let mut manifests = Vec::new();
+    for (path, bytes) in files.range(directory.to_path_buf()..) {
+        if !path.starts_with(directory) {
+            break;
+        }
+        manifests.extend(file_documents(path, bytes)?);
+    }
+    Ok(manifests)
+}
+
+fn file_documents(path: &Path, bytes: &[u8]) -> Result<Vec<Value>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| NylError::config(format!("Rendered file {} is not UTF-8: {error}", path.display())))?;
+    serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)
 }
 
 /// The Release's resources as the compiled target lays them out for its
@@ -198,9 +229,7 @@ async fn from_compiled_target(
             break;
         }
         found = true;
-        let text = std::str::from_utf8(bytes)
-            .map_err(|error| NylError::config(format!("Rendered file {} is not UTF-8: {error}", path.display())))?;
-        let documents = serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)?;
+        let documents = file_documents(path, bytes)?;
         let provenance = compiled.provenance.get(path);
         for (index, manifest) in documents.into_iter().enumerate() {
             if let Some(origin) = provenance.and_then(|provenance| provenance.get(index)) {

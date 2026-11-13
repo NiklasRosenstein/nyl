@@ -35,8 +35,9 @@ async fn main() {
         .with(indicatif_layer.with_filter(IndicatifFilter::new(false)))
         .init();
 
-    // Execute command
-    if let Err(e) = cli.execute().await {
+    // Execute command. Boxed so the main thread's stack does not hold every
+    // command's future: Windows debug builds run it on 1 MiB.
+    if let Err(e) = Box::pin(cli.execute()).await {
         if !matches!(e, nyl_render::NylError::ValidationReported(_)) {
             tracing::error!("{e}");
         }

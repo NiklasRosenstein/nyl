@@ -45,7 +45,7 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{RunState, TransitionChanges};
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Condition, DesiredUnit, ObservedUnit, Operation, StateLocation,
+    ArtifactDocument, Attestation, Condition, DesiredUnit, ObservationRecord, ObservedUnit, Operation, StateLocation,
 };
 use serde_json::{json, Value};
 
@@ -311,6 +311,8 @@ pub(crate) fn after_import(
     desired: Option<&DesiredUnit>,
     observed: &mut BTreeMap<UnitName, ObservedUnit>,
     artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    attestations: &mut BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    observations: &mut BTreeMap<UnitName, ObservationRecord>,
     runs: &[RunState],
     acknowledgement: &nyl_core::orchestration::state::Request,
 ) -> Result<Value, Finding> {
@@ -331,6 +333,17 @@ pub(crate) fn after_import(
         } else {
             artifacts.insert(recover.unit.clone(), set);
         }
+    }
+    if let Some(evidence) = recovery.evidence {
+        if evidence.attestations.is_empty() {
+            attestations.remove(&recover.unit);
+        } else {
+            attestations.insert(recover.unit.clone(), evidence.attestations);
+        }
+        match evidence.observations {
+            Some(record) => observations.insert(recover.unit.clone(), record),
+            None => observations.remove(&recover.unit),
+        };
     }
     observed.insert(recover.unit.clone(), recovery.observed);
     Ok(action_entry(&recover.action))
@@ -404,6 +417,15 @@ pub fn recover(
                     changes.artifacts.insert(unit.clone(), after);
                 }
             }
+            if let Some(evidence) = &recovery.evidence {
+                let attested = (!evidence.attestations.is_empty()).then(|| evidence.attestations.clone());
+                if snapshot.attestations.get(unit) != attested.as_ref() {
+                    changes.attestations.insert(unit.clone(), attested);
+                }
+                if snapshot.observations.get(unit) != evidence.observations.as_ref() {
+                    changes.observations.insert(unit.clone(), evidence.observations.clone());
+                }
+            }
             let mut summary = summary(Operation::Recover, environment, "");
             summarize(&mut summary, Some((unit.clone(), action_entry(action))));
             commit(context, location, held, &snapshot, summary, changes, requested, report)?;
@@ -463,6 +485,8 @@ mod retry_tests {
         };
         let mut observed = BTreeMap::from([(recover.unit.clone(), failed.clone())]);
         let mut artifacts = BTreeMap::new();
+        let mut attestations = BTreeMap::new();
+        let mut observations = BTreeMap::new();
         let mut request = Request {
             by: "operator".to_owned(),
             at: "2026-10-28T00:00:00Z".parse().unwrap(),
@@ -475,6 +499,8 @@ mod retry_tests {
                 Some(&desired),
                 &mut observed,
                 &mut artifacts,
+                &mut attestations,
+                &mut observations,
                 &[],
                 &request
             )
@@ -490,6 +516,8 @@ mod retry_tests {
             Some(&desired),
             &mut observed,
             &mut artifacts,
+            &mut attestations,
+            &mut observations,
             &[],
             &request,
         )

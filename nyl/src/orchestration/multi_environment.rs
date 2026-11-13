@@ -13,13 +13,24 @@ use nyl_core::orchestration::ports::{
 use nyl_orchestration::rules::multi_environment::{dependencies, order};
 use nyl_orchestration::run_report::ReportKind;
 
-use super::project::declared;
+use super::project::{declared, resolve_environment_with, InstanceRequest};
 use super::run::CommandOutcome;
 use super::session::{pretty_json, stopped, Stop};
 use crate::cli::commands::reconcile::RunOutput;
 use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::units::UnitSourceRenderer;
 use nyl_render::gitops::GitOpsInventory;
+
+/// What a command that removes expired instances says about expiry: an
+/// instance it removes is not rendered by the preflight, because removing it
+/// needs its stored documents and not its source.
+///
+/// Contract: [Expiry](../../../design/orchestration-core.md#expiry).
+#[derive(Debug, Clone, Copy)]
+pub struct Expiry {
+    pub intent: nyl_orchestration::rules::expiry::Intent,
+    pub now: nyl_core::orchestration::time::Timestamp,
+}
 
 /// Selected environments in dependency order, with independent preflight errors.
 pub struct Selection {
@@ -39,10 +50,25 @@ pub fn select(
     source_override: Option<&str>,
     offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
+    instance: &InstanceRequest,
+    expiry: Option<Expiry>,
 ) -> Result<Selection, Stop> {
     let inventory = discover_gitops_inventory(path, None, crate::resource_catalogue())?;
     let (environments, groups) = declared(&inventory);
-    let selection = selection_names(&environments, &groups, names, labels, group)?;
+    // Named environments that are not declared are instances of an
+    // EnvironmentTemplate, known by their records; `--template` and
+    // `--param` name the one being created or updated.
+    let hint = |name: &str| InstanceRequest {
+        offline,
+        ..if names.len() == 1 && names[0] == name {
+            instance.clone()
+        } else {
+            InstanceRequest::default()
+        }
+    };
+    let (instances, mut errors, undeclared, unlisted, expiries) = known_instances(&inventory, names, &hint, offline);
+    let inventory = inventory.with_instances(instances);
+    let selection = selection_names(&environments, &groups, names, labels, group, &undeclared)?;
     if selection.is_empty() {
         return Ok(Selection {
             names: Vec::new(),
@@ -50,6 +76,7 @@ pub fn select(
         });
     }
     single_source(source_override, &selection.iter().cloned().collect::<Vec<_>>())?;
+    let removing = removing_instances(&inventory, &expiries, &selection, expiry);
     let repository = git2::Repository::discover(&inventory.project_root)
         .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
     let commit = repository
@@ -59,22 +86,30 @@ pub fn select(
     let commit = CommitId::new(commit.id().to_string())
         .map_err(|error| Finding::new(Code::SourceUnavailable, error.to_string(), "check out a source commit"))?;
     let renderer = UnitSourceRenderer::new(super::session::project_dir(&inventory), crate::resource_catalogue())
-        .with_previous_paths(inventory.project_config.config.project.previous_paths.clone());
+        .with_previous_paths(inventory.project_config.config.project.previous_paths.clone())
+        .with_instances(inventory.instances.clone());
     let mut graph = BTreeMap::new();
     let mut rendered_sources = BTreeMap::new();
-    let mut errors = BTreeMap::new();
-    for environment in environments {
-        let name = environment
-            .name()
-            .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
+    let mut all = nyl_render::gitops::instances::environment_names(&inventory)
+        .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
+    // A named environment that could not be resolved still takes part, so its
+    // finding is reported instead of the name vanishing from the selection.
+    all.extend(errors.keys().filter_map(|name| EnvironmentName::new(name).ok()));
+    all.sort();
+    all.dedup();
+    for name in all {
+        if errors.contains_key(name.as_str()) {
+            graph.insert(name, BTreeSet::new());
+            continue;
+        }
         match read_environment(
             &inventory,
             &name,
             &commit,
             &renderer,
-            source_graph,
+            source_graph && !removing.contains(&name),
             source_override.filter(|_| selection.contains(name.as_str())),
-            offline,
+            &hint(name.as_str()),
         ) {
             Ok((dependencies, rendered)) => {
                 graph.insert(name.clone(), dependencies);
@@ -97,16 +132,10 @@ pub fn select(
         }
     }
     if source_graph {
-        ownership_preflight(&inventory, &rendered_sources, &mut errors, offline, drivers)?;
+        ownership_preflight(&inventory, &rendered_sources, &mut errors, drivers, &hint, &unlisted)?;
     }
     let ordered = if source_graph {
-        nyl_orchestration::rules::multi_environment::validate_available_sources(
-            &rendered_sources,
-            &errors
-                .keys()
-                .filter_map(|name| EnvironmentName::new(name).ok())
-                .collect(),
-        )?
+        validate_rendered_sources(&inventory, &rendered_sources, &mut errors, &removing)?
     } else {
         order(&graph)?
     };
@@ -120,26 +149,169 @@ pub fn select(
     })
 }
 
+/// Validate the rendered sources of every environment together and order them.
+/// A consumer's bad reference is that environment's error, never the others'.
+fn validate_rendered_sources(
+    inventory: &GitOpsInventory,
+    rendered_sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    errors: &mut BTreeMap<String, Finding>,
+    removing: &BTreeSet<EnvironmentName>,
+) -> Result<Vec<EnvironmentName>, Stop> {
+    let validation = nyl_orchestration::rules::multi_environment::validate_available_sources(
+        rendered_sources,
+        &errors
+            .keys()
+            .filter_map(|name| EnvironmentName::new(name).ok())
+            .chain(removing.iter().cloned())
+            .collect(),
+        &nyl_render::gitops::instances::instance_only_names(inventory)
+            .map_err(|error| nyl_render::NylError::config(error.to_string()))?,
+    )?;
+    for (name, finding) in validation.errors {
+        errors.entry(name.to_string()).or_insert(finding);
+    }
+    Ok(validation.order)
+}
+
+/// The instances commands across environments know: the ones state lists,
+/// and the named environments that are not declared, resolved with their
+/// `--template` and `--param` hints. A named environment that cannot be
+/// resolved is a finding of its own, and is left out of the instances.
+fn known_instances(
+    inventory: &GitOpsInventory,
+    names: &[String],
+    hint: &dyn Fn(&str) -> InstanceRequest,
+    offline: bool,
+) -> (
+    nyl_core::orchestration::instance::Instances,
+    BTreeMap<String, Finding>,
+    Vec<String>,
+    Unlisted,
+    Expiries,
+) {
+    let (declared_environments, _) = declared(inventory);
+    let mut instances = nyl_core::orchestration::instance::Instances::new();
+    let mut expiries = Expiries::new();
+    let mut errors = BTreeMap::new();
+    let mut undeclared = Vec::new();
+    let listing = super::project::list_instances(inventory, offline);
+    let unlisted: Unlisted = listing
+        .unavailable
+        .iter()
+        .map(|template| {
+            let why = listing.invalid.get(template).map_or_else(
+                || "its state could not be read".to_owned(),
+                |cause| cause.message.clone(),
+            );
+            (template.clone(), why)
+        })
+        .collect();
+    for instance in listing.instances {
+        expiries.insert(
+            instance.name.clone(),
+            (instance.descriptor.template.clone(), instance.record.expires_at),
+        );
+        instances.insert(instance.name, instance.descriptor);
+    }
+    for name in names {
+        if declared_environments
+            .iter()
+            .any(|environment| environment.metadata.name == *name)
+        {
+            continue;
+        }
+        match resolve_environment_with(inventory, name, &hint(name)) {
+            Ok(resolved) => {
+                if let Some(found) = resolved.instance {
+                    // The record the command read is newer than the listing's.
+                    expiries.insert(
+                        resolved.name.clone(),
+                        (
+                            found.template.clone(),
+                            found.record.as_ref().and_then(|record| record.expires_at),
+                        ),
+                    );
+                    instances.insert(resolved.name, found.descriptor());
+                }
+            }
+            Err(finding) => {
+                errors.insert(name.clone(), finding);
+            }
+        }
+        undeclared.push(name.clone());
+    }
+    (instances, errors, undeclared, unlisted, expiries)
+}
+
+/// The selected instances a reconcile with `expiry` removes: expired ones are
+/// not rendered by the preflight, because removing one runs from its stored
+/// documents, so a lost source commit cannot keep it alive.
+fn removing_instances(
+    inventory: &GitOpsInventory,
+    expiries: &Expiries,
+    selection: &BTreeSet<String>,
+    expiry: Option<Expiry>,
+) -> BTreeSet<EnvironmentName> {
+    let Some(expiry) = expiry else {
+        return BTreeSet::new();
+    };
+    expiries
+        .iter()
+        .filter(|(name, _)| selection.contains(name.as_str()))
+        .filter(|(_, (template, expires_at))| {
+            let ttl = nyl_render::gitops::instances::find_template(inventory, template)
+                .and_then(|template| template.spec.ttl);
+            nyl_orchestration::rules::expiry::decide(expiry.intent, *expires_at, ttl, expiry.now)
+                == nyl_orchestration::rules::expiry::Disposition::Remove
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Each known instance's template and recorded expiry.
+type Expiries = BTreeMap<EnvironmentName, (String, Option<nyl_core::orchestration::time::Timestamp>)>;
+
+/// The templates whose instances could not be listed, with why.
+type Unlisted = Vec<(String, String)>;
+
 /// Stored incarnations keep their resource claims until they leave state,
 /// including when source changes or stops selecting a held or deleting unit.
 fn ownership_preflight(
     inventory: &GitOpsInventory,
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     errors: &mut BTreeMap<String, Finding>,
-    offline: bool,
     drivers: &nyl_core::orchestration::driver::DriverSet,
+    hint: &dyn Fn(&str) -> InstanceRequest,
+    unlisted: &Unlisted,
 ) -> Result<(), Stop> {
     let mut snapshots = BTreeMap::new();
-    let mut unknown = Vec::new();
-    for environment in declared(inventory).0 {
-        let name = environment
-            .name()
-            .map_err(|error| nyl_render::NylError::config(error.to_string()))?;
-        match snapshot(inventory, &name, offline) {
+    // What keeps an environment's stored claims from being read, with the
+    // finding's own message and fix: its declaration cannot be used, or its
+    // state cannot be read. Instances that could not be listed hold claims
+    // nobody can check.
+    let mut unknown: Vec<Finding> = unlisted
+        .iter()
+        .map(|(template, why)| {
+            Finding::new(
+                Code::StateUnavailable,
+                format!("the instances of EnvironmentTemplate {template} could not be listed: {why}"),
+                "check access to the template's state repository",
+            )
+        })
+        .collect();
+    for name in nyl_render::gitops::instances::environment_names(inventory)
+        .map_err(|error| nyl_render::NylError::config(error.to_string()))?
+    {
+        match snapshot(inventory, &name, &hint(name.as_str())) {
             Ok(snapshot) => {
                 snapshots.insert(name, snapshot);
             }
-            Err(_) => unknown.push(name.to_string()),
+            Err(Stop::Finding(finding)) => unknown.push(finding),
+            Err(Stop::Error(error)) => unknown.push(Finding::new(
+                Code::StateUnavailable,
+                format!("cannot read the state of {name}: {error}"),
+                "check access to the environment's state",
+            )),
         }
     }
     if let Some(finding) =
@@ -150,25 +322,40 @@ fn ownership_preflight(
         return Err(finding.into());
     }
     if !unknown.is_empty() {
+        let message = format!(
+            "cannot check the stored resource ownership claims of every environment: {}",
+            unknown
+                .iter()
+                .map(|finding| finding.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        let mut fixes: Vec<&str> = Vec::new();
+        for finding in &unknown {
+            if !fixes.contains(&finding.fix.as_str()) {
+                fixes.push(finding.fix.as_str());
+            }
+        }
+        let fix = format!(
+            "{}; `nyl validate` reports an invalid declaration. Units that claim native resources run once every environment's state can be read",
+            fixes.join("; ")
+        );
         for owner in nyl_orchestration::rules::desired::scope_owners(sources, drivers) {
-            errors.entry(owner.to_string()).or_insert_with(|| {
-                Finding::new(
-                    Code::StateUnavailable,
-                    format!(
-                        "cannot check stored resource ownership claims of environments {}: state is unavailable",
-                        unknown.join(", ")
-                    ),
-                    "restore access before running units that claim native resources",
-                )
-            });
+            errors
+                .entry(owner.to_string())
+                .or_insert_with(|| Finding::new(Code::StateUnavailable, message.clone(), fix.clone()));
         }
     }
     Ok(())
 }
 
-fn snapshot(inventory: &GitOpsInventory, name: &EnvironmentName, offline: bool) -> Result<EnvironmentSnapshot, Stop> {
-    let resolved = super::project::resolve_environment(inventory, name.as_str())?;
-    let store = super::project::open_store_mode(inventory, &resolved, None, offline)?;
+fn snapshot(
+    inventory: &GitOpsInventory,
+    name: &EnvironmentName,
+    request: &InstanceRequest,
+) -> Result<EnvironmentSnapshot, Stop> {
+    let resolved = resolve_environment_with(inventory, name.as_str(), request)?;
+    let store = super::project::open_store_mode(inventory, &resolved, None, request.offline)?;
     store.snapshot(&resolved.location).map_err(|error| {
         Finding::new(
             Code::StateUnavailable,
@@ -187,10 +374,10 @@ fn read_environment(
     renderer: &UnitSourceRenderer,
     source_graph: bool,
     source_override: Option<&str>,
-    offline: bool,
+    request: &InstanceRequest,
 ) -> Result<(BTreeSet<EnvironmentName>, Option<RenderedSource>), Stop> {
     if !source_graph {
-        let snapshot = snapshot(inventory, name, offline)?;
+        let snapshot = snapshot(inventory, name, request)?;
         return Ok((
             snapshot
                 .desired
@@ -201,17 +388,50 @@ fn read_environment(
             None,
         ));
     }
-    let resolved = super::project::resolve_environment(inventory, name.as_str())?;
+    let resolved = resolve_environment_with(inventory, name.as_str(), request)?;
     let (_, groups) = declared(inventory);
     let entry = nyl_core::resources::environment::effective_environment(&resolved.environment, &groups)?;
     if let Some(finding) = nyl_orchestration::rules::sources::unsupported_source(&entry) {
         return Err(finding.into());
     }
     let auth = crate::cli::git_auth::project_git_auth(&inventory.project_config.config)?;
-    let sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
-    let source_commit = match source_request(&entry, commit, source_override) {
+    let mut sources = nyl_state::source::GitSourceResolver::new(&resolved.git_dir, auth);
+    // A recorded commit the clone lacks is fetched first through the instance's keep refs,
+    // then by its id from the clone's origin.
+    if !request.offline {
+        sources = sources.with_origin_fetch();
+    }
+    if let Some(id) = resolved
+        .instance
+        .as_ref()
+        .and_then(|instance| instance.record.as_ref()?.keep_id.as_ref())
+        .filter(|_| !request.offline)
+    {
+        sources = sources.with_kept_source(nyl_orchestration::rules::keep::keep_prefix(id));
+    }
+    if let Some(reference) = resolved
+        .instance
+        .as_ref()
+        .and_then(|instance| {
+            instance
+                .source_ref
+                .clone()
+                .or_else(|| instance.record.as_ref()?.source_ref.clone())
+        })
+        .filter(|_| !request.offline)
+    {
+        sources = sources.with_source_ref(reference);
+    }
+    // An instance not entered from its own checkout renders at its recorded commit.
+    let recorded = resolved
+        .instance
+        .as_ref()
+        .filter(|_| request.template.is_none())
+        .and_then(|instance| instance.record.as_ref()?.source_commit.clone());
+    let commit = recorded.as_ref().unwrap_or(commit);
+    let source_commit = match source_request(&entry, commit, source_override, recorded.is_some()) {
         SourceRequest::Worktree(snapshot) => snapshot.commit,
-        SourceRequest::Entry(commit) | SourceRequest::Commit { commit, .. } => commit,
+        SourceRequest::Entry(commit) | SourceRequest::Recorded(commit) | SourceRequest::Commit { commit, .. } => commit,
         SourceRequest::Revision(revision) | SourceRequest::Override(revision) => sources
             .resolve_revision(&SourceRepository::This, &revision)
             .map_err(|error| {
@@ -259,6 +479,7 @@ fn selection_names(
     names: &[String],
     labels: Option<&str>,
     group: Option<&str>,
+    undeclared: &[String],
 ) -> Result<BTreeSet<String>, Stop> {
     let matches = if let Some(group) = group {
         groups
@@ -311,6 +532,7 @@ fn selection_names(
             }
         })
         .map(|environment| environment.metadata.name.clone())
+        .chain(undeclared.iter().cloned())
         .collect::<BTreeSet<_>>();
     for name in names {
         if !selection.contains(name) {

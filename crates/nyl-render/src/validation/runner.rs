@@ -212,7 +212,7 @@ fn partition_for(inventory: &GitOpsInventory, effective: EffectiveCluster) -> Re
 /// Build partitions using installation destinations, not Application.spec.destination.
 pub fn tree_partitions(inventory: &GitOpsInventory, compiled: &CompiledTargetTree) -> Result<Vec<ValidationPartition>> {
     let workload = compiled.target.cluster_name();
-    let catalog = if let Some(reference) = &compiled.target.spec.argocd_ref {
+    let catalog = if let Some(reference) = compiled.target.argocd_instance_ref() {
         match inventory
             .get(GitOpsResourceKind::ArgoCDInstance, &reference.name)
             .and_then(|resource| resource.resource.as_ref())

@@ -19,6 +19,24 @@
         }
       ]
     },
+    "ArgoCdReconciler": {
+      "additionalProperties": false,
+      "description": "Options of the Argo CD reconciler.",
+      "properties": {
+        "instanceRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Project-local ArgoCDInstance. Required when any explicit instance exists; not allowed when none is declared, where Nyl uses a target-local instance in the workload Cluster and `argocd` namespace."
+        }
+      },
+      "type": "object"
+    },
     "CatalogApplicationOverrides": {
       "additionalProperties": false,
       "properties": {
@@ -42,7 +60,7 @@
         },
         "enabled": {
           "default": true,
-          "description": "Whether to generate a catalog Application recursively sourcing `_nyl/catalog`.",
+          "description": "Whether to generate a catalog Application recursively sourcing `_nyl/catalog`. A target with `shared` generates none, whatever this says.",
           "type": "boolean"
         },
         "labels": {
@@ -77,6 +95,17 @@
           ],
           "description": "Self-pruning override; inherits the instance default when omitted."
         },
+        "shared": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SharedCatalogApplication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sync this target's catalog directory through a catalog Application shared by many targets, such as every preview on a branch. Nyl renders that Application once, under `_nyl/shared/<name>/`, and the target generates no catalog Application of its own. The other `catalogApplication` fields then belong in this block, because they describe the shared Application."
+        },
         "syncPolicy": {
           "anyOf": [
             {
@@ -98,17 +127,6 @@
           "$ref": "#/$defs/LabelSelector",
           "default": {},
           "description": "Matches literal ApplicationGroup metadata labels before rendering their specs. An empty selector matches all groups."
-        },
-        "argocdRef": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LocalReference"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Project-local ArgoCDInstance. Required when any explicit instance exists; otherwise Nyl uses a target-local instance in the workload Cluster and `argocd` namespace."
         },
         "catalogApplication": {
           "$ref": "#/$defs/CatalogApplicationOverrides",
@@ -132,6 +150,10 @@
           "$ref": "#/$defs/GitPublication",
           "description": "Git repository, revision, and path prefix owned by this target. Targets on the same repository revision must have disjoint prefixes."
         },
+        "reconciler": {
+          "$ref": "#/$defs/TargetReconciler",
+          "description": "Who applies the rendered Releases. Required, with exactly one member. `argocd`: Argo CD syncs the published tree; `argocd.instanceRef` names the project-local ArgoCDInstance, which is required once any explicit instance exists, and `argocd: {}` uses the implicit target-local instance in the workload Cluster and the `argocd` namespace otherwise. `direct: {}`: Nyl applies the Releases to the target's Cluster itself with the mechanics of `nyl apply`, and still publishes the tree without Applications, AppProjects, or a catalog."
+        },
         "releaseInputs": {
           "additionalProperties": {
             "additionalProperties": {
@@ -146,12 +168,40 @@
           "additionalProperties": true,
           "description": "Target values recursively overlaid on Cluster values and exposed as template inputs.",
           "type": "object"
+        },
+        "valuesFrom": {
+          "description": "Plain YAML mapping files merged in declaration order over Cluster values and before inline target values. Paths are relative to this resource's source file, or `/`-rooted at the Git worktree; files must stay inside the worktree without traversing symlinks.",
+          "items": {
+            "$ref": "#/$defs/ValuesFromFile"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "publication"
+        "publication",
+        "reconciler"
       ],
       "type": "object"
+    },
+    "DirectReconciler": {
+      "additionalProperties": false,
+      "description": "Options of the direct reconciler. None yet.",
+      "type": "object"
+    },
+    "Evidence": {
+      "description": "Evidence a consumer requires from its producer.",
+      "oneOf": [
+        {
+          "const": "published",
+          "description": "A current receipt.",
+          "type": "string"
+        },
+        {
+          "const": "attested",
+          "description": "A current receipt whose required attestations pass.",
+          "type": "string"
+        }
+      ]
     },
     "FileInputSource": {
       "additionalProperties": false,
@@ -1116,19 +1166,178 @@
       ],
       "type": "object"
     },
+    "SharedCatalogApplication": {
+      "additionalProperties": false,
+      "description": "The shared catalog Application of `catalogApplication.shared`: its name and the policy it overrides.\n\nContract: [Catalog ownership](../../../../design/orchestration-core.md#kubernetes-publication-unit).\nEvery target that names the same catalog must describe it identically,\nbecause one manifest is rendered for all of them.",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations added to the shared Application.",
+          "type": "object"
+        },
+        "applicationDeletionPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Application deletion override; inherits the instance default when omitted."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels added to the shared Application.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Name of the shared catalog and of its Argo CD Application. It also names the reserved publication prefix `_nyl/shared/<name>/` that holds the manifest.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Argo CD project override; inherits the instance catalog default when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selfPrunePolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedResourceDeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Self-pruning override; inherits the instance default when omitted."
+        },
+        "syncPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOpsSyncPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Catalog synchronization override; inherits the instance default when omitted. Previews tear down only when this prunes."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "TargetReconciler": {
+      "additionalProperties": false,
+      "description": "The reconciler that applies a target's Releases: exactly one member.\n\nContract: [Direct reconciler](../../../../design/orchestration-core.md#direct-reconciler).",
+      "oneOf": [
+        {
+          "description": "Argo CD syncs the published tree; `instanceRef` names the ArgoCDInstance when any is declared.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "direct": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "direct"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "argocd": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "argocd"
+          ],
+          "title": "argocd"
+        },
+        {
+          "description": "Nyl applies the Releases to the target's Cluster itself.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "argocd": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "argocd"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "direct": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "direct"
+          ],
+          "title": "direct"
+        }
+      ],
+      "properties": {
+        "argocd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArgoCdReconciler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Argo CD syncs the published tree. Write `argocd: {instanceRef: {name: <instance>}}` for an explicit ArgoCDInstance, or `argocd: {}` for the implicit target-local instance, which is valid only while no ArgoCDInstance is declared."
+        },
+        "direct": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DirectReconciler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Nyl applies the target's Releases to its Cluster, in the order of `nyl apply`, and prunes by release state. Takes no options yet; write `direct: {}`."
+        }
+      },
+      "type": "object"
+    },
     "UnitInputSource": {
       "additionalProperties": false,
       "description": "Reserved orchestration reference to a unit output or artifact field.",
       "properties": {
         "artifact": {
-          "description": "Published artifact name. Set exactly one of `output` and `artifact`.",
+          "description": "Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.",
           "type": [
             "string",
             "null"
           ]
         },
         "attestations": {
-          "description": "Required attestations.",
+          "description": "The producer's attestations to require, instead of all it declares; each must pass for the producer's current receipt.",
           "items": {
             "type": "string"
           },
@@ -1142,11 +1351,15 @@
           ]
         },
         "evidence": {
-          "description": "Required evidence level: `published` or `attested`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required evidence level: `published` (a current receipt, the default) or `attested` (every attestation the producer declares passes)."
         },
         "kind": {
           "description": "Expected artifact kind.",
@@ -1155,15 +1368,22 @@
             "null"
           ]
         },
+        "observation": {
+          "description": "Declared observed value name: a value the unit's driver reads from the system the unit manages. Set exactly one of `output`, `artifact`, and `observation`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "output": {
-          "description": "Declared output name. Set exactly one of `output` and `artifact`.",
+          "description": "Declared output name. Set exactly one of `output`, `artifact`, and `observation`.",
           "type": [
             "string",
             "null"
           ]
         },
         "pointer": {
-          "description": "JSON Pointer inside the output or artifact.",
+          "description": "JSON Pointer inside the output, artifact, or observed value.",
           "type": [
             "string",
             "null"
@@ -1176,6 +1396,27 @@
       },
       "required": [
         "unit"
+      ],
+      "type": "object"
+    },
+    "ValuesFromFile": {
+      "additionalProperties": false,
+      "description": "One ordinary configuration file contributing template values, without templating or recursive includes.",
+      "properties": {
+        "file": {
+          "description": "Static, normalized path to exactly one YAML mapping document in a Git-visible regular file. Relative paths start at the resource's source directory; `/` starts at the Git worktree root. Leading `..` segments may reach outside the Nyl project, but never outside its worktree or through symlinks. Ignored untracked files, submodules, and the project's `.nyl/cache` directory are excluded.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Mount the mapping under this literal values key. Omit to merge at the values root. Dots are literal characters, not path separators.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
       ],
       "type": "object"
     }
@@ -1191,9 +1432,6 @@
         "name": "production"
       },
       "spec": {
-        "argocdRef": {
-          "name": "primary"
-        },
         "clusterRef": {
           "name": "primary"
         },
@@ -1203,6 +1441,13 @@
             "name": "deploy"
           },
           "revision": "deploy"
+        },
+        "reconciler": {
+          "argocd": {
+            "instanceRef": {
+              "name": "primary"
+            }
+          }
         }
       }
     }

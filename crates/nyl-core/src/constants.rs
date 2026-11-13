@@ -18,26 +18,77 @@ pub const API_VERSION_ARTIFACTS: &str = "artifacts.gitops.nyl/v1";
 /// API version for Component resources
 pub const API_VERSION_COMPONENTS: &str = "components.k8s.nyl/v1";
 
-/// Label name for release identification in Kubernetes secrets
-pub const LABEL_RELEASE: &str = "nyl.niklasrosenstein.github.com/release";
+// Labels, annotations, and Secret types use the `.nyl` API groups of the
+// layer that owns them, like the resource API versions above: `k8s.nyl/` for
+// Kubernetes rendering and `k8s.gitops.nyl/` for Kubernetes GitOps.
 
-/// Label name for revision tracking in Kubernetes secrets
-pub const LABEL_REVISION: &str = "nyl.niklasrosenstein.github.com/revision";
+/// Label naming the release a release-state Secret records.
+pub const LABEL_RELEASE: &str = "k8s.nyl/release";
 
-/// Secret type for Nyl release state storage
-pub const SECRET_TYPE_RELEASE: &str = "nyl.niklasrosenstein.github.com/release.v1";
+/// Label carrying the revision a release-state Secret records.
+pub const LABEL_REVISION: &str = "k8s.nyl/revision";
 
-/// Annotation for tracking parent resource API version
-pub const ANNOTATION_PARENT_API_VERSION: &str = "nyl.niklasrosenstein.github.com/parent-api-version";
+/// Secret type of release-state Secrets.
+pub const SECRET_TYPE_RELEASE: &str = "k8s.nyl/release.v1";
 
-/// Annotation for tracking parent resource kind
-pub const ANNOTATION_PARENT_KIND: &str = "nyl.niklasrosenstein.github.com/parent-kind";
+/// Annotation recording the API version of the resource a manifest was expanded from.
+pub const ANNOTATION_PARENT_API_VERSION: &str = "k8s.nyl/parent-api-version";
 
-/// Annotation for tracking parent resource name
-pub const ANNOTATION_PARENT_NAME: &str = "nyl.niklasrosenstein.github.com/parent-name";
+/// Annotation recording the kind of the resource a manifest was expanded from.
+pub const ANNOTATION_PARENT_KIND: &str = "k8s.nyl/parent-kind";
 
-/// Annotation for tracking parent resource namespace
-pub const ANNOTATION_PARENT_NAMESPACE: &str = "nyl.niklasrosenstein.github.com/parent-namespace";
+/// Annotation recording the name of the resource a manifest was expanded from.
+pub const ANNOTATION_PARENT_NAME: &str = "k8s.nyl/parent-name";
 
-/// Annotation for declaring Kyverno policy scope
-pub const ANNOTATION_KYVERNO_SCOPE: &str = "nyl.niklasrosenstein.github.com/apply-policy-scope";
+/// Annotation recording the namespace of the resource a manifest was expanded from.
+pub const ANNOTATION_PARENT_NAMESPACE: &str = "k8s.nyl/parent-namespace";
+
+/// Annotation declaring when Nyl applies a Kyverno policy during rendering.
+pub const ANNOTATION_KYVERNO_SCOPE: &str = "k8s.nyl/apply-policy-scope";
+
+/// Annotation on a Pod template that opts into a checksum of the ConfigMaps and
+/// Secrets it consumes: `auto`, or a comma-separated list of `Kind/name` with an
+/// optional `#key`.
+pub const ANNOTATION_CHECKSUM: &str = "k8s.nyl/checksum";
+
+/// Annotation Nyl writes on the Pod template that declares
+/// [`ANNOTATION_CHECKSUM`]: the SHA-256 of the selected ConfigMap and Secret
+/// data, in lowercase hex. Nyl owns the key; a document that sets it is an error.
+pub const ANNOTATION_CHECKSUM_SHA256: &str = "k8s.nyl/checksum-sha256";
+
+/// Annotation carrying a Helm manifest's chart-relative source path from
+/// rendering to the rendered layout, which removes it before writing.
+pub const ANNOTATION_HELM_SOURCE: &str = "k8s.gitops.nyl/helm-source";
+
+/// Annotation recording the owning ApplicationGroup and destination of a
+/// published catalog Application or AppProject.
+pub const ANNOTATION_PUBLICATION_CONTEXT: &str = "k8s.gitops.nyl/publication-context";
+
+/// Identifiers from before Nyl used `.nyl` API groups.
+///
+/// Nyl reads them only where existing clusters, projects, or published trees
+/// still carry them, and recognizes the old API versions only to name their
+/// replacement. Nothing writes them.
+pub mod legacy {
+    /// API version of HelmChart and RemoteManifest before `k8s.nyl/v1`; rejected with a fix.
+    pub const API_VERSION: &str = "nyl.niklasrosenstein.github.com/v1";
+
+    /// API group of Nyl resources before the `.nyl` groups.
+    pub const API_GROUP: &str = "nyl.niklasrosenstein.github.com";
+
+    /// API version of component invocations before `components.k8s.nyl/v1`; rejected with a fix.
+    pub const API_VERSION_COMPONENTS: &str = "components.nyl.niklasrosenstein.github.com/v1";
+
+    /// Release label of release-state Secrets recorded before [`super::LABEL_RELEASE`]; deprecated.
+    pub const LABEL_RELEASE: &str = "nyl.niklasrosenstein.github.com/release";
+
+    /// Revision label of release-state Secrets recorded before [`super::LABEL_REVISION`]; deprecated.
+    pub const LABEL_REVISION: &str = "nyl.niklasrosenstein.github.com/revision";
+
+    /// Kyverno scope annotation before [`super::ANNOTATION_KYVERNO_SCOPE`]; deprecated.
+    pub const ANNOTATION_KYVERNO_SCOPE: &str = "nyl.niklasrosenstein.github.com/apply-policy-scope";
+
+    /// Publication context annotation in trees published before
+    /// [`super::ANNOTATION_PUBLICATION_CONTEXT`]; read from baselines.
+    pub const ANNOTATION_PUBLICATION_CONTEXT: &str = "nyl.niklasrosenstein.github.com/publication-context";
+}

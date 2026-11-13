@@ -1,67 +1,34 @@
 //! When a publication's teardown wait after phase 1 ends.
 //!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
-//! Teardown: `teardownWait` strategies `observe` (Argo CD no longer reports
-//! the target's workload Applications within the unit's `timeout`, else
-//! uncertain with `applications-remain` or `observation-failed`; default for
-//! `mode: observe`), `delay` (`duration` after the phase 1 commit, recorded
-//! as not observed), and `manual` (an operator's `--confirm-removed`; the
-//! default for `mode: publish`; never keeps a run waiting). A confirmation
+//! Teardown: `teardownWait` strategies `observe` (the driver reports that
+//! the workload Applications are gone within the unit's `timeout`, else
+//! uncertain with `applications-remain` or `observation-failed`), `delay`
+//! (`duration` after the phase 1 commit, recorded as not observed), and
+//! `manual` (an operator's `--confirm-removed`; never keeps a run waiting).
+//! The driver reads the strategy and its defaults from the stored spec
+//! ([`Driver::teardown_wait`](nyl_core::orchestration::driver::Driver::teardown_wait)). A confirmation
 //! bound to the run and phase 1 commit, or `--allow-incomplete`, ends any
 //! wait once phase 1 is published. A waiting run checks its signal ref about
 //! every [`SIGNAL_POLL`].
 
-use nyl_core::orchestration::driver::WaitCompletion;
+use nyl_core::orchestration::driver::{RemovalObservation, WaitCompletion, WaitStrategy};
 use nyl_core::orchestration::ids::RunId;
-use nyl_core::orchestration::ports::ApplicationsObservation;
 use nyl_core::orchestration::state::{Signal, SignalAction, TeardownWaiting};
 use nyl_core::orchestration::time::{Duration, Timestamp};
-use serde_json::Value;
 
 /// How often a waiting run reads its signal ref.
 pub const SIGNAL_POLL: Duration = Duration::from_secs(15);
-
-/// A publication's `teardownWait`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Strategy {
-    Observe,
-    Delay { duration: Duration },
-    Manual,
-}
-
-/// The strategy a stored publication spec declares, with the defaults by
-/// `mode` (`observe` for `mode: observe`, `manual` for `mode: publish`).
-///
-/// Validation rejects an unknown strategy and a `delay` without a valid
-/// `duration` before a document is stored; a stored document that still
-/// carries one reads as `manual`, the only strategy that never ends a wait
-/// without an operator.
-pub fn strategy(spec: &Value) -> Strategy {
-    let declared = spec.pointer("/teardownWait/strategy").and_then(Value::as_str);
-    match declared {
-        Some("observe") => Strategy::Observe,
-        Some("delay") => spec
-            .pointer("/teardownWait/duration")
-            .and_then(Value::as_str)
-            .and_then(|duration| duration.parse::<Duration>().ok())
-            .map_or(Strategy::Manual, |duration| Strategy::Delay { duration }),
-        Some(_) => Strategy::Manual,
-        None => match spec.get("mode").and_then(Value::as_str) {
-            Some("observe") => Strategy::Observe,
-            _ => Strategy::Manual,
-        },
-    }
-}
 
 /// When a wait ends by itself: `since + duration` for `delay`, `None` for
 /// `observe` and `manual`. The run path sets the phase deadline from this,
 /// not from `Outcome::Waiting.until`: only the recorded `since` (the
 /// phase 1 commit's time, which the run records) is authoritative, so a
 /// driver may leave `until` empty.
-pub fn ends(strategy: Strategy, waiting: &TeardownWaiting) -> Option<Timestamp> {
+pub fn ends(strategy: WaitStrategy, waiting: &TeardownWaiting) -> Option<Timestamp> {
     match strategy {
-        Strategy::Delay { duration } => Some(duration.after(waiting.since)),
-        Strategy::Observe | Strategy::Manual => None,
+        WaitStrategy::Delay { duration } => Some(duration.after(waiting.since)),
+        WaitStrategy::Observe | WaitStrategy::Manual => None,
     }
 }
 
@@ -79,7 +46,7 @@ pub fn confirms(signal: &Signal, run: &RunId, waiting: &TeardownWaiting) -> bool
 
 /// What deciding a wait reads.
 pub struct WaitInputs<'a> {
-    pub strategy: Strategy,
+    pub strategy: WaitStrategy,
     /// The run waiting now, whose signal ref confirmations arrive on.
     pub run: &'a RunId,
     pub waiting: &'a TeardownWaiting,
@@ -87,7 +54,7 @@ pub struct WaitInputs<'a> {
     /// The unit's teardown deadline (its `timeout` from the teardown's start).
     pub deadline: Timestamp,
     /// The observer's latest answer, for `observe`.
-    pub observation: Option<&'a ApplicationsObservation>,
+    pub observation: Option<&'a RemovalObservation>,
     /// A confirmation sent to the waiting run for this unit, if any arrived.
     pub confirmation: Option<&'a Signal>,
     /// `--allow-incomplete`.
@@ -141,10 +108,10 @@ pub fn decide(inputs: &WaitInputs<'_>) -> WaitDecision {
         }
     };
     match inputs.strategy {
-        Strategy::Manual => WaitDecision::Stop {
+        WaitStrategy::Manual => WaitDecision::Stop {
             reason: "teardownWait is manual: an operator confirms the removal with --confirm-removed".to_owned(),
         },
-        Strategy::Delay { duration } => {
+        WaitStrategy::Delay { duration } => {
             let end = duration.after(inputs.waiting.since);
             if inputs.now >= end {
                 WaitDecision::Complete(WaitCompletion::Delayed)
@@ -159,17 +126,17 @@ pub fn decide(inputs: &WaitInputs<'_>) -> WaitDecision {
                 poll(Some(end))
             }
         }
-        Strategy::Observe => match inputs.observation {
+        WaitStrategy::Observe => match inputs.observation {
             None => WaitDecision::Uncertain {
                 reason: "observation-failed: no Argo CD observation was made".to_owned(),
             },
-            Some(ApplicationsObservation::Failed(error)) => WaitDecision::Uncertain {
+            Some(RemovalObservation::Failed(error)) => WaitDecision::Uncertain {
                 reason: format!("observation-failed: {error}"),
             },
-            Some(ApplicationsObservation::Remaining(applications)) if applications.is_empty() => {
+            Some(RemovalObservation::Remaining(applications)) if applications.is_empty() => {
                 WaitDecision::Complete(WaitCompletion::Observed)
             }
-            Some(ApplicationsObservation::Remaining(applications)) => {
+            Some(RemovalObservation::Remaining(applications)) => {
                 if inputs.now >= inputs.deadline {
                     WaitDecision::Uncertain {
                         reason: format!("applications-remain: {}", applications.join(", ")),
@@ -185,7 +152,6 @@ pub fn decide(inputs: &WaitInputs<'_>) -> WaitDecision {
 #[cfg(test)]
 mod tests {
     use nyl_core::orchestration::state::{ApprovalIdentity, SignalKind, StateV1};
-    use serde_json::json;
 
     use super::*;
     use crate::rules::fixtures::{commit, name, run, COMMIT, OTHER_COMMIT, RUN_1, RUN_2};
@@ -225,10 +191,10 @@ mod tests {
     }
 
     fn inputs<'a>(
-        strategy: Strategy,
+        strategy: WaitStrategy,
         waiting: &'a TeardownWaiting,
         now: i64,
-        observation: Option<&'a ApplicationsObservation>,
+        observation: Option<&'a RemovalObservation>,
     ) -> WaitInputs<'a> {
         WaitInputs {
             strategy,
@@ -242,42 +208,17 @@ mod tests {
         }
     }
 
-    const DELAY: Strategy = Strategy::Delay {
+    const DELAY: WaitStrategy = WaitStrategy::Delay {
         duration: Duration::from_secs(300),
     };
-
-    /// Catches a publication waiting for the wrong thing: `mode: observe`
-    /// must observe and `mode: publish` must wait for an operator unless
-    /// `teardownWait` says otherwise.
-    #[test]
-    fn test_strategy_reads_teardown_wait_with_defaults_by_mode() {
-        assert_eq!(strategy(&json!({"mode": "observe"})), Strategy::Observe);
-        assert_eq!(strategy(&json!({"mode": "publish"})), Strategy::Manual);
-        assert_eq!(strategy(&json!({})), Strategy::Manual);
-        assert_eq!(
-            strategy(&json!({"mode": "observe", "teardownWait": {"strategy": "delay", "duration": "10m"}})),
-            Strategy::Delay {
-                duration: Duration::from_mins(10)
-            }
-        );
-        assert_eq!(
-            strategy(&json!({"mode": "publish", "teardownWait": {"strategy": "observe"}})),
-            Strategy::Observe
-        );
-        // A stored delay without a usable duration never completes by itself.
-        assert_eq!(
-            strategy(&json!({"teardownWait": {"strategy": "delay"}})),
-            Strategy::Manual
-        );
-    }
 
     /// Catches a delay measured from anything but the recorded phase 1 time.
     #[test]
     fn test_only_a_delay_ends_by_itself_from_the_recorded_since() {
         let waiting = waiting();
         assert_eq!(ends(DELAY, &waiting), Some(time(300)));
-        assert_eq!(ends(Strategy::Observe, &waiting), None);
-        assert_eq!(ends(Strategy::Manual, &waiting), None);
+        assert_eq!(ends(WaitStrategy::Observe, &waiting), None);
+        assert_eq!(ends(WaitStrategy::Manual, &waiting), None);
     }
 
     /// Catches a confirmation that the operator bound to this run and phase 1
@@ -286,8 +227,8 @@ mod tests {
     fn test_a_bound_confirmation_completes_any_wait() {
         let waiting = waiting();
         let confirmation = signal(SignalAction::ConfirmRemoved, RUN_1, Some(COMMIT));
-        let remaining = ApplicationsObservation::Remaining(vec!["web".to_owned()]);
-        for strategy in [Strategy::Manual, DELAY, Strategy::Observe] {
+        let remaining = RemovalObservation::Remaining(vec!["web".to_owned()]);
+        for strategy in [WaitStrategy::Manual, DELAY, WaitStrategy::Observe] {
             let decision = decide(&WaitInputs {
                 confirmation: Some(&confirmation),
                 ..inputs(strategy, &waiting, 10, Some(&remaining))
@@ -317,7 +258,7 @@ mod tests {
         ] {
             let decision = decide(&WaitInputs {
                 confirmation: Some(&other),
-                ..inputs(Strategy::Manual, &waiting, 10, None)
+                ..inputs(WaitStrategy::Manual, &waiting, 10, None)
             });
             assert!(matches!(decision, WaitDecision::Stop { .. }), "{other:?}: {decision:?}");
         }
@@ -329,7 +270,7 @@ mod tests {
         let waiting = waiting();
         let decision = decide(&WaitInputs {
             allow_incomplete: true,
-            ..inputs(Strategy::Manual, &waiting, 10, None)
+            ..inputs(WaitStrategy::Manual, &waiting, 10, None)
         });
         assert_eq!(decision, WaitDecision::Complete(WaitCompletion::Incomplete));
     }
@@ -339,7 +280,7 @@ mod tests {
     fn test_manual_stops_at_once() {
         let waiting = waiting();
         assert!(matches!(
-            decide(&inputs(Strategy::Manual, &waiting, 0, None)),
+            decide(&inputs(WaitStrategy::Manual, &waiting, 0, None)),
             WaitDecision::Stop { .. }
         ));
     }
@@ -360,7 +301,7 @@ mod tests {
             decide(&inputs(DELAY, &waiting, 300, None)),
             WaitDecision::Complete(WaitCompletion::Delayed)
         );
-        let long = Strategy::Delay {
+        let long = WaitStrategy::Delay {
             duration: Duration::from_mins(20),
         };
         assert_eq!(
@@ -378,25 +319,25 @@ mod tests {
     #[test]
     fn test_observe_completes_on_removal_and_is_uncertain_otherwise() {
         let waiting = waiting();
-        let gone = ApplicationsObservation::Remaining(Vec::new());
+        let gone = RemovalObservation::Remaining(Vec::new());
         assert_eq!(
-            decide(&inputs(Strategy::Observe, &waiting, 10, Some(&gone))),
+            decide(&inputs(WaitStrategy::Observe, &waiting, 10, Some(&gone))),
             WaitDecision::Complete(WaitCompletion::Observed)
         );
-        let remaining = ApplicationsObservation::Remaining(vec!["web".to_owned(), "api".to_owned()]);
+        let remaining = RemovalObservation::Remaining(vec!["web".to_owned(), "api".to_owned()]);
         assert_eq!(
-            decide(&inputs(Strategy::Observe, &waiting, 10, Some(&remaining))),
+            decide(&inputs(WaitStrategy::Observe, &waiting, 10, Some(&remaining))),
             WaitDecision::Poll { until: time(25) }
         );
         assert_eq!(
-            decide(&inputs(Strategy::Observe, &waiting, 600, Some(&remaining))),
+            decide(&inputs(WaitStrategy::Observe, &waiting, 600, Some(&remaining))),
             WaitDecision::Uncertain {
                 reason: "applications-remain: web, api".to_owned()
             }
         );
-        let failed = ApplicationsObservation::Failed("no credentials for the Argo CD cluster".to_owned());
+        let failed = RemovalObservation::Failed("no credentials for the Argo CD cluster".to_owned());
         assert_eq!(
-            decide(&inputs(Strategy::Observe, &waiting, 10, Some(&failed))),
+            decide(&inputs(WaitStrategy::Observe, &waiting, 10, Some(&failed))),
             WaitDecision::Uncertain {
                 reason: "observation-failed: no credentials for the Argo CD cluster".to_owned()
             }
@@ -413,7 +354,7 @@ mod tests {
         let decision = decide(&WaitInputs {
             run: &later,
             confirmation: Some(&confirmation),
-            ..inputs(Strategy::Manual, &waiting, 10, None)
+            ..inputs(WaitStrategy::Manual, &waiting, 10, None)
         });
         assert!(matches!(
             decision,

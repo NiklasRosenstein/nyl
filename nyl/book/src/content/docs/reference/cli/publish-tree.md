@@ -27,11 +27,23 @@ rendering. Its error lists up to 20 dirty files with Git index/worktree status
 codes and repository-relative paths, and reports how many more were omitted.
 It identifies the repository root so the full status can be inspected even when
 Nyl is invoked from a project subdirectory.
+When changed tracked files use Git LFS and Git finds no `git-lfs` executable
+or no LFS filter configuration, the error adds a hint to install Git LFS and run
+`git lfs install --local --skip-repo`; the files still count as changes. See
+[Git LFS in CI](/nyl/kubernetes-gitops/workflow/publish/#git-lfs-in-ci).
 
 `--allow-dirty` skips the clean-checkout comparison and publishes the
 working-tree render explicitly; the ownership index records `dirty: true` and
 the commit message includes `Nyl-Source-Dirty: true`. The two options are
 mutually exclusive.
+
+A prefix that an orchestrated `KubernetesPublication` unit owns (its index names the unit
+in an `owner` member) is refused with `NYL-TREE-OWNED-BY-UNIT`, as it
+is by [`render-tree`](/nyl/reference/cli/render-tree/), because Nyl cannot tell
+here whether the unit still exists. Publish through the environment that owns
+it, or release the prefix after `nyl state forget` by removing the `owner`
+member from `<prefix>/_nyl/index.json` in a commit to the publication branch; see
+[Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership).
 
 Nyl clones the destination branch into a clean checkout, reconciles indexed
 files, stages only the selected target prefix, commits the result, fetches the
@@ -42,6 +54,43 @@ The completion summary names the destination repository, branch, and resulting
 commit. Publication commit messages carry `Nyl-Source-Repository`,
 `Nyl-Source-Commit`, `Nyl-Deployment-Target`, and `Nyl-Cluster` provenance
 trailers. `--message` replaces the subject while retaining those trailers.
+Above the trailers, a `Changed applications:` paragraph lists each generated
+Argo CD Application, as `NAMESPACE/NAME`, whose catalog manifest or deployed
+files the commit adds, modifies, or removes. Changes to other catalog files,
+such as AppProjects, list the catalog Application. The paragraph is omitted
+when no Application changes, for example when only state files do.
+Orchestrated publications list the same paragraph.
+
+A target with [`catalogApplication.shared`](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance)
+generates no catalog Application, and `publish-tree` publishes only the
+target's own tree and warns about the catalog's manifest, which a
+`KubernetesPublication` unit of the target publishes
+(`nyl build <unit> -- --shared-catalog --push`).
+
+```text
+Render deployment target production
+
+Changed applications:
+- argocd/api
+- argocd/production-catalog
+
+Nyl-Source-Repository: https://github.com/example/platform.git
+Nyl-Source-Commit: 3e7b0c1d9a4f5e6b7c8d9e0f1a2b3c4d5e6f7a8b
+Nyl-Deployment-Target: production
+Nyl-Cluster: prod-eu-1
+```
+
+Before creating a publication commit, Nyl checks the exact indexed baseline for
+AppProject cleanup permission contractions affecting retiring Applications and
+resources. An unsafe transition fails with `NYL_PROJECT_SCOPE_CONTRACTION` before
+any commit or push, including with `--dry-run`. A first publication has no
+retirement transition. `--ignore-project-scope-contraction` explicitly continues
+with a warning; it does not bypass baseline integrity checks. `diff-tree` runs
+the same analysis for MR CI, including source comparisons.
+
+See [Retiring Applications safely](/nyl/kubernetes-gitops/resource-guides/application-group/#retiring-applications-safely)
+for `retainedProjectNamespaces` and manual pruning. Operators must verify live
+deletion before removing retention entries; this guard only compares snapshots.
 
 Publication commits use the normal Git author identity from `GIT_AUTHOR_NAME` /
 `GIT_AUTHOR_EMAIL` or `user.name` / `user.email`. Set
@@ -54,3 +103,24 @@ documents the configuration model.
 
 See the [options shared by the tree commands](/nyl/reference/cli/render-tree/#options-shared-by-the-tree-commands) for target selection, caching, secret inputs, progress,
 and validation.
+
+## Partial publication
+
+```bash
+nyl publish-tree --target production --application-group payments
+nyl publish-tree --target production --release payments/api --release payments/worker
+```
+
+| Option | Description |
+| --- | --- |
+| `--application-group NAME` | Replace the ApplicationGroup's published Releases, including removals. Repeatable. |
+| `--release GROUP/RELEASE` | Replace one Release, given by its literal `metadata.name`. Repeatable. |
+
+Selectors combine by union; without any, Nyl publishes the full target. The
+summary names the baseline commit, counts rendered, retained, and removed
+Releases, lists changed shared catalog artifacts, and lists new Releases in a
+touched group that the selection leaves unpublished. Publication commits add
+`Nyl-Publication-Base` and `Nyl-Publication-Selection` trailers.
+[Partial publication](/nyl/kubernetes-gitops/workflow/partial-publication/)
+explains retention, provenance, and the conditions that require a full
+publication.

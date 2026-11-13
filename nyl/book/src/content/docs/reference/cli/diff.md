@@ -7,7 +7,7 @@ Show the difference between rendered manifests and the current cluster state.
 ## Synopsis
 
 ```bash
-nyl diff [--target <TARGET>] [OPTIONS] <FILE>
+nyl diff [--target <TARGET> | --context <CONTEXT>] [OPTIONS] <FILE>
 ```
 
 ## Description
@@ -17,6 +17,13 @@ It compares exactly what [`apply`](/nyl/reference/cli/apply/) would apply and
 prune. See [Rendering Pipeline](/nyl/kubernetes-rendering/pipeline/#the-releases-application)
 for the behavior `render`, `diff`, and `apply` share.
 
+A diff creates nothing, so a custom resource of a CustomResourceDefinition that is
+new in the same manifest cannot be compared with the server. It is listed as added
+with the note `CRD will be installed` and is not an error; a custom resource whose
+CRD is neither in the manifest nor in the cluster is an error. The namespace such a
+resource takes is decided as `apply` decides it
+([which kinds are namespaced](/nyl/reference/cli/apply/#which-kinds-are-namespaced)).
+
 ## Arguments
 
 - `<FILE>` - Path to the manifest file to diff (required)
@@ -25,13 +32,14 @@ for the behavior `render`, `diff`, and `apply` share.
 
 ### Common Options
 
-- `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
+- `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion. A render with this option fails with `NYL-KUBERNETES-CHECKSUM-PARTIAL` when a remaining Pod template sets [`k8s.nyl/checksum`](/nyl/kubernetes-rendering/pod-template-checksums/#where-it-runs), because a digest of part of the Release would differ from the one other commands write.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
-- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available.
+- `--target <TARGET>` - DeploymentTarget whose Cluster supplies values, capabilities, destination identity, and the default kube context. Optional when exactly one target is configured; required when several are available. A project without DeploymentTargets uses `--context` instead.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
 - `--release-only` and `--allow-secret-inputs` - As for [`apply`](/nyl/reference/cli/apply/#common-options).
+- `--lookup <snapshot|live>` and `--refresh-lookup <KIND/NAMESPACE/NAME>` - As for [`render`](/nyl/reference/cli/render/#common-options). A diff with `--lookup=live` can legitimately differ from one that reads the publication: the cluster holds the object as it is now.
 
 ### Release Options
 
@@ -40,7 +48,7 @@ for the behavior `render`, `diff`, and `apply` share.
 
 ### Cluster Options
 
-- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`
+- `--context <CONTEXT>` - Kubernetes context to use instead of `Cluster.spec.live.context`. When the Cluster declares a `live.context`, it is used and the current context never is. Without either, the current context is used only when the Cluster's destination server is a concrete URL that can be checked against it; an in-cluster or by-name destination needs `--context`. The context's server must match the declared destination either way. Without GitOps configuration, `--context` selects the cluster instead; see [Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration).
 
 ### Diff Options
 
@@ -67,6 +75,9 @@ nyl diff --target production --only-source-kind ConfigMap manifest.yaml
 
 # Diff only final rendered Deployments
 nyl diff --target production --only-kind Deployment manifest.yaml
+
+# Diff against a kube context in a project without GitOps configuration
+nyl diff --context kind-kind manifest.yaml
 ```
 
 ### Summary Mode
@@ -124,6 +135,34 @@ $ nyl diff --target production applications/web/release.yaml
 
 Summary: 0 to add, 1 to modify, 1 to delete, 2 unchanged, 1 kept
 ```
+
+### Hooks
+
+A [hook](/nyl/reference/cli/apply/#hooks-and-sync-waves) is no resource `apply` adds,
+changes, or deletes, so the diff does not list it with the resources. After them, a
+section lists the hook runs `apply` would make, in the order they run: the phase, the
+sync wave, the object, and its delete policies. A hook that names several phases is
+listed once for each. Hooks are in none of the counts and never set the exit status
+of `--exit-code`: the exit status is `1` only when a resource would be added, changed,
+or deleted, and `2` when the diff itself failed. `--summary` shows the section too.
+
+```console
+$ nyl diff --target production applications/web/release.yaml
+= Deployment web/web
+
+Hooks that would run:
+  ▶ PreSync  wave  -1  Job web/migrate  (delete: HookSucceeded)
+  ▶ PostSync wave   0  Job web/smoke-test  (delete: BeforeHookCreation)
+
+Summary: 0 to add, 0 to modify, 0 to delete, 1 unchanged
+```
+
+Hooks that name no sync phase are left out of the apply. Helm's `test` hook and the
+rollback hooks are listed after the hooks that would run, for information, under
+"Hooks left out"; delete hooks (`PreDelete`, `PostDelete`, `pre-delete`,
+`post-delete`), which Nyl never runs, get the warning `NYL-KUBERNETES-HOOK-IGNORED`
+once for the Release. See
+[Hooks left out](/nyl/reference/cli/apply/#hooks-and-sync-waves).
 
 Before the first apply, every resource is new, including the managed Namespaces
 the Release's Application deploys:

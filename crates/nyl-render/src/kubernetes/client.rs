@@ -11,9 +11,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::{
+    kubernetes::field_manager::{has_applied_fields, ownership_release_body},
     kubernetes::resource::{ApplyOutcome, GroupVersionKind, ResourceKey},
     NylError, Result,
 };
+
+/// How often removing a finalizer reads the object again after another writer got in first.
+const FINALIZER_ATTEMPTS: usize = 5;
 
 /// Trait for Kubernetes client operations
 #[async_trait]
@@ -54,8 +58,36 @@ pub trait KubeClient: Send + Sync {
         Ok(false)
     }
 
-    /// Delete a resource from the cluster
-    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()>;
+    /// Delete a resource from the cluster with the server's default deletion
+    /// options. A resource that does not exist counts as deleted.
+    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+        self.delete_resource_with(gvk, namespace, name, &DeleteOptions::default())
+            .await
+    }
+
+    /// Delete a resource from the cluster with explicit deletion options. A
+    /// resource that does not exist counts as deleted.
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &DeleteOptions,
+    ) -> Result<()>;
+
+    /// Remove `finalizer` from the live object, leaving its other finalizers, so an
+    /// object being deleted can go. Returns whether the finalizer was there; an
+    /// object that does not exist is left alone (`false`). A client that never
+    /// adds the finalizer needs no implementation, which is the default.
+    async fn remove_finalizer(
+        &self,
+        _gvk: &GroupVersionKind,
+        _namespace: Option<&str>,
+        _name: &str,
+        _finalizer: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     /// Get server-normalized version of a resource using dry-run apply
     ///
@@ -65,6 +97,15 @@ pub trait KubeClient: Send + Sync {
     /// - Return normalized resource without persisting
     async fn get_normalized_resource(&self, resource: &DynamicObject, field_manager: &str) -> Result<DynamicObject>;
 
+    /// Release every field `field_manager` owns through server-side apply on the
+    /// live object of `resource`, so fields other managers also own stay and
+    /// fields only it owned are removed.
+    ///
+    /// Returns whether the manager owned fields to release; a missing object or
+    /// one the manager never applied is left alone.
+    /// See [`crate::kubernetes::field_manager`].
+    async fn release_field_manager(&self, resource: &DynamicObject, field_manager: &str) -> Result<bool>;
+
     /// Refresh API discovery until every `required` kind is resolvable, or give up.
     ///
     /// Called after CustomResourceDefinitions or APIServices are applied so the kinds
@@ -73,6 +114,41 @@ pub trait KubeClient: Send + Sync {
     /// the default.
     async fn refresh_discovery_until_available(&self, _required: &[GroupVersionKind]) -> Result<()> {
         Ok(())
+    }
+}
+
+/// How dependents of a deleted object are handled, as Kubernetes'
+/// `propagationPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum DeletePropagation {
+    /// Dependents are deleted before the object.
+    Foreground,
+    /// The object is deleted at once and dependents in the background.
+    Background,
+    /// Dependents are left in place.
+    Orphan,
+}
+
+/// Native Kubernetes deletion options. The defaults leave both to the server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteOptions {
+    pub propagation: Option<DeletePropagation>,
+    pub grace_period_seconds: Option<u32>,
+}
+
+impl DeleteOptions {
+    /// The equivalent kube-rs delete parameters.
+    pub fn to_params(&self) -> kube::api::DeleteParams {
+        kube::api::DeleteParams {
+            propagation_policy: self.propagation.map(|propagation| match propagation {
+                DeletePropagation::Foreground => kube::api::PropagationPolicy::Foreground,
+                DeletePropagation::Background => kube::api::PropagationPolicy::Background,
+                DeletePropagation::Orphan => kube::api::PropagationPolicy::Orphan,
+            }),
+            grace_period_seconds: self.grace_period_seconds,
+            ..kube::api::DeleteParams::default()
+        }
     }
 }
 
@@ -540,7 +616,13 @@ impl KubeClient for KubeRsClient {
         self.client.default_namespace()
     }
 
-    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &DeleteOptions,
+    ) -> Result<()> {
         let (ar, caps) = self.discover_object_api(gvk)?;
 
         // Create API client
@@ -553,7 +635,7 @@ impl KubeClient for KubeRsClient {
         };
 
         // Delete the resource
-        match api.delete(name, &kube::api::DeleteParams::default()).await {
+        match api.delete(name, &options.to_params()).await {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(err)) if err.code == 404 => {
                 // Resource already deleted or doesn't exist - not an error
@@ -561,6 +643,51 @@ impl KubeClient for KubeRsClient {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> Result<bool> {
+        let (ar, caps) = self.discover_object_api(gvk)?;
+        let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
+            let ns = namespace
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
+            Api::namespaced_with(self.client.clone(), ns, &ar)
+        } else {
+            Api::all_with(self.client.clone(), &ar)
+        };
+        // The patch names the resourceVersion it read, so a finalizer another party
+        // added meanwhile is never dropped; a conflict reads again.
+        for _ in 0..FINALIZER_ATTEMPTS {
+            let Some(live) = self.get_resource(gvk, namespace, name).await? else {
+                return Ok(false);
+            };
+            let finalizers = live.metadata.finalizers.clone().unwrap_or_default();
+            if !finalizers.iter().any(|present| present == finalizer) {
+                return Ok(false);
+            }
+            let remaining: Vec<&String> = finalizers.iter().filter(|present| *present != finalizer).collect();
+            let patch = serde_json::json!({
+                "metadata": {
+                    "finalizers": remaining,
+                    "resourceVersion": live.metadata.resource_version,
+                }
+            });
+            match api.patch(name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                Ok(_) => return Ok(true),
+                Err(kube::Error::Api(err)) if err.code == 404 => return Ok(false),
+                Err(kube::Error::Api(err)) if err.code == 409 => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(NylError::Kubernetes(format!(
+            "{} {name} kept changing while its finalizer {finalizer} was removed",
+            gvk.kind
+        )))
     }
 
     async fn get_normalized_resource(&self, resource: &DynamicObject, field_manager: &str) -> Result<DynamicObject> {
@@ -589,6 +716,33 @@ impl KubeClient for KubeRsClient {
         let normalized = api.patch(&name, &patch_params, &patch).await?;
 
         Ok(normalized)
+    }
+
+    async fn release_field_manager(&self, resource: &DynamicObject, field_manager: &str) -> Result<bool> {
+        let name = resource.name_any();
+        let namespace = resource.namespace();
+        let gvk = crate::kubernetes::resource::extract_gvk(&serde_json::to_value(resource)?)?;
+        let Some(live) = self.get_resource(&gvk, namespace.as_deref(), &name).await? else {
+            return Ok(false);
+        };
+        if !has_applied_fields(&live, field_manager) {
+            return Ok(false);
+        }
+        let (ar, caps) = self.discover_api_resource(&gvk)?;
+        let api: Api<DynamicObject> = if caps.scope == Scope::Namespaced {
+            let ns = namespace
+                .as_deref()
+                .ok_or_else(|| NylError::Config(format!("Namespace required for namespaced resource {}", gvk.kind)))?;
+            Api::namespaced_with(self.client.clone(), ns, &ar)
+        } else {
+            Api::all_with(self.client.clone(), &ar)
+        };
+        // The body names only the object and conflicts with no other manager, so
+        // the apply needs no force.
+        let body = ownership_release_body(resource);
+        api.patch(&name, &PatchParams::apply(field_manager), &Patch::Apply(&body))
+            .await?;
+        Ok(true)
     }
 
     /// Refresh discovery, retrying until every `required` GVK appears in the rebuilt
@@ -631,7 +785,10 @@ impl KubeClient for KubeRsClient {
     }
 
     async fn refresh_discovery_until_available(&self, required: &[GroupVersionKind]) -> Result<()> {
-        const MAX_ATTEMPTS: u32 = 10;
+        // A CustomResourceDefinition is served once it is Established, which takes a
+        // moment (longer on a busy API server); an APIService once its backend is up.
+        // The caller's own deadline cuts the wait short.
+        const WAIT: Duration = Duration::from_secs(30);
         const DELAY: Duration = Duration::from_millis(500);
 
         let all_known = || {
@@ -643,7 +800,8 @@ impl KubeClient for KubeRsClient {
             return Ok(());
         }
 
-        for attempt in 1..=MAX_ATTEMPTS {
+        let deadline = Instant::now() + WAIT;
+        for attempt in 1_u32.. {
             match self.refresh_discovery().await {
                 Ok(()) if all_known() => break,
                 Ok(()) => tracing::debug!(
@@ -654,9 +812,10 @@ impl KubeClient for KubeRsClient {
                 // discovery with 503 until it is ready.
                 Err(err) => tracing::debug!(attempt, error = %err, "Discovery refresh failed; retrying"),
             }
-            if attempt < MAX_ATTEMPTS {
-                tokio::time::sleep(DELAY).await;
+            if Instant::now() + DELAY >= deadline {
+                break;
             }
+            tokio::time::sleep(DELAY).await;
         }
 
         if !all_known() {
@@ -738,7 +897,11 @@ fn aggregated_discovery_unsupported(err: &kube::Error) -> bool {
 /// Mock Kubernetes client for testing
 pub struct MockKubeClient {
     resources: Arc<Mutex<HashMap<ResourceKey, DynamicObject>>>,
+    /// Field managers that applied each object since it was added.
+    applied_managers: Arc<Mutex<HashMap<ResourceKey, std::collections::BTreeSet<String>>>>,
     kind_scope_overrides: Arc<Mutex<HashMap<String, bool>>>,
+    /// The options of every deletion, in order.
+    deletions: Arc<Mutex<Vec<DeleteOptions>>>,
     default_namespace: String,
 }
 
@@ -752,15 +915,43 @@ impl MockKubeClient {
     pub fn with_default_namespace(default_namespace: impl Into<String>) -> Self {
         Self {
             resources: Arc::new(Mutex::new(HashMap::new())),
+            applied_managers: Arc::new(Mutex::new(HashMap::new())),
             kind_scope_overrides: Arc::new(Mutex::new(HashMap::new())),
+            deletions: Arc::new(Mutex::new(Vec::new())),
             default_namespace: default_namespace.into(),
         }
+    }
+
+    /// The options each deletion was requested with, in order.
+    pub fn deletion_options(&self) -> Vec<DeleteOptions> {
+        self.deletions.lock().unwrap().clone()
     }
 
     /// Add a resource to the mock store
     pub fn add_resource(&self, key: ResourceKey, resource: DynamicObject) {
         let mut store = self.resources.lock().unwrap();
         store.insert(key, resource);
+    }
+
+    /// The field managers that hold applied fields of an object: those that
+    /// applied it through this client and the `Apply` entries of its stored
+    /// `managedFields`, less those released since.
+    pub fn applied_managers(&self, key: &ResourceKey) -> Vec<String> {
+        let mut managers = self
+            .applied_managers
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(object) = self.resources.lock().unwrap().get(key) {
+            for entry in object.metadata.managed_fields.iter().flatten() {
+                if let (Some(manager), Some("Apply")) = (&entry.manager, entry.operation.as_deref()) {
+                    managers.insert(manager.clone());
+                }
+            }
+        }
+        managers.into_iter().collect()
     }
 
     /// Get all resources in the mock store
@@ -817,6 +1008,49 @@ pub fn is_known_cluster_scoped_gvk(gvk: &GroupVersionKind) -> bool {
     }
 }
 
+/// The fixed scope of a built-in Kubernetes kind; `None` for any other kind.
+pub fn builtin_scope(group: &str, kind: &str) -> Option<crate::resources::ResourceScope> {
+    let gvk = GroupVersionKind {
+        group: group.to_owned(),
+        version: String::new(),
+        kind: kind.to_owned(),
+    };
+    if is_known_cluster_scoped_gvk(&gvk) {
+        return Some(crate::resources::ResourceScope::Cluster);
+    }
+    let namespaced = match group {
+        "" => matches!(
+            kind,
+            "ConfigMap"
+                | "Endpoints"
+                | "Event"
+                | "LimitRange"
+                | "PersistentVolumeClaim"
+                | "Pod"
+                | "PodTemplate"
+                | "ReplicationController"
+                | "ResourceQuota"
+                | "Secret"
+                | "Service"
+                | "ServiceAccount"
+        ),
+        "apps" => matches!(
+            kind,
+            "ControllerRevision" | "DaemonSet" | "Deployment" | "ReplicaSet" | "StatefulSet"
+        ),
+        "batch" => matches!(kind, "CronJob" | "Job"),
+        "autoscaling" => kind == "HorizontalPodAutoscaler",
+        "policy" => kind == "PodDisruptionBudget",
+        "networking.k8s.io" => matches!(kind, "Ingress" | "NetworkPolicy"),
+        "rbac.authorization.k8s.io" => matches!(kind, "Role" | "RoleBinding"),
+        "coordination.k8s.io" => kind == "Lease",
+        "discovery.k8s.io" => kind == "EndpointSlice",
+        "events.k8s.io" => kind == "Event",
+        _ => false,
+    };
+    namespaced.then_some(crate::resources::ResourceScope::Namespaced)
+}
+
 fn api_service_api_resource() -> ApiResource {
     ApiResource {
         group: "apiregistration.k8s.io".to_string(),
@@ -839,37 +1073,11 @@ fn crd_api_resource() -> ApiResource {
 
 /// The scope of every served version of a CRD's kind (`true` when namespaced).
 fn crd_scope_entries(crd: &DynamicObject) -> Vec<(GroupVersionKind, bool)> {
-    let Some(spec) = crd.data.get("spec") else {
+    let Some(declaration) = crd.data.get("spec").and_then(super::CrdDeclaration::from_spec) else {
         return Vec::new();
     };
-    let (Some(group), Some(kind), Some(versions)) = (
-        spec.get("group").and_then(serde_json::Value::as_str),
-        spec.get("names")
-            .and_then(|names| names.get("kind"))
-            .and_then(serde_json::Value::as_str),
-        spec.get("versions").and_then(serde_json::Value::as_array),
-    ) else {
-        return Vec::new();
-    };
-    let namespaced = match spec.get("scope").and_then(serde_json::Value::as_str) {
-        Some("Namespaced") => true,
-        Some("Cluster") => false,
-        _ => return Vec::new(),
-    };
-    // Mirror Kubernetes behavior: only served versions are requestable.
-    versions
-        .iter()
-        .filter(|version| version.get("served").and_then(serde_json::Value::as_bool) == Some(true))
-        .filter_map(|version| version.get("name").and_then(serde_json::Value::as_str))
-        .map(|version| {
-            let gvk = GroupVersionKind {
-                group: group.to_string(),
-                version: version.to_string(),
-                kind: kind.to_string(),
-            };
-            (gvk, namespaced)
-        })
-        .collect()
+    let namespaced = declaration.scope == crate::resources::ResourceScope::Namespaced;
+    declaration.gvks().map(|gvk| (gvk, namespaced)).collect()
 }
 
 #[cfg(test)]
@@ -906,7 +1114,7 @@ impl KubeClient for MockKubeClient {
     async fn apply_resource(
         &self,
         resource: &DynamicObject,
-        _field_manager: &str,
+        field_manager: &str,
         dry_run: bool,
     ) -> Result<ApplyOutcome> {
         // Extract metadata
@@ -933,9 +1141,19 @@ impl KubeClient for MockKubeClient {
             old_json != new_json
         });
 
-        // Only store if not dry run
+        // Only store if not dry run, keeping the ownership the live object records.
         if !dry_run {
-            store.insert(key.clone(), resource.clone());
+            let mut stored = resource.clone();
+            if let Some(old) = &existing {
+                stored.metadata.managed_fields.clone_from(&old.metadata.managed_fields);
+            }
+            store.insert(key.clone(), stored);
+            self.applied_managers
+                .lock()
+                .unwrap()
+                .entry(key.clone())
+                .or_default()
+                .insert(field_manager.to_string());
         }
 
         let base_outcome = if existing.is_none() {
@@ -991,7 +1209,14 @@ impl KubeClient for MockKubeClient {
         &self.default_namespace
     }
 
-    async fn delete_resource(&self, gvk: &GroupVersionKind, namespace: Option<&str>, name: &str) -> Result<()> {
+    async fn delete_resource_with(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        options: &DeleteOptions,
+    ) -> Result<()> {
+        self.deletions.lock().unwrap().push(*options);
         let key = ResourceKey {
             gvk: gvk.clone(),
             namespace: namespace.map(|s| s.to_string()),
@@ -1005,10 +1230,59 @@ impl KubeClient for MockKubeClient {
         Ok(())
     }
 
+    async fn remove_finalizer(
+        &self,
+        gvk: &GroupVersionKind,
+        namespace: Option<&str>,
+        name: &str,
+        finalizer: &str,
+    ) -> Result<bool> {
+        let key = ResourceKey {
+            gvk: gvk.clone(),
+            namespace: namespace.map(str::to_string),
+            name: name.to_string(),
+        };
+        let mut store = self.resources.lock().unwrap();
+        let Some(finalizers) = store
+            .get_mut(&key)
+            .and_then(|object| object.metadata.finalizers.as_mut())
+        else {
+            return Ok(false);
+        };
+        let before = finalizers.len();
+        finalizers.retain(|present| present != finalizer);
+        Ok(finalizers.len() < before)
+    }
+
     async fn get_normalized_resource(&self, resource: &DynamicObject, _field_manager: &str) -> Result<DynamicObject> {
         // For testing, simply return the resource as-is
         // Tests can inject pre-normalized resources if needed
         Ok(resource.clone())
+    }
+
+    async fn release_field_manager(&self, resource: &DynamicObject, field_manager: &str) -> Result<bool> {
+        let gvk = crate::kubernetes::resource::extract_gvk(&serde_json::to_value(resource)?)?;
+        let key = ResourceKey {
+            gvk,
+            namespace: resource.namespace(),
+            name: resource.name_any(),
+        };
+        if !self
+            .applied_managers(&key)
+            .iter()
+            .any(|manager| manager == field_manager)
+        {
+            return Ok(false);
+        }
+        if let Some(managers) = self.applied_managers.lock().unwrap().get_mut(&key) {
+            managers.remove(field_manager);
+        }
+        if let Some(object) = self.resources.lock().unwrap().get_mut(&key) {
+            if let Some(entries) = object.metadata.managed_fields.as_mut() {
+                entries.retain(|entry| entry.manager.as_deref() != Some(field_manager));
+            }
+        }
+        Ok(true)
     }
 }
 

@@ -11,8 +11,8 @@ use git2::Repository;
 use nyl_render::git::GitManager;
 use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::gitops::{
-    compile_target_tree_cached_with_observer_and_options, resolve_deployment_target_name, resource_path, GitOpsCache,
-    RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
+    compile_target_tree_cached_with_observer_and_options, derive_application_views, resolve_deployment_target_name,
+    ApplicationView, GitOpsCache, RenderIndex, TreeCacheArgs, TreeRenderOptions, CATALOG_DIRECTORY,
 };
 use nyl_render::util::project_path::{locate_checkout_project, ProjectLocation};
 use nyl_render::{NylError, Result};
@@ -41,9 +41,14 @@ pub struct DiffTreeArgs {
     pub validation: nyl_render::validation::ValidationArgs,
     #[command(flatten)]
     pub cache: TreeCacheArgs,
+    #[command(flatten)]
+    pub project_scope: nyl_render::gitops::project_scope::ProjectScopeArgs,
 
     #[command(flatten)]
     pub progress: TreeProgressArgs,
+
+    #[command(flatten)]
+    pub lookup: nyl_render::helm::lookup::LookupArgs,
 
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
@@ -171,13 +176,6 @@ impl DiffSelection {
     }
 }
 
-#[derive(Debug)]
-struct ApplicationView {
-    catalog_file: PathBuf,
-    payload_path: PathBuf,
-    catalog_application: bool,
-}
-
 struct ComparisonFiles {
     base: BTreeMap<PathBuf, Vec<u8>>,
     desired: BTreeMap<PathBuf, Vec<u8>>,
@@ -189,6 +187,7 @@ pub async fn execute(args: DiffTreeArgs) -> Result<()> {
 }
 
 pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::ColorChoice) -> Result<()> {
+    args.lookup.refuse_live("diff-tree")?;
     let protected = std::iter::once(args.output.clone())
         .chain(args.stats_output.iter().map(|o| o.path.clone()))
         .filter(|p| p != Path::new("-"))
@@ -246,6 +245,7 @@ pub(crate) async fn execute_with_color(args: DiffTreeArgs, color: crate::cli::Co
 async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let discovered = (|| {
         let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+        nyl_render::gitops::shared_catalog::validate_with_samples(&inventory)?;
         let target = resolve_deployment_target_name(&inventory, args.target.as_deref())?;
         let carried = nyl_render::gitops::inputs::carry_paths(&inventory, &target)?;
         let nyl_render::gitops::provenance::WorktreeSourceState { commit, dirty } =
@@ -274,6 +274,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
     let options = TreeRenderOptions {
         allow_secret_inputs: args.allow_secret_inputs,
         publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(args.offline),
+        refresh_lookup: args.lookup.refresh(),
         ..TreeRenderOptions::default()
     };
     let rendered = compile_target_tree_cached_with_observer_and_options(
@@ -310,7 +311,7 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
             "Validation is not enabled in project configuration"
         },
     );
-    let compared = async {
+    let compared = Box::pin(async {
         // A source baseline reads the same publication state, so the diff
         // shows only what the source change causes. A baseline that
         // publishes elsewhere reads its own publication instead.
@@ -331,14 +332,13 @@ async fn evaluate(args: &DiffTreeArgs, report: &mut Report) {
             }
         }
         report.baseline(&baseline, &desired);
-        let selection = DiffSelection::from_args(args);
-        let comparison = comparison_files(&selection, &baseline, &desired)?;
+        let comparison = comparison_files(args, &baseline, &desired)?;
         TreeDiff::between(
             &comparison.base,
             &comparison.desired,
             if args.raw { DiffMode::Raw } else { DiffMode::Normalized },
         )
-    }
+    })
     .await;
     report.render = Some(cache.stats());
     match compared {
@@ -366,7 +366,7 @@ async fn resolve_baseline(
                 .source_ref
                 .as_deref()
                 .ok_or_else(|| NylError::config("--source-ref is required with --against source"))?;
-            let baseline = source_derived_tree(
+            let baseline = Box::pin(source_derived_tree(
                 inventory,
                 &args.source_project_path,
                 args.source_repository.as_deref(),
@@ -375,7 +375,7 @@ async fn resolve_baseline(
                 cache,
                 args.progress,
                 options,
-            )
+            ))
             .await?;
             Ok(ResolvedBaseline::Source(Box::new(baseline)))
         }
@@ -399,11 +399,19 @@ fn owned_copy(files: &nyl_render::gitops::DesiredFiles<'_>) -> BTreeMap<PathBuf,
 }
 
 fn comparison_files(
-    selection: &DiffSelection,
+    args: &DiffTreeArgs,
     baseline: &ResolvedBaseline,
     desired: &nyl_render::gitops::CompiledTargetTree,
 ) -> Result<ComparisonFiles> {
-    match selection {
+    nyl_render::gitops::project_scope::check_project_scope(
+        &baseline.files(),
+        &desired.owned_files(),
+        baseline.publication_path_prefix(desired),
+        desired.target.publication_path_prefix(),
+        desired.cluster.spec.kubernetes.as_ref(),
+        args.project_scope.ignore_project_scope_contraction,
+    )?;
+    match &DiffSelection::from_args(args) {
         DiffSelection::Tree => {
             let mut base = owned_copy(&baseline.files());
             // State files are owned plain files, shown as file diffs next to
@@ -492,128 +500,6 @@ fn validate_application_selector(selector: &str) -> Result<()> {
         return Err(NylError::config(format!(
             "--application {selector:?} must use NAMESPACE/NAME"
         )));
-    }
-    Ok(())
-}
-
-fn derive_application_views(
-    files: &nyl_render::gitops::DesiredFiles<'_>,
-    publication_path_prefix: &str,
-) -> Result<BTreeMap<String, ApplicationView>> {
-    let mut views = BTreeMap::new();
-    for (path, bytes) in files.iter().filter(|(path, _)| path.starts_with(CATALOG_DIRECTORY)) {
-        let text = std::str::from_utf8(bytes).map_err(|error| {
-            NylError::config(format!(
-                "Generated catalog file {} is not UTF-8: {error}",
-                path.display()
-            ))
-        })?;
-        let manifest = nyl_render::yaml::parse_yaml_value_k8s_compatible(text).map_err(|error| {
-            NylError::config(format!(
-                "Failed to parse generated catalog file {}: {error}",
-                path.display()
-            ))
-        })?;
-        if manifest.get("apiVersion").and_then(serde_json::Value::as_str) != Some("argoproj.io/v1alpha1")
-            || manifest.get("kind").and_then(serde_json::Value::as_str) != Some("Application")
-        {
-            continue;
-        }
-        let namespace = required_application_string(&manifest, "/metadata/namespace", path)?;
-        let name = required_application_string(&manifest, "/metadata/name", path)?;
-        let identity = format!("{namespace}/{name}");
-        let key = nyl_render::kubernetes::ResourceKey::from_json_value(&manifest)?;
-        let expected = Path::new(CATALOG_DIRECTORY).join(resource_path(&key)?);
-        // Publications rendered before the per-resource catalog layout stored
-        // Applications at applications/<namespace>/<name>.yaml; they remain
-        // readable as a comparison baseline.
-        let legacy = Path::new(CATALOG_DIRECTORY)
-            .join("applications")
-            .join(namespace)
-            .join(format!("{name}.yaml"));
-        if *path != expected && *path != legacy {
-            return Err(NylError::config(format!(
-                "Generated Argo CD Application {identity:?} is at {}, expected {}",
-                nyl_core::resources::relative_path_to_posix("generated catalog path", path)?,
-                nyl_core::resources::relative_path_to_posix("generated catalog path", &expected)?
-            )));
-        }
-        let rendered_path = required_application_string(&manifest, "/spec/source/path", path)?;
-        nyl_core::resources::validate_relative_path(
-            "generated Application spec.source.path",
-            rendered_path,
-            false,
-            false,
-        )?;
-        let payload_path = strip_publication_prefix(rendered_path, publication_path_prefix, path)?;
-        let view = ApplicationView {
-            catalog_file: path.to_path_buf(),
-            catalog_application: payload_path == Path::new(CATALOG_DIRECTORY),
-            payload_path,
-        };
-        if views.insert(identity.clone(), view).is_some() {
-            return Err(NylError::config(format!(
-                "Generated Argo CD Application identity {identity:?} occurs more than once"
-            )));
-        }
-    }
-    validate_application_payloads(&views)?;
-    Ok(views)
-}
-
-fn required_application_string<'a>(application: &'a serde_json::Value, pointer: &str, path: &Path) -> Result<&'a str> {
-    application
-        .pointer(pointer)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            NylError::config(format!(
-                "Generated Argo CD Application {} field {} must be a string",
-                path.display(),
-                pointer.trim_start_matches('/')
-            ))
-        })
-}
-
-fn strip_publication_prefix(rendered_path: &str, path_prefix: &str, catalog_file: &Path) -> Result<PathBuf> {
-    let rendered_path = Path::new(rendered_path);
-    let payload = if path_prefix.is_empty() {
-        rendered_path
-    } else {
-        rendered_path.strip_prefix(path_prefix).map_err(|_| {
-            NylError::config(format!(
-                "Generated Argo CD Application {} source path {} is outside publication path prefix {:?}",
-                catalog_file.display(),
-                rendered_path.display(),
-                path_prefix
-            ))
-        })?
-    };
-    if payload.as_os_str().is_empty() {
-        return Err(NylError::config(format!(
-            "Generated Argo CD Application {} source path resolves to the publication root",
-            catalog_file.display()
-        )));
-    }
-    nyl_core::resources::relative_path_to_posix("generated Application payload path", payload)?;
-    Ok(payload.to_path_buf())
-}
-
-fn validate_application_payloads(views: &BTreeMap<String, ApplicationView>) -> Result<()> {
-    let workloads = views
-        .iter()
-        .filter(|(_, view)| !view.catalog_application)
-        .collect::<Vec<_>>();
-    for (index, (left_identity, left)) in workloads.iter().enumerate() {
-        for (right_identity, right) in workloads.iter().skip(index + 1) {
-            if left.payload_path.starts_with(&right.payload_path) || right.payload_path.starts_with(&left.payload_path)
-            {
-                return Err(NylError::config(format!(
-                    "Generated Argo CD Applications {left_identity:?} and {right_identity:?} have overlapping payload paths {} and {}",
-                    left.payload_path.display(),
-                    right.payload_path.display()
-                )));
-            }
-        }
     }
     Ok(())
 }
@@ -895,33 +781,9 @@ pub(super) fn read_rendered_tree(
         });
     }
     reject_published_symlink(root, &index_path)?;
-    let index: RenderIndex = serde_json::from_slice(&std::fs::read(&index_path)?)?;
-    if index.version != nyl_render::gitops::reconcile::RENDER_INDEX_VERSION {
-        return Err(NylError::config(format!(
-            "Published ownership index {} uses unsupported version {}",
-            index_path.display(),
-            index.version
-        )));
-    }
-    let mut files = BTreeMap::new();
-    for (relative, expected_hash) in &index.files {
-        nyl_core::resources::validate_relative_path("published owned path", relative, false, false)?;
-        let path = root.join(relative);
-        reject_published_symlink(root, &path)?;
-        let bytes = std::fs::read(&path).map_err(|error| {
-            NylError::config(format!(
-                "Published owned file {} is missing or unreadable: {error}",
-                path.display()
-            ))
-        })?;
-        if nyl_core::digest::sha256_hex(&bytes) != *expected_hash {
-            return Err(NylError::config(format!(
-                "Published owned file {} does not match its ownership index",
-                path.display()
-            )));
-        }
-        files.insert(PathBuf::from(relative), bytes);
-    }
+    let index =
+        nyl_render::gitops::reconcile::parse_index(&std::fs::read(&index_path)?, &index_path.display().to_string())?;
+    let files = nyl_render::gitops::reconcile::read_indexed_files(root, &index, &BTreeSet::new())?;
     Ok(PublishedRenderedTree {
         files,
         index: Some(index),
@@ -1022,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_application_views_from_generated_catalog() {
+    fn application_comparison_selects_workloads_by_default() {
         let files = BTreeMap::from([
             (
                 PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/api.yaml"),
@@ -1041,11 +903,6 @@ mod tests {
                 b"kind: ConfigMap\n".to_vec(),
             ),
         ]);
-
-        let views = derive_application_views(&borrowed(&files), "production").unwrap();
-        assert_eq!(views["argocd/api"].payload_path, Path::new("workloads/api"));
-        assert!(!views["argocd/api"].catalog_application);
-        assert!(views["argocd/production-catalog"].catalog_application);
 
         let comparison = application_comparison_files(
             &BTreeSet::new(),
@@ -1082,57 +939,13 @@ mod tests {
     }
 
     #[test]
-    fn application_views_accept_legacy_baselines_and_reject_misplaced_applications() {
-        let legacy = BTreeMap::from([(
-            PathBuf::from("_nyl/catalog/applications/argocd/api.yaml"),
-            application_yaml("argocd", "api", "production/workloads/api"),
-        )]);
-        let views = derive_application_views(&borrowed(&legacy), "production").unwrap();
-        assert_eq!(views["argocd/api"].payload_path, Path::new("workloads/api"));
-
-        let misplaced = BTreeMap::from([(
-            PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/web.yaml"),
-            application_yaml("argocd", "api", "production/workloads/api"),
-        )]);
-        let error = derive_application_views(&borrowed(&misplaced), "production").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("expected _nyl/catalog/application.argoproj.io/argocd/api.yaml"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn rejects_ambiguous_or_escaping_application_payloads() {
-        let overlapping = BTreeMap::from([
-            (
-                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/parent.yaml"),
-                application_yaml("argocd", "parent", "production/workloads"),
-            ),
-            (
-                PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/child.yaml"),
-                application_yaml("argocd", "child", "production/workloads/child"),
-            ),
-        ]);
-        let error = derive_application_views(&borrowed(&overlapping), "production").unwrap_err();
-        assert!(error.to_string().contains("overlapping payload paths"));
-
-        let escaping = BTreeMap::from([(
-            PathBuf::from("_nyl/catalog/application.argoproj.io/argocd/api.yaml"),
-            application_yaml("argocd", "api", "another-target/workloads/api"),
-        )]);
-        let error = derive_application_views(&borrowed(&escaping), "production").unwrap_err();
-        assert!(error.to_string().contains("outside publication path prefix"));
-    }
-
-    #[test]
     fn publication_marker_changes_when_ownership_coordinates_change() {
         let target: DeploymentTarget = serde_json::from_value(serde_json::json!({
             "apiVersion": nyl_core::constants::API_VERSION_K8S_GITOPS,
             "kind": "DeploymentTarget",
             "metadata": {"name": "production"},
             "spec": {
+                "reconciler": {"argocd": {}},
                 "clusterRef": {"name": "prod-eu-1"},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
@@ -1153,6 +966,8 @@ mod tests {
         }))
         .unwrap();
         let baseline = nyl_render::gitops::CompiledTargetTree {
+            publication_snapshot: None,
+            publication_report: nyl_render::gitops::tree::partial::PublicationReport::default(),
             provenance: BTreeMap::new(),
             target: target.clone(),
             cluster,
@@ -1167,6 +982,7 @@ mod tests {
             state_files: BTreeMap::new(),
             committed_state_paths: BTreeSet::new(),
             publication_base: None,
+            shared_catalog: None,
         };
         let baseline_marker = publication_marker(&baseline).unwrap();
         let mut desired = baseline;

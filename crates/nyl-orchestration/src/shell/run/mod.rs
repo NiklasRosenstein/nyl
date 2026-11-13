@@ -10,7 +10,9 @@
 //! (`SourceRenderer`), builds desired documents (`rules::desired`), the graph
 //! (`rules::graph`), and resolves references in dependency order
 //! (`rules::references`), asking each ready unit's driver for its key inputs
-//! (`rules::execution_key`). Then waves: select ready units
+//! (`rules::execution_key`). With `--detect-drift`, the run then checks the
+//! current units for drift under its own lease ([`detect`]) and selection
+//! reads the fresh records. Then waves: select ready units
 //! (`rules::selection`), execute them in parallel up to the concurrency
 //! limit on scoped threads, each in its concurrency slot's worktree
 //! ([`slots`]) and its own temp dir ([`execute`]), write a
@@ -56,19 +58,21 @@ use nyl_core::orchestration::driver::{
 };
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
-    ArgoObserver, Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer,
-    SourceRepository, SourceResolver, StateError, TransitionChanges,
+    Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository,
+    SourceResolver, StateError, TransitionChanges,
 };
 use nyl_core::orchestration::state::{
-    ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, Condition, DesiredUnit, Lifecycle, ObservedUnit,
-    Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
+    ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, BlockedReason, Condition, DesiredUnit, Lifecycle,
+    ObservedUnit, Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
 };
+use nyl_core::orchestration::state::{Attestation, ObservationRecord};
 use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::environment::Environment;
 use nyl_core::resources::units::OutputDeclaration;
 use serde_json::{json, Map, Value};
 
 use super::lease::{self, HeldLease};
+use super::peers::Peers;
 use super::{store_error, Context};
 use crate::fault::{FaultAction, FaultPoint};
 use crate::rules::desired::{
@@ -78,6 +82,8 @@ use crate::rules::drift;
 use crate::rules::execution_key::{execution_key, stored_fingerprint, KeyMaterial};
 use crate::rules::freshness::{receipt_is_current, same_incarnation};
 use crate::rules::graph::{extract, topological_order};
+use crate::rules::observed_values;
+use crate::rules::peers::{Need, Problem};
 use crate::rules::references::{resolve_unit, ReferenceView};
 use crate::rules::selection::{batches, local_approve, select, Candidates, Skipped};
 use crate::rules::sources::{
@@ -86,7 +92,7 @@ use crate::rules::sources::{
 };
 use crate::rules::takeover::{self, ImportInputs, Leftovers};
 use crate::rules::teardown::TeardownOptions;
-use crate::rules::unit_state::{receipt_state, unit_state, NO_CURRENT_RECEIPT};
+use crate::rules::unit_state::{receipt_state, unit_state};
 use crate::run_report::{BlockedBy, EnvironmentRunReport, ReportKind, RunReport, UnitReport, UnitState};
 use crate::transition::Trailers;
 pub use cancel::{Cancellation, SIGINT, SIGTERM};
@@ -95,7 +101,10 @@ use nyl_core::orchestration::progress::UnitResult;
 use slots::Slots;
 
 mod cancel;
+mod detect;
 mod execute;
+mod incarnations;
+mod observe;
 pub(crate) mod slots;
 mod teardown;
 pub(crate) mod wait;
@@ -108,6 +117,9 @@ pub struct RunContext<'a> {
     pub base: &'a Context<'a>,
     pub sources: &'a dyn SourceResolver,
     pub renderer: &'a dyn SourceRenderer,
+    /// The instances of EnvironmentTemplates the run knows from state: the
+    /// environment itself when it is one. Renders across environments include them.
+    pub instances: &'a nyl_core::orchestration::instance::Instances,
     pub drivers: &'a DriverSet,
     pub tools: &'a dyn ToolRunner,
     /// Live unit events; absent for callers that only consume the final report.
@@ -127,10 +139,6 @@ pub struct RunContext<'a> {
     /// clock's time: the identity the command line resolved for state
     /// commits. `None` for `plan`, which writes nothing.
     pub commit_identity: Option<&'a CommitIdentity>,
-    /// Reads Argo CD for a publication's `observe` teardown wait; `None`
-    /// when no observer is configured, which makes such a wait uncertain
-    /// with `observation-failed`.
-    pub observer: Option<&'a dyn ArgoObserver>,
     /// The terminal of a run waiting on a teardown, when stdin is one: Enter
     /// confirms the removal.
     pub prompt: Option<&'a dyn OperatorPrompt>,
@@ -226,6 +234,11 @@ pub struct LifecycleOptions {
     pub leaving: bool,
     /// `teardown --confirm-removed`: the operator confirms a publication's removal.
     pub confirm_removed: bool,
+    /// The removal of an expired instance, decided on this `expiresAt`: its
+    /// teardowns are caused by expiry (`DeletionReason::Expired`), start only
+    /// with `allow_teardown`, and are refused when the record's expiry is no
+    /// longer this one ([`crate::rules::expiry::guard_removal`]).
+    pub expired: Option<nyl_core::orchestration::time::Timestamp>,
     /// `teardown --hold`: hold the units after their teardown, in the same
     /// operation ("tear down, then hold").
     pub hold: bool,
@@ -233,6 +246,7 @@ pub struct LifecycleOptions {
 
 /// One `plan` or `reconcile` of one environment.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Independent command-line switches next to the run's own facts.
 pub struct RunRequest {
     /// Selected environments whose source/state preflight failed.
     pub unavailable: BTreeSet<EnvironmentName>,
@@ -242,6 +256,12 @@ pub struct RunRequest {
     pub planned: BTreeMap<EnvironmentName, BTreeSet<UnitName>>,
     /// Declared environments and their state locations; producer snapshots are read lazily once.
     pub environments: BTreeMap<EnvironmentName, StateLocation>,
+    /// The entries of `environments` that are instances of EnvironmentTemplates
+    /// and no declared Environment. Instances are consumers only: they are
+    /// found by the checks across environments (fencing, `exec`, the
+    /// protection of producers) but never read as a producer, so a reference
+    /// to one is refused (`NYL-REFERENCE-INSTANCE-PRODUCER`).
+    pub instances: BTreeSet<EnvironmentName>,
     pub environment: EnvironmentName,
     /// The Environment as the entry worktree declares it, with group
     /// defaults applied: the source of `source`, `state`, `protectedRefs`,
@@ -250,6 +270,8 @@ pub struct RunRequest {
     pub location: StateLocation,
     /// The entry worktree's commit, S when `source` is omitted.
     pub entry_commit: CommitId,
+    /// Whether `entry_commit` is an instance's recorded source commit, because the run is not entered from the instance's own source.
+    pub source_recorded: bool,
     /// Worktree-rooted directory of the entry `nyl.toml`, to locate the
     /// project at S.
     pub entry_project_dir: String,
@@ -276,6 +298,12 @@ pub struct RunRequest {
     /// although their receipts are current; requires `units` and `reason`.
     /// Contract: [Drift](../../../../../design/orchestration-core.md#drift).
     pub reapply: bool,
+    /// `reconcile --detect-drift`: before it selects units, the run checks
+    /// the current receipts selection leaves current for drift, under its own
+    /// lease, and selects the units that came back `drifted` by the one
+    /// selection rule. Contract:
+    /// [Drift](../../../../../design/orchestration-core.md#drift).
+    pub detect_drift: bool,
     /// `--fail-fast` (`reconcile`, `teardown`): after the first failure,
     /// uncertain outcome, or approval wait, start no further unit; the run
     /// still checkpoints what finished and writes its transition commit.
@@ -286,6 +314,10 @@ pub struct RunRequest {
     /// `--reason` of an operator action (`--reapply`, `teardown`, `recover`),
     /// recorded as `Nyl-Reason` next to `Nyl-Requested-By`.
     pub reason: Option<String>,
+    /// The prefix of the keep refs of an instance's source commits, which
+    /// `state delete` removes with the instance's state; `None` for a
+    /// declared environment and unless the template sets `keepSource: true`.
+    pub keep_prefix: Option<String>,
 }
 
 impl RunRequest {
@@ -317,6 +349,64 @@ pub fn plan(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
     let mut report = RunReport::new(ReportKind::PlanReport);
     report.environments.push(environment);
     report
+}
+
+/// The teardown requirements the environment's units do not meet, as
+/// `plan` would warn about them, and what an unattended removal would wait
+/// for, without a report of anything else: what
+/// `nyl state init --template` shows, because every instance is torn down
+/// some day. The units render at the request's source and resolve against
+/// the environment's state; nothing is written. The findings are the
+/// drivers' own, shown unchanged. `Err` holds why the units could not be
+/// resolved, so a caller can say the readiness is unchecked.
+///
+/// Contract: [Kubernetes publication unit](../../../../../design/orchestration-core.md#kubernetes-publication-unit),
+/// teardown readiness.
+pub fn teardown_readiness_preview(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+) -> Result<Vec<Finding>, Vec<Finding>> {
+    off_runtime(|| {
+        let session = Session::new(context, request);
+        let preview = || -> Result<Vec<Finding>, Vec<Finding>> {
+            let snapshot = context
+                .base
+                .store
+                .snapshot(&request.location)
+                .map_err(|error| vec![store_error(&request.environment, &error)])?;
+            let prepared = session.prepare(&snapshot)?;
+            let held_view: BTreeMap<UnitName, DesiredUnit> = prepared
+                .desired
+                .held
+                .iter()
+                .map(|(name, held)| (name.clone(), held.stored.clone()))
+                .collect();
+            let produced = BTreeSet::new();
+            let resolved = session.resolve(
+                &prepared,
+                &Evidence {
+                    observed: &snapshot.observed,
+                    artifacts: &snapshot.artifacts,
+                    attestations: &snapshot.attestations,
+                    observations: &snapshot.observations,
+                    observed_commit: snapshot.tips.observed.as_ref(),
+                    run: None,
+                    produced_in_run: &produced,
+                    previous: &snapshot.desired,
+                },
+                &held_view,
+            );
+            let mut findings = crate::rules::teardown::readiness_warnings(context.drivers, resolved.units.values());
+            findings.extend(crate::rules::teardown::unattended_warnings(
+                context.drivers,
+                resolved.units.values(),
+            ));
+            Ok(findings)
+        };
+        let result = preview();
+        session.clean();
+        result
+    })
 }
 
 /// `nyl reconcile -e <env>`.
@@ -377,6 +467,9 @@ impl RunContext<'_> {
 struct Session<'r, 'a> {
     context: &'r RunContext<'a>,
     request: &'r RunRequest,
+    /// Whether other units' incarnations still exist in their environments'
+    /// state, for drivers that fence resources by owner.
+    incarnations: incarnations::StateIncarnations<'r>,
     /// This operation's own directory beneath the workspace.
     directory: PathBuf,
     default_branch: OnceCell<Result<String, Finding>>,
@@ -422,6 +515,8 @@ struct Resolved {
 struct Evidence<'e> {
     observed: &'e BTreeMap<UnitName, ObservedUnit>,
     artifacts: &'e BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    attestations: &'e BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    observations: &'e BTreeMap<UnitName, ObservationRecord>,
     observed_commit: Option<&'e CommitId>,
     run: Option<&'e RunId>,
     produced_in_run: &'e BTreeSet<UnitName>,
@@ -444,6 +539,7 @@ impl<'r, 'a> Session<'r, 'a> {
         Self {
             context,
             request,
+            incarnations: incarnations::StateIncarnations::over(context.base.store, Peers::of(request)),
             directory,
             default_branch: OnceCell::new(),
             revisions: RefCell::new(BTreeMap::new()),
@@ -460,24 +556,46 @@ impl<'r, 'a> Session<'r, 'a> {
 
     /// Read declared consumers once, without taking their leases. Stored specs,
     /// including held and retained ones, protect producers throughout teardown.
+    ///
+    /// Any environment may hold a consumer, so every other environment is
+    /// required ([`Need::Required`]) when a unit is leaving: one that cannot
+    /// be read is an error and nothing leaves. With no unit leaving
+    /// (`leaving` is false), nothing needs the consumers, and no other
+    /// environment is read.
     fn external_dependents(
         &self,
         desired: &BTreeMap<UnitName, DesiredUnit>,
+        leaving: bool,
     ) -> Result<BTreeMap<UnitName, Vec<String>>, Finding> {
-        if let Some(finding) = self.request.environment_errors.values().next() {
-            return Err(finding.clone());
-        }
         let mut dependents: BTreeMap<UnitName, Vec<String>> = BTreeMap::new();
-        for (environment, location) in &self.request.environments {
-            if environment == self.environment() {
-                continue;
-            }
+        if !leaving {
+            return Ok(dependents);
+        }
+        let peers = Peers::of(self.request);
+        // An environment whose own preflight failed in this invocation has no
+        // usable state here (a reference to it reads an empty snapshot), so
+        // its consumers cannot be seen.
+        if let Some(environment) = self
+            .request
+            .unavailable
+            .iter()
+            .find(|environment| *environment != self.environment())
+        {
+            return Err(Finding::new(
+                Code::StateUnavailable,
+                format!(
+                    "the state of {environment} was not read because its own preflight failed in this invocation, so its consumers of a leaving unit cannot be checked"
+                ),
+                format!(
+                    "fix {environment} (`nyl validate` reports an invalid declaration), or run this environment on its own"
+                ),
+            ));
+        }
+        for environment in peers.others(self.environment()) {
             if !self.environments.borrow().contains_key(environment) {
-                let snapshot = self
-                    .base()
-                    .store
-                    .snapshot(location)
-                    .map_err(|error| store_error(environment, &error))?;
+                let snapshot = peers
+                    .read(self.base().store, environment, Need::Required)
+                    .map_err(Problem::into_finding)?;
                 self.environments.borrow_mut().insert(environment.clone(), snapshot);
             }
             let environments = self.environments.borrow();
@@ -701,10 +819,11 @@ impl<'r, 'a> Session<'r, 'a> {
             entry,
             &self.request.entry_commit,
             self.request.source_override.as_deref(),
+            self.request.source_recorded,
         );
         let commit = match &request {
             SourceRequest::Worktree(snapshot) => snapshot.commit.clone(),
-            SourceRequest::Entry(commit) => commit.clone(),
+            SourceRequest::Entry(commit) | SourceRequest::Recorded(commit) => commit.clone(),
             SourceRequest::Revision(revision) | SourceRequest::Override(revision) => self.resolve_revision(revision)?,
             SourceRequest::Commit { revision, commit } => {
                 self.check_pin(commit, revision)?;
@@ -736,11 +855,12 @@ impl<'r, 'a> Session<'r, 'a> {
         let worktree = self
             .resolution_worktree(&source_commit)
             .map_err(|finding| vec![finding])?;
-        let rendered = self
+        let mut rendered = self
             .context
             .renderer
             .render(&worktree, self.environment(), &source_commit)
             .map_err(|error| vec![source_unavailable(&error.to_string())])?;
+        crate::rules::desired::apply_instance_policy(&mut rendered, self.context.drivers);
         let environment_spec = environment_spec(&rendered.environment, &self.request.entry);
         let desired = desire(
             &DesireInputs {
@@ -825,11 +945,32 @@ impl<'r, 'a> Session<'r, 'a> {
     }
 
     /// Cache producer snapshots once; a preflight-failed selected producer supplies no evidence.
-    fn read_environments(&self, prepared: &Prepared) -> Vec<Finding> {
+    ///
+    /// The producers a unit's references name are required
+    /// ([`Need::Required`]): one whose declaration cannot be used or whose
+    /// state cannot be read is an error of the run, and so is a reference to an
+    /// instance. Each producer that failed is in the second result, so its
+    /// consumers report that error instead of an undeclared environment.
+    fn read_environments(&self, prepared: &Prepared) -> (Vec<Finding>, BTreeSet<EnvironmentName>) {
+        let peers = Peers::of(self.request);
         let mut errors = Vec::new();
+        let mut failed = BTreeSet::new();
         for unit in prepared.desired.units.values() {
             for environment in crate::rules::multi_environment::dependencies(&unit.spec) {
                 if environment == *self.environment() || self.environments.borrow().contains_key(&environment) {
+                    continue;
+                }
+                // Each consumer of an instance is named in its own error.
+                if self.request.instances.contains(&environment) {
+                    errors.push(crate::rules::multi_environment::instance_producer_finding(
+                        &format!("unit {}", unit.unit.name),
+                        &environment,
+                    ));
+                    failed.insert(environment);
+                    continue;
+                }
+                // A producer is read, and fails, once per run.
+                if failed.contains(&environment) {
                     continue;
                 }
                 if self.request.unavailable.contains(&environment) {
@@ -838,21 +979,22 @@ impl<'r, 'a> Session<'r, 'a> {
                         .insert(environment, EnvironmentSnapshot::default());
                     continue;
                 }
-                if let Some(finding) = self.request.environment_errors.get(&environment) {
-                    errors.push(finding.clone());
+                // An environment nobody declares is the reference's own error.
+                if !peers.knows(&environment) {
                     continue;
                 }
-                if let Some(location) = self.request.environments.get(&environment) {
-                    match self.base().store.snapshot(location) {
-                        Ok(snapshot) => {
-                            self.environments.borrow_mut().insert(environment, snapshot);
-                        }
-                        Err(error) => errors.push(store_error(&environment, &error)),
+                match peers.read(self.base().store, &environment, Need::Required) {
+                    Ok(snapshot) => {
+                        self.environments.borrow_mut().insert(environment, snapshot);
+                    }
+                    Err(problem) => {
+                        errors.push(problem.into_finding());
+                        failed.insert(environment);
                     }
                 }
             }
         }
-        errors
+        (errors, failed)
     }
 
     /// Include held producers, preserving their frozen documents and marker declarations.
@@ -889,8 +1031,23 @@ impl<'r, 'a> Session<'r, 'a> {
         evidence: &Evidence<'_>,
         held: &BTreeMap<UnitName, DesiredUnit>,
     ) -> Resolved {
-        let external_errors = self.read_environments(prepared);
-        let external = self.environments.borrow();
+        let (external_errors, failed_producers) = self.read_environments(prepared);
+        // A producer that could not be read has no snapshot to resolve from:
+        // it resolves as one with no units, so its consumers' own errors are
+        // their own, and the producer's error (in `external_errors`) says why
+        // the run stops. The cache itself never holds that stand-in.
+        let cached = self.environments.borrow();
+        let stand_ins;
+        let external = if failed_producers.is_empty() {
+            &*cached
+        } else {
+            let mut merged = cached.clone();
+            for producer in &failed_producers {
+                merged.entry(producer.clone()).or_default();
+            }
+            stand_ins = merged;
+            &stand_ins
+        };
         let mut units = Self::resolution_units(prepared, held);
         let mut commits = BTreeMap::new();
         let mut errors: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
@@ -912,11 +1069,14 @@ impl<'r, 'a> Session<'r, 'a> {
             };
             let resolution = {
                 let view = ReferenceView {
-                    environments: &external,
+                    environments: external,
                     environment: self.environment(),
                     desired: &units,
                     observed: evidence.observed,
                     artifacts: evidence.artifacts,
+                    attestations: evidence.attestations,
+                    observations: evidence.observations,
+                    now: self.base().clock.now(),
                     observed_commit: evidence.observed_commit,
                     run: evidence.run,
                     produced_in_run: evidence.produced_in_run,
@@ -943,20 +1103,13 @@ impl<'r, 'a> Session<'r, 'a> {
             unit.provenance = resolution.provenance;
             unit.readiness = resolution.readiness;
             if !resolution.errors.is_empty() && !in_shadow {
-                errors.insert(
-                    name.clone(),
-                    resolution
-                        .errors
-                        .iter()
-                        .map(|error| {
-                            Finding::new(
-                                Code::ReferenceInvalid,
-                                format!("unit {name}: {error}"),
-                                "correct the reference so that it names a declared, non-sensitive output or a listed artifact of a unit in the ownership set",
-                            )
-                        })
-                        .collect(),
-                );
+                // The unit's own errors join the producers' errors, never replace them.
+                errors
+                    .entry(name.clone())
+                    .or_default()
+                    .extend(resolution.errors.iter().map(|error| {
+                        Finding::new(error.code, format!("unit {name}: {}", error.message), error.fix.clone())
+                    }));
             }
             let fenced = prepared.desired.fenced.contains(name);
             if let (Some(mut spec), true, false) = (resolution.resolved_spec, resolution.errors.is_empty(), fenced) {
@@ -1048,7 +1201,7 @@ impl<'r, 'a> Session<'r, 'a> {
         )
         .map_err(invalid)?;
         let commit = effective_commit(spec, &fields, source_commit).map_err(invalid)?;
-        crate::shell::sources::validate_local_inputs(self.context.sources, driver, spec, source_commit)
+        crate::shell::sources::validate_local_inputs(self.context.sources, driver, spec, source_commit, None)
             .map_err(invalid)?;
 
         let cached = self
@@ -1066,6 +1219,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 driver,
                 spec,
                 source_commit,
+                None,
                 project_dir,
                 &self.directory.join(format!("key-sources-{name}")),
                 Some((&worktree, &commit)),
@@ -1079,6 +1233,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 deadline,
             };
             let context = ResolutionContext {
+                instances: self.context.instances,
                 source_roots,
                 environment: self.environment().clone(),
                 project_dir: project_path(&worktree, project_dir),
@@ -1101,6 +1256,9 @@ impl<'r, 'a> Session<'r, 'a> {
                 .insert(name.clone(), (spec.clone(), commit.clone(), inputs.clone()));
             inputs
         };
+        // What the driver learned from its inputs joins the resolved spec
+        // before the key is computed, so the stored document carries it.
+        inputs.record_into(spec).map_err(|error| invalid(error.to_string()))?;
         let key = execution_key(&KeyMaterial {
             api_version: &unit.unit.api_version,
             kind: &unit.unit.kind,
@@ -1136,6 +1294,14 @@ struct Keyed {
     fingerprint: Option<String>,
     commit: CommitId,
     attestations: Vec<String>,
+}
+
+/// Whether the instance's template authorizes omission teardown without `--allow-teardown`.
+fn instance_allows_teardown(rendered: &RenderedSource) -> bool {
+    rendered
+        .instance
+        .as_ref()
+        .is_some_and(|instance| instance.allow_teardown)
 }
 
 fn source_unavailable(message: &str) -> Finding {
@@ -1303,32 +1469,32 @@ fn declared_outputs(spec: &Value) -> BTreeMap<String, OutputDeclaration> {
         .unwrap_or_default()
 }
 
-/// A stored blocked reason in the report's form.
-fn blocked_by(unit: &DesiredUnit) -> Vec<BlockedBy> {
+/// The coded warnings the unit's driver reported with its current receipt:
+/// what its last execution found, which stays until it executes again.
+fn receipt_warnings(observed: Option<&ObservedUnit>) -> Vec<Finding> {
+    observed
+        .and_then(|observed| observed.receipt.as_ref())
+        .map(|receipt| receipt.warnings.clone())
+        .unwrap_or_default()
+}
+
+/// A unit's stored blocked reasons in the report's form, and the warnings
+/// of those that wait for attestations or observed values.
+fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<BlockedBy>, Vec<Finding>) {
     let Readiness::Blocked { reasons } = &unit.readiness else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    reasons
-        .iter()
-        .map(|reason| {
-            let producer = reason
-                .reason
-                .strip_suffix(" has no current receipt")
-                .and_then(|producer| UnitName::new(producer).ok());
-            match producer {
-                Some(producer) => BlockedBy {
-                    pointer: reason.pointer.clone(),
-                    unit: Some(producer),
-                    reason: NO_CURRENT_RECEIPT.to_owned(),
-                },
-                None => BlockedBy {
-                    pointer: reason.pointer.clone(),
-                    unit: None,
-                    reason: reason.reason.clone(),
-                },
-            }
-        })
-        .collect()
+    (
+        reasons.iter().map(crate::rules::unit_state::blocked_by).collect(),
+        crate::rules::evidence::warnings(&unit.unit.name, environment.as_str(), reasons)
+            .into_iter()
+            .chain(crate::rules::observed_values::warnings(
+                &unit.unit.name,
+                environment.as_str(),
+                reasons,
+            ))
+            .collect(),
+    )
 }
 
 /// The failure or uncertainty message of the unit's current incarnation.
@@ -1416,6 +1582,8 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
             &Evidence {
                 observed: &observed,
                 artifacts: &snapshot.artifacts,
+                attestations: &snapshot.attestations,
+                observations: &snapshot.observations,
                 observed_commit: snapshot.tips.observed.as_ref(),
                 run: None,
                 produced_in_run: &produced,
@@ -1428,6 +1596,10 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         }
     };
     report.errors.extend(resolved.errors.values().flatten().cloned());
+    report.warnings.extend(crate::rules::teardown::readiness_warnings(
+        context.drivers,
+        resolved.units.values(),
+    ));
     let attempted = BTreeSet::new();
     let selectable = selection_view(&resolved, &held_view);
     let candidates = Candidates {
@@ -1464,7 +1636,9 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
         entry.receipt = Some(receipt_state(Some(unit), current));
         entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
         entry.message = condition_message(unit, current);
-        entry.blocked_by = blocked_by(unit);
+        (entry.blocked_by, entry.warnings) = blocked_report(environment, unit);
+        // What the driver warned about when it executed, until it executes again.
+        entry.warnings.extend(receipt_warnings(current));
         entry.state = Some(if skipped.get(name) == Some(&Skipped::ManualApproval) {
             UnitState::AwaitingApproval
         } else if drifted.contains(name) {
@@ -1545,7 +1719,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
     }
     let options = TeardownOptions {
         approvals: Some(&request.approvals),
-        allow_teardown: request.lifecycle.allow_teardown,
+        allow_teardown: request.lifecycle.allow_teardown || instance_allows_teardown(&prepared.rendered),
         allow_dependents: request.lifecycle.allow_dependents,
         allow_incomplete: request.lifecycle.allow_incomplete,
         named: None,
@@ -1655,7 +1829,7 @@ fn plan_leaving(
         if !teardown_unit {
             continue;
         }
-        if let Some(preflight) = teardown::readiness(context.drivers, environment, name, unit) {
+        if let Some(preflight) = teardown::readiness(context.drivers, unit) {
             let blocking = &preflight.blocking;
             readiness_state.insert(
                 name.clone(),
@@ -1674,7 +1848,8 @@ fn plan_leaving(
     }
     let attempted = BTreeSet::new();
     let waiting = BTreeSet::new();
-    let external = session.external_dependents(&life.desired);
+    let leaves = crate::rules::teardown::leaves(&life.desired, &life.releases, options);
+    let external = session.external_dependents(&life.desired, leaves);
     let mut plan = crate::rules::teardown::plan(&crate::rules::teardown::TeardownInputs {
         external_dependents: external.as_ref().unwrap_or(&BTreeMap::new()),
         environment,
@@ -1810,17 +1985,21 @@ fn plan_unit(
     let temp_dir = directory.join("tmp");
     // Planning is sequential, so it always uses the first slot.
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-    let (worktree, source_roots) =
-        match session
-            .slots
-            .checkout_unit(context.sources, 0, commit, driver, spec, project_dir)
-        {
-            Ok(roots) => roots,
-            Err(message) => {
-                entry.plan_error = Some(message);
-                return;
-            }
-        };
+    let (worktree, source_roots) = match session.slots.checkout_unit(
+        context.sources,
+        0,
+        commit,
+        unit.source_revision.as_ref(),
+        driver,
+        spec,
+        project_dir,
+    ) {
+        Ok(roots) => roots,
+        Err(message) => {
+            entry.plan_error = Some(message);
+            return;
+        }
+    };
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
         entry.plan_error = Some(format!("cannot create {}: {error}", temp_dir.display()));
         return;
@@ -1840,6 +2019,8 @@ fn plan_unit(
         deadline: unit_timeout(context.drivers, unit).after(now),
     };
     let execution = ExecutionContext {
+        instances: context.instances,
+        clock: context.base.clock,
         secrets,
         interactive: false,
         artifacts: BTreeMap::new(),
@@ -1858,6 +2039,8 @@ fn plan_unit(
         commit_identity: context.commit_identity,
         cache_dir: session.context.cache_dir(),
         teardown_wait: None,
+        incarnations: &session.incarnations,
+        dirty_source: false,
     };
     match driver.plan(&execution, unit) {
         Ok(Supported::Supported(plan)) => {
@@ -1868,8 +2051,11 @@ fn plan_unit(
                 .blocked_by
                 .extend(plan.blocked_by.into_iter().map(|pointer| BlockedBy {
                     pointer,
+                    environment: None,
                     unit: None,
                     reason: "needed-to-plan".to_owned(),
+                    attestation: None,
+                    observation: None,
                 }));
         }
         Ok(Supported::Unsupported) => {
@@ -2062,6 +2248,15 @@ fn reconcile_environment(session: &Session<'_, '_>) -> EnvironmentRunReport {
     let base = context.base;
     let environment = session.environment();
     let mut report = EnvironmentRunReport::new(environment.clone());
+    // Options that leave `--detect-drift` nothing to check are refused
+    // before the run takes the lease.
+    if request.detect_drift {
+        if let Some(finding) = crate::rules::checks::detect_drift_conflict(request.lifecycle.leaving, request.reapply) {
+            report.errors.push(finding);
+            report.finish(request.mode.report_kind());
+            return report;
+        }
+    }
     let run = base.ids.run_id();
     // A `--local` run checks for remote run refs it would have to take over
     // before it takes the lease, so a refusal leaves the remote lease (and
@@ -2152,6 +2347,46 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             "the next run takes over once the lease expires or is broken",
         ));
         Ending::Killed
+    }
+
+    /// Checkpoint again, with the observed values just read, each unit of
+    /// `read` whose current receipt this run's latest checkpoint recorded
+    /// ([`takeover::observation_checkpoint`] decides): a run that dies
+    /// afterwards leaves the values on its run ref next to the receipt they
+    /// were read for. The later checkpoint of a unit decides on import. A
+    /// unit still inside its `observationWait` (`waiting`) is left for the
+    /// read that settles it, so polling writes nothing. A store failure is a
+    /// warning: the transition commit still records the values, and the next
+    /// read tries again.
+    fn checkpoint_observations(
+        &mut self,
+        checkpointed: &mut BTreeMap<UnitName, Checkpoint>,
+        read: &[UnitName],
+        observations: &BTreeMap<UnitName, ObservationRecord>,
+        waiting: impl Fn(&UnitName) -> bool,
+    ) {
+        for name in read {
+            let Some(latest) = checkpointed.get(name) else {
+                continue;
+            };
+            if waiting(name) {
+                continue;
+            }
+            let Some(candidate) =
+                takeover::observation_checkpoint(self.environment(), &self.run, latest, observations.get(name))
+            else {
+                continue;
+            };
+            match self.write_run(Some(&candidate)) {
+                Ok(()) => {
+                    checkpointed.insert(name.clone(), candidate);
+                }
+                Err(error) => {
+                    let finding = store_error(self.environment(), &error);
+                    self.report.warnings.push(finding);
+                }
+            }
+        }
     }
 
     /// Write the run record; a store failure is reported and ends the run.
@@ -2305,6 +2540,11 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
 
         let mut observed = snapshot.observed.clone();
         let mut artifacts = snapshot.artifacts.clone();
+        // The attestations of the receipts as this run changes them.
+        let mut attestations = snapshot.attestations.clone();
+        // The observed values of the receipts as this run reads them.
+        let mut observations = snapshot.observations.clone();
+        let mut observing = observe::Observing::default();
         let mut life = teardown::Life::new(&overlay.desired);
         if lifecycle_work {
             for (name, write) in &prepared.desired.lifecycle {
@@ -2350,11 +2590,21 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         let mut produced = BTreeSet::new();
         let mut attempted = BTreeSet::new();
         let mut executions: BTreeMap<UnitName, Execution> = BTreeMap::new();
+        // The latest checkpoint this run wrote for each unit it executed, so
+        // that what it reads of the unit's receipt afterwards is
+        // checkpointed with it.
+        let mut checkpointed: BTreeMap<UnitName, Checkpoint> = BTreeMap::new();
         let mut created: BTreeSet<UnitName> = BTreeSet::new();
         let mut taking = Takeover::new(&leftovers, overlay, &prepared.desired.units, &prepared.desired.fenced);
         let runs: Vec<_> = leftovers.runs.iter().map(|state| (*state).clone()).collect();
         let mut adoptions: BTreeSet<UnitName> = BTreeSet::new();
         let reapply = request.reapply_units();
+        // `--detect-drift`: what the run's drift check found. The drift
+        // records selection reads are the snapshot's with the fresh ones laid
+        // over them.
+        let mut detection = detect::Detection::default();
+        let mut drift_records = snapshot.drift.clone();
+        let mut drift_checked = false;
         let mut first = true;
         let (resolved, skipped) = loop {
             if request.cancellation.is_cancelled() {
@@ -2375,6 +2625,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 &Evidence {
                     observed: &observed,
                     artifacts: &artifacts,
+                    attestations: &attestations,
+                    observations: &observations,
                     observed_commit: snapshot.tips.observed.as_ref(),
                     run: Some(&self.run),
                     produced_in_run: &produced,
@@ -2414,9 +2666,50 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     observed: &observed,
                     handled: &taking.handled,
                 });
-                if taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
+                if taking.apply(
+                    import,
+                    &mut observed,
+                    &mut artifacts,
+                    &mut attestations,
+                    &mut observations,
+                    &mut produced,
+                    &mut self.report,
+                ) {
                     // Imported receipts may change downstream keys: resolve again.
                     continue;
+                }
+            }
+            if request.mode == RunMode::Reconcile && !request.lifecycle.leaving && life.stopped.is_none() {
+                // The observed values of a replaced receipt go, and every
+                // current unit that declares observations is read once per
+                // receipt before its consumers resolve: a value that changed
+                // by itself reaches them in this run.
+                for stale in observed_values::changes(&observations, &observed).into_keys() {
+                    observations.remove(&stale);
+                }
+                let now = context.base.clock.now();
+                let due = observing.due(session, &resolved.units, &observed, now);
+                if !due.is_empty() {
+                    let longest = longest_timeout(context.drivers, due.iter().map(|unit| &resolved.units[unit]));
+                    if let Err(ending) = self.phase(Vec::new(), lease::deadline(context.base, now, longest), &[]) {
+                        return ending;
+                    }
+                    let changed = observing.read(
+                        session,
+                        &prepared,
+                        &resolved,
+                        &observed,
+                        &artifacts,
+                        &mut observations,
+                        &due,
+                    );
+                    self.checkpoint_observations(&mut checkpointed, &due, &observations, |unit| {
+                        observing.waiting(unit)
+                    });
+                    if changed {
+                        // A recorded value changed: its consumers resolve again.
+                        continue;
+                    }
                 }
             }
             if !request.mode.executes() || request.lifecycle.leaving || life.stopped.is_some() {
@@ -2430,18 +2723,51 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             }
             let selectable = selection_view(&resolved, &held_view);
             let approvals = session.approvals(&resolved.units);
+            let local_approved = request
+                .local
+                .as_ref()
+                .and_then(|local| local_approve(&local.approve, context.commit_identity));
+            // `--detect-drift`: once, before the first selection, check the
+            // current receipts selection leaves current, under this run's
+            // lease. The records it finds join the ones selection reads.
+            if request.detect_drift && !drift_checked {
+                drift_checked = true;
+                let targets = crate::rules::checks::reconcile_targets(&Candidates {
+                    desired: &selectable,
+                    observed: &observed,
+                    drivers: context.drivers,
+                    named: request.units.as_ref(),
+                    attempted: &attempted,
+                    local: local_approved,
+                    approvals: request.approvals.identity.as_ref().map(|_| &approvals),
+                    drift: &snapshot.drift,
+                    drift_repair: drift::drift_repair(&prepared.rendered.environment),
+                    reapply: &reapply,
+                });
+                match self.detect_drift(
+                    &targets,
+                    &selectable,
+                    &observed,
+                    &artifacts,
+                    &snapshot.drift,
+                    &prepared.rendered.project_dir,
+                ) {
+                    Ok(found) => {
+                        drift_records = found.overlay(&snapshot.drift);
+                        detection = found;
+                    }
+                    Err(ending) => return ending,
+                }
+            }
             let candidates = Candidates {
                 desired: &selectable,
                 observed: &observed,
                 drivers: context.drivers,
                 named: request.units.as_ref(),
                 attempted: &attempted,
-                local: request
-                    .local
-                    .as_ref()
-                    .and_then(|local| local_approve(&local.approve, context.commit_identity)),
+                local: local_approved,
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
-                drift: &snapshot.drift,
+                drift: &drift_records,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
             };
@@ -2470,6 +2796,23 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
             }
             if ready.is_empty() {
+                // Nothing else to run: wait for the observed values this run
+                // owes a wait for (`observationWait`), then resolve again.
+                if request.mode == RunMode::Reconcile && life.stopped.is_none() {
+                    let now = context.base.clock.now();
+                    if let Some(until) = observing.next_poll(now, context.base.settings.observation_poll) {
+                        // Whole seconds, rounded up, so the clock is at or past
+                        // the poll when the run wakes; at least one, so a poll
+                        // that is due already does not spin.
+                        let delta = until - now;
+                        let seconds = delta.num_seconds() + i64::from(delta.subsec_nanos() > 0);
+                        context
+                            .base
+                            .clock
+                            .wait(Duration::from_secs(u64::try_from(seconds).unwrap_or(1).max(1)));
+                        continue;
+                    }
+                }
                 break (resolved, skipped);
             }
             for batch in batches(&ready, request.concurrency) {
@@ -2527,7 +2870,28 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                             produced.insert(name.clone());
                         }
                         observed.insert(name.clone(), checkpoint.observed.clone());
+                        // A run that executed a unit owes its `observationWait`.
+                        if let (UnitResult::Executed { .. } | UnitResult::Recovered { .. }, Some(receipt)) =
+                            (&execution.result, checkpoint.observed.receipt.as_ref())
+                        {
+                            let unit = &resolved.units[&name];
+                            observing.executed(
+                                unit,
+                                receipt,
+                                unit_timeout(context.drivers, unit),
+                                context.base.clock.now(),
+                            );
+                        }
+                        // A new receipt starts with the attestations its own execution reported.
+                        if let Some(set) = &execution.attestations {
+                            if set.is_empty() {
+                                attestations.remove(&name);
+                            } else {
+                                attestations.insert(name.clone(), set.clone());
+                            }
+                        }
                         self.checkpointed = true;
+                        checkpointed.insert(name.clone(), checkpoint.clone());
                         if let Err(error) = self.write_run(Some(checkpoint)) {
                             let finding = store_error(&environment, &error);
                             self.report.errors.push(finding);
@@ -2570,7 +2934,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 }
             }
         };
+        // What the run still holds of values it read while waiting for them
+        // is checkpointed now, before the rest of the run.
+        let read: Vec<UnitName> = checkpointed.keys().cloned().collect();
+        self.checkpoint_observations(&mut checkpointed, &read, &observations, |_| false);
         self.report.errors.extend(resolved.errors.values().flatten().cloned());
+        self.report.warnings.extend(crate::rules::teardown::readiness_warnings(
+            context.drivers,
+            resolved.units.values(),
+        ));
         // Drift repairs and reapplies list only the units the run executed
         // again, with a new receipt replacing the drifted one.
         let executed = |name: &UnitName| {
@@ -2602,7 +2974,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 observed: &observed,
                 handled: &taking.handled,
             });
-            taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report);
+            taking.apply(
+                import,
+                &mut observed,
+                &mut artifacts,
+                &mut attestations,
+                &mut observations,
+                &mut produced,
+                &mut self.report,
+            );
         }
         self.report.imported = taking.imported.iter().cloned().collect();
         self.report.recovered = taking.recovered.iter().cloned().collect();
@@ -2626,6 +3006,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 desired,
                 &mut observed,
                 &mut artifacts,
+                &mut attestations,
+                &mut observations,
                 &runs,
                 &nyl_core::orchestration::state::Request {
                     by: context.base.requested_by.clone(),
@@ -2650,7 +3032,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 runs: &runs,
                 options: TeardownOptions {
                     approvals: Some(&request.approvals),
-                    allow_teardown: request.lifecycle.allow_teardown,
+                    allow_teardown: request.lifecycle.allow_teardown || instance_allows_teardown(&prepared.rendered),
                     allow_dependents: request.lifecycle.allow_dependents,
                     allow_incomplete: request.lifecycle.allow_incomplete,
                     named: None,
@@ -2715,7 +3097,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     .local
                     .as_ref()
                     .and_then(|local| local_approve(&local.approve, context.commit_identity)),
-                drift: &snapshot.drift,
+                drift: &drift_records,
                 drift_repair: drift::drift_repair(&prepared.rendered.environment),
                 reapply: &reapply,
                 approvals: request.approvals.identity.as_ref().map(|_| &approvals),
@@ -2733,7 +3115,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             let mut entry = UnitReport::new(unit.unit.kind.clone());
             entry.receipt = Some(receipt_state(Some(unit), current));
             entry.last_run = current.and_then(ObservedUnit::last_run).cloned();
-            entry.blocked_by = blocked_by(unit);
+            let (blocked, blocked_warnings) = blocked_report(&environment, unit);
+            entry.blocked_by = blocked;
             entry.receipt_nyl_version =
                 crate::rules::unit_state::receipt_nyl_version(unit, current, &context.base.version);
             if let Some(execution) = executions.get(name) {
@@ -2760,6 +3143,26 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 if skipped.get(name) == Some(&Skipped::LocalApproval) {
                     entry.message = Some(format!(
                         "a --local run executes {name} only with --approve {name}: its recovery policy is not converge"
+                    ));
+                }
+            }
+            entry.warnings.extend(blocked_warnings);
+            entry
+                .warnings
+                .extend(observing.warnings.get(name).cloned().unwrap_or_default());
+            if let Some(check) = detection.checks.get(name) {
+                // What `--detect-drift` found; drift this run repaired is
+                // reported by `driftRepaired`, not as a warning, and a check
+                // that failed is already reported as `NYL-DRIVER-ERROR`.
+                entry.drift_check = Some(check.clone());
+                if !detection.failed.contains(name) {
+                    entry.warnings.extend(crate::rules::checks::reconcile_warnings(
+                        &environment,
+                        name,
+                        check,
+                        crate::rules::selection::execution_recovery(context.drivers, unit),
+                        drift::drift_repair(&prepared.rendered.environment),
+                        self.report.drift_repaired.contains(name),
                     ));
                 }
             }
@@ -2830,7 +3233,33 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.desired.insert(name.clone(), write.clone());
             }
         }
-        Self::observed_changes(snapshot, &observed, &artifacts, &life, &mut changes);
+        Self::observed_changes(
+            snapshot,
+            &observed,
+            &artifacts,
+            &attestations,
+            &observations,
+            &life,
+            &mut changes,
+        );
+        // The drift records the run's check found, in the same commit as its
+        // receipts: one for a unit whose receipt this run did not replace
+        // (a repair makes a new receipt with the same execution key, and
+        // the record is about the old one) and that differs from the stored.
+        for (name, (record, receipt)) in &detection.records {
+            let standing = observed.get(name).and_then(|observed| observed.receipt.as_ref());
+            if standing == Some(receipt)
+                && snapshot.drift.get(name) != Some(record)
+                && !changes.drift.contains_key(name)
+            {
+                changes.drift.insert(name.clone(), Some(record.clone()));
+            }
+        }
+        self.report.observations_changed = observing
+            .changed
+            .iter()
+            .map(|(unit, names)| (unit.clone(), names.iter().cloned().collect()))
+            .collect();
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
@@ -2894,6 +3323,16 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             overlay,
         } = begun;
         let run = self.run.clone();
+        // The removal of an expired instance repeats its decision under the
+        // lease: an instance renewed meanwhile is kept.
+        if let Some(decided_on) = request.lifecycle.expired {
+            if let Err(finding) =
+                crate::rules::expiry::guard_removal(&environment, decided_on, snapshot.record.as_ref())
+            {
+                self.report.errors.push(finding);
+                return Ending::Release;
+            }
+        }
         let leftovers = takeover::leftovers(&run, replaced.as_ref(), coordination);
         let mut observed = snapshot.observed.clone();
         let mut artifacts = snapshot.artifacts.clone();
@@ -2923,6 +3362,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         // A run taking over imports against the stored documents.
         let stored: BTreeMap<UnitName, DesiredUnit> = overlay.desired.clone();
         let mut taking = Takeover::new(&leftovers, overlay, &BTreeMap::new(), &BTreeSet::new());
+        let mut attestations = snapshot.attestations.clone();
+        let mut observations = snapshot.observations.clone();
         if taking.active {
             let mut produced = BTreeSet::new();
             loop {
@@ -2945,7 +3386,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     observed: &observed,
                     handled: &taking.handled,
                 });
-                if !taking.apply(import, &mut observed, &mut artifacts, &mut produced, &mut self.report) {
+                if !taking.apply(
+                    import,
+                    &mut observed,
+                    &mut artifacts,
+                    &mut attestations,
+                    &mut observations,
+                    &mut produced,
+                    &mut self.report,
+                ) {
                     break;
                 }
             }
@@ -2975,7 +3424,10 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             runs: &runs,
             options: TeardownOptions {
                 approvals: Some(&request.approvals),
-                allow_teardown: true,
+                // An explicit teardown needs no `--allow-teardown`; the removal
+                // of an expired instance does, like any teardown nobody asked
+                // for by name (`allowTeardown` of the template or the flag).
+                allow_teardown: request.lifecycle.expired.is_none() || request.lifecycle.allow_teardown,
                 allow_dependents: request.lifecycle.allow_dependents,
                 allow_incomplete: request.lifecycle.allow_incomplete,
                 named: named.as_ref(),
@@ -3006,7 +3458,15 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 changes.desired.insert(name.clone(), write.clone());
             }
         }
-        Self::observed_changes(snapshot, &observed, &artifacts, &life, &mut changes);
+        Self::observed_changes(
+            snapshot,
+            &observed,
+            &artifacts,
+            &attestations,
+            &observations,
+            &life,
+            &mut changes,
+        );
         if request.cancellation.is_cancelled() {
             return self.cancelled();
         }
@@ -3102,6 +3562,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         snapshot: &EnvironmentSnapshot,
         observed: &BTreeMap<UnitName, ObservedUnit>,
         artifacts: &BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        attestations: &BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+        observations: &BTreeMap<UnitName, ObservationRecord>,
         life: &teardown::Life,
         changes: &mut TransitionChanges,
     ) {
@@ -3122,7 +3584,40 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
         }
         // A new receipt replaces the one a drift record was about.
         changes.drift.extend(drift::drift_changes(snapshot, observed));
+        // Attestations name the receipt they are for: a replaced receipt's go
+        // in the same commit, and the new receipt's own are written with it.
+        let mut standing = attestations.clone();
+        for (name, kept) in crate::rules::evidence::attestation_changes(&standing, observed) {
+            match kept {
+                Some(kept) => standing.insert(name, kept),
+                None => standing.remove(&name),
+            };
+        }
+        let names: BTreeSet<&UnitName> = standing.keys().chain(snapshot.attestations.keys()).collect();
+        for name in names {
+            let after = standing.get(name);
+            if snapshot.attestations.get(name) != after {
+                changes.attestations.insert(name.clone(), after.cloned());
+            }
+        }
+        // Observed values name the receipt they were read for: a replaced
+        // receipt's go in the same commit, and the new receipt's own are
+        // written with it.
+        let mut standing = observations.clone();
+        for stale in crate::rules::observed_values::changes(&standing, observed).into_keys() {
+            standing.remove(&stale);
+        }
+        let names: BTreeSet<&UnitName> = standing.keys().chain(snapshot.observations.keys()).collect();
+        for name in names {
+            let after = standing.get(name);
+            if snapshot.observations.get(name) != after {
+                changes.observations.insert(name.clone(), after.cloned());
+            }
+        }
         for name in &life.cleared {
+            if snapshot.observations.contains_key(name) {
+                changes.observations.insert(name.clone(), None);
+            }
             if snapshot.drift.contains_key(name) {
                 changes.drift.insert(name.clone(), None);
             }
@@ -3534,12 +4029,17 @@ impl Takeover {
     }
 
     /// Overlay an import on the run's evidence; whether it changed any
-    /// observed document.
+    /// observed document. An imported receipt brings the attestations and
+    /// observed values its checkpoint carried, which replace those of the
+    /// receipt it replaces, as a unit's own execution's do.
+    #[allow(clippy::too_many_arguments)] // The import and every kind of evidence it overlays.
     fn apply(
         &mut self,
         import: takeover::Import,
         observed: &mut BTreeMap<UnitName, ObservedUnit>,
         artifacts: &mut BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+        attestations: &mut BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+        observations: &mut BTreeMap<UnitName, ObservationRecord>,
         produced: &mut BTreeSet<UnitName>,
         report: &mut EnvironmentRunReport,
     ) -> bool {
@@ -3554,6 +4054,14 @@ impl Takeover {
             // Its receipt reaches state with this run's commit.
             produced.insert(name);
         }
+        for (name, set) in import.attestations {
+            if set.is_empty() {
+                attestations.remove(&name);
+            } else {
+                attestations.insert(name, set);
+            }
+        }
+        observations.extend(import.observations);
         self.imported.extend(import.imported);
         self.recovered.extend(import.recovered);
         self.handled.extend(import.handled);
@@ -3629,7 +4137,7 @@ fn unexecuted_result(
         return UnitResult::Blocked {
             reason: reasons
                 .iter()
-                .map(|reason| reason.reason.as_str())
+                .map(BlockedReason::message)
                 .collect::<Vec<_>>()
                 .join("; "),
         };

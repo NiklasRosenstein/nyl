@@ -53,6 +53,10 @@ nyl apply --target dev apps/web.yaml
 
 `nyl apply` tracks release state in Kubernetes Secrets unless `--no-release` is used. That release state allows Nyl to understand what it previously applied and helps with pruning.
 
+Before Argo CD takes over resources you applied this way, apply them once more
+with `--handoff`, so Argo CD's syncs can remove fields you later drop from the
+source. See [Hand Over to Argo CD](/nyl/kubernetes-gitops/workflow/handoff/).
+
 ## Typical Uses
 
 - Bootstrap ArgoCD or other cluster prerequisites before GitOps is available.

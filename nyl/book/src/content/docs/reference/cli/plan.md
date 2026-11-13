@@ -33,6 +33,11 @@ asks each ready unit's driver what executing it would change, and reports:
   `NYL-TEARDOWN-HAS-DEPENDENTS` naming the tombstones that cite it, or a
   publication's unmet teardown readiness. Retained tombstones are listed as
   `retained`. See [Deletion and holds](/nyl/orchestration/deletion/);
+- warnings for each unmet teardown requirement, and each remnant, of every
+  publication that would be torn down (`NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
+  `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM`,
+  `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS`), each naming
+  the setting that fixes it;
 - each unit's state: `ready` for a unit that would execute, with the driver's
   change summary and digest, `drifted` for a current unit whose drift the
   run would repair, `current`, `held`, or `blocked` with the references it
@@ -78,6 +83,13 @@ for qualified unit options and independent state transactions.
 `--unit` filters the report while resolution still covers every desired unit.
 A changed producer outside that filter still blocks a selected consumer in
 another environment until its new receipt exists.
+
+`plan` reads the producer environments its units' references name, so they are
+[required](/nyl/orchestration/runs/#other-environments): a producer whose
+declaration cannot be used or whose state cannot be read is a
+`NYL-STATE-UNAVAILABLE` error with its fix, as for
+[`reconcile`](/nyl/reference/cli/reconcile/#other-environments). An
+environment the plan does not read never affects it.
 
 ## Options
 

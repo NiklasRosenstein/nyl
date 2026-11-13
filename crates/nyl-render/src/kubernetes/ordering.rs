@@ -1,13 +1,20 @@
 //! Resource ordering for the Kubernetes apply and prune sequence.
 //!
-//! Apply order follows Argo CD's sync engine (gitops-engine `pkg/sync/sync_tasks.go`),
-//! which adopted Helm's install order: Namespaces first, then cluster policy,
-//! ServiceAccounts, Secrets and ConfigMaps, storage, CustomResourceDefinitions, RBAC,
-//! Services, workloads, Ingresses, and APIServices. Every other kind, including custom
-//! resources, follows these built-in kinds. A built-in kind is matched by API group and
-//! kind, so a custom kind that shares a built-in name (such as a CNI's
-//! `NetworkPolicy`) still follows the CustomResourceDefinition or APIService that
-//! registers it.
+//! Apply order has three phases. CustomResourceDefinitions come first, then
+//! Namespaces, so everything else can depend on a kind or a namespace the same
+//! manifest defines: a CRD applied first has the longest to become Established while
+//! the other kinds apply, and a Namespace precedes every object in it. The remaining
+//! built-in kinds follow Argo CD's sync engine (gitops-engine `pkg/sync/sync_tasks.go`),
+//! which adopted Helm's install order: cluster policy, ServiceAccounts, Secrets and
+//! ConfigMaps, storage, RBAC, Services, workloads, Ingresses, and APIServices. Every
+//! other kind, including custom resources, follows these built-in kinds. A built-in
+//! kind is matched by API group and kind, so a custom kind that shares a built-in name
+//! (such as a CNI's `NetworkPolicy`) still follows the CustomResourceDefinition or
+//! APIService that registers it.
+//!
+//! This is the order within one sync wave of one phase. Argo CD's sync waves and
+//! hook phases order what comes before and after: [`super::hooks`] decides them and
+//! [`super::lifecycle`] applies waves in turn, each by this order.
 //!
 //! Admission webhook configurations are applied after everything else: registering a
 //! webhook before the resources it admits would send their requests to a backend
@@ -16,16 +23,18 @@
 //! Like Argo CD, [`ResourceOrdering::apply_batches`] groups consecutive resources of
 //! one kind into a batch. Resources in a batch are applied concurrently and each batch
 //! finishes before the next starts, so a kind never races a kind it may depend on.
-//! [`ResourceOrdering::prune_batches`] deletes in the reverse order, dependents first.
+//! [`ResourceOrdering::prune_batches`] deletes in the reverse order, dependents first,
+//! so Namespaces and then CustomResourceDefinitions are deleted last.
 
 use crate::kubernetes::{extract_gvk, GroupVersionKind, ResourceKey};
 use crate::Result;
 use serde_json::Value;
 use std::ops::Range;
 
-/// Built-in kinds in apply order, mirroring Argo CD's `kindOrder`, each with the API
-/// groups that serve it.
+/// Built-in kinds in apply order, each with the API groups that serve it: the
+/// CustomResourceDefinition and Namespace phases, then Argo CD's `kindOrder` for the rest.
 const KIND_ORDER: &[(&[&str], &str)] = &[
+    (&[API_EXTENSIONS_GROUP], "CustomResourceDefinition"),
     (&[""], "Namespace"),
     (&["networking.k8s.io", "extensions"], "NetworkPolicy"),
     (&[""], "ResourceQuota"),
@@ -39,7 +48,6 @@ const KIND_ORDER: &[(&[&str], &str)] = &[
     (&["storage.k8s.io"], "StorageClass"),
     (&[""], "PersistentVolume"),
     (&[""], "PersistentVolumeClaim"),
-    (&[API_EXTENSIONS_GROUP], "CustomResourceDefinition"),
     (&[RBAC_GROUP], "ClusterRole"),
     (&[RBAC_GROUP], "ClusterRoleList"),
     (&[RBAC_GROUP], "ClusterRoleBinding"),
@@ -105,6 +113,12 @@ impl ResourceOrdering {
         }
     }
 
+    /// How two kinds compare in apply order: the order hooks of one phase and
+    /// wave run in, as resources of one wave are applied.
+    pub fn compare_kinds(a: &GroupVersionKind, b: &GroupVersionKind) -> std::cmp::Ordering {
+        Self::gvk_order_key(a).cmp(&Self::gvk_order_key(b))
+    }
+
     /// Sort resources into apply order.
     ///
     /// The sort is stable: resources of one kind keep their relative input order.
@@ -159,7 +173,8 @@ impl ResourceOrdering {
     /// deletes dependents first: admission webhooks before the backends they call,
     /// custom resources and aggregated-API objects before the CustomResourceDefinitions
     /// and APIServices that define and serve them, APIServices before their backends,
-    /// and Namespaces last. Resources within a batch may be deleted concurrently.
+    /// then Namespaces and CustomResourceDefinitions last, so no object outlives its
+    /// Namespace or its kind. Resources within a batch may be deleted concurrently.
     pub fn prune_batches(keys: &mut [&ResourceKey]) -> Vec<Range<usize>> {
         keys.sort_by_cached_key(|key| (Self::gvk_order_key(&key.gvk), key.namespace.clone(), key.name.clone()));
         let mut batches = Self::apply_batches(keys.iter().map(|key| &key.gvk));
@@ -187,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_follows_argo_cd_kind_order() {
+    fn test_sort_applies_crds_then_namespaces_then_argo_cd_kind_order() {
         let mut resources = vec![
             manifest(
                 "admissionregistration.k8s.io/v1",
@@ -213,11 +228,11 @@ mod tests {
         assert_eq!(
             kinds(&resources),
             vec![
+                "CustomResourceDefinition",
                 "Namespace",
                 "ServiceAccount",
                 "Secret",
                 "ConfigMap",
-                "CustomResourceDefinition",
                 "ClusterRole",
                 "Role",
                 "RoleBinding",
@@ -255,8 +270,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "built-in",
                 "networkpolicies.crd.antrea.io",
+                "built-in",
                 "v3.projectcalico.org",
                 "custom",
                 "served"
@@ -363,8 +378,8 @@ mod tests {
                 vec!["widget"],
                 vec!["api"],
                 vec!["backend-a", "backend-b"],
-                vec!["crd"],
                 vec!["ns"],
+                vec!["crd"],
             ]
         );
     }

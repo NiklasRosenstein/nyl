@@ -37,6 +37,21 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   (`drift: clean`, `drifted`, or `unknown`). A current unit whose latest
   record is `drifted` has the state `drifted`: work for the next
   reconcile, like a changed unit.
+- **Observed values.** A consumer of an [observed value](/nyl/orchestration/runs/#observed-values)
+  whose recorded value no longer equals the one it resolved, or that was
+  blocked on a value that has arrived since, is `ready` and says which
+  observed value changed or arrived (`NYL-OBSERVATION-CHANGED`): work for the
+  next reconcile. That holds for a value of another environment that the unit
+  reads with `environment`: status reads the producer environment's state, without
+  a lease, and names it as `dev/kubernetes`. That producer environment is
+  [required](/nyl/orchestration/runs/#other-environments): if its declaration
+  cannot be used or its state cannot be read, `status` fails with
+  `NYL-STATE-UNAVAILABLE` and its fix, because what the consumer resolved
+  cannot be compared. Other environments are not read. [`nyl get units`](/nyl/reference/cli/project-resources/)
+  shows the same states for the current state, and none from other environments
+  with `--state-revision`. A consumer still waiting for a value shows the blocker,
+  `observation-pending`, with the driver's reason (`NYL-OBSERVATION-PENDING`).
+  Status reads only recorded values.
 - **Teardowns.** A unit pending teardown warns with `NYL-TEARDOWN-PENDING`,
   naming `nyl reconcile --allow-teardown` for an omission (or `nyl teardown
   --unit` again for an explicit request) and `nyl state forget` to keep its

@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::fmt::Write as _;
 
 use clap::{Args, Subcommand, ValueEnum};
-use nyl_core::orchestration::codes::Finding;
+use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
+use nyl_core::orchestration::ports::{SourceResolver, StateStore as _};
 use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::orchestration::time::Duration;
 use nyl_orchestration::report::{Outcome, StateOperationReport};
@@ -18,6 +19,8 @@ use nyl_orchestration::shell::state::{self, Requested};
 use nyl_orchestration::shell::Context;
 use nyl_state::git::{CommitAuthor, Endpoint};
 
+use crate::orchestration::instances::Removal;
+use crate::orchestration::project::{parse_params, parse_source_ref, InstanceRequest};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
 use nyl_render::gitops::discover_gitops_inventory;
@@ -61,6 +64,54 @@ pub struct Common {
     pub path: PathBuf,
 }
 
+/// The options of `nyl state move`: [`Common`], where `-e` names the
+/// environment unless `--template` moves every instance of a template.
+#[derive(Args, Debug)]
+pub struct MoveCommon {
+    /// Environment whose state to move.
+    #[arg(
+        short = 'e',
+        long = "environment",
+        required_unless_present = "template",
+        conflicts_with = "template"
+    )]
+    pub environment: Option<String>,
+
+    /// Why, recorded as the transition commit's Nyl-Reason.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Wait up to this long for another run's lease, such as 10m.
+    #[arg(long)]
+    pub wait_lease: Option<Duration>,
+
+    /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
+    #[arg(long)]
+    pub author: Option<String>,
+
+    /// Output format.
+    #[arg(short = 'o', long = "output", value_enum, default_value_t)]
+    pub output: Output,
+
+    /// Project directory or a path beneath it.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+}
+
+impl MoveCommon {
+    /// The shared options, naming `fallback` when `-e` is not given.
+    fn to_common(&self, fallback: &str) -> Common {
+        Common {
+            environment: self.environment.clone().unwrap_or_else(|| fallback.to_owned()),
+            reason: self.reason.clone(),
+            wait_lease: self.wait_lease,
+            author: self.author.clone(),
+            output: self.output,
+            path: self.path.clone(),
+        }
+    }
+}
+
 /// Manage an environment's orchestration state.
 #[derive(Args, Debug)]
 pub struct StateArgs {
@@ -77,12 +128,48 @@ pub enum StateCommand {
         /// Start over deliberately: every unit becomes a new incarnation and executes again.
         #[arg(long)]
         fresh: bool,
+        /// Create or update the environment as an instance of this EnvironmentTemplate.
+        #[arg(long)]
+        template: Option<String>,
+        /// A parameter of the instance, `name=value` with the value parsed as
+        /// YAML (repeatable); needs --template.
+        #[arg(long = "param")]
+        params: Vec<String>,
+        /// With --template, record this full ref name of `origin`
+        /// (`refs/pull/123/head`) next to the instance's source commit, for a
+        /// host that will not serve a commit by its id: a later run that lacks
+        /// the commit fetches the ref by name and looks for the recorded commit
+        /// in it. Only a hint, checked by syntax; a run without it keeps the
+        /// recorded one.
+        #[arg(long, requires = "template")]
+        source_ref: Option<String>,
+        /// With --template, when the template is at maxInstances, remove
+        /// expired instances first (oldest expiry first, only as many as
+        /// needed), then create the instance.
+        #[arg(long, requires = "template")]
+        make_room: bool,
+        /// With --make-room, authorize the teardown of expired instances
+        /// without the template's allowTeardown.
+        #[arg(long, requires = "make_room")]
+        allow_teardown: bool,
+        /// With --make-room, proceed with teardowns whose readiness
+        /// requirements are unmet, recording what may remain.
+        #[arg(long, requires = "make_room")]
+        allow_incomplete: bool,
     },
     /// Move state from its old location to the configured one. The options
     /// name the old location; each defaults to the configured value.
     Move {
         #[command(flatten)]
-        common: Common,
+        common: MoveCommon,
+        /// Move the state of every instance of this EnvironmentTemplate, found
+        /// by listing the old location, instead of one environment; with
+        /// --from-template, record them as instances of this template.
+        #[arg(long)]
+        template: Option<String>,
+        /// With --template, the name the instances' template had; defaults to --template.
+        #[arg(long, requires = "template")]
+        from_template: Option<String>,
         /// Repository the state is in: a URL, a GitRepository name, or `local` for this clone's branches.
         #[arg(long)]
         from: Option<String>,
@@ -175,12 +262,23 @@ pub enum LeaseCommand {
 /// Run a `nyl state` command in-process with `wiring`.
 pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     match &args.command {
-        StateCommand::Init { common, fresh } => {
-            let requested = requested(common, wiring);
-            run(common, wiring, Operation::StateInit.as_str(), None, false, |ctx| {
-                state::init(ctx.context, &ctx.environment, ctx.location, *fresh, &requested)
-            })
-        }
+        StateCommand::Init {
+            common,
+            fresh,
+            template,
+            params,
+            source_ref,
+            make_room,
+            allow_teardown,
+            allow_incomplete,
+        } => run_init(
+            common,
+            wiring,
+            *fresh,
+            template.as_ref(),
+            (params, source_ref.as_deref()),
+            (*make_room, *allow_teardown, *allow_incomplete),
+        ),
         StateCommand::Forget { common, unit } => {
             let unit = UnitName::new(unit).map_err(|error| NylError::config(error.to_string()))?;
             let requested = requested(common, wiring);
@@ -227,23 +325,240 @@ pub fn run_state(args: &StateArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome
         }
         StateCommand::Move {
             common,
+            template,
+            from_template,
             from,
             desired_ref,
             observed_ref,
             state_path,
             coordination_refs,
-        } => run_move(
-            common,
-            wiring,
-            from.as_ref(),
-            [
+        } => {
+            let old = [
                 desired_ref.as_ref(),
                 observed_ref.as_ref(),
                 state_path.as_ref(),
                 coordination_refs.as_ref(),
-            ],
-        ),
+            ];
+            match template {
+                Some(template) => run_move_template(
+                    &common.to_common(template),
+                    wiring,
+                    template,
+                    from_template.as_deref().unwrap_or(template),
+                    from.as_ref(),
+                    old,
+                ),
+                None => run_move(&common.to_common(""), wiring, from.as_ref(), old),
+            }
+        }
     }
+}
+
+/// `nyl state init`, for a declared environment or, with `--template`, an instance.
+#[allow(clippy::too_many_lines)] // The instance path: admission, keep ref, record, then the readiness preview.
+fn run_init(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    fresh: bool,
+    template: Option<&String>,
+    (params, source_ref): (&[String], Option<&str>),
+    (make_room, allow_teardown, allow_incomplete): (bool, bool, bool),
+) -> Result<CommandOutcome> {
+    let requested = requested(common, wiring);
+    let request = InstanceRequest {
+        template: template.cloned(),
+        params: match parse_params(params) {
+            Ok(params) => params,
+            Err(finding) => {
+                return Ok(render(
+                    &StateOperationReport::new(placeholder_environment(&common.environment), "state-init")
+                        .refused(finding),
+                    common.output,
+                ))
+            }
+        },
+        source_ref: match parse_source_ref(source_ref) {
+            Ok(source_ref) => source_ref,
+            Err(finding) => {
+                return Ok(render(
+                    &StateOperationReport::new(placeholder_environment(&common.environment), "state-init")
+                        .refused(finding),
+                    common.output,
+                ))
+            }
+        },
+        offline: false,
+    };
+    let removal = Removal {
+        path: &common.path,
+        offline: false,
+        allow_teardown,
+        allow_dependents: false,
+        allow_incomplete,
+        fail_fast: false,
+        approval: None,
+        reason: common.reason.as_deref(),
+        wait: common.wait_lease,
+        author: common.author.as_deref(),
+        source: None,
+    };
+    run_with_instance(
+        common,
+        wiring,
+        Operation::StateInit.as_str(),
+        None,
+        false,
+        &request,
+        |ctx| match (&ctx.session.resolved.instance, template) {
+            (Some(instance), Some(_)) => {
+                let refused = |finding: Finding| {
+                    StateOperationReport::new(ctx.environment.clone(), "state-init").refused(finding)
+                };
+                let source_commit = match ctx.session.entry_commit() {
+                    Ok(commit) => commit,
+                    Err(finding) => return refused(finding),
+                };
+                let write = InstanceWrite {
+                    reason: common.reason.as_deref(),
+                    wait: common.wait_lease,
+                    local: false,
+                    restart: if fresh {
+                        state::Restart::Always
+                    } else {
+                        state::Restart::Never
+                    },
+                    make_room,
+                    removal: &removal,
+                };
+                let evicted = match prepare_instance_write(ctx.session, wiring, &write) {
+                    Ok(evicted) => evicted,
+                    Err(Stop::Finding(finding)) => return refused(finding),
+                    Err(Stop::Error(error)) => {
+                        return refused(Finding::new(
+                            Code::StateUnavailable,
+                            error.to_string(),
+                            "check the project and access to its state",
+                        ))
+                    }
+                };
+                let sources = match ctx.session.sources() {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        return refused(Finding::new(
+                            Code::SourceUnavailable,
+                            error.to_string(),
+                            "check the project's Git configuration",
+                        ))
+                    }
+                };
+                let mut report = state::init_instance(
+                    ctx.context,
+                    &ctx.environment,
+                    ctx.location,
+                    &state::InstanceInit {
+                        template: &instance.template,
+                        params: &instance.params,
+                        source_commit: &source_commit,
+                        source_ref: instance.source_ref.as_deref(),
+                        ttl: instance.terms.ttl,
+                        keep: ctx.session.keeps_source().then_some(&sources as &dyn SourceResolver),
+                    },
+                    if fresh {
+                        state::Restart::Always
+                    } else {
+                        state::Restart::Never
+                    },
+                    &requested,
+                );
+                if !evicted.is_empty() {
+                    report.details.insert(
+                        "evicted".to_owned(),
+                        serde_json::json!(evicted.iter().map(ToString::to_string).collect::<Vec<_>>()),
+                    );
+                }
+                if report.outcome != Outcome::Refused {
+                    // Every instance is torn down some day: say now what its units
+                    // would leave behind or wait for.
+                    report.warnings.extend(readiness_preview(ctx, wiring));
+                }
+                report
+            }
+            _ => state::init(ctx.context, &ctx.environment, ctx.location, fresh, &requested),
+        },
+    )
+}
+
+/// The teardown requirements the new instance's units do not meet, as
+/// warnings of `state init --template`; what could not be checked is a
+/// warning too.
+fn readiness_preview(ctx: &OperationContext<'_>, wiring: &Wiring<'_>) -> Vec<Finding> {
+    let request = ctx.session.request(&RunOptions {
+        units: &[],
+        concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
+        source: None,
+        wait: None,
+        local: None,
+        cancellation: wiring.cancellation.clone(),
+        mode: RunMode::Reconcile,
+        lifecycle: LifecycleOptions::default(),
+        reapply: false,
+        detect_drift: false,
+        fail_fast: false,
+        reason: None,
+    });
+    let request = match request {
+        Ok(request) => request,
+        Err(finding) => return vec![finding],
+    };
+    match ctx.session.run_with(
+        wiring,
+        ctx.context.store,
+        None,
+        &request,
+        nyl_orchestration::shell::run::teardown_readiness_preview,
+    ) {
+        Ok(Ok(findings) | Err(findings)) => findings,
+        Err(Stop::Finding(finding)) => vec![finding],
+        Err(Stop::Error(error)) => vec![Finding::new(
+            Code::SourceUnavailable,
+            format!("the teardown readiness of the instance's units could not be checked: {error}"),
+            "check the project, then run `nyl plan` for the instance",
+        )],
+    }
+}
+
+/// The old repository of a move named by `--from` and, unless it is this
+/// clone's branches, how to reach it.
+fn resolve_from(
+    inventory: &nyl_render::gitops::GitOpsInventory,
+    from: Option<&String>,
+) -> Result<Option<(String, Option<Endpoint>)>> {
+    from.map(|from| -> Result<_> {
+        Ok(match from.as_str() {
+            StateLocation::LOCAL_REPOSITORY => (from.clone(), None),
+            name if !name.contains(':') && !name.contains('/') => {
+                let (repository, _) = inventory.resolve_git_repository(
+                    Some(&nyl_core::resources::LocalReference { name: name.to_owned() }),
+                    None,
+                )?;
+                (
+                    repository.repo_url.clone(),
+                    Some(Endpoint {
+                        read: repository.repo_url,
+                        write: repository.publish_url,
+                    }),
+                )
+            }
+            url => (
+                nyl_render::util::credential_free_url(url),
+                Some(Endpoint {
+                    read: url.to_owned(),
+                    write: None,
+                }),
+            ),
+        })
+    })
+    .transpose()
 }
 
 /// `nyl state move`: `old` holds `--desired-ref`, `--observed-ref`,
@@ -255,34 +570,7 @@ fn run_move(
     [desired_ref, observed_ref, state_path, coordination_refs]: [Option<&String>; 4],
 ) -> Result<CommandOutcome> {
     let inventory = discover_gitops_inventory(&common.path, None, crate::resource_catalogue())?;
-    // The old repository and, unless it is this clone's branches, how to reach it.
-    let from = from
-        .map(|from| -> Result<_> {
-            Ok(match from.as_str() {
-                StateLocation::LOCAL_REPOSITORY => (from.clone(), None),
-                name if !name.contains(':') && !name.contains('/') => {
-                    let (repository, _) = inventory.resolve_git_repository(
-                        Some(&nyl_core::resources::LocalReference { name: name.to_owned() }),
-                        None,
-                    )?;
-                    (
-                        repository.repo_url.clone(),
-                        Some(Endpoint {
-                            read: repository.repo_url,
-                            write: repository.publish_url,
-                        }),
-                    )
-                }
-                url => (
-                    nyl_render::util::credential_free_url(url),
-                    Some(Endpoint {
-                        read: url.to_owned(),
-                        write: None,
-                    }),
-                ),
-            })
-        })
-        .transpose()?;
+    let from = resolve_from(&inventory, from)?;
     let extra = from
         .as_ref()
         .and_then(|(identity, endpoint)| endpoint.clone().map(|endpoint| (identity.clone(), endpoint)));
@@ -307,6 +595,226 @@ fn run_move(
         }
         state::relocate(ctx.context, &ctx.environment, location, &old, &requested)
     })
+}
+
+/// How an instance's state path ends when one directory of a ref holds each
+/// instance: the old location of `state move --template` names it the same way.
+const NAME_PLACEHOLDER: &str = "{{ environment.name }}";
+
+/// `nyl state move --template <template> [--from-template <old>] [old location options]`:
+/// move the state of every instance of a template, found by listing the old
+/// location, to the template's configured location, one `state move` each,
+/// and record them as instances of `template` when its name changed. The old
+/// `--state-path` ends in `{{ environment.name }}` like the template's.
+///
+/// Contract: [Instances](../../../../design/orchestration-core.md#instances).
+#[allow(clippy::too_many_lines)] // One move of many: resolve, list the old location, move each, rename each.
+fn run_move_template(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    template: &str,
+    from_template: &str,
+    from: Option<&String>,
+    [desired_ref, observed_ref, state_path, coordination_refs]: [Option<&String>; 4],
+) -> Result<CommandOutcome> {
+    let operation = Operation::StateMove.as_str();
+    let refused = |finding: Finding| {
+        let report = StateOperationReport::new(placeholder_environment(template), operation).refused(finding);
+        render(&report, common.output)
+    };
+    let inventory = discover_gitops_inventory(&common.path, None, crate::resource_catalogue())?;
+    let Some(declaration) = nyl_render::gitops::instances::find_template(&inventory, template) else {
+        return Ok(refused(Finding::new(
+            Code::InstanceTemplateUnknown,
+            format!("the project declares no EnvironmentTemplate {template:?}"),
+            "list the templates with `nyl get environment-templates`",
+        )));
+    };
+    let listed = match crate::orchestration::project::listing_location(&inventory, declaration) {
+        Ok(listed) => listed,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let Some((located, new_parent)) = listed else {
+        return Ok(refused(Finding::new(
+            Code::InstanceNotListable,
+            format!(
+                "the instances of EnvironmentTemplate {template} cannot be moved together: its state location depends on the instance name"
+            ),
+            "end spec.state.path with `{{ environment.name }}` and keep the repository and refs independent of the name, or move each instance with `nyl state move -e <instance>`",
+        )));
+    };
+    let relocating = from.is_some()
+        || [desired_ref, observed_ref, state_path, coordination_refs]
+            .iter()
+            .any(Option::is_some);
+    if !relocating && template == from_template {
+        return Ok(refused(Finding::new(
+            Code::StateLocationMismatch,
+            format!("the instances of EnvironmentTemplate {template} are already at its configured location"),
+            "pass the old location's options (--from, --desired-ref, --observed-ref, --state-path, --coordination-refs), or --from-template for a renamed template",
+        )));
+    }
+    let identity = match wiring.commit_identity(&located.git_dir, common.author.as_deref()) {
+        Ok(identity) => identity,
+        Err(finding) => return Ok(refused(finding)),
+    };
+    let author = Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    });
+    let mut store = crate::orchestration::project::open_store(&inventory, &located, author)?;
+    let from = resolve_from(&inventory, from)?;
+    if let Some((repository, Some(endpoint))) = &from {
+        if *repository != located.location.repository {
+            store = crate::orchestration::project::configure_repository(
+                &inventory,
+                &located.git_dir,
+                store,
+                repository,
+                endpoint.clone(),
+            )?;
+        }
+    }
+    let context = Context {
+        store: &store,
+        clock: wiring.clock.as_ref(),
+        ids: wiring.ids,
+        faults: wiring.faults,
+        runner: wiring.runner.clone(),
+        requested_by: crate::orchestration::project::requested_by(&located.git_dir, &wiring.runner),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        settings: nyl_orchestration::shell::Settings::default(),
+    };
+    let requested = requested(common, wiring);
+    let mut reports = Vec::new();
+    if relocating {
+        // The old directory of the instances: the configured one with the old options laid over it.
+        let mut old = new_parent.clone();
+        if let Some((repository, _)) = &from {
+            old.repository.clone_from(repository);
+        }
+        if let Some(desired) = desired_ref {
+            old.desired_ref.clone_from(desired);
+        }
+        if let Some(observed) = observed_ref {
+            old.observed_ref.clone_from(observed);
+        }
+        if let Some(prefix) = coordination_refs {
+            old.coordination_ref_prefix.clone_from(prefix);
+        }
+        if let Some(path) = state_path {
+            let Some(parent) = path.trim().strip_suffix(NAME_PLACEHOLDER) else {
+                return Ok(refused(Finding::new(
+                    Code::StateLocationMismatch,
+                    format!("--state-path {path:?} does not end in {NAME_PLACEHOLDER}, so it names no directory per instance"),
+                    "name the old directory of the instances like the template's spec.state.path, such as `previews/{{ environment.name }}`",
+                )));
+            };
+            parent.trim_matches('/').clone_into(&mut old.path);
+        }
+        let listed = match store.list_records(&old) {
+            Ok(records) => records,
+            Err(error) => {
+                return Ok(refused(Finding::new(
+                    Code::StateUnavailable,
+                    format!(
+                        "cannot list the instances at {}: {error}",
+                        nyl_orchestration::rules::state_location::describe(&old)
+                    ),
+                    "check access to the old state repository",
+                )))
+            }
+        };
+        for record in listed
+            .into_iter()
+            .filter(|record| record.template.as_deref() == Some(from_template) && record.deleted().is_none())
+        {
+            let name = record.environment.clone();
+            let to = match crate::orchestration::project::instance_location(&inventory, &name, template) {
+                Ok(to) => to,
+                Err(finding) => {
+                    reports.push(StateOperationReport::new(name, operation).refused(finding));
+                    continue;
+                }
+            };
+            let mut from_location = old.clone();
+            from_location.path = if old.path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}/{name}", old.path)
+            };
+            reports.push(state::relocate(&context, &name, &to, &from_location, &requested));
+        }
+        if reports.is_empty() {
+            return Ok(refused(Finding::new(
+                Code::StateMissing,
+                format!(
+                    "no instance of EnvironmentTemplate {from_template} has state at {}",
+                    nyl_orchestration::rules::state_location::describe(&old)
+                ),
+                "name the location the instances' state is at with --from and the ref options",
+            )));
+        }
+    }
+    if from_template != template {
+        // The instances now at the configured location are the template's.
+        let listed = match store.list_records(&new_parent) {
+            Ok(records) => records,
+            Err(error) => {
+                return Ok(refused(Finding::new(
+                    Code::StateUnavailable,
+                    format!("cannot list the instances at the configured location: {error}"),
+                    "check access to the state repository",
+                )))
+            }
+        };
+        let mut renamed = false;
+        for record in listed
+            .into_iter()
+            .filter(|record| record.template.as_deref() == Some(from_template) && record.deleted().is_none())
+        {
+            let name = record.environment.clone();
+            match crate::orchestration::project::instance_location(&inventory, &name, template) {
+                Ok(location) => {
+                    renamed = true;
+                    reports.push(state::retemplate(&context, &name, &location, template, &requested));
+                }
+                Err(finding) => reports.push(StateOperationReport::new(name, operation).refused(finding)),
+            }
+        }
+        if !renamed && reports.is_empty() {
+            return Ok(refused(Finding::new(
+                Code::StateMissing,
+                format!("no instance of EnvironmentTemplate {from_template} has state at the configured location of {template}"),
+                "name the location the instances' state is at with --from and the ref options",
+            )));
+        }
+    }
+    Ok(combine(template, &reports, common.output))
+}
+
+/// The outcome of a command that did one state operation per instance:
+/// each report in the text form, or all of them under `instances` in JSON.
+/// The exit is the highest of theirs.
+fn combine(template: &str, reports: &[StateOperationReport], output: Output) -> CommandOutcome {
+    let rendered = reports.iter().map(|report| render(report, output)).collect::<Vec<_>>();
+    let exit = rendered.iter().map(|outcome| outcome.exit).max().unwrap_or(0);
+    let report = serde_json::json!({
+        "apiVersion": "gitops.nyl/v1",
+        "kind": "StateMoveReport",
+        "template": template,
+        "instances": rendered.iter().map(|outcome| outcome.report.clone()).collect::<Vec<_>>(),
+    });
+    let stdout = match output {
+        Output::Json => pretty_json(&report),
+        Output::Text => rendered.iter().map(|outcome| outcome.stdout.as_str()).collect(),
+    };
+    CommandOutcome {
+        exit,
+        report,
+        stdout,
+        stderr: rendered.iter().map(|outcome| outcome.stderr.as_str()).collect(),
+    }
 }
 
 /// Run a `nyl lease` command in-process with `wiring`.
@@ -346,6 +854,7 @@ pub(crate) fn requested(common: &Common, wiring: &Wiring<'_>) -> Requested {
 
 /// What one state operation runs against.
 pub(crate) struct OperationContext<'a> {
+    pub(crate) session: &'a Session,
     pub(crate) context: &'a Context<'a>,
     pub(crate) environment: EnvironmentName,
     pub(crate) location: &'a StateLocation,
@@ -363,6 +872,28 @@ pub(crate) fn run(
     offline: bool,
     operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
 ) -> Result<CommandOutcome> {
+    run_with_instance(
+        common,
+        wiring,
+        operation_name,
+        extra_endpoint,
+        offline,
+        &InstanceRequest::default(),
+        operation,
+    )
+}
+
+/// [`run`] for a command that may create or update an instance of an EnvironmentTemplate.
+#[allow(clippy::too_many_arguments)] // The shared state command wiring, with the instance request.
+pub(crate) fn run_with_instance(
+    common: &Common,
+    wiring: &Wiring<'_>,
+    operation_name: &'static str,
+    extra_endpoint: Option<(String, Endpoint)>,
+    offline: bool,
+    instance: &InstanceRequest,
+    operation: impl FnOnce(&OperationContext<'_>) -> StateOperationReport,
+) -> Result<CommandOutcome> {
     let refused = |finding: Finding| {
         let environment = placeholder_environment(&common.environment);
         render(
@@ -370,7 +901,14 @@ pub(crate) fn run(
             common.output,
         )
     };
-    let session = match Session::open(&common.path, &common.environment) {
+    let session = match Session::open_with(
+        &common.path,
+        &common.environment,
+        &InstanceRequest {
+            offline,
+            ..instance.clone()
+        },
+    ) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),
         Err(Stop::Error(error)) => return Err(error),
@@ -417,7 +955,7 @@ pub(crate) fn run(
         if repository != resolved.location.repository {
             store = crate::orchestration::project::configure_repository(
                 &session.inventory,
-                resolved,
+                &resolved.git_dir,
                 store,
                 &repository,
                 endpoint,
@@ -426,6 +964,7 @@ pub(crate) fn run(
     }
     let context = session.context(&store, wiring, Some(identity.to_string()));
     let mut report = operation(&OperationContext {
+        session: &session,
         context: &context,
         environment: resolved.name.clone(),
         location: &resolved.location,
@@ -444,6 +983,105 @@ pub(crate) fn run(
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
     Ok(render(&report, common.output))
+}
+
+/// How a command that creates or updates an instance writes its record.
+pub(crate) struct InstanceWrite<'a> {
+    pub(crate) reason: Option<&'a str>,
+    pub(crate) wait: Option<Duration>,
+    /// `--local`: write to the clone's state branches without the remote.
+    pub(crate) local: bool,
+    /// Whether a deleted instance starts over, decided under the lease.
+    pub(crate) restart: state::Restart,
+    /// `--make-room`: at `maxInstances`, remove expired instances first.
+    pub(crate) make_room: bool,
+    /// How the removal of an expired instance, for `--make-room`, is authorized.
+    pub(crate) removal: &'a Removal<'a>,
+}
+
+/// What precedes the write of a new or updated instance's record: its
+/// admission under `maxInstances` (a new instance only, with the removal of
+/// expired ones for `--make-room`). Returns the instances removed to make
+/// room. The keep ref of the source commit is moved by the write itself
+/// ([`state::InstanceInit::keep`]), past every refusal and before the commit.
+///
+/// Contract: [Expiry](../../../../design/orchestration-core.md#expiry) and
+/// [Instances](../../../../design/orchestration-core.md#instances).
+pub(crate) fn prepare_instance_write(
+    session: &Session,
+    wiring: &Wiring<'_>,
+    write: &InstanceWrite<'_>,
+) -> std::result::Result<Vec<EnvironmentName>, Stop> {
+    let instance = session
+        .resolved
+        .instance
+        .as_ref()
+        .expect("--template resolved an instance");
+    // A deleted instance starts over, with `--fresh` or as the pull request job
+    // does, and is then a new one.
+    let new = instance
+        .record
+        .as_ref()
+        .is_none_or(|record| write.restart != state::Restart::Never && record.deleted().is_some());
+    if new {
+        crate::orchestration::instances::admit(session, wiring, write.make_room, write.removal)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Create or update the instance a session resolved from `--template`, the
+/// way `nyl state init --template` does: the first step of
+/// `nyl reconcile --template`. A refusal stops the command with its finding.
+/// Returns the report of the write and the instances removed to make room.
+pub(crate) fn create_or_update_instance(
+    session: &Session,
+    wiring: &Wiring<'_>,
+    identity: &nyl_core::orchestration::ports::CommitIdentity,
+    write: &InstanceWrite<'_>,
+) -> std::result::Result<(StateOperationReport, Vec<EnvironmentName>), Stop> {
+    let instance = session
+        .resolved
+        .instance
+        .as_ref()
+        .expect("--template resolved an instance");
+    let evicted = prepare_instance_write(session, wiring, write)?;
+    let author = Some(CommitAuthor {
+        identity: identity.clone(),
+        clock: wiring.clock.clone(),
+    });
+    let store = if write.local {
+        session.offline_store(author)?
+    } else {
+        session.store(author)?
+    };
+    let context = session.context(&store, wiring, Some(identity.to_string()));
+    let source_commit = session.entry_commit()?;
+    let requested = Requested {
+        reason: write.reason.map(str::to_owned),
+        wait: write.wait,
+        cancellation: wiring.cancellation.clone(),
+    };
+    let sources = session.sources()?;
+    let report = state::init_instance(
+        &context,
+        &session.resolved.name,
+        &session.resolved.location,
+        &state::InstanceInit {
+            template: &instance.template,
+            params: &instance.params,
+            source_commit: &source_commit,
+            source_ref: instance.source_ref.as_deref(),
+            ttl: instance.terms.ttl,
+            keep: session.keeps_source().then_some(&sources as &dyn SourceResolver),
+        },
+        write.restart,
+        &requested,
+    );
+    if let Some(finding) = report.errors.first() {
+        return Err(Stop::Finding(finding.clone()));
+    }
+    Ok((report, evicted))
 }
 
 /// `nyl state delete [--teardown]`: on the run path, through
@@ -500,7 +1138,7 @@ pub(crate) fn run_lifecycle(
             common.output,
         )
     };
-    let session = match Session::open(&common.path, &common.environment) {
+    let session = match Session::open_offline(&common.path, &common.environment, offline) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),
         Err(Stop::Error(error)) => return Err(error),
@@ -519,6 +1157,7 @@ pub(crate) fn run_lifecycle(
         mode,
         lifecycle,
         reapply: false,
+        detect_drift: false,
         fail_fast: false,
         reason: common.reason.as_deref(),
     }) {

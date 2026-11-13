@@ -5,22 +5,42 @@
 /// - YAML serialization/deserialization with serde-norway
 /// - Resource validation
 mod client;
+mod cluster_server;
 mod diff;
+pub mod fence;
+pub mod field_manager;
+pub mod health;
+#[cfg(test)]
+mod hook_tests;
+pub mod hooks;
+pub mod lifecycle;
+pub mod memory;
+mod namespace_resolution;
+mod ordered_delete;
 mod ordering;
 pub mod prune;
 mod resource;
+mod scope;
 mod state;
+mod sync_run;
 
-pub use client::is_known_cluster_scoped_gvk;
-pub use client::{DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
-pub use diff::DiffEngine;
+pub use client::{builtin_scope, is_known_cluster_scoped_gvk};
+pub use client::{DeleteOptions, DeletePropagation, DiscoveryMode, KubeClient, KubeRsClient, MockKubeClient};
+pub use cluster_server::{normalize_cluster_url, verifiable_cluster_server, verify_cluster_server, verify_server};
+pub use diff::{DiffEngine, ServerComparison};
+pub use memory::InMemoryReleaseStorage;
+pub use namespace_resolution::{adjust_duplicate_keys_for_namespace_resolution, resolve_manifest_namespaces};
+pub use ordered_delete::{delete_in_prune_order, run_concurrently, PruneEvent, PRUNE_TERMINATION_TIMEOUT};
 pub use ordering::ResourceOrdering;
 pub use resource::{extract_api_version, extract_gvk, extract_kind, extract_name, extract_namespace};
 pub use resource::{ApplyOutcome, GroupVersionKind, ObjectIdentity, ResourceKey};
+pub use scope::{CrdDeclaration, ScopeMismatch, ScopeResolver};
+pub mod lookup;
 pub use state::{
-    enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseState,
-    ReleaseStatus, ReleaseStorage,
+    enforce_release_history_limit, revisions_beyond_history_limit, KubernetesReleaseStorage, ReleaseInfo, ReleaseMeta,
+    ReleasePublication, ReleaseState, ReleaseStatus, ReleaseStorage,
 };
+pub use sync_run::{HookReport, WaitSettings};
 
 use serde::{Deserialize, Serialize};
 

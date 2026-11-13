@@ -10,14 +10,16 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::git::GitManager;
+use crate::kubernetes::ScopeResolver;
 use crate::render::cache::{CacheLayer, CacheOutcome};
 use crate::resources::release_inputs::ReleaseKey;
 use crate::resources::{
     is_supported_application_field_path, path_matches_glob, AppProjectDefinition, AppProjectDestination,
     AppProjectManagement, AppProjectResourcePattern, AppProjectTemplate, ApplicationGroup, ApplicationGroupSource,
-    ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination, DeploymentTarget,
-    GitOpsResource, GitOpsResourceKind, GitPublication, ManagedResourceDeletionPolicy, RendererConfig,
-    RendererConfigMode, SharedNamespaceOwner,
+    ArgoCDAccess, ArgoCDInstance, ArgoCDInstanceSpec, CatalogApplicationDefaults, Cluster, ClusterDestination,
+    DeploymentTarget, GitOpsResource, GitOpsResourceKind, GitPublication, ManagedResourceDeletionPolicy,
+    RendererConfig, RendererConfigMode, SharedNamespaceOwner, TARGET_ARGOCD_INSTANCE_REF_REQUIRED,
+    TARGET_ARGOCD_INSTANCE_UNDECLARED,
 };
 use crate::template::{TemplateEngine, TemplateValueExpander};
 use crate::util::SourceContext;
@@ -29,11 +31,15 @@ use super::{
     take_managed_namespace, DirectoryApplicationInput, GitOpsCache, GitOpsInventory, RenderSession, CATALOG_DIRECTORY,
 };
 
-const TARGET_CACHE_ACTION: &str = "target-provenance-v4";
+pub mod partial;
+
+const TARGET_CACHE_ACTION: &str = "target-provenance-v7";
 
 /// Inputs admitted while compiling a rendered deployment tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TreeRenderOptions {
+    /// Explicit replacement authority; empty means the complete target.
+    pub selection: partial::PublicationSelection,
     /// Allow the trusted central project to read its secrets provider and
     /// `NYL_*` process environment.
     pub allow_secret_inputs: bool,
@@ -57,11 +63,27 @@ pub struct TreeRenderOptions {
     /// them. Part of the render-cache key, since the values are rendered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orchestrated_inputs: Option<super::inputs::OrchestratedInputs>,
+    /// Objects the Helm `lookup` of the target's charts treats as absent for
+    /// this render, which regenerates what a chart reads from them (a CA, for
+    /// rotation). Part of the cache key, since it changes what renders.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub refresh_lookup: BTreeSet<crate::helm::lookup::ObjectRef>,
+    /// Where the Helm `lookup` of the target's charts reads from instead of the
+    /// target's publication: the live cluster, for `render`, `diff`, and
+    /// `apply` only. Tree and publication commands never set it. A render that
+    /// used it is never cached.
+    #[serde(skip)]
+    pub lookup_backend: Option<super::lookup::LookupBackendOverride>,
 }
 
 /// Pure output of compiling one target. Paths are relative to the target prefix.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CompiledTargetTree {
+    /// Portable publication metadata for retaining unselected Releases.
+    #[serde(default)]
+    pub publication_snapshot: Option<partial::PublicationSnapshot>,
+    #[serde(default)]
+    pub publication_report: partial::PublicationReport,
     pub target: DeploymentTarget,
     pub cluster: Cluster,
     pub repository_name: Option<String>,
@@ -88,6 +110,11 @@ pub struct CompiledTargetTree {
     /// when the target has none. Never cached: it is re-resolved every run.
     #[serde(skip)]
     pub publication_base: Option<super::inputs::PublicationBase>,
+    /// The catalog Application this target shares with other targets, when
+    /// `catalogApplication.shared` is declared. It is published beside the
+    /// targets, never in this tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_catalog: Option<super::shared_catalog::SharedCatalogManifest>,
 }
 
 impl CompiledTargetTree {
@@ -125,6 +152,7 @@ impl CompiledTargetTree {
             force_owned,
             adopt: self.adoptable_paths(),
             release: self.committed_state_paths.clone(),
+            take_over_from: None,
         }
     }
 }
@@ -176,17 +204,21 @@ struct ManagedNamespaceOwner {
     annotations: BTreeMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PendingWorkload {
     group: ApplicationGroup,
     release: crate::resources::Release,
+    #[serde(skip)]
     manifests: Vec<Value>,
+    #[serde(skip)]
     manifest_provenance: HashMap<crate::kubernetes::ResourceKey, crate::render::Provenance>,
+    #[serde(skip)]
     release_provenance: Option<crate::render::Provenance>,
     destination_namespace: String,
     argocd_project_name: String,
     release_directory: PathBuf,
     application_name: String,
+    input_paths: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,11 +281,15 @@ struct PreparedGroup {
     source: ResolvedGroupSource,
 }
 
-struct EffectiveArgoCDInstance {
+pub(super) struct EffectiveArgoCDInstance {
     identity: String,
-    resource: ArgoCDInstance,
+    /// The instance as rendering sees it: without `spec.access`, which never
+    /// affects rendered bytes and so stays out of every render input.
+    pub(super) resource: ArgoCDInstance,
+    /// How Nyl reads the instance's Applications; see [`argocd_observation`].
+    access: ArgoCDAccess,
     source_path: Option<PathBuf>,
-    cluster: Cluster,
+    pub(super) cluster: Cluster,
     cluster_path: PathBuf,
 }
 
@@ -315,8 +351,29 @@ fn validate_gitops_inventory_with_options(inventory: &GitOpsInventory, options: 
             }
         }
     }
+    super::shared_catalog::validate_shared_catalogs(inventory)?;
     validate_argocd_name_collisions(inventory, instance_count, options)?;
     Ok(())
+}
+
+/// The shared catalog Application `target` declares, rendered from the
+/// ArgoCDInstance and publication repository it resolves to, or `None` for a
+/// target that shares none. Targets that name one catalog must render equal ones.
+pub(super) fn shared_manifest_of(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<Option<super::shared_catalog::SharedCatalogManifest>> {
+    let Some(shared) = target.spec.catalog_application.shared.as_deref() else {
+        return Ok(None);
+    };
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
+    let (_, repository, _) = resolve_git_publication(inventory, &target.spec.publication)?;
+    super::shared_catalog::manifest(shared, target, &repository, &argocd).map(Some)
 }
 
 pub(super) fn normalize_branch_revision(revision: &str) -> &str {
@@ -474,7 +531,8 @@ async fn compile_target_tree_recording(
         .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
         .count();
     let argocd = resolve_argocd_instance(inventory, &target, instance_count)?;
-    if argocd.source_path.is_none() {
+    let direct = target.is_direct();
+    if argocd.source_path.is_none() && !direct {
         // The implicit instance is the documented default, so it is not news on
         // every compile; `--verbose` still shows which instance a target uses.
         tracing::debug!(
@@ -484,6 +542,22 @@ async fn compile_target_tree_recording(
         );
     }
     let (repository_name, repository, repository_path) = resolve_git_publication(inventory, &target.spec.publication)?;
+    // Every Release of the target reads its lookups from the target's own
+    // publication, which is read the first time a chart's lookup needs it.
+    let lookup = super::lookup::PublicationLookup::for_target(
+        inventory,
+        &target,
+        &cluster,
+        options.publication_read,
+        cache,
+        options.publication_base.as_ref(),
+    )?;
+    let lookup_config = match &options.lookup_backend {
+        Some(backend) => crate::helm::lookup::LookupConfig::new(backend.0.clone(), options.refresh_lookup.clone()),
+        None => {
+            crate::helm::lookup::LookupConfig::new(std::sync::Arc::new(lookup.clone()), options.refresh_lookup.clone())
+        }
+    };
     let central_session = if options.allow_secret_inputs {
         RenderSession::for_target_with_secret_inputs(
             &inventory.project_root,
@@ -495,11 +569,71 @@ async fn compile_target_tree_recording(
         RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?
     }
     .with_cache(cache.cloned())
-    .with_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
+    .with_git_offline(options.publication_read == super::inputs::PublicationRead::Cached)
+    .with_lookup(Some(lookup_config.clone()));
+    let selection = options.selection.clone();
+    selection.validate()?;
+    let control_digest = partial::control_digest(inventory, &target, &cluster, &argocd, &repository)?;
+    let baseline_reader = super::inputs::CachedGitBlobSource::new(
+        None,
+        &inventory.project_root,
+        &inventory.project_config,
+        cache.cloned(),
+    );
+    let partial_base = if selection.is_full() {
+        None
+    } else {
+        let url = repository.publish_url.as_deref().unwrap_or(&repository.repo_url);
+        let branch = &target.spec.publication.revision;
+        let prefix = target.publication_path_prefix();
+        Some(match &options.publication_base {
+            Some(base) if base.is_for(url, branch, prefix) => base.clone(),
+            _ => super::inputs::PublicationBase::resolve(
+                &baseline_reader,
+                url,
+                branch,
+                prefix,
+                options.publication_read,
+            )?,
+        })
+    };
+    let mut baseline = partial_base
+        .as_ref()
+        .map(|base| {
+            partial::load_baseline(
+                &baseline_reader,
+                base,
+                &target,
+                &cluster,
+                repository_name.as_deref().unwrap_or(&repository.repo_url),
+            )
+        })
+        .transpose()?;
+    if baseline
+        .as_ref()
+        .is_some_and(|base| base.snapshot.control_digest != control_digest)
+    {
+        return Err(NylError::config(
+            "Target-wide configuration changed; publish the full target first",
+        ));
+    }
     let mut git_manager = None;
 
     let (groups, disabled_groups) = selected_groups(inventory, &target, &central_session)?;
 
+    let known_groups = groups
+        .iter()
+        .map(|(_, group)| group.metadata.name.clone())
+        .chain(disabled_groups.iter().cloned())
+        .chain(baseline.iter().flat_map(|base| base.snapshot.groups.keys().cloned()))
+        .collect::<BTreeSet<_>>();
+    for name in &selection.application_groups {
+        if !known_groups.contains(name) {
+            return Err(NylError::config(format!("Unknown ApplicationGroup selector {name:?}")));
+        }
+    }
+    let mut group_digests = BTreeMap::new();
+    let mut skipped_releases = BTreeSet::new();
     let mut prepared_groups = Vec::new();
     for (group_resource_path, group) in groups {
         let project = resolve_effective_group_project(
@@ -510,17 +644,52 @@ async fn compile_target_tree_recording(
             &cluster,
             &argocd.resource,
         )?;
-        let mut source = resolve_group_source(
-            inventory,
-            &group_resource_path,
-            &group,
-            &target,
-            &mut git_manager,
-            cache,
-        )?;
+        let group_digest = partial::group_digest(&group, &project)?;
+        if let Some(base) = &baseline {
+            if !selection.application_groups.contains(&group.metadata.name)
+                && base.snapshot.groups.get(&group.metadata.name) != Some(&group_digest)
+            {
+                return Err(NylError::config(format!(
+                    "ApplicationGroup {:?} configuration changed; select the entire group or publish the full target",
+                    group.metadata.name
+                )));
+            }
+        }
+        group_digests.insert(group.metadata.name.clone(), group_digest);
+        let mut source = if selection.touches_group(&group.metadata.name) {
+            resolve_group_source(
+                inventory,
+                &group_resource_path,
+                &group,
+                &target,
+                &mut git_manager,
+                cache,
+            )?
+        } else {
+            ResolvedGroupSource::empty(inventory.project_root.clone())
+        };
+        if !selection.is_full() && !selection.application_groups.contains(&group.metadata.name) {
+            source.files.retain(|file| {
+                let Some(name) = &file.name else {
+                    return false;
+                };
+                if selection.includes(&group.metadata.name, name) {
+                    return true;
+                }
+                let key = format!("{}/{name}", group.metadata.name);
+                if baseline
+                    .as_ref()
+                    .is_some_and(|base| !base.snapshot.releases.contains_key(&key))
+                {
+                    skipped_releases.insert(key);
+                }
+                false
+            });
+        }
         if let Some(session) = &mut source.source_session {
             session.set_cache(cache.cloned());
             session.set_git_offline(options.publication_read == super::inputs::PublicationRead::Cached);
+            session.set_lookup(Some(lookup_config.clone()));
         }
         prepared_groups.push(PreparedGroup {
             group_resource_path,
@@ -530,6 +699,28 @@ async fn compile_target_tree_recording(
         });
     }
 
+    if let Some(base) = &baseline {
+        for name in base.snapshot.groups.keys() {
+            if !group_digests.contains_key(name) && !selection.application_groups.contains(name) {
+                return Err(NylError::config(format!("Retained ApplicationGroup {name:?} is missing or disabled; select the group or publish the full target")));
+            }
+        }
+    }
+    for key in &selection.releases {
+        let key = ReleaseKey::parse(key)?;
+        if !prepared_groups.iter().any(|group| {
+            group.group.metadata.name == key.group
+                && group
+                    .source
+                    .files
+                    .iter()
+                    .any(|file| file.name.as_ref() == Some(&key.release))
+        }) {
+            return Err(NylError::config(format!(
+                "Unknown Release selector {key}; removal requires selecting its ApplicationGroup"
+            )));
+        }
+    }
     // Boxed: it holds the lazy artifact resolver across the compile's awaits.
     let git_blobs = Box::new(super::inputs::CachedGitBlobSource::new(
         git_manager.take(),
@@ -537,7 +728,9 @@ async fn compile_target_tree_recording(
         &inventory.project_config,
         cache.cloned(),
     ));
-    let publication_base = if target
+    let publication_base = if partial_base.is_some() {
+        partial_base
+    } else if target
         .spec
         .release_inputs
         .iter()
@@ -568,6 +761,7 @@ async fn compile_target_tree_recording(
     } else {
         None
     };
+    lookup.adopt_base(publication_base.as_ref());
     // Pinned state is relative to the prefix of the base it came with.
     let pinned_state_files = options.pinned_state_files.as_ref().filter(|_| {
         options
@@ -575,9 +769,16 @@ async fn compile_target_tree_recording(
             .as_ref()
             .is_none_or(|passed| publication_base.as_ref() == Some(passed))
     });
+    let mut input_target = target.clone();
+    if !selection.is_full() {
+        input_target
+            .spec
+            .release_inputs
+            .retain(|key, _| ReleaseKey::parse(key).is_ok_and(|key| selection.includes(&key.group, &key.release)));
+    }
     let release_inputs = resolve_prepared_release_inputs(
         inventory,
-        &target,
+        &input_target,
         &prepared_groups,
         &disabled_groups,
         git_blobs.as_ref(),
@@ -587,7 +788,7 @@ async fn compile_target_tree_recording(
     )?;
 
     let target_cache_inputs = TargetCacheInputs {
-        options,
+        options: options.clone(),
         target: &target,
         target_source_path: &target_discovered.source_path,
         cluster: &cluster,
@@ -597,6 +798,7 @@ async fn compile_target_tree_recording(
         repository: &repository,
         repository_source_path: repository_path.as_deref(),
         record,
+        lookup: &lookup_config,
     };
     let input_digests = release_inputs.index_entries()?;
     let mut cache_probe = prepare_target_cache(
@@ -610,8 +812,12 @@ async fn compile_target_tree_recording(
     )?;
     let progress_total = prepared_groups.iter().map(|prepared| prepared.source.files.len()).sum();
     observer.started(progress_total);
-    if let Some(mut compiled) = load_cached_target(cache, cache_probe.as_ref())? {
-        compiled.publication_base = publication_base;
+    if let Some(mut compiled) = if selection.is_full() {
+        load_cached_target(cache, cache_probe.as_ref())?
+    } else {
+        None
+    } {
+        compiled.publication_base = publication_base.or_else(|| lookup.resolved_base());
         observer.finished();
         // A hit's probe holds exactly the stored record's inputs, re-read.
         let dependencies = cache_probe.filter(|_| record).map(|probe| TargetDependencies {
@@ -628,7 +834,10 @@ async fn compile_target_tree_recording(
             probe.recorder = base;
         }
     }
-    let mut target_cacheable = cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
+    if let (Some(base), Some(probe)) = (&baseline, &mut cache_probe) {
+        probe.recorder.record_value("publication-baseline", &base.index)?;
+    }
+    let mut target_cacheable = selection.is_full() && cache_probe.as_ref().is_some_and(|probe| probe.cacheable);
     let mut target_cache_bypass_reasons = BTreeSet::new();
     let mut files = BTreeMap::new();
     let mut inputs = BTreeSet::from([
@@ -636,6 +845,7 @@ async fn compile_target_tree_recording(
         cluster_path,
         argocd.cluster_path.clone(),
     ]);
+    inputs.extend(target_discovered.values_inputs.iter().cloned());
     for name in [cluster.metadata.name.as_str(), argocd.cluster.metadata.name.as_str()] {
         inputs.extend(super::resolve_cluster_contract(inventory, name)?.inputs);
     }
@@ -655,13 +865,19 @@ async fn compile_target_tree_recording(
     let mut namespace_owners = BTreeMap::<(String, String), ManagedNamespaceOwner>::new();
     let mut workload_owners = HashMap::new();
     let mut application_owners = BTreeMap::<(String, String), ApplicationOwner>::new();
-    let mut pending_workloads = Vec::new();
+    let mut pending_workloads = baseline
+        .as_mut()
+        .map(|base| base.retained_workloads(&selection))
+        .transpose()?
+        .unwrap_or_default();
     let mut namespace_scope_errors = Vec::new();
     let mut release_count = 0;
     let mut progress_completed = 0;
     let mut helm_render_count = 0;
     let template_values = TemplateEngine::new().template_values();
 
+    let mut project_contexts = BTreeMap::new();
+    let mut group_sources = BTreeMap::new();
     for PreparedGroup {
         group_resource_path,
         group,
@@ -669,12 +885,24 @@ async fn compile_target_tree_recording(
         source,
     } in prepared_groups
     {
+        // Recorded in published bytes, so the separator must not depend on the platform.
+        let group_source = group_resource_path.to_string_lossy().replace('\\', "/");
+        group_sources.insert(group.metadata.name.clone(), group_source.clone());
         inputs.insert(group_resource_path.clone());
         inputs.extend(project.source_paths.iter().cloned());
         let argocd_project_name = project.name;
+        project_contexts.entry(argocd_project_name.clone()).or_insert_with(|| {
+            serde_json::json!({
+                "group": group.metadata.name, "source": group_source,
+                "projectNamespace": argocd.resource.spec.namespace,
+                "cluster": cluster.metadata.name, "destination": cluster.spec.destination,
+                "generated": group.spec.project_ref.is_none(), "namespaceCreate": group.spec.namespace.create,
+            })
+        });
         match project.manifest {
             ProjectManifest::Fixed(manifest) => {
-                if emitted_projects.insert(project.catalog_id.clone()) {
+                // A direct target generates no AppProject, whatever its group names.
+                if !direct && emitted_projects.insert(project.catalog_id.clone()) {
                     catalog_manifests.push(manifest);
                 }
             }
@@ -694,6 +922,7 @@ async fn compile_target_tree_recording(
         };
         let mut claimed_source_files = BTreeSet::new();
         let project_paths = inventory.paths();
+        let lookup_scope = super::lookup::group_scope(&group);
 
         for source_file in &source.files {
             claimed_source_files.insert(manifest_path_identity(&source_file.path));
@@ -714,6 +943,19 @@ async fn compile_target_tree_recording(
                     source_path: input_path.clone(),
                 },
             );
+            let mut workload_inputs = BTreeSet::from([input_path.clone(), group_resource_path.clone()]);
+            if let Some(name) = &source_file.name {
+                if let Some(resolved) = release_inputs.releases.get(&ReleaseKey {
+                    group: group.metadata.name.clone(),
+                    release: name.clone(),
+                }) {
+                    for input in resolved.inputs.values() {
+                        if let super::inputs::InputOrigin::File(path) = &input.origin {
+                            workload_inputs.insert(inventory.paths().key(path).unwrap_or_else(|| path.clone()));
+                        }
+                    }
+                }
+            }
             inputs.insert(input_path);
             let provenance_root = &source.provenance_root;
             let worktree_root = (!source.remote).then_some(inventory.worktree_root.as_path());
@@ -734,6 +976,8 @@ async fn compile_target_tree_recording(
                     provenance_root,
                     worktree_root,
                     resolved_inputs.as_ref(),
+                    Some(lookup_scope.clone()),
+                    group.spec.destination_namespace.as_deref(),
                 )
                 .await?;
             if let (Some(repository), Some(revision)) = (
@@ -768,6 +1012,7 @@ async fn compile_target_tree_recording(
                 } else {
                     project_paths.key(bundle_input).unwrap_or_else(|| bundle_input.clone())
                 };
+                workload_inputs.insert(input_path.clone());
                 inputs.insert(input_path);
             }
             let Some(release) = rendered.release.take() else {
@@ -785,7 +1030,7 @@ async fn compile_target_tree_recording(
                 &release,
                 &destination_namespace,
             ));
-            if let Some(patterns) = &project.destination_namespaces {
+            if let Some(patterns) = project.destination_namespaces.as_ref().filter(|_| !direct) {
                 validate_project_namespace_scope(&group, &release, &destination_namespace, patterns)?;
             }
 
@@ -810,9 +1055,23 @@ async fn compile_target_tree_recording(
                 argocd_project_name: argocd_project_name.clone(),
                 release_directory,
                 application_name,
+                input_paths: workload_inputs,
             });
         }
-        warn_unclaimed_group_manifests(&group, &source, &claimed_source_files);
+        if selection.is_full() || selection.application_groups.contains(&group.metadata.name) {
+            warn_unclaimed_group_manifests(&group, &source, &claimed_source_files);
+        }
+    }
+
+    for key in &selection.releases {
+        if !pending_workloads
+            .iter()
+            .any(|workload| format!("{}/{}", workload.group.metadata.name, workload.release.metadata.name) == *key)
+        {
+            return Err(NylError::config(format!(
+                "Selected Release {key} did not render; select its ApplicationGroup for removal"
+            )));
+        }
     }
 
     if !namespace_scope_errors.is_empty() {
@@ -840,11 +1099,11 @@ async fn compile_target_tree_recording(
         usage.record(&owner.manifest);
     }
     let scopes = ScopeResolver::new(
-        &cluster,
+        cluster.spec.kubernetes.as_ref(),
         pending_workloads.iter().flat_map(|workload| workload.manifests.iter()),
     );
     let empty_usage = ProjectUsage::default();
-    for (name, (catalog_id, generated)) in &generated_projects {
+    for (name, (catalog_id, generated)) in generated_projects.iter().filter(|_| !direct) {
         if emitted_projects.insert(catalog_id.clone()) {
             catalog_manifests.push(generated.finish(project_usage.get(name).unwrap_or(&empty_usage), &scopes)?);
         }
@@ -854,6 +1113,7 @@ async fn compile_target_tree_recording(
         .map(|workload| workload.release_directory.clone())
         .collect::<Vec<_>>();
 
+    let snapshot_workloads = pending_workloads.clone();
     for workload in pending_workloads {
         for manifest in &workload.manifests {
             let key = crate::kubernetes::ResourceKey::from_json_value(manifest)?;
@@ -875,6 +1135,9 @@ async fn compile_target_tree_recording(
             insert_file(&mut files, path, bytes)?;
         }
 
+        if direct {
+            continue;
+        }
         let rendered_path = join_posix(target.publication_path_prefix(), &workload.release_directory)?;
         let mut application = build_directory_application(&DirectoryApplicationInput {
             name: workload.application_name.clone(),
@@ -891,6 +1154,14 @@ async fn compile_target_tree_recording(
             annotations: workload.group.spec.annotations.clone(),
         })?;
         apply_release_application_override(&mut application, &workload.release, &workload.group)?;
+        let publication_context = serde_json::json!({
+            "group": workload.group.metadata.name,
+            "source": group_sources[&workload.group.metadata.name],
+            "projectNamespace": argocd.resource.spec.namespace,
+            "cluster": cluster.metadata.name, "destination": cluster.spec.destination,
+            "generated": workload.group.spec.project_ref.is_none(),
+        });
+        super::project_scope::annotate(&mut application, &publication_context)?;
         claim_application(
             &mut application_owners,
             &target.metadata.name,
@@ -904,6 +1175,15 @@ async fn compile_target_tree_recording(
         catalog_manifests.push(application);
     }
 
+    if direct {
+        if let Some(((_, namespace), _)) = namespace_owners.iter().next() {
+            return Err(NylError::config(format!(
+                "Namespace {namespace:?} has a Dedicated owner, which generates an Application of its own; a direct \
+                 target has none and no Release to hold release state for it. Own the Namespace by a Release \
+                 (sharedNamespaces owner kind Release) or declare it External"
+            )));
+        }
+    }
     for ((cluster, namespace), owner) in namespace_owners {
         let digest = nyl_core::digest::sha256_hex(format!("{cluster}\0{namespace}").as_bytes());
         let suffix = &digest[..20];
@@ -941,7 +1221,21 @@ async fn compile_target_tree_recording(
         catalog_manifests.push(application);
     }
 
-    if target.spec.catalog_application.enabled {
+    let shared_catalog = match &target.spec.catalog_application.shared {
+        Some(shared) => {
+            let manifest = super::shared_catalog::manifest(shared, &target, &repository, &argocd)?;
+            claim_application(
+                &mut application_owners,
+                &target.metadata.name,
+                &argocd.resource.spec.namespace,
+                &shared.name,
+                ApplicationOwner::SharedCatalog,
+            )?;
+            Some(manifest)
+        }
+        None => None,
+    };
+    if target.spec.catalog_application.generates_application() && !direct {
         let application = build_catalog_application(&target, &repository, &argocd)?;
         let parent_name = application
             .pointer("/metadata/name")
@@ -958,11 +1252,110 @@ async fn compile_target_tree_recording(
         catalog_manifests.push(application);
     }
     // The catalog uses the per-resource layout of every rendered Application.
+    for manifest in &mut catalog_manifests {
+        let project_name = if manifest["kind"] == "AppProject" {
+            manifest["metadata"]["name"].as_str()
+        } else {
+            manifest["spec"]["project"].as_str()
+        };
+        if let Some(context) = project_name.and_then(|name| project_contexts.get(name)) {
+            if manifest["metadata"]["annotations"]
+                .get(super::project_scope::CONTEXT_ANNOTATION)
+                .is_none()
+            {
+                super::project_scope::annotate(manifest, context)?;
+            }
+        }
+    }
     for (relative, bytes) in render_manifest_layout_with_provenance(&catalog_manifests, &HashMap::new())? {
         insert_file(&mut files, Path::new(CATALOG_DIRECTORY).join(relative), bytes)?;
     }
 
-    let state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
+    let mut state_files = super::inputs::place_state_files(&release_inputs, &release_directories, &files)?;
+    let mut state_paths = release_inputs.state_paths.clone();
+    let mut committed_state_paths = release_inputs
+        .committed_state_paths()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<BTreeSet<_>>();
+    let mut publication_snapshot = partial::PublicationSnapshot {
+        version: partial::COMPILATION_METADATA_VERSION,
+        control_digest,
+        groups: group_digests,
+        releases: BTreeMap::new(),
+        bindings: input_target
+            .spec
+            .release_inputs
+            .iter()
+            .filter_map(|(key, bindings)| {
+                let sources = bindings
+                    .values()
+                    .filter_map(|binding| binding.from_publication.clone())
+                    .collect::<Vec<_>>();
+                (!sources.is_empty()).then(|| (key.clone(), sources))
+            })
+            .collect(),
+    };
+    if let Some(base) = &baseline {
+        base.verify_retention(&selection, &mut files)?;
+        for (key, bindings) in &base.snapshot.bindings {
+            let release = ReleaseKey::parse(key)?;
+            if selection.includes(&release.group, &release.release) {
+                continue;
+            }
+            publication_snapshot.bindings.insert(key.clone(), bindings.clone());
+            for source in bindings {
+                state_paths
+                    .entry(source.path.clone())
+                    .or_insert(source.carry_file_from_worktree.is_some());
+                let path = PathBuf::from(&source.path);
+                if let Some(bytes) = state_files.get(&path) {
+                    if base.files.get(&path) != Some(bytes) {
+                        return Err(NylError::config(format!(
+                            "Shared state {:?} would change for retained Release {key}; select it as well",
+                            source.path
+                        )));
+                    }
+                }
+                if source.carry_file_from_worktree.is_some() {
+                    let bytes = base.files.get(&path).ok_or_else(|| {
+                        NylError::config("Retained carried state is missing; publish the full target")
+                    })?;
+                    state_files.insert(path, bytes.clone());
+                } else {
+                    committed_state_paths.insert(path);
+                }
+            }
+        }
+    }
+    super::inputs::validate_state_placement(&state_paths, &release_directories, &files)?;
+    for workload in &snapshot_workloads {
+        let key = format!("{}/{}", workload.group.metadata.name, workload.release.metadata.name);
+        let retained = baseline
+            .as_ref()
+            .and_then(|base| base.snapshot.releases.get(&key))
+            .filter(|_| !selection.includes(&workload.group.metadata.name, &workload.release.metadata.name));
+        let release = match retained {
+            Some(retained) => retained.clone(),
+            None => partial::snapshot_release(
+                workload,
+                &files,
+                release_inputs.release_index_entries(&ReleaseKey {
+                    group: workload.group.metadata.name.clone(),
+                    release: workload.release.metadata.name.clone(),
+                })?,
+            ),
+        };
+        publication_snapshot.releases.insert(key, release);
+    }
+    publication_snapshot
+        .bindings
+        .retain(|key, _| publication_snapshot.releases.contains_key(key));
+    // Retained bytes are part of the candidate, including their original input evidence.
+    let mut input_digests = input_digests;
+    if let Some(base) = &baseline {
+        input_digests.extend(base.retained_input_digests(&selection));
+    }
 
     let provenance = files
         .iter()
@@ -988,7 +1381,20 @@ async fn compile_target_tree_recording(
             Ok((path.clone(), frames))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let publication_report = partial::report(
+        &selection,
+        skipped_releases,
+        baseline.as_ref(),
+        publication_base.as_ref(),
+        &publication_snapshot,
+        &files,
+    );
+    // What the lookups read is state read from the publication, so the
+    // publication must not move under it.
+    let publication_base = publication_base.or_else(|| lookup.resolved_base());
     let compiled = CompiledTargetTree {
+        publication_report,
+        publication_snapshot: Some(publication_snapshot),
         target,
         cluster,
         repository_name,
@@ -998,12 +1404,9 @@ async fn compile_target_tree_recording(
         inputs,
         input_digests,
         state_files,
-        committed_state_paths: release_inputs
-            .committed_state_paths()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect(),
+        committed_state_paths,
         publication_base,
+        shared_catalog,
     };
     let dependencies = cache_probe.as_ref().filter(|_| record).map(|probe| TargetDependencies {
         dependencies: probe.recorder.dependencies().clone(),
@@ -1044,8 +1447,13 @@ struct TargetCacheInputs<'a> {
     /// Whether the compile returns its dependency record, which keeps a
     /// probe even without a cache.
     record: bool,
+    /// How the Releases' Helm `lookup` is answered, to revalidate what a cached
+    /// target recorded.
+    lookup: &'a crate::helm::lookup::LookupConfig,
 }
 
+// One record of every input of the target; splitting it would hide which inputs are recorded.
+#[allow(clippy::too_many_lines)]
 fn prepare_target_cache(
     inventory: &GitOpsInventory,
     inputs: &TargetCacheInputs<'_>,
@@ -1101,6 +1509,9 @@ fn prepare_target_cache(
             .values()
             .filter(|resource| contract.inputs.contains(&resource.source_path))
         {
+            for path in &discovered.values_inputs {
+                recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+            }
             if let Some(GitOpsResource::Cluster(declared)) = &discovered.resource {
                 let mut declared = declared.clone();
                 declared.spec.live = None;
@@ -1111,7 +1522,7 @@ fn prepare_target_cache(
             }
         }
     }
-    record_target_control_dependencies(&mut recorder, inputs, groups)?;
+    record_target_control_dependencies(&mut recorder, inventory, inputs, groups)?;
     for prepared in groups {
         let members = prepared
             .source
@@ -1145,6 +1556,9 @@ fn prepare_target_cache(
     let base = record.then(|| recorder.clone());
     if let Some(previous) = previous.as_ref().filter(|record| record.action == TARGET_CACHE_ACTION) {
         recorder.replay_filesystem_dependencies(previous)?;
+        // What the Releases looked up is an input of the target: it is reused
+        // only while every lookup still returns what it did.
+        recorder.replay_lookup_dependencies(previous, inputs.lookup);
     }
     let cacheable = recorder.is_cacheable();
     Ok(Some(TargetCacheProbe {
@@ -1157,9 +1571,15 @@ fn prepare_target_cache(
 
 fn record_target_control_dependencies(
     recorder: &mut crate::render::cache::DependencyRecorder,
+    inventory: &GitOpsInventory,
     inputs: &TargetCacheInputs<'_>,
     groups: &[PreparedGroup],
 ) -> Result<()> {
+    if let Some(target) = inventory.get(GitOpsResourceKind::DeploymentTarget, &inputs.target.metadata.name) {
+        for path in &target.values_inputs {
+            recorder.record_path_file(&inventory.paths().path_for_key(path))?;
+        }
+    }
     recorder.record_value("tree-render-options", &inputs.options)?;
     let mut effective_target = inputs.target.clone();
     effective_target.apply_defaults();
@@ -1327,6 +1747,7 @@ enum ApplicationOwner {
     Release { group: String, release: String },
     Namespace(String),
     Catalog,
+    SharedCatalog,
 }
 
 impl std::fmt::Display for ApplicationOwner {
@@ -1335,6 +1756,7 @@ impl std::fmt::Display for ApplicationOwner {
             Self::Release { group, release } => write!(formatter, "Release {group}/{release}"),
             Self::Namespace(namespace) => write!(formatter, "the owner Application of namespace {namespace:?}"),
             Self::Catalog => formatter.write_str("the catalog Application"),
+            Self::SharedCatalog => formatter.write_str("the shared catalog Application"),
         }
     }
 }
@@ -1912,21 +2334,111 @@ pub(super) fn target_selects_group(target: &DeploymentTarget, group_labels: &BTr
         .all(|(key, value)| group_labels.get(key) == Some(value))
 }
 
+/// Where `target`'s Argo CD instance is and how Nyl reads it: the instance,
+/// its namespace, its control-plane Cluster with that Cluster's local
+/// context, and the declared access (the Kubernetes API unless the instance
+/// says otherwise).
+///
+/// Contract: [Kubernetes publications](../../../../design/promotion.md#kubernetes-publications), observer.
+pub(super) fn delivery_of(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<super::observation::Delivery> {
+    if target.is_direct() {
+        let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
+        return Ok(super::observation::Delivery::Direct(
+            super::observation::DirectLocation {
+                cluster: cluster.metadata.name,
+                context: cluster.spec.live.map(|live| live.context),
+                server: cluster
+                    .spec
+                    .destination
+                    .server
+                    .filter(|server| crate::kubernetes::verifiable_cluster_server(server)),
+            },
+        ));
+    }
+    argocd_location(inventory, target).map(super::observation::Delivery::ArgoCd)
+}
+
+fn argocd_location(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<super::observation::ArgoCdLocation> {
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
+    Ok(super::observation::ArgoCdLocation {
+        instance: argocd.identity,
+        namespace: argocd.resource.spec.namespace,
+        cluster: argocd.cluster.metadata.name,
+        context: argocd.cluster.spec.live.map(|live| live.context),
+        access: argocd.access,
+    })
+}
+
+/// The workload Cluster `target` renders into, with its declared local
+/// context (`spec.live.context`), read from the declaration like
+/// [`argocd_location`] so that a render served from a cache holds the
+/// context as it stands.
+pub(super) fn workload_cluster(
+    inventory: &GitOpsInventory,
+    target: &DeploymentTarget,
+) -> Result<super::observation::WorkloadCluster> {
+    let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
+    Ok(super::observation::WorkloadCluster {
+        cluster: cluster.metadata.name,
+        context: cluster.spec.live.map(|live| live.context),
+    })
+}
+
+/// The Cluster running a target's effective ArgoCDInstance and the namespace
+/// its Applications live in: the referenced instance, or the implicit one on
+/// the target's own Cluster in `argocd` when no instance is declared. A target
+/// with the direct reconciler has no Argo CD Applications.
+pub fn target_argocd_location(inventory: &GitOpsInventory, target: &DeploymentTarget) -> Result<(Cluster, String)> {
+    if target.is_direct() {
+        return Err(NylError::config(format!(
+            "DeploymentTarget {:?} uses the direct reconciler and has no Argo CD Applications",
+            target.metadata.name
+        )));
+    }
+    let instance_count = inventory
+        .resources
+        .values()
+        .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
+        .count();
+    let instance = resolve_argocd_instance(inventory, target, instance_count)?;
+    Ok((instance.cluster, instance.resource.spec.namespace))
+}
+
 fn resolve_argocd_instance(
     inventory: &GitOpsInventory,
     target: &DeploymentTarget,
     instance_count: usize,
 ) -> Result<EffectiveArgoCDInstance> {
-    if instance_count == 0 {
-        if let Some(reference) = &target.spec.argocd_ref {
+    // A direct target generates no Argo CD object, so it needs no instance and
+    // never joins the explicit-instance rule; the compile still carries an
+    // implicit one for the settings it shares with every target.
+    if instance_count == 0 || target.is_direct() {
+        if let Some(reference) = target.argocd_instance_ref() {
             return Err(NylError::config(format!(
-                "DeploymentTarget {:?} references ArgoCDInstance {:?}, but no ArgoCDInstance resources are defined",
+                "{TARGET_ARGOCD_INSTANCE_UNDECLARED}: DeploymentTarget {:?} references ArgoCDInstance {:?} in \
+                 spec.reconciler.argocd.instanceRef, but no ArgoCDInstance resources are defined; \
+                 write `reconciler: {{argocd: {{}}}}` to use the implicit target-local instance, or declare the ArgoCDInstance",
                 target.metadata.name, reference.name
             )));
         }
         let (cluster, cluster_path) = resolve_cluster(inventory, target.cluster_name())?;
         return Ok(EffectiveArgoCDInstance {
-            identity: format!("implicit:{}", target.metadata.name),
+            identity: format!(
+                "{}:{}",
+                if target.is_direct() { "direct" } else { "implicit" },
+                target.metadata.name
+            ),
             resource: ArgoCDInstance {
                 api_version: nyl_core::constants::API_VERSION_K8S_GITOPS.to_owned(),
                 kind: crate::resources::KIND_ARGOCD_INSTANCE.to_owned(),
@@ -1940,17 +2452,20 @@ fn resolve_argocd_instance(
                     },
                     namespace: "argocd".to_owned(),
                     catalog_application_defaults: CatalogApplicationDefaults::default(),
+                    access: None,
                 },
             },
+            access: ArgoCDAccess::kubernetes(),
             source_path: None,
             cluster,
             cluster_path,
         });
     }
 
-    let reference = target.spec.argocd_ref.as_ref().ok_or_else(|| {
+    let reference = target.argocd_instance_ref().ok_or_else(|| {
         NylError::config(format!(
-            "DeploymentTarget {:?} must set spec.argocdRef because explicit ArgoCDInstance resources are defined",
+            "{TARGET_ARGOCD_INSTANCE_REF_REQUIRED}: DeploymentTarget {:?} must set spec.reconciler.argocd.instanceRef \
+             because explicit ArgoCDInstance resources are defined; write `reconciler: {{argocd: {{instanceRef: {{name: <instance>}}}}}}`",
             target.metadata.name
         ))
     })?;
@@ -1964,9 +2479,12 @@ fn resolve_argocd_instance(
         )));
     };
     let (cluster, cluster_path) = resolve_cluster(inventory, &instance.spec.cluster_ref.name)?;
+    let mut resource = instance.clone();
+    let access = resource.spec.access.take().unwrap_or_else(ArgoCDAccess::kubernetes);
     Ok(EffectiveArgoCDInstance {
         identity: reference.name.clone(),
-        resource: instance.clone(),
+        resource,
+        access,
         source_path: Some(discovered.source_path.clone()),
         cluster,
         cluster_path,
@@ -2016,7 +2534,10 @@ fn build_catalog_application(
     Ok(application)
 }
 
-fn set_catalog_prune_option(annotations: &mut BTreeMap<String, String>, policy: ManagedResourceDeletionPolicy) {
+pub(super) fn set_catalog_prune_option(
+    annotations: &mut BTreeMap<String, String>,
+    policy: ManagedResourceDeletionPolicy,
+) {
     const KEY: &str = "argocd.argoproj.io/sync-options";
     let mut options = annotations
         .get(KEY)
@@ -2066,10 +2587,11 @@ fn validate_argocd_name_collisions(
         .filter(|resource| resource.identity.kind == GitOpsResourceKind::ApplicationGroup)
         .collect::<Vec<_>>();
     let mut parent_owners = BTreeMap::<(String, String, String), String>::new();
+    let mut shared_owners = BTreeMap::<(String, String, String), String>::new();
     let mut project_owners = BTreeMap::<(String, String, String), (String, String, bool, String)>::new();
     let mut default_application_owners = BTreeMap::<(String, String, String), String>::new();
 
-    for target in targets {
+    for target in targets.into_iter().filter(|target| !target.is_direct()) {
         let argocd = resolve_argocd_instance(inventory, target, instance_count)?;
         // Argo CD names live in one namespace of one control-plane cluster,
         // whichever instance or Cluster resource, explicit or implicit, put them
@@ -2077,7 +2599,19 @@ fn validate_argocd_name_collisions(
         let control_plane = control_plane_identity(&argocd.cluster);
         let control_cluster = argocd.cluster.metadata.name.clone();
         let control_namespace = argocd.resource.spec.namespace.clone();
-        if target.spec.catalog_application.enabled {
+        if let Some(shared) = &target.spec.catalog_application.shared {
+            let key = (control_plane.clone(), control_namespace.clone(), shared.name.clone());
+            if let Some(previous) = parent_owners.get(&key) {
+                return Err(NylError::config(format!(
+                    "DeploymentTarget {previous:?} generates a catalog Application named {control_namespace}/{} in Argo CD on Cluster {control_cluster:?}, which is also the name of the shared catalog of DeploymentTarget {:?}; rename one of them",
+                    shared.name, target.metadata.name
+                )));
+            }
+            // Targets that share a catalog must render the same manifest, which
+            // `validate_shared_catalogs` checks across them.
+            shared_owners.entry(key).or_insert_with(|| target.metadata.name.clone());
+        }
+        if target.spec.catalog_application.generates_application() {
             let parent_name = target
                 .spec
                 .catalog_application
@@ -2085,6 +2619,12 @@ fn validate_argocd_name_collisions(
                 .clone()
                 .unwrap_or_else(|| format!("{}-catalog", target.metadata.name));
             let key = (control_plane.clone(), control_namespace.clone(), parent_name.clone());
+            if let Some(shared) = shared_owners.get(&key) {
+                return Err(NylError::config(format!(
+                    "DeploymentTarget {:?} generates a catalog Application named {control_namespace}/{parent_name} in Argo CD on Cluster {control_cluster:?}, which is also the name of the shared catalog of DeploymentTarget {shared:?}; customize spec.catalogApplication.name",
+                    target.metadata.name
+                )));
+            }
             if let Some(previous) = parent_owners.insert(key, target.metadata.name.clone()) {
                 return Err(NylError::config(format!(
                     "DeploymentTargets {previous:?} and {:?} generate the same catalog Application {control_namespace}/{parent_name} in Argo CD on Cluster {control_cluster:?}; customize spec.catalogApplication.name",
@@ -2107,7 +2647,7 @@ fn validate_argocd_name_collisions(
             if !target_selects_group(target, &discovered.static_labels) {
                 continue;
             }
-            let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, &session)? else {
+            let Some(group) = render_effective_group(discovered, &session)? else {
                 continue;
             };
             if !group.spec.enabled {
@@ -2197,7 +2737,7 @@ pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[Comp
         .filter(|resource| resource.identity.kind == GitOpsResourceKind::ArgoCDInstance)
         .count();
     let mut owners = BTreeMap::<(String, String, String, String), (String, PathBuf)>::new();
-    for tree in trees {
+    for tree in trees.iter().filter(|tree| !tree.target.is_direct()) {
         let argocd = resolve_argocd_instance(inventory, &tree.target, instance_count)?;
         let control_plane = control_plane_identity(&argocd.cluster);
         for (path, bytes) in tree.files.range(PathBuf::from(CATALOG_DIRECTORY)..) {
@@ -2236,6 +2776,127 @@ pub fn validate_compiled_argocd_names(inventory: &GitOpsInventory, trees: &[Comp
         }
     }
     Ok(())
+}
+
+/// An object a direct target renders, for the cross-target check, as (the
+/// Release key or the destination, group, kind, namespace, name).
+type DirectObject = (String, String, String, Option<String>, String);
+
+/// What the cross-target check of direct targets needs of one compiled tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectFacts {
+    pub target: String,
+    /// The cluster the target is applied to, by its declared destination
+    /// (server or name), so two Cluster resources for one cluster are one.
+    pub destination: String,
+    /// The Releases: state identity and group.
+    pub releases: Vec<super::observation::PublishedDirectRelease>,
+    /// Every object the Releases render: (Release key, group, kind, namespace, name).
+    pub objects: Vec<DirectObject>,
+}
+
+/// Fail when two Releases of direct targets that reach one cluster share a
+/// state identity (namespace and name), or two of them render one object:
+/// release state is stored under the Release's name in its namespace, and one
+/// object has one owner. Argo CD's generated-name rule does not apply to
+/// direct targets.
+///
+/// Contract: [Direct reconciler](../../../../design/orchestration-core.md#declaration), collisions.
+pub fn check_direct_collisions(facts: &[DirectFacts]) -> Result<()> {
+    let mut identities: BTreeMap<(String, String, String), (String, String)> = BTreeMap::new();
+    let mut objects: BTreeMap<DirectObject, (String, String)> = BTreeMap::new();
+    for fact in facts {
+        // `https://Cluster.example/` and `https://cluster.example` are one cluster.
+        let destination = crate::kubernetes::normalize_cluster_url(&fact.destination);
+        for release in &fact.releases {
+            let (namespace, name) = release.identity();
+            let key = (destination.clone(), namespace.to_owned(), name.to_owned());
+            if let Some(previous) = identities.insert(key, (fact.target.clone(), release.key.clone())) {
+                let message = if previous.0 == fact.target {
+                    format!(
+                        "NYL-KUBERNETES-DIRECT-RELEASE-COLLISION: Releases {} and {} of DeploymentTarget {:?} are both named {name:?} in namespace {namespace:?}, so they would share one release state; rename one or give it another namespace",
+                        previous.1, release.key, fact.target
+                    )
+                } else {
+                    format!(
+                        "NYL-KUBERNETES-DIRECT-RELEASE-COLLISION: Release {} of DeploymentTarget {:?} and Release {} of {:?} are applied to the same cluster ({}) as {name:?} in namespace {namespace:?}, so they would share one release state; give each target its own Release namespace or name, for example from `${{ target.metadata.name }}`",
+                        release.key, fact.target, previous.1, previous.0, fact.destination
+                    )
+                };
+                return Err(NylError::config(message));
+            }
+        }
+        for (release, group, kind, namespace, name) in &fact.objects {
+            let key = (
+                destination.clone(),
+                group.clone(),
+                kind.clone(),
+                namespace.clone(),
+                name.clone(),
+            );
+            if let Some(previous) = objects.insert(key, (fact.target.clone(), release.clone())) {
+                if previous != (fact.target.clone(), release.clone()) {
+                    return Err(NylError::config(format!(
+                        "{kind} {}{name} is rendered by Release {release} of DeploymentTarget {:?} and by Release {} of {:?}, which are applied to the same cluster ({}); one object has one owner",
+                        namespace.as_deref().map(|namespace| format!("{namespace}/")).unwrap_or_default(),
+                        fact.target,
+                        previous.1,
+                        previous.0,
+                        fact.destination
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`check_direct_collisions`] over compiled trees: the direct ones among `trees`.
+pub fn validate_compiled_direct_targets(trees: &[CompiledTargetTree]) -> Result<()> {
+    let mut facts = Vec::new();
+    for tree in trees.iter().filter(|tree| tree.target.is_direct()) {
+        let compilation = tree
+            .publication_snapshot
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        let releases = super::observation::direct_releases_of(compilation.as_ref());
+        let destination = {
+            let destination = &tree.cluster.spec.destination;
+            destination
+                .server
+                .clone()
+                .or_else(|| destination.name.clone())
+                .unwrap_or_default()
+        };
+        let mut objects = Vec::new();
+        for release in &releases {
+            for (path, bytes) in tree.files.range(PathBuf::from(&release.directory)..) {
+                if !path.starts_with(&release.directory) {
+                    break;
+                }
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| NylError::config(format!("rendered file {} is not UTF-8", path.display())))?;
+                for manifest in serde_saphyr::from_multiple::<Value>(text).map_err(NylError::Yaml)? {
+                    let key = crate::kubernetes::ResourceKey::from_json_value(&manifest)?;
+                    let namespace = if crate::kubernetes::is_known_cluster_scoped_gvk(&key.gvk) {
+                        None
+                    } else {
+                        key.namespace
+                            .or_else(|| Some(release.release.destination_namespace.clone()))
+                    };
+                    objects.push((release.key.clone(), key.gvk.group, key.gvk.kind, namespace, key.name));
+                }
+            }
+        }
+        facts.push(DirectFacts {
+            target: tree.target.metadata.name.clone(),
+            destination,
+            releases,
+            objects,
+        });
+    }
+    check_direct_collisions(&facts)
 }
 
 pub(super) fn resolve_git_publication(
@@ -2396,6 +3057,9 @@ fn build_generated_project(
             destination: target_cluster.spec.destination.clone(),
             namespace_create: group.spec.namespace.create,
             declared_namespaces: destination_namespaces.clone(),
+            retained_namespaces: group.spec.retained_project_namespaces.iter().cloned().collect(),
+            retained_namespaced_kinds: group.spec.retained_namespace_resource_whitelist.clone(),
+            retained_cluster_kinds: group.spec.retained_cluster_resource_whitelist.clone(),
         })),
         destination_namespaces,
     })
@@ -2411,6 +3075,10 @@ struct GeneratedProject {
     cluster: String,
     destination: ClusterDestination,
     namespace_create: bool,
+    retained_namespaces: BTreeSet<String>,
+    /// Cleanup permissions appended to the namespaced and cluster resource whitelists.
+    retained_namespaced_kinds: Vec<AppProjectResourcePattern>,
+    retained_cluster_kinds: Vec<AppProjectResourcePattern>,
     /// Namespace patterns declared destinations admit on the target Cluster.
     declared_namespaces: Option<Vec<String>>,
 }
@@ -2433,54 +3101,18 @@ impl ProjectUsage {
     }
 }
 
-/// Resource scopes known for a target: CRDs it renders, then the Cluster's capabilities.
-struct ScopeResolver<'a> {
-    rendered: BTreeMap<(String, String), crate::resources::ResourceScope>,
-    capabilities: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
-}
-
-impl<'a> ScopeResolver<'a> {
-    fn new<'m>(cluster: &'a Cluster, manifests: impl IntoIterator<Item = &'m Value>) -> Self {
-        let mut rendered = BTreeMap::new();
-        for manifest in manifests {
-            if manifest.get("kind").and_then(Value::as_str) != Some("CustomResourceDefinition") {
-                continue;
-            }
-            let field = |pointer: &str| manifest.pointer(pointer).and_then(Value::as_str);
-            let scope = match field("/spec/scope") {
-                Some("Cluster") => crate::resources::ResourceScope::Cluster,
-                Some("Namespaced") => crate::resources::ResourceScope::Namespaced,
-                _ => continue,
-            };
-            if let (Some(group), Some(kind)) = (field("/spec/group"), field("/spec/names/kind")) {
-                rendered.insert((group.to_owned(), kind.to_owned()), scope);
-            }
-        }
-        Self {
-            rendered,
-            capabilities: cluster.spec.kubernetes.as_ref(),
-        }
-    }
-
-    fn scope(&self, group: &str, kind: &str) -> Option<crate::resources::ResourceScope> {
-        self.rendered
-            .get(&(group.to_owned(), kind.to_owned()))
-            .copied()
-            .or_else(|| {
-                self.capabilities
-                    .and_then(|capabilities| capabilities.scope_of(group, kind))
-            })
-    }
-}
-
 impl GeneratedProject {
     /// The AppProject manifest, with omitted fields derived from the group's usage.
-    fn finish(&self, usage: &ProjectUsage, scopes: &ScopeResolver<'_>) -> Result<Value> {
+    fn finish(&self, usage: &ProjectUsage, scopes: &ScopeResolver) -> Result<Value> {
         let mut spec = self.spec.clone();
+        let namespaces = usage
+            .namespaces
+            .union(&self.retained_namespaces)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if spec.destinations.is_none() {
             spec.destinations = Some(
-                usage
-                    .namespaces
+                namespaces
                     .iter()
                     .map(|namespace| AppProjectDestination {
                         server: self.destination.server.clone(),
@@ -2515,6 +3147,23 @@ impl GeneratedProject {
                     }
                 }
             }
+            if derive_cluster
+                && self.namespace_create
+                && !self.retained_namespaces.is_empty()
+                && !cluster_kinds
+                    .iter()
+                    .any(|pattern| pattern.group.is_empty() && pattern.kind == "Namespace")
+            {
+                cluster_kinds.extend(
+                    self.retained_namespaces
+                        .iter()
+                        .map(|namespace| AppProjectResourcePattern {
+                            group: String::new(),
+                            kind: "Namespace".to_owned(),
+                            name: Some(namespace.clone()),
+                        }),
+                );
+            }
             if derive_cluster {
                 spec.cluster_resource_whitelist = Some(cluster_kinds);
             }
@@ -2532,7 +3181,7 @@ impl GeneratedProject {
                 let namespaces = self
                     .declared_namespaces
                     .clone()
-                    .unwrap_or_else(|| usage.namespaces.iter().cloned().collect());
+                    .unwrap_or_else(|| namespaces.iter().cloned().collect());
                 for namespace in namespaces {
                     let permission = AppProjectResourcePattern {
                         group: String::new(),
@@ -2545,12 +3194,34 @@ impl GeneratedProject {
                 }
             }
         }
+        // Retained cleanup permissions are additive to derived and declared whitelists alike.
+        append_retained(&mut spec.namespace_resource_whitelist, &self.retained_namespaced_kinds);
+        append_retained(&mut spec.cluster_resource_whitelist, &self.retained_cluster_kinds);
         Ok(serde_json::json!({
             "apiVersion": "argoproj.io/v1alpha1",
             "kind": "AppProject",
             "metadata": self.metadata,
             "spec": serde_json::to_value(spec)?,
         }))
+    }
+}
+
+/// Append retained patterns a whitelist lacks, unless it admits every resource.
+fn append_retained(whitelist: &mut Option<Vec<AppProjectResourcePattern>>, retained: &[AppProjectResourcePattern]) {
+    if retained.is_empty() {
+        return;
+    }
+    let whitelist = whitelist.get_or_insert_with(Vec::new);
+    let permits_every_resource = whitelist.iter().any(|pattern| {
+        pattern.group == PERMISSIVE_PATTERN && pattern.kind == PERMISSIVE_PATTERN && pattern.name.is_none()
+    });
+    if permits_every_resource {
+        return;
+    }
+    for pattern in retained {
+        if !whitelist.contains(pattern) {
+            whitelist.push(pattern.clone());
+        }
     }
 }
 
@@ -2574,7 +3245,12 @@ fn generated_destinations(
             .map(|destination| destination.namespace.clone())
             .collect::<Vec<_>>()
     };
-    if let Some(namespace) = &group.spec.destination_namespace {
+    for namespace in group
+        .spec
+        .destination_namespace
+        .iter()
+        .chain(group.spec.retained_project_namespaces.iter().collect::<BTreeSet<_>>())
+    {
         if !namespace_matches_any(namespace, &target_namespaces(&destinations)) {
             destinations.push(AppProjectDestination {
                 server: cluster.server.clone(),
@@ -2712,13 +3388,24 @@ pub(super) fn render_effective_control(
             discovered.document_index
         )));
     }
-    let effective = crate::resources::parse_gitops_resource(&documents[0])?.ok_or_else(|| {
-        NylError::config(format!(
-            "GitOps resource {} document {} does not retain its static envelope after target rendering",
-            discovered.source_path.display(),
-            discovered.document_index
-        ))
-    })?;
+    let effective = crate::resources::parse_gitops_resource(&documents[0])
+        .map_err(|error| {
+            NylError::from_core_at(
+                error,
+                format!(
+                    "{}#document-{}",
+                    discovered.source_path.display(),
+                    discovered.document_index
+                ),
+            )
+        })?
+        .ok_or_else(|| {
+            NylError::config(format!(
+                "GitOps resource {} document {} does not retain its static envelope after target rendering",
+                discovered.source_path.display(),
+                discovered.document_index
+            ))
+        })?;
     let effective_identity = match &effective {
         GitOpsResource::GitRepository(resource) => (GitOpsResourceKind::GitRepository, &resource.metadata.name),
         GitOpsResource::Cluster(resource) => (GitOpsResourceKind::Cluster, &resource.metadata.name),
@@ -2730,6 +3417,9 @@ pub(super) fn render_effective_control(
         GitOpsResource::ApplicationGroup(resource) => (GitOpsResourceKind::ApplicationGroup, &resource.metadata.name),
         GitOpsResource::Environment(resource) => (GitOpsResourceKind::Environment, &resource.metadata.name),
         GitOpsResource::EnvironmentGroup(resource) => (GitOpsResourceKind::EnvironmentGroup, &resource.metadata.name),
+        GitOpsResource::EnvironmentTemplate(resource) => {
+            (GitOpsResourceKind::EnvironmentTemplate, &resource.metadata.name)
+        }
     };
     if effective_identity.0 != discovered.identity.kind || effective_identity.1 != &discovered.identity.name {
         return Err(NylError::config(format!(
@@ -2743,6 +3433,49 @@ pub(super) fn render_effective_control(
     Ok(Some(effective))
 }
 
+/// The ApplicationGroup `discovered` is for the target `session` renders, or
+/// `None` when its document renders to no document, which omits the group for
+/// that target.
+///
+/// Contract: [Structural templating](../../../../nyl/book/src/content/docs/kubernetes-gitops/resource-guides/application-group.md#structural-templating)
+/// and [unit documents](../../../../design/orchestration-core.md), where an
+/// ApplicationGroup that renders to nothing counts as `enabled: false`. This is
+/// the only way a selected group leaves a target without an error: a template
+/// that fails to render, or renders anything but one ApplicationGroup with the
+/// static identity, is an error.
+///
+/// Targets selected the group by its literal labels before rendering, so the
+/// rendered `metadata.labels` must equal them; this is where that invariant is
+/// enforced for every reader of discovery's labels.
+pub(super) fn render_effective_group(
+    discovered: &super::DiscoveredGitOpsResource,
+    session: &RenderSession,
+) -> Result<Option<ApplicationGroup>> {
+    // `render_effective_control` already checks that the kind is unchanged, so
+    // the other variants are unreachable; the error keeps this total.
+    let group = match render_effective_control(discovered, session)? {
+        None => return Ok(None),
+        Some(GitOpsResource::ApplicationGroup(group)) => *group,
+        Some(_) => {
+            return Err(NylError::config(format!(
+                "GitOps resource {} document {} is not an ApplicationGroup after target rendering",
+                discovered.source_path.display(),
+                discovered.document_index
+            )))
+        }
+    };
+    if group.metadata.labels != discovered.static_labels {
+        return Err(NylError::config(format!(
+            "ApplicationGroup {:?} renders metadata.labels {:?}, but targets selected it by the literal labels {:?} in {}; write metadata.labels literally, without templating, because targets select on them before rendering",
+            group.metadata.name,
+            group.metadata.labels,
+            discovered.static_labels,
+            discovered.source_path.display()
+        )));
+    }
+    Ok(Some(group))
+}
+
 struct ResolvedGroupSource {
     root: PathBuf,
     provenance_root: PathBuf,
@@ -2753,6 +3486,23 @@ struct ResolvedGroupSource {
     remote: bool,
     provenance_inputs: Vec<PathBuf>,
     repository: Option<nyl_core::resources::ReadGitRepository>,
+}
+
+impl ResolvedGroupSource {
+    /// A source without Release files, for groups a partial selection leaves untouched.
+    fn empty(root: PathBuf) -> Self {
+        Self {
+            root,
+            provenance_root: PathBuf::new(),
+            candidate_files: Vec::new(),
+            files: Vec::new(),
+            renderer_mode: RendererConfigMode::Central,
+            source_session: None,
+            remote: false,
+            provenance_inputs: Vec::new(),
+            repository: None,
+        }
+    }
 }
 
 struct StaticReleaseFile {
@@ -2890,13 +3640,15 @@ pub(super) fn selected_groups(
         {
             continue;
         }
-        let Some(GitOpsResource::ApplicationGroup(group)) = render_effective_control(discovered, session)? else {
-            continue;
-        };
-        if group.spec.enabled {
-            groups.push((discovered.source_path.clone(), *group));
-        } else {
-            disabled.insert(group.metadata.name.clone());
+        match render_effective_group(discovered, session)? {
+            Some(group) if group.spec.enabled => groups.push((discovered.source_path.clone(), group)),
+            Some(group) => {
+                disabled.insert(group.metadata.name.clone());
+            }
+            // Omitted for this target, which counts as `enabled: false`.
+            None => {
+                disabled.insert(discovered.identity.name.clone());
+            }
         }
     }
     groups.sort_by(|left, right| left.1.metadata.name.cmp(&right.1.metadata.name));
@@ -3406,6 +4158,77 @@ fn validate_path_segment(field: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::observation::{DirectRelease, PublishedDirectRelease};
+
+    fn release(group: &str, name: &str, namespace: &str) -> PublishedDirectRelease {
+        PublishedDirectRelease {
+            key: format!("{group}/{name}"),
+            group: group.to_owned(),
+            release: DirectRelease {
+                name: name.to_owned(),
+                namespace: namespace.to_owned(),
+                destination_namespace: namespace.to_owned(),
+            },
+            directory: format!("{group}/{name}"),
+        }
+    }
+
+    fn facts(target: &str, destination: &str, releases: Vec<PublishedDirectRelease>) -> DirectFacts {
+        DirectFacts {
+            target: target.to_owned(),
+            destination: destination.to_owned(),
+            releases,
+            objects: Vec::new(),
+        }
+    }
+
+    /// Catches two Releases sharing one release state: within a target, and
+    /// across two targets that reach one cluster, however their Cluster
+    /// resources are named; targets on other clusters never collide.
+    #[test]
+    fn test_direct_releases_collide_by_state_identity_on_one_destination() {
+        let one = facts("a", "https://kind:6443", vec![release("web", "api", "api")]);
+        let same_cluster = facts("b", "https://kind:6443", vec![release("web", "api", "api")]);
+        let error = check_direct_collisions(&[one.clone(), same_cluster])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-KUBERNETES-DIRECT-RELEASE-COLLISION"), "{error}");
+        let other_cluster = facts("b", "https://other:6443", vec![release("web", "api", "api")]);
+        assert!(check_direct_collisions(&[one.clone(), other_cluster]).is_ok());
+        // Two spellings of one server are one cluster.
+        let respelled = facts("b", "HTTPS://Kind:6443/", vec![release("web", "api", "api")]);
+        assert!(check_direct_collisions(&[one.clone(), respelled]).is_err());
+        let twice = facts(
+            "a",
+            "https://kind:6443",
+            vec![release("web", "api", "api"), release("jobs", "api", "api")],
+        );
+        assert!(check_direct_collisions(&[twice]).is_err());
+        let other_namespace = facts("b", "https://kind:6443", vec![release("web", "api", "b-api")]);
+        assert!(check_direct_collisions(&[one, other_namespace]).is_ok());
+    }
+
+    /// Catches one object being rendered by Releases of two direct targets
+    /// on one cluster, where the last writer would win silently.
+    #[test]
+    fn test_one_object_has_one_owner_across_direct_targets_on_a_cluster() {
+        let object = |release: &str| {
+            (
+                release.to_owned(),
+                String::new(),
+                "ConfigMap".to_owned(),
+                Some("shared".to_owned()),
+                "settings".to_owned(),
+            )
+        };
+        let mut a = facts("a", "https://kind:6443", vec![release("web", "a", "a")]);
+        a.objects.push(object("web/a"));
+        let mut b = facts("b", "https://kind:6443", vec![release("web", "b", "b")]);
+        b.objects.push(object("web/b"));
+        let error = check_direct_collisions(&[a, b]).unwrap_err().to_string();
+        assert!(error.contains("ConfigMap shared/settings"), "{error}");
+    }
+
     use super::*;
 
     #[test]
@@ -3453,6 +4276,9 @@ mod tests {
             },
             namespace_create: true,
             declared_namespaces: None,
+            retained_namespaces: BTreeSet::new(),
+            retained_namespaced_kinds: Vec::new(),
+            retained_cluster_kinds: Vec::new(),
         }
     }
 
@@ -3478,12 +4304,85 @@ mod tests {
     }
 
     #[test]
+    fn test_retention_augments_inferred_and_declared_project_scope() {
+        let cluster = scoped_cluster();
+        let scopes = ScopeResolver::new(cluster.spec.kubernetes.as_ref(), []);
+        for declared in [false, true] {
+            let mut group: ApplicationGroup = serde_json::from_value(serde_json::json!({
+                "apiVersion":"k8s.gitops.nyl/v1", "kind":"ApplicationGroup", "metadata":{"name":"web"},
+                "spec":{"applicationNamespace":"argocd", "retainedProjectNamespaces":["retired", "retired"],
+                    "retainedNamespaceResourceWhitelist":[{"group":"batch", "kind":"CronJob"}, {"group":"", "kind":"ConfigMap"}],
+                    "retainedClusterResourceWhitelist":[{"group":"rbac.authorization.k8s.io", "kind":"ClusterRole", "name":"reader"}]}
+            }))
+            .unwrap();
+            if declared {
+                group.spec.project_template = Some(AppProjectTemplate {
+                    destinations: Some(vec![AppProjectDestination {
+                        server: cluster.spec.destination.server.clone(),
+                        name: None,
+                        namespace: "web".into(),
+                    }]),
+                    cluster_resource_whitelist: Some(vec![]),
+                    ..Default::default()
+                });
+            }
+            let argocd: ArgoCDInstance = serde_json::from_value(serde_json::json!({
+                "apiVersion":"k8s.gitops.nyl/v1", "kind":"ArgoCDInstance", "metadata":{"name":"control"},
+                "spec":{"clusterRef":{"name":"production"}, "namespace":"argocd"}
+            }))
+            .unwrap();
+            let repository = InlineGitRepository {
+                repo_url: "https://repo".into(),
+                publish_url: None,
+            };
+            let effective = build_generated_project(&group, &repository, &cluster, &argocd).unwrap();
+            let ProjectManifest::Generated(generated) = effective.manifest else {
+                panic!("expected generated project")
+            };
+            let manifest = generated.finish(&usage(&[("", "ConfigMap")]), &scopes).unwrap();
+            let namespaces = manifest["spec"]["destinations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["namespace"].as_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(namespaces, BTreeSet::from(["web", "retired"]));
+            assert_eq!(manifest["spec"]["destinations"].as_array().unwrap().len(), 2);
+            // Retained kinds join the derived namespaced list without duplicating rendered ones.
+            assert_eq!(
+                manifest["spec"]["namespaceResourceWhitelist"],
+                serde_json::json!([{"group":"", "kind":"ConfigMap"}, {"group":"batch", "kind":"CronJob"}])
+            );
+            assert!(manifest["spec"]["clusterResourceWhitelist"]
+                .as_array()
+                .unwrap()
+                .contains(
+                    &serde_json::json!({"group":"rbac.authorization.k8s.io", "kind":"ClusterRole", "name":"reader"})
+                ));
+            assert!(manifest["spec"]["clusterResourceWhitelist"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["kind"] == "Namespace" && p["name"] == "retired"));
+            group.spec.retained_project_namespaces.clear();
+            let ProjectManifest::Generated(empty) = build_generated_project(&group, &repository, &cluster, &argocd)
+                .unwrap()
+                .manifest
+            else {
+                panic!("expected generated project")
+            };
+            let empty_manifest = empty.finish(&usage(&[("", "ConfigMap")]), &scopes).unwrap();
+            assert_eq!(empty_manifest["spec"]["destinations"].as_array().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
     fn test_generated_project_derives_whitelists_from_rendered_kinds_by_scope() {
         let cluster = scoped_cluster();
         // A CRD rendered in the target decides its kind's scope.
         let crd = serde_json::json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
             "spec": {"group": "example.com", "scope": "Cluster", "names": {"kind": "Widget"}}});
-        let scopes = ScopeResolver::new(&cluster, [&crd]);
+        let scopes = ScopeResolver::new(cluster.spec.kubernetes.as_ref(), [&crd]);
         let project = generated_project(AppProjectTemplate::default())
             .finish(
                 &usage(&[
@@ -3516,7 +4415,7 @@ mod tests {
     #[test]
     fn test_generated_project_requires_known_scopes_only_for_derived_whitelists() {
         let cluster = scoped_cluster();
-        let scopes = ScopeResolver::new(&cluster, []);
+        let scopes = ScopeResolver::new(cluster.spec.kubernetes.as_ref(), []);
         let unknown = usage(&[("example.com", "Widget")]);
         let error = generated_project(AppProjectTemplate::default())
             .finish(&unknown, &scopes)
@@ -3581,23 +4480,232 @@ mod tests {
             std::fs::write(path, "---\n").unwrap();
         }
         let source = ResolvedGroupSource {
-            provenance_root: PathBuf::new(),
-            root: temporary.path().to_path_buf(),
             candidate_files: vec![entry.clone(), included.clone(), ignored.clone()],
             files: vec![StaticReleaseFile {
                 path: entry.clone(),
                 name: Some("test".to_string()),
                 inputs: BTreeMap::new(),
             }],
-            renderer_mode: RendererConfigMode::Central,
-            source_session: None,
-            remote: false,
-            provenance_inputs: Vec::new(),
-            repository: None,
+            ..ResolvedGroupSource::empty(temporary.path().to_path_buf())
         };
         let claimed = BTreeSet::from([manifest_path_identity(&entry), manifest_path_identity(&included)]);
 
         assert_eq!(unclaimed_group_manifests(&source, &claimed), vec![ignored.as_path()]);
+    }
+
+    const PLATFORM: &str = r"apiVersion: gitops.nyl/v1
+kind: GitRepository
+metadata:
+  name: deploy
+spec:
+  repoURL: https://example.invalid/deploy.git
+  publishURL: ssh://git@example.invalid/deploy.git
+---
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: prod-eu-1
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, v1/ConfigMap, v1/Namespace]
+    clusterScopedKinds: [core/Namespace]
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: production
+  labels:
+    environment: production
+spec:
+  reconciler: {argocd: {}}
+  clusterRef:
+    name: prod-eu-1
+  applicationGroupSelector:
+    matchLabels:
+      environment: production
+  publication:
+    repositoryRef:
+      name: deploy
+    revision: deploy/production
+    pathPrefix: production
+";
+
+    /// A Git project with the platform above, `group` as the only ApplicationGroup,
+    /// and one Release in the group's derived source directory.
+    fn templated_group_project(group: &str) -> tempfile::TempDir {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        git2::Repository::init(root).unwrap();
+        for (path, contents) in [
+            ("nyl.toml", ""),
+            ("config/platform.yaml", PLATFORM),
+            ("config/group.yaml", group),
+            (
+                "applications/workloads/api.yaml",
+                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api\n  namespace: api\ndata:\n  stage: '{{ target.metadata.labels.environment }}'\n",
+            ),
+        ] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        directory
+    }
+
+    fn group_document(labels: &str, spec: &str) -> String {
+        format!(
+            "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: workloads\n{labels}spec:\n  applicationNamespace: argocd\n{spec}"
+        )
+    }
+
+    const BLOCK_LABELS: &str = "  labels:\n    environment: production\n";
+
+    fn compile_production(directory: &tempfile::TempDir) -> Result<CompiledTargetTree> {
+        let inventory =
+            crate::gitops::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue())?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(compile_target_tree(&inventory, "production"))
+    }
+
+    fn file<'a>(tree: &'a CompiledTargetTree, path: &str) -> &'a str {
+        let bytes = tree.files.get(Path::new(path)).unwrap_or_else(|| {
+            panic!(
+                "{path} was not rendered; got {:?}",
+                tree.files.keys().collect::<Vec<_>>()
+            )
+        });
+        std::str::from_utf8(bytes).unwrap()
+    }
+
+    /// Structural templating in `projectTemplate` renders per target without
+    /// dropping the group, whichever YAML form its labels are written in.
+    #[test]
+    fn test_compile_renders_a_group_with_a_templated_project_template() {
+        let spec = "  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n    labels:\n      team: '{{ cluster.metadata.name }}'\n";
+        for (index, labels) in [
+            BLOCK_LABELS,
+            "  labels: {environment: production}\n",
+            "  labels: # targets select on these\n    environment: production\n",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = templated_group_project(&group_document(labels, spec));
+            let tree = compile_production(&directory).unwrap_or_else(|error| panic!("form {index}: {error}"));
+
+            let project = file(&tree, "_nyl/catalog/appproject.argoproj.io/argocd/production-web.yaml");
+            assert!(project.contains("name: production-web"), "form {index}: {project}");
+            assert!(project.contains("team: prod-eu-1"), "form {index}: {project}");
+            let application = file(&tree, "_nyl/catalog/application.argoproj.io/argocd/api.yaml");
+            assert!(
+                application.contains("project: production-web"),
+                "form {index}: {application}"
+            );
+            let release = file(&tree, "workloads/api/configmap/api/api.yaml");
+            assert!(release.contains("stage: production"), "form {index}: {release}");
+        }
+    }
+
+    /// An ApplicationGroup whose document renders to nothing is omitted for the
+    /// target and counts as disabled; every other selected group is kept.
+    #[test]
+    fn test_selected_groups_records_a_group_that_renders_to_nothing_as_omitted() {
+        let omitted = format!(
+            "{{% if target.metadata.name != 'production' %}}\n{}{{% endif %}}\n",
+            group_document(BLOCK_LABELS, "")
+        );
+        for (document, enabled) in [
+            (omitted, false),
+            (
+                group_document(
+                    BLOCK_LABELS,
+                    "  projectTemplate:\n    name: '{{ target.metadata.name }}-web'\n",
+                ),
+                true,
+            ),
+        ] {
+            let directory = templated_group_project(&document);
+            let inventory =
+                crate::gitops::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue())
+                    .unwrap();
+            let Some(GitOpsResource::DeploymentTarget(target)) = &inventory
+                .get(GitOpsResourceKind::DeploymentTarget, "production")
+                .unwrap()
+                .resource
+            else {
+                panic!("the target is static");
+            };
+            let (cluster, _) = resolve_cluster(&inventory, target.cluster_name()).unwrap();
+            let session =
+                RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster)
+                    .unwrap();
+
+            let (groups, disabled) = selected_groups(&inventory, target, &session).unwrap();
+
+            let names = groups
+                .iter()
+                .map(|(_, group)| group.metadata.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, if enabled { vec!["workloads"] } else { vec![] });
+            assert_eq!(disabled.contains("workloads"), !enabled, "{disabled:?}");
+        }
+    }
+
+    /// A selected group whose effective spec cannot be rendered is an error that
+    /// names the field, never an omission.
+    #[test]
+    fn test_selected_group_with_an_unrenderable_spec_is_an_error() {
+        for (spec, fragment) in [
+            // Renders to '-web', which is not a DNS subdomain.
+            (
+                "  projectTemplate:\n    name: '{{ target.name }}-web'\n",
+                "spec.projectTemplate.name",
+            ),
+            (
+                "  projectTemplate:\n    name: '{{ target.metadata.name | nosuchfilter }}'\n",
+                "nosuchfilter",
+            ),
+        ] {
+            let directory = templated_group_project(&group_document(BLOCK_LABELS, spec));
+            let error = compile_production(&directory).unwrap_err().to_string();
+            assert!(error.contains(fragment), "{error}");
+        }
+    }
+
+    /// Targets select on the labels discovery read; a group whose rendered labels
+    /// differ from them is an error rather than a silently different selection.
+    #[test]
+    fn test_selected_group_whose_rendered_labels_differ_from_the_selected_ones_is_an_error() {
+        // The labels sit below a template expression, which discovery's scanner
+        // cannot see through: it reads none, the render has `environment`.
+        let document = "apiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: workloads\n{{ \"  labels: {environment: production}\" }}\nspec:\n  applicationNamespace: argocd\n";
+        let directory = templated_group_project(document);
+        let inventory =
+            crate::gitops::discover_gitops_inventory(directory.path(), None, crate::config::test_catalogue()).unwrap();
+        let discovered = inventory
+            .get(GitOpsResourceKind::ApplicationGroup, "workloads")
+            .unwrap();
+        assert!(discovered.static_labels.is_empty());
+        let Some(GitOpsResource::DeploymentTarget(target)) = &inventory
+            .get(GitOpsResourceKind::DeploymentTarget, "production")
+            .unwrap()
+            .resource
+        else {
+            panic!("the target is static");
+        };
+        let (cluster, _) = resolve_cluster(&inventory, target.cluster_name()).unwrap();
+        let session =
+            RenderSession::for_target(&inventory.project_root, &inventory.project_config, target, &cluster).unwrap();
+
+        let error = render_effective_group(discovered, &session).unwrap_err().to_string();
+        assert!(error.contains("targets selected it by the literal labels"), "{error}");
+        assert!(error.contains("environment"), "{error}");
     }
 
     #[cfg(unix)]

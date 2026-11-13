@@ -1,0 +1,17 @@
+apiVersion: gitops.nyl/v1
+kind: ObservedUnit
+unit:
+  environment: dev
+  name: lb
+  uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+  apiVersion: units.gitops.nyl/v1
+  kind: Command
+receipt:
+  executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+  behaviorVersion: 1
+  run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90
+  startedAt: "2026-09-24T10:00:00Z"
+  finishedAt: "2026-09-24T10:01:00Z"
+  outputs:
+    version: "1"
+condition: null

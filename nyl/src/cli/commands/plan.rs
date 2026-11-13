@@ -107,6 +107,8 @@ pub fn run(args: &PlanArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             args.source.as_deref(),
             false,
             wiring.drivers,
+            &crate::orchestration::project::InstanceRequest::default(),
+            None,
         ),
         |environment, selected, planned, unavailable| {
             let mut args = args.clone();
@@ -159,6 +161,7 @@ fn plan(
         mode: teardown_mode(args)?,
         lifecycle: nyl_orchestration::shell::run::LifecycleOptions::default(),
         reapply: false,
+        detect_drift: false,
         fail_fast: false,
         reason: None,
     })?;

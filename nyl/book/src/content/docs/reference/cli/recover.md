@@ -35,7 +35,8 @@ execution switched off:
 
 - It resolves the environment's units at the source, adopts the uids of
   units the dead run created, turns checkpoints whose execution key matches
-  into `imported` receipts, and gives units the run left without a
+  into `imported` receipts (with the attestations and observed values the
+  checkpoint carries for them), and gives units the run left without a
   checkpoint an `uncertain` condition. The next `nyl reconcile` runs those
   again under their recovery policy.
 - The commit uses the operation `recover`, lists the import under
@@ -82,8 +83,8 @@ when `--retry` follows an imported interrupted run.
   needs no recover, because the next reconcile retries it, but `--retry`
   clears it too. On a unit held with `nyl hold` it clears only
   the condition; the unit stays held.
-- `--accept <run>` adopts the receipt, outputs, and artifacts that run
-  checkpointed for the unit, typically after a runner that lost its lease
+- `--accept <run>` adopts the receipt, outputs, artifacts, attestations, and
+  observed values that run checkpointed for the unit, typically after a runner that lost its lease
   finished the unit late. It is allowed only when the checkpoint's execution
   key and uid equal the unit's current desired document's, so a checkpoint
   is accepted only for what the unit runs now. A held unit runs nothing, so

@@ -15,6 +15,7 @@ nyl get targets
 nyl get app-projects
 nyl get application-groups
 nyl get environments
+nyl get environment-templates
 nyl get units
 nyl get cluster primary
 ```
@@ -41,6 +42,15 @@ monitoring  monitoring (generated)  applications/monitoring  applications/monito
 web         web (generated)         applications/web         applications/web/group.yaml#document-1
 ```
 
+`nyl get environments` also lists the live instances of every
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/),
+found by listing the template's state location, and adds the `TEMPLATE` and
+`EXPIRES` columns (`-` for a declared Environment). An instance whose state was
+deleted is not listed. This is the one `get` form that reads state; it contacts
+the state repositories of declared templates only. A template whose refs depend
+on the environment name has no location to list, so its instances are not shown.
+
+
 `CONTEXT` is the Cluster's `spec.live.context`, `PUBLICATION` the target's
 repository and revision, and `PROJECT` the ApplicationGroup's AppProject, marked
 `(generated)` when Nyl derives it.
@@ -57,6 +67,7 @@ nyl get units -e dev -o wide                  # ... and TEARDOWN READINESS
 nyl get unit migrate -e dev -o yaml           # the persisted desired and observed documents
 nyl get unit migrate -e dev -o json --observed
 nyl get output database/host -e dev           # resolves like {fromUnit: {unit: database, output: host}}
+nyl get observation kubernetes/ingressIp -e dev  # an observed value, as {fromUnit: {unit: kubernetes, observation: ingressIp}}
 nyl get artifacts -e dev                      # UNIT NAME KIND SUMMARY
 nyl get artifact web/image -e dev --pointer /reference
 nyl get units -e dev --state-revision 41f0c2e
@@ -72,13 +83,20 @@ nyl get units -e dev --local                  # this clone's local view
   `-o wide` adds the teardown readiness of units whose kind reports
   teardown settings, such as a `KubernetesPublication`: `ready`, or
   `incomplete:` with the unmet requirements, and `-` for other kinds.
+  The state is the one [`nyl status`](/nyl/reference/cli/status/) shows,
+  including `ready` for a unit that reads an observed value of another
+  environment that changed since it resolved; that producer environment is
+  [required](/nyl/orchestration/runs/#other-environments), so one that cannot
+  be read is an error. With `--state-revision`, no
+  other environment is read, so that readiness is not evaluated.
 - `get unit <name> -e <env> -o yaml|json` prints exactly the persisted
   `{desired, observed}` documents, never a synthesized merge. `--desired` or
   `--observed` prints only one of them.
-- `get output <unit>/<output>` and `get artifact <unit>/<name> --pointer …`
-  print one value for scripts and resolve exactly like the matching
-  `fromUnit` reference: the pointer is relative to the artifact's `spec`, and
-  only a current receipt counts. When the reference would not resolve, they
+- `get output <unit>/<output>`, `get artifact <unit>/<name> --pointer …`, and
+  `get observation <unit>/<name>` print one value for scripts and resolve
+  exactly like the matching `fromUnit` reference: the pointer is relative to
+  the artifact's `spec`, and only a current receipt counts. An observed value
+  must also be recorded for that receipt and not older than its `maxAge`. When the reference would not resolve, they
   print nothing and exit 1. `--allow-stale` prints the latest receipt's value
   with the warning `NYL-REFERENCE-STALE` instead.
 - `--state-revision <commit>` reads state as of an earlier state commit.
@@ -100,7 +118,7 @@ nyl capture cluster primary --context admin@primary
 nyl capture cluster primary --check
 ```
 
-The explicit context wins over `Cluster.spec.live.context`. The update changes
+The explicit context wins over `Cluster.spec.live.context`, which is used and the current context never is once the Cluster declares one; without either, the current context is used only when the Cluster's destination server is a concrete URL that can be checked against it. The update changes
 only the selected Cluster document and preserves the rest of a shared YAML
 file. `--check` reports drift without writing.
 

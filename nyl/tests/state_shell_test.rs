@@ -325,6 +325,7 @@ fn recover(harness: &shell::Harness) -> StateOperationReport {
     let base = harness.context();
     let tools = ProcessRunner::new();
     let context = RunContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         base: &base,
         sources: &job.sources,
         renderer: &job.renderer,
@@ -334,7 +335,6 @@ fn recover(harness: &shell::Harness) -> StateOperationReport {
         process_env: &harness.process_env,
         secrets: None,
         commit_identity: Some(&harness.identity),
-        observer: None,
         progress: None,
         prompt: None,
     };

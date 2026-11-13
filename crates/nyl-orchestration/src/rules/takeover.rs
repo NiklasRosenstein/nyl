@@ -16,6 +16,15 @@
 //! - When several leftover runs touched a unit (checkpointed it, or started
 //!   it without a checkpoint), the newest run (by deadline, then run id)
 //!   decides; older checkpoints are reported as superseded.
+//! - A checkpointed receipt's attestations and observed values import only
+//!   together with that exact receipt ([`checkpointed_evidence`]): the
+//!   receipt's execution key and run, and the incarnation (environment,
+//!   name, and uid) of the unit that executed it. A record of anything else
+//!   is dropped, as is every record of a checkpoint that is not imported
+//!   (superseded, late, or of another incarnation). An imported record keeps
+//!   its own `at` and `observedAt`: age is judged where it is consumed
+//!   (`maxAge`, `maxAttestationAge`, the refresh interval), never reset by
+//!   the import.
 //! - Other checkpointed results are superseded: reported with
 //!   `NYL-RUN-SUPERSEDED`. A superseded result whose effects are real (a
 //!   receipt, or an `uncertain` outcome) with an execution key other than
@@ -58,7 +67,7 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Checkpoint, Coordination, RunState};
 use nyl_core::orchestration::state::{
-    ArtifactDocument, Condition, DesiredUnit, Lease, ObservedUnit, Operation, Receipt,
+    ArtifactDocument, Attestation, Condition, DesiredUnit, Lease, ObservationRecord, ObservedUnit, Operation, Receipt,
 };
 use nyl_core::orchestration::time::Timestamp;
 
@@ -163,6 +172,11 @@ pub struct Import {
     pub observed: BTreeMap<UnitName, ObservedUnit>,
     /// The artifact sets of imported receipts.
     pub artifacts: BTreeMap<UnitName, BTreeMap<String, ArtifactDocument>>,
+    /// The attestations of imported receipts, which replace the unit's
+    /// earlier set; empty when the receipt was checkpointed with none.
+    pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    /// The observed values of imported receipts.
+    pub observations: BTreeMap<UnitName, ObservationRecord>,
     /// Units whose checkpointed result became their receipt or condition:
     /// the summary's `imported`.
     pub imported: Vec<UnitName>,
@@ -271,6 +285,80 @@ pub(crate) fn checkpointed_receipt<'c>(run: &RunId, checkpoint: &'c Checkpoint) 
         .filter(|receipt| checkpoint.observed.condition.is_none() && &receipt.run == run)
 }
 
+/// The attestations and observed values a checkpoint carries for its receipt.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CheckpointedEvidence {
+    pub attestations: BTreeMap<String, Attestation>,
+    pub observations: Option<ObservationRecord>,
+}
+
+/// What `checkpoint` of `run` carries for its receipt in `environment`, or
+/// `None` when it records no success of that run. A record is kept only when
+/// it names that receipt's execution key (and, for observed values, its run)
+/// and the incarnation, with environment and name, that executed it; anything
+/// else is dropped, never repaired. The records keep their own times.
+pub(crate) fn checkpointed_evidence(
+    environment: &EnvironmentName,
+    run: &RunId,
+    checkpoint: &Checkpoint,
+) -> Option<CheckpointedEvidence> {
+    let receipt = checkpointed_receipt(run, checkpoint)?;
+    let identity = &checkpoint.desired.unit;
+    let uid = identity.uid.as_ref()?;
+    let attestations = checkpoint
+        .attestations
+        .iter()
+        .filter(|(_, attestation)| {
+            attestation.execution_key == receipt.execution_key.as_str()
+                && attestation.unit.as_ref().is_some_and(|unit| {
+                    unit.environment == *environment && unit.name == identity.name && unit.uid == *uid
+                })
+        })
+        .map(|(name, attestation)| (name.clone(), attestation.clone()))
+        .collect();
+    let observations = checkpoint
+        .observations
+        .as_ref()
+        .filter(|record| {
+            record.execution_key == receipt.execution_key
+                && record.run == receipt.run
+                && record.unit.environment == *environment
+                && record.unit.name == identity.name
+                && record.unit.uid.as_ref() == Some(uid)
+        })
+        .cloned();
+    Some(CheckpointedEvidence {
+        attestations,
+        observations,
+    })
+}
+
+/// The checkpoint to write after a run read observed values for the receipt
+/// `latest`, the run's latest checkpoint of the unit, recorded: `latest` with
+/// `record`, the record the run now holds for the unit. `None` when nothing
+/// changed, or when the record cannot ride with that receipt (it names
+/// another receipt or incarnation, or `latest` records no success of
+/// `run`); the transition commit still records it. A unit's later
+/// checkpoint is its result on import.
+pub(crate) fn observation_checkpoint(
+    environment: &EnvironmentName,
+    run: &RunId,
+    latest: &Checkpoint,
+    record: Option<&ObservationRecord>,
+) -> Option<Checkpoint> {
+    if latest.observations.as_ref() == record {
+        return None;
+    }
+    let candidate = Checkpoint {
+        observations: record.cloned(),
+        ..latest.clone()
+    };
+    let binds = record.is_none()
+        || checkpointed_evidence(environment, run, &candidate)
+            .is_some_and(|evidence| evidence.observations == candidate.observations);
+    binds.then_some(candidate)
+}
+
 /// Whether a checkpoint shows effects that happened: a receipt the run
 /// recorded, or an `uncertain` outcome. A failure claims none.
 fn effects_real(run: &RunId, checkpoint: &Checkpoint) -> bool {
@@ -321,6 +409,7 @@ enum Decision {
     Imported {
         observed: Box<ObservedUnit>,
         artifacts: Option<BTreeMap<String, ArtifactDocument>>,
+        evidence: Option<CheckpointedEvidence>,
     },
     Uncertain {
         observed: Box<ObservedUnit>,
@@ -375,9 +464,19 @@ pub fn import(inputs: &ImportInputs<'_>) -> Import {
         import.handled.insert((newest.run.clone(), name.clone()));
         match decision {
             Decision::Nothing => {}
-            Decision::Imported { observed, artifacts } => {
+            Decision::Imported {
+                observed,
+                artifacts,
+                evidence,
+            } => {
                 if let Some(artifacts) = artifacts {
                     import.artifacts.insert(name.clone(), artifacts);
+                }
+                if let Some(evidence) = evidence {
+                    import.attestations.insert(name.clone(), evidence.attestations);
+                    import
+                        .observations
+                        .extend(evidence.observations.map(|record| (name.clone(), record)));
                 }
                 import.observed.insert(name.clone(), *observed);
                 import.imported.push(name);
@@ -486,6 +585,7 @@ fn checkpointed(
             Ok(Applied::Changed(observed)) => Decision::Imported {
                 observed,
                 artifacts: checkpointed_receipt(run, checkpoint).map(|_| checkpoint.artifacts.clone()),
+                evidence: checkpointed_evidence(inputs.environment, run, checkpoint),
             },
             Ok(Applied::Evidence) | Err(_) => Decision::Warn(late_warning(inputs.environment, name, run)),
         });
@@ -606,8 +706,11 @@ pub fn unchanged(consumption: Consumption, leftovers: &Leftovers<'_>, current: &
 #[cfg(test)]
 mod tests {
     use nyl_core::orchestration::ports::HeldLease;
-    use nyl_core::orchestration::state::{Request, Run};
-    use serde_json::json;
+    use nyl_core::orchestration::state::{
+        ArtifactUnit, AttestationKind, AttestationResult, ObservationRecordKind, RecordedObservation, Request, Run,
+        StateV1,
+    };
+    use serde_json::{json, Value};
 
     use super::*;
     use crate::rules::fixtures::{
@@ -634,11 +737,11 @@ mod tests {
     }
 
     fn checkpoint(unit_name: &str, seed: &str, by: &str) -> Checkpoint {
-        Checkpoint {
-            desired: unit(unit_name, seed),
-            observed: success(unit_name, seed, by, "10:00"),
-            artifacts: BTreeMap::new(),
-        }
+        Checkpoint::new(
+            unit(unit_name, seed),
+            success(unit_name, seed, by, "10:00"),
+            BTreeMap::new(),
+        )
     }
 
     fn run_state(id: &str, deadline: &str, units: &[&str], checkpoints: Vec<Checkpoint>) -> RunState {
@@ -753,6 +856,281 @@ mod tests {
         assert_eq!(import.observed[&name("network")], expected);
         assert!(import.artifacts.contains_key(&name("network")));
         assert!(import.recovered.is_empty() && import.warnings.is_empty());
+    }
+
+    /// A `healthy` attestation of `checkpoint`'s receipt, as its run recorded it.
+    fn attested(checkpoint: &Checkpoint) -> Attestation {
+        let receipt = checkpoint.observed.receipt.as_ref().unwrap();
+        Attestation {
+            api_version: StateV1,
+            kind: AttestationKind,
+            name: "healthy".to_owned(),
+            unit: Some(ArtifactUnit {
+                environment: env(),
+                name: checkpoint.desired.unit.name.clone(),
+                uid: checkpoint.desired.unit.uid.clone().unwrap(),
+            }),
+            execution_key: receipt.execution_key.to_string(),
+            result: AttestationResult::Pass,
+            at: at("10:05"),
+            source: json!({"driver": "reconcile"}),
+            reason: None,
+            details: Value::Null,
+        }
+    }
+
+    /// The observed `ip` of `checkpoint`'s receipt, as its run read it.
+    fn read(checkpoint: &Checkpoint) -> ObservationRecord {
+        let receipt = checkpoint.observed.receipt.as_ref().unwrap();
+        ObservationRecord {
+            api_version: StateV1,
+            kind: ObservationRecordKind,
+            unit: checkpoint.desired.unit.clone(),
+            execution_key: receipt.execution_key.clone(),
+            run: receipt.run.clone(),
+            at: at("10:06"),
+            values: BTreeMap::from([(
+                "ip".to_owned(),
+                RecordedObservation::Value {
+                    value: json!("203.0.113.10"),
+                    observed_at: at("10:06"),
+                },
+            )]),
+        }
+    }
+
+    /// `checkpoint` with the evidence its run recorded for its receipt.
+    fn evidenced(mut checkpoint: Checkpoint) -> Checkpoint {
+        checkpoint.attestations = BTreeMap::from([("healthy".to_owned(), attested(&checkpoint))]);
+        checkpoint.observations = Some(read(&checkpoint));
+        checkpoint
+    }
+
+    /// The import of the checkpoints of `network` on one run ref, for a unit
+    /// resolved as `seed`.
+    fn import_of_all(checkpoints: Vec<Checkpoint>, seed: &str) -> Import {
+        let mut world = World::new(vec![run_state(RUN_2, "11:00", &[], checkpoints)]);
+        world.resolve("network", seed);
+        world.import()
+    }
+
+    fn import_of(checkpoint: Checkpoint, seed: &str) -> Import {
+        import_of_all(vec![checkpoint], seed)
+    }
+
+    /// Catches an imported receipt starting with its attestations and
+    /// observed values pending, and an import that re-stamps them: both keep
+    /// the times their run recorded, because age is judged where they are
+    /// consumed.
+    #[test]
+    fn test_import_takes_the_evidence_of_a_checkpointed_receipt_with_it_and_keeps_its_times() {
+        let checkpoint = evidenced(checkpoint("network", "v1", RUN_2));
+        let import = import_of(checkpoint.clone(), "v1");
+        assert_eq!(import.imported, [name("network")]);
+        assert_eq!(import.attestations[&name("network")], checkpoint.attestations);
+        assert_eq!(import.attestations[&name("network")]["healthy"].at, at("10:05"));
+        assert_eq!(import.observations[&name("network")], checkpoint.observations.unwrap());
+    }
+
+    /// A change that makes a document of a checkpoint name something else.
+    type Mismatch<T> = Box<dyn Fn(&mut T)>;
+
+    /// Catches evidence that does not name the imported receipt reaching
+    /// state: another execution key, another incarnation, another
+    /// environment, or (for observed values) another run, each dropped while
+    /// the receipt itself is still imported.
+    #[test]
+    fn test_import_drops_evidence_that_names_another_receipt_or_incarnation() {
+        let other_uid = fixtures::uid("another-incarnation");
+        let mismatches: Vec<(&str, Mismatch<Checkpoint>)> = vec![
+            (
+                "attestation of another key",
+                Box::new(|checkpoint| {
+                    checkpoint.attestations.get_mut("healthy").unwrap().execution_key =
+                        fixtures::key("another").to_string();
+                }),
+            ),
+            (
+                "attestation of another incarnation",
+                Box::new(move |checkpoint| {
+                    let uid = other_uid.clone();
+                    checkpoint
+                        .attestations
+                        .get_mut("healthy")
+                        .unwrap()
+                        .unit
+                        .as_mut()
+                        .unwrap()
+                        .uid = uid;
+                }),
+            ),
+            (
+                "attestation of another environment",
+                Box::new(|checkpoint| {
+                    checkpoint
+                        .attestations
+                        .get_mut("healthy")
+                        .unwrap()
+                        .unit
+                        .as_mut()
+                        .unwrap()
+                        .environment = EnvironmentName::new("prod").unwrap();
+                }),
+            ),
+            (
+                "attestation of no incarnation",
+                Box::new(|checkpoint| checkpoint.attestations.get_mut("healthy").unwrap().unit = None),
+            ),
+        ];
+        for (what, mismatch) in mismatches {
+            let mut checkpoint = evidenced(checkpoint("network", "v1", RUN_2));
+            mismatch(&mut checkpoint);
+            let import = import_of(checkpoint, "v1");
+            assert_eq!(import.imported, [name("network")], "{what}");
+            assert!(import.attestations[&name("network")].is_empty(), "{what}");
+            assert!(
+                import.observations.contains_key(&name("network")),
+                "{what}: the observed value is the receipt's"
+            );
+        }
+        let mismatches: Vec<(&str, Mismatch<ObservationRecord>)> = vec![
+            (
+                "observed value of another key",
+                Box::new(|record| record.execution_key = fixtures::key("another")),
+            ),
+            (
+                "observed value of another run",
+                Box::new(|record| record.run = run(OLDER)),
+            ),
+            (
+                "observed value of another incarnation",
+                Box::new(|record| record.unit.uid = Some(fixtures::uid("another-incarnation"))),
+            ),
+        ];
+        for (what, mismatch) in mismatches {
+            let mut checkpoint = evidenced(checkpoint("network", "v1", RUN_2));
+            mismatch(checkpoint.observations.as_mut().unwrap());
+            let import = import_of(checkpoint, "v1");
+            assert_eq!(import.imported, [name("network")], "{what}");
+            assert!(!import.observations.contains_key(&name("network")), "{what}");
+            assert_eq!(import.attestations[&name("network")].len(), 1, "{what}");
+        }
+    }
+
+    /// Catches evidence of a result that is not imported (superseded by
+    /// another execution key) becoming the unit's, or a failure's carrying
+    /// the evidence of the receipt before it.
+    #[test]
+    fn test_import_takes_no_evidence_of_a_result_it_does_not_import() {
+        let superseded = import_of(evidenced(checkpoint("network", "old", RUN_2)), "new");
+        assert!(superseded.imported.is_empty());
+        assert!(superseded.attestations.is_empty() && superseded.observations.is_empty());
+
+        // A late checkpoint of a unit already uncertain is evidence only.
+        let mut late = World::new(vec![run_state(
+            RUN_2,
+            "11:00",
+            &[],
+            vec![evidenced(checkpoint("network", "v1", RUN_2))],
+        )]);
+        late.resolve("network", "v1");
+        let mut uncertain = success("network", "v1", RUN_1, "08:00");
+        uncertain.condition = Some(Condition::Uncertain {
+            since: at("09:00"),
+            run: run(RUN_2),
+            reason: "run lost its lease".to_owned(),
+        });
+        late.snapshot.insert(name("network"), uncertain);
+        let import = late.import();
+        assert_eq!(codes(&import), [Code::RunLateCheckpoint]);
+        assert!(import.attestations.is_empty() && import.observations.is_empty());
+
+        // A checkpoint of a failure holds no receipt of its run.
+        let mut failure = evidenced(checkpoint("network", "v1", RUN_2));
+        failure.observed.condition = Some(Condition::Uncertain {
+            since: at("10:00"),
+            run: run(RUN_2),
+            reason: "tools signalled".to_owned(),
+        });
+        assert_eq!(checkpointed_evidence(&env(), &run(RUN_2), &failure), None);
+    }
+
+    /// Catches the later checkpoint of a unit, the one that carries the values
+    /// its run read, not deciding: the run ref's last checkpoint of the unit
+    /// is its result.
+    #[test]
+    fn test_import_takes_the_evidence_of_the_runs_latest_checkpoint_of_the_unit() {
+        let first = evidenced(checkpoint("network", "v1", RUN_2));
+        let mut first_without_values = first.clone();
+        first_without_values.observations = None;
+        let import = import_of_all(vec![first_without_values, first.clone()], "v1");
+        assert_eq!(import.observations[&name("network")], first.observations.unwrap());
+    }
+
+    /// Catches a read value being checkpointed with a receipt it was not read
+    /// for, which an import would then take as the receipt's: only a record
+    /// that names the latest checkpoint's receipt (execution key, run, and
+    /// incarnation) rides with it, and an unchanged record writes nothing.
+    #[test]
+    fn test_observation_checkpoint_carries_only_a_record_that_names_the_receipt() {
+        let latest = checkpoint("network", "v1", RUN_2);
+        let record = read(&latest);
+        let written = observation_checkpoint(&env(), &run(RUN_2), &latest, Some(&record)).unwrap();
+        assert_eq!(written.observations, Some(record.clone()));
+        assert_eq!(
+            Checkpoint {
+                observations: None,
+                ..written.clone()
+            },
+            latest,
+            "nothing else of the checkpoint changes"
+        );
+        assert_eq!(
+            observation_checkpoint(&env(), &run(RUN_2), &written, Some(&record)),
+            None,
+            "an unchanged record writes nothing"
+        );
+
+        let mismatches: Vec<(&str, Mismatch<ObservationRecord>)> = vec![
+            (
+                "another key",
+                Box::new(|record| record.execution_key = fixtures::key("another")),
+            ),
+            ("another run", Box::new(|record| record.run = run(OLDER))),
+            (
+                "another incarnation",
+                Box::new(|record| record.unit.uid = Some(fixtures::uid("another-incarnation"))),
+            ),
+        ];
+        for (what, mismatch) in mismatches {
+            let mut record = read(&latest);
+            mismatch(&mut record);
+            assert_eq!(
+                observation_checkpoint(&env(), &run(RUN_2), &latest, Some(&record)),
+                None,
+                "a record of {what} is left to the transition commit"
+            );
+        }
+
+        // A checkpoint of another run's receipt (or of a failure) carries none.
+        assert_eq!(
+            observation_checkpoint(&env(), &run(OLDER), &latest, Some(&record)),
+            None
+        );
+        let mut uncertain = latest.clone();
+        uncertain.observed.condition = Some(Condition::Uncertain {
+            since: at("10:00"),
+            run: run(RUN_2),
+            reason: "tools signalled".to_owned(),
+        });
+        assert_eq!(
+            observation_checkpoint(&env(), &run(RUN_2), &uncertain, Some(&record)),
+            None
+        );
+
+        // A record that went away is checkpointed away too.
+        let cleared = observation_checkpoint(&env(), &run(RUN_2), &written, None).unwrap();
+        assert_eq!(cleared.observations, None);
     }
 
     /// Catches a superseded result, whose effects are real, letting the unit

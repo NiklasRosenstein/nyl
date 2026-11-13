@@ -15,7 +15,7 @@ for orchestration.
 | Repository | Holds | Written by |
 | --- | --- | --- |
 | Source repository | `nyl.toml` and every resource Nyl renders: releases, targets, environments, and units | People, through commits and pull requests. Nyl reads it, and orchestration renders units from a fresh checkout of the run's source commit. |
-| Publication destinations | Rendered Kubernetes trees for Argo CD | [`nyl publish-tree`](/nyl/reference/cli/publish-tree/); from M5 (planned), KubernetesPublication units |
+| Publication destinations | Rendered Kubernetes trees for Argo CD | [`nyl publish-tree`](/nyl/reference/cli/publish-tree/), and [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/) units |
 | State repositories | Each environment's desired and observed state and its coordination refs | Orchestration commands such as `reconcile`, `recover`, `detect-drift`, and `nyl state` |
 
 All three can be one repository.
@@ -105,10 +105,10 @@ history:
 | Ref | Content | Created by | Deleted by |
 | --- | --- | --- | --- |
 | `<prefix><env>/lease` | One `Lease` (`lease.yaml`): run, runner, operation, units executing, deadline | Every state-writing operation, with compare-and-swap | The holder when it ends; replaced by a run that takes over an expired lease or by `nyl lease break` |
-| `<prefix><env>/runs/<run>` | `run.yaml`, the `Run` record with the same deadline and units; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before it starts; `checkpoints/<n>-<unit>/`, added in one commit per finished unit, with the desired document it executed, its receipt or condition, and its artifacts | `reconcile` | The run after its transition commit lands; otherwise the run that takes it over, which retires it to an evidence ref when an uncertain unit still needs it |
+| `<prefix><env>/runs/<run>` | `run.yaml`, the `Run` record with the same deadline and units; `created/<unit>.yaml`, the desired document and uid of each unit the run created, written before it starts; `checkpoints/<n>-<unit>/`, added in one commit per finished unit, with the desired document it executed, its receipt or condition, and the receipt's artifacts, `attestations.yaml`, and `observations.yaml` (the last two only when the run recorded some, and the unit's checkpoint is written again when the run reads its observed values) | `reconcile` | The run after its transition commit lands; otherwise the run that takes it over, which retires it to an evidence ref when an uncertain unit still needs it |
 | `<prefix><env>/signals/<run>` | `Signal` records other invocations send to a running run: a teardown confirmation (`nyl teardown --confirm-removed`) or a hold (`nyl hold`) | The sending command | Together with the run ref; by the sender when the run finished before reading it; by `nyl state delete` |
 | `<prefix><env>/evidence/<run>` | A retired run ref, kept because its checkpoints are evidence for an `uncertain` unit | A run that takes over | A later takeover or `nyl recover`, once no uncertain unit needs it; `nyl state delete` |
-| `<prefix><env>/keep` (M5, planned) | Keeps a preview instance's latest source commit fetchable, in the source repository | Every reconcile of a template instance | `nyl state delete` |
+| `refs/nyl-keep/<keepId>/<commit>` (outside the prefix, in the source repository) | Keeps a preview instance's recorded source commit fetchable after its branch is gone, for templates that opt in with [`keepSource: true`](/nyl/orchestration/resource-guides/environment-template/#source-keep-refs) | `reconcile --template` and `state init --template`, before the record names the commit; the previous commit's ref goes after the record lands | `nyl state delete` |
 
 While a run executes, its lease and run ref look like this:
 

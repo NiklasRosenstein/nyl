@@ -43,6 +43,8 @@ pub enum SourceRequest {
     Worktree(nyl_core::orchestration::ports::WorktreeSnapshot),
     /// The entry worktree's commit.
     Entry(CommitId),
+    /// An instance's recorded source commit.
+    Recorded(CommitId),
     /// The tip of a revision of this repository.
     Revision(String),
     /// A commit, with the revision it must be reachable from.
@@ -59,6 +61,7 @@ impl SourceRequest {
                 revision: snapshot.revision.clone(),
             },
             Self::Entry(_) => SourceChoice::Entry,
+            Self::Recorded(_) => SourceChoice::Recorded,
             Self::Revision(revision) => SourceChoice::Revision {
                 revision: revision.clone(),
             },
@@ -72,21 +75,36 @@ impl SourceRequest {
     }
 }
 
-/// The request for S from the entry worktree's Environment, its commit, and
-/// an optional `--source` override.
+/// The request for S from the entry worktree's Environment, its commit (an
+/// instance's recorded commit when `recorded`), and an optional `--source`
+/// override.
 ///
 /// `source.fromPromotion` is M6: it yields a revision only where one is set
 /// (validation excludes that), and otherwise the entry commit, so the shell
 /// must reject it beforehand with [`unsupported_source`].
-pub fn source_request(entry: &Environment, entry_commit: &CommitId, override_revision: Option<&str>) -> SourceRequest {
+pub fn source_request(
+    entry: &Environment,
+    entry_commit: &CommitId,
+    override_revision: Option<&str>,
+    recorded: bool,
+) -> SourceRequest {
     if let Some(revision) = override_revision {
         return SourceRequest::Override(revision.to_owned());
     }
+    // Without a source of its own, an instance not entered from its own
+    // checkout renders at the commit its record names.
+    let without_source = || {
+        if recorded {
+            SourceRequest::Recorded(entry_commit.clone())
+        } else {
+            SourceRequest::Entry(entry_commit.clone())
+        }
+    };
     let Some(source) = &entry.spec.source else {
-        return SourceRequest::Entry(entry_commit.clone());
+        return without_source();
     };
     let Some(revision) = &source.git.revision else {
-        return SourceRequest::Entry(entry_commit.clone());
+        return without_source();
     };
     match source.git.commit.as_deref().map(CommitId::new) {
         Some(Ok(commit)) => SourceRequest::Commit {
@@ -237,24 +255,39 @@ pub fn source_repository(source: &GitSource) -> Result<SourceRepository, String>
     }))
 }
 
-/// Each resolved source field's repository and pinned commit.
+/// Each resolved source field's repository and commit.
+///
+/// A field is checked out at its pinned commit, except one that only followed
+/// the unit's own source commit: no `revision`, this repository, and a pin
+/// equal to `recorded`, the unit's recorded source commit. It follows
+/// `source_commit` instead, so a teardown with `--source <revision>` (whose
+/// job commit differs from the recorded one) takes that revision's files for
+/// it as for every other file of the unit, while the stored spec, and with it
+/// every digest and approval, stays unchanged. Explicit `revision` and
+/// `commit` locks, and other repositories, are never replaced. See
+/// [Teardown](../../../../design/orchestration-core.md#deletion).
 pub fn source_checkouts(
     spec: &Value,
     fields: &[String],
     source_commit: &CommitId,
+    recorded: Option<&CommitId>,
 ) -> Result<BTreeMap<String, (SourceRepository, CommitId)>, String> {
     let mut result = BTreeMap::new();
     for field in fields {
         let Some(source) = git_source(spec, field)? else {
             continue;
         };
-        result.insert(
-            field.clone(),
-            (
-                source_repository(&source)?,
-                locked_commit(field, &source)?.unwrap_or_else(|| source_commit.clone()),
-            ),
-        );
+        let repository = source_repository(&source)?;
+        let commit = match locked_commit(field, &source)? {
+            Some(locked)
+                if source.revision.is_none() && repository == SourceRepository::This && Some(&locked) == recorded =>
+            {
+                source_commit.clone()
+            }
+            Some(locked) => locked,
+            None => source_commit.clone(),
+        };
+        result.insert(field.clone(), (repository, commit));
     }
     Ok(result)
 }
@@ -416,7 +449,7 @@ pub fn effective_commit(
     fields: &[String],
     source_commit: &CommitId,
 ) -> Result<CommitId, String> {
-    source_checkouts(resolved_spec, fields, source_commit)?;
+    source_checkouts(resolved_spec, fields, source_commit, None)?;
     Ok(source_commit.clone())
 }
 
@@ -546,10 +579,32 @@ mod tests {
             ),
         ];
         for (spec, override_revision, request, choice) in cases {
-            let actual = source_request(&environment(&spec), &entry, override_revision);
+            let actual = source_request(&environment(&spec), &entry, override_revision, false);
             assert_eq!(actual, request, "{spec}");
             assert_eq!(actual.choice(), choice, "{spec}");
         }
+    }
+
+    /// Catches an instance not entered from its own checkout following the
+    /// checkout: it renders at its record's commit and records that choice,
+    /// unless its template names a revision or the run overrides the source.
+    #[test]
+    fn test_a_recorded_source_is_used_only_without_a_source_of_its_own() {
+        let recorded = commit('e');
+        let request = |spec: &Value, override_revision: Option<&str>| {
+            source_request(&environment(spec), &recorded, override_revision, true)
+        };
+        let plain = request(&json!({}), None);
+        assert_eq!(plain, SourceRequest::Recorded(recorded.clone()));
+        assert_eq!(plain.choice(), SourceChoice::Recorded);
+        assert_eq!(
+            request(&json!({"source": {"revision": "release/prod"}}), None),
+            SourceRequest::Revision("release/prod".to_owned())
+        );
+        assert_eq!(
+            request(&json!({}), Some("hotfix")),
+            SourceRequest::Override("hotfix".to_owned())
+        );
     }
 
     /// Catches a promoted source silently running from the entry commit.
@@ -680,7 +735,7 @@ mod tests {
         pin_source_fields(&mut spec, &fields, "/nyl", &commit('a'), &revisions).unwrap();
         assert_eq!(spec["source"]["path"], "/modules/network");
         assert_eq!(
-            source_checkouts(&spec, &fields, &commit('a')).unwrap()["/source"],
+            source_checkouts(&spec, &fields, &commit('a'), None).unwrap()["/source"],
             (repository, commit('b'))
         );
         spec["source"].as_object_mut().unwrap().remove("revision");
@@ -704,9 +759,52 @@ mod tests {
     fn test_source_fields_keep_independent_commits_and_main_worktree_stays_at_s() {
         let spec = json!({"a": {"commit": "c".repeat(40)}, "b": {"commit": "d".repeat(40)}});
         let fields = fields(&["/a", "/b"]);
-        let roots = source_checkouts(&spec, &fields, &commit('a')).unwrap();
+        let roots = source_checkouts(&spec, &fields, &commit('a'), None).unwrap();
         assert_eq!(roots["/a"], (SourceRepository::This, commit('c')));
         assert_eq!(roots["/b"], (SourceRepository::This, commit('d')));
         assert_eq!(effective_commit(&spec, &fields, &commit('a')).unwrap(), commit('a'));
+    }
+
+    /// A teardown's `--source` supplies the files of a field that only followed
+    /// the unit's source commit, and of nothing explicit: a revision, a commit
+    /// lock that is not the recorded commit, and another repository stay put.
+    /// Catches a `--source` teardown that still checks out the lost commit.
+    #[test]
+    fn test_a_source_override_replaces_only_the_pin_that_followed_the_recorded_commit() {
+        let recorded = commit('a');
+        let mut spec = json!({
+            "followed": {"path": "../infra"},
+            "locked": {"path": "../infra", "commit": "c".repeat(40)},
+            "tracked": {"path": "../infra", "revision": "main"},
+            "remote": {"path": "modules", "repository": {"repoURL": "https://example.org/repo.git"}, "revision": "main"},
+        });
+        let fields = fields(&["/followed", "/locked", "/tracked", "/remote"]);
+        let revisions = BTreeMap::from([(
+            (
+                SourceRepository::Url("https://example.org/repo.git".to_owned()),
+                "main".to_owned(),
+            ),
+            commit('e'),
+        )]);
+        let mut tips = revisions.clone();
+        tips.insert((SourceRepository::This, "main".to_owned()), commit('a'));
+        pin_source_fields(&mut spec, &fields, "/nyl", &recorded, &tips).unwrap();
+        let before = spec.clone();
+        // Without an override the job commit is the recorded one: nothing moves.
+        let same = source_checkouts(&spec, &fields, &recorded, Some(&recorded)).unwrap();
+        assert_eq!(same["/followed"], (SourceRepository::This, recorded.clone()));
+        assert_eq!(same["/locked"], (SourceRepository::This, commit('c')));
+        // With `--source`, the job commit differs from the recorded one.
+        let main = commit('f');
+        let roots = source_checkouts(&spec, &fields, &main, Some(&recorded)).unwrap();
+        assert_eq!(roots["/followed"], (SourceRepository::This, main.clone()));
+        assert_eq!(roots["/locked"], (SourceRepository::This, commit('c')));
+        assert_eq!(roots["/tracked"], (SourceRepository::This, recorded.clone()));
+        assert_eq!(roots["/remote"].1, commit('e'));
+        // The stored spec, and so every digest and approval, is unchanged.
+        assert_eq!(spec, before);
+        // Without the recorded commit nothing is replaced.
+        let none = source_checkouts(&spec, &fields, &main, None).unwrap();
+        assert_eq!(none["/followed"], (SourceRepository::This, recorded));
     }
 }

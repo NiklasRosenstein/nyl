@@ -42,7 +42,6 @@ metadata:
   labels: {dev: 'true'}
 spec:
   target: '{{ values.target }}'
-  mode: publish
   teardownWait: {strategy: manual}
   timeout: 10m
 ---

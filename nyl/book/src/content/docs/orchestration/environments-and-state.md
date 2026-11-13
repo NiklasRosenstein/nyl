@@ -55,6 +55,39 @@ state exits 2 with `NYL-LEASE-BROKEN` and names `nyl recover -e <env>`, so
 the dead run's effects are recorded before anything else changes the
 environment. See [Breaking a lease](/nyl/orchestration/recovery/#breaking-a-lease).
 
+## State format versions
+
+Every state document carries the format version of its kind in `apiVersion`.
+A Nyl release reads the versions it knows and rejects a newer one with an
+instruction to upgrade, so an environment's state is never misread.
+
+A release changes a format in one of two ways: it adds a version and a
+migration, or it changes the version in place. The change that stores what a
+blocked unit waits for as data changed `gitops.nyl/v1` in place. The desired
+document of a unit (and the copy of it that the observed document embeds) now
+records each blocked reason as a typed `blocker` (the producer, with its
+environment, and the attestation, observed value, or planned change it waits
+for) instead of as text under `reason`.
+
+- This Nyl still reads state written by Nyl 0.6, text reasons included, and
+  writes the typed form with the next run that changes a document. Nothing
+  rewrites state in bulk.
+- Nyl 0.6 cannot read a document written in the typed form. Once a run of this
+  release has written a blocked unit, `nyl` 0.6 fails on that environment's
+  state. Every user of a state repository, in CI and on workstations alike, has
+  to upgrade together.
+- The `gitops.nyl/v1/state/` JSON Schemas of the desired and observed
+  documents describe the typed form.
+
+## Preview environments
+
+An [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
+declares what a preview looks like; each instance is created from it with
+`nyl state init --template` or `nyl reconcile --template`, lives only in state,
+and shares one state ref with the other instances through `state.path`. Every
+command names an instance with `-e` like a declared environment, and a plain
+run renders it at the source commit its record names.
+
 ## Local runs
 
 Every command that reads an environment's remote state keeps the clone's own

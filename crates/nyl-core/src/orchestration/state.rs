@@ -9,9 +9,13 @@
 //! Every document carries `apiVersion` and `kind`, and the version in
 //! `apiVersion` is the format version of that kind. Readers reject a version
 //! or kind they do not know, through the marker types below, so a newer
-//! format is never misread. A format change adds a version with a migration;
-//! golden files under `crates/nyl-core/tests/golden/state/` cover every kind
-//! and version.
+//! format is never misread. A format change either adds a version with a
+//! migration or changes the format in place, decided for each change with the
+//! user; golden files under `crates/nyl-core/tests/golden/state/` cover every
+//! kind and version. The blocked reasons of `DesiredUnit` changed in place in
+//! `gitops.nyl/v1`: they are written typed ([`super::blocked::Blocker`]), and
+//! the reader still accepts the text form of earlier releases
+//! ([`super::blocked::BlockedReason`]).
 //!
 //! Lifecycle and conditions are enums that carry their data, so every state
 //! a unit can be in is spelled out and exhaustive matching forces each new
@@ -27,6 +31,8 @@ use super::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, JsonPoin
 use super::ports::StateSide;
 use super::time::Timestamp;
 use crate::constants::{API_VERSION_ARTIFACTS, API_VERSION_GITOPS};
+
+pub use super::blocked::BlockedReason;
 
 /// A unit struct that serializes as the constant string `$value` and
 /// refuses every other string on deserialization with `$message`.
@@ -89,6 +95,7 @@ document_kind!(EnvironmentRecordKind, "EnvironmentRecord");
 document_kind!(DesiredUnitKind, "DesiredUnit");
 document_kind!(ObservedUnitKind, "ObservedUnit");
 document_kind!(DriftRecordKind, "DriftRecord");
+document_kind!(ObservationRecordKind, "ObservationRecord");
 document_kind!(AttestationKind, "Attestation");
 document_kind!(AttestationRecordKind, "AttestationRecord");
 document_kind!(LeaseKind, "Lease");
@@ -167,6 +174,25 @@ pub struct StateRecord {
     /// An instance's expiry.
     #[serde(rename = "expiresAt", default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
+    /// An instance's source commit: the entry worktree's commit when
+    /// `state init --template` or `reconcile --template` last created or
+    /// updated it. A run that is not entered from the instance's own source
+    /// renders at this commit.
+    #[serde(rename = "sourceCommit", default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<CommitId>,
+    /// A hint for fetching `sourceCommit`, a full ref name of the source
+    /// repository's `origin` that carried it when the run that recorded it
+    /// passed `--source-ref` (GitHub's `refs/pull/<n>/head`, for a host that
+    /// refuses to serve a commit by its id). Only a place to look: it is never
+    /// resolved to a commit, and a run without the option keeps the value.
+    #[serde(rename = "sourceRef", default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    /// The identity of an instance's keep refs in the source repository,
+    /// `refs/nyl-keep/<keepId>/<commit>`: minted when the instance first
+    /// keeps a commit, unique across projects, and surviving moves of the
+    /// state, of the project, and renames of the template.
+    #[serde(rename = "keepId", default, skip_serializing_if = "Option::is_none")]
+    pub keep_id: Option<Uid>,
     pub location: StateLocation,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<StateEvent>,
@@ -260,6 +286,8 @@ pub struct EnvironmentRecord {
 pub enum SourceChoice {
     /// The entry worktree's commit.
     Entry,
+    /// An instance's recorded source commit: a run that is not entered from the instance's own source.
+    Recorded,
     /// The tip of the Environment's `source.revision`.
     Revision { revision: String },
     /// The Environment's `source.commit` lock.
@@ -298,6 +326,9 @@ pub struct UnitIdentity {
 }
 
 /// `desired/units/<unit>.yaml`.
+///
+/// Its blocked reasons are stored typed ([`super::blocked::Blocker`]); the
+/// text form that releases before this change wrote still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredUnit {
@@ -516,6 +547,14 @@ pub struct ReceiptProvenance {
     pub observed_commit: Option<CommitId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunId>,
+    /// The observed value of the producer's receipt the reference read, for
+    /// a `fromUnit: {unit, observation}` reference; absent for an output or
+    /// an artifact field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<String>,
+    /// When the observed value was last read successfully, with `observation`.
+    #[serde(rename = "observedAt", default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<Timestamp>,
 }
 
 /// A value read from a PromotionRecord.
@@ -532,15 +571,6 @@ pub struct PromotionProvenance {
 pub enum Readiness {
     Ready,
     Blocked { reasons: Vec<BlockedReason> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct BlockedReason {
-    /// Location of the unresolved reference, or empty for a `dependsOn` entry.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub pointer: String,
-    pub reason: String,
 }
 
 /// `observed/units/<unit>.yaml`: the latest receipt and condition.
@@ -666,6 +696,11 @@ pub struct Receipt {
     pub outputs: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactDigest>,
+    /// Coded findings the driver reported with the execution that produced
+    /// this receipt, recorded unchanged so `plan` and `status` show them
+    /// until the unit executes again. The engine does not interpret them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::orchestration::codes::Finding>,
 }
 
 fn empty_object() -> Value {
@@ -852,6 +887,55 @@ pub enum Drift {
     Unknown { reason: String },
 }
 
+/// A unit's latest observed values, `observed/units/<unit>/observations.yaml`:
+/// what the driver read for the receipt whose execution key it names. A
+/// record belongs to that receipt alone and goes when a new receipt replaces
+/// it, so a value read from what ran before never satisfies a reference.
+/// Contract: [Observed values](../../../../design/orchestration-core.md#observed-values).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRecord {
+    #[serde(rename = "apiVersion")]
+    pub api_version: StateV1,
+    pub kind: ObservationRecordKind,
+    pub unit: UnitIdentity,
+    #[serde(rename = "executionKey")]
+    pub execution_key: ExecutionKey,
+    /// The run that produced the receipt the record was read for. A receipt
+    /// is new with every execution, even one with the same key, so a record
+    /// names it by its run too.
+    pub run: RunId,
+    /// When the record was last written: a recorded read, never a read that
+    /// changed nothing.
+    pub at: Timestamp,
+    /// Each declared observation by name, as of its last recorded read.
+    pub values: BTreeMap<String, RecordedObservation>,
+}
+
+/// One observation in an [`ObservationRecord`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum RecordedObservation {
+    /// The value, and when it was last read successfully.
+    Value {
+        value: Value,
+        #[serde(rename = "observedAt")]
+        observed_at: Timestamp,
+    },
+    /// No value yet for this receipt, with the driver's reason.
+    Pending { pending: String },
+}
+
+impl RecordedObservation {
+    /// The value, when there is one.
+    pub fn value(&self) -> Option<&Value> {
+        match self {
+            Self::Value { value, .. } => Some(value),
+            Self::Pending { .. } => None,
+        }
+    }
+}
+
 /// An attestation of a receipt, or of an environment's state; stored as one
 /// entry of an [`AttestationRecord`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -979,9 +1063,11 @@ pub enum Operation {
     Recover,
     DetectDrift,
     Attest,
+    Observe,
     Exec,
     CiAdmit,
     StateInit,
+    StateRenew,
     StateMove,
     StateDelete,
     StateForget,
@@ -999,9 +1085,11 @@ impl Operation {
             Self::Recover => "recover",
             Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
+            Self::Observe => "observe",
             Self::Exec => "exec",
             Self::CiAdmit => "ci-admit",
             Self::StateInit => "state-init",
+            Self::StateRenew => "state-renew",
             Self::StateMove => "state-move",
             Self::StateDelete => "state-delete",
             Self::StateForget => "state-forget",
@@ -1101,19 +1189,36 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         schema
     }
     let schemas: BTreeMap<_, _> = [
-        ("state-record", schema::<StateRecord>("StateRecord")),
-        ("environment-record", schema::<EnvironmentRecord>("EnvironmentRecord")),
-        ("desired-unit", schema::<DesiredUnit>("DesiredUnit")),
-        ("observed-unit", schema::<ObservedUnit>("ObservedUnit")),
-        ("artifact", schema::<ArtifactDocument>("Artifact")),
-        ("drift-record", schema::<DriftRecord>("DriftRecord")),
-        ("attestation-record", schema::<AttestationRecord>("AttestationRecord")),
-        ("lease", schema::<Lease>("Lease")),
-        ("run", schema::<Run>("Run")),
-        ("signal", schema::<Signal>("Signal")),
+        (API_VERSION_GITOPS, "state-record", schema::<StateRecord>("StateRecord")),
+        (
+            API_VERSION_GITOPS,
+            "environment-record",
+            schema::<EnvironmentRecord>("EnvironmentRecord"),
+        ),
+        (API_VERSION_GITOPS, "desired-unit", schema::<DesiredUnit>("DesiredUnit")),
+        (
+            API_VERSION_GITOPS,
+            "observed-unit",
+            schema::<ObservedUnit>("ObservedUnit"),
+        ),
+        (API_VERSION_GITOPS, "artifact", schema::<ArtifactDocument>("Artifact")),
+        (API_VERSION_GITOPS, "drift-record", schema::<DriftRecord>("DriftRecord")),
+        (
+            API_VERSION_GITOPS,
+            "observation-record",
+            schema::<ObservationRecord>("ObservationRecord"),
+        ),
+        (
+            API_VERSION_GITOPS,
+            "attestation-record",
+            schema::<AttestationRecord>("AttestationRecord"),
+        ),
+        (API_VERSION_GITOPS, "lease", schema::<Lease>("Lease")),
+        (API_VERSION_GITOPS, "run", schema::<Run>("Run")),
+        (API_VERSION_GITOPS, "signal", schema::<Signal>("Signal")),
     ]
     .into_iter()
-    .map(|(slug, schema)| (format!("{API_VERSION_GITOPS}/state/{slug}.schema.json"), schema))
+    .map(|(version, slug, schema)| (format!("{version}/state/{slug}.schema.json"), schema))
     .collect();
     schemas
 }

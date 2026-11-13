@@ -1,0 +1,37 @@
+# `service` attests `healthy` when `nyl attest` runs its `attest` step, which
+# reads the result from outside the project. `smoke` runs only against a
+# healthy service (dependsOn), and `dashboard` reads its endpoint only from an
+# attested one (fromUnit).
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: service
+  labels: {dev: 'true'}
+spec:
+  values: {version: '2'}
+  command: [sh, -c, 'printf "{\"endpoint\": \"svc.example\"}" > "$NYL_OUTPUTS"']
+  attest: [sh, -c, 'cp "$SCENARIO_TMP/health.json" "$NYL_ATTESTATIONS"']
+  attestations: [{name: healthy}]
+  outputs:
+    endpoint: {type: string}
+  env:
+    passthrough: [SCENARIO_TMP]
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: smoke
+  labels: {dev: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  dependsOn: [{unit: service, attestations: [healthy]}]
+---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: dashboard
+  labels: {dev: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  values:
+    endpoint: {fromUnit: {unit: service, output: endpoint, evidence: attested}}

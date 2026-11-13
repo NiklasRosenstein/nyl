@@ -7,9 +7,10 @@ results in its state. See [Runs](/nyl/orchestration/runs/) for how a run
 chooses its source commit, resolves references, and decides what executes.
 
 :::note
-`reconcile` runs selected environments' Command, OciImage, Terraform, and
-OpenTofu units, with recorded approvals, recovery, drift repair, and lifecycle
-handling. Kubernetes publication and promotion drivers follow in M5 and M6.
+`reconcile` runs selected environments' Command, OciImage, Terraform,
+OpenTofu, and [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/)
+units, with recorded approvals, recovery, drift repair, and lifecycle
+handling. Promotion drivers follow in M6.
 :::
 
 ```bash
@@ -24,7 +25,11 @@ nyl reconcile -e dev --worktree
 nyl reconcile -e dev --allow-teardown
 nyl reconcile -e dev --leaving --allow-teardown
 nyl reconcile -e dev --unit config --reapply --reason "rotate credentials"
+nyl reconcile -e dev --detect-drift
 nyl reconcile -e dev --fail-fast
+nyl reconcile -e pr-123 --template preview --param pr=123
+nyl reconcile -e pr-123 --renew
+nyl reconcile --template preview
 ```
 
 The environment's state must exist: create it once with
@@ -33,7 +38,110 @@ lease, executes waves of ready units until nothing is ready, writes one
 transition commit per state ref it changes, and releases the lease. A run
 that changes nothing writes no commit.
 
+## Preview instances
+
+`--template <name>` with one `-e <instance>` and `--param <name>=<value>`
+creates the instance of an
+[EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
+or updates its parameters, as [`nyl state init --template`](/nyl/reference/cli/state/#nyl-state-init)
+does, and then reconciles it from this checkout: the run records the checkout's
+commit as the instance's source. `--source-ref <ref>` records a full ref name of
+`origin` next to that commit, for hosts that will not serve a commit by its id;
+[`nyl state init`](/nyl/reference/cli/state/#nyl-state-init) says how it is
+used. It needs `--template` and one `-e`. Without `--template`, the environment is a
+declared Environment or an existing instance found by its record, and an
+instance renders at the source commit its record names, whichever checkout the
+command runs from; the report says so, and the environment record keeps
+`by: recorded`.
+
+## Preview lifecycle
+
+Instances expire, and a reconcile is how they stay alive or are removed. The
+full rules are in
+[expiry, limits, and the fleet](/nyl/orchestration/resource-guides/environment-template/#expiry-limits-and-the-fleet);
+the options are:
+
+| Command | An instance that is live | An instance that is expired |
+| --- | --- | --- |
+| `reconcile -e <instance>` | extends `expiresAt` to now plus `ttl`, then reconciles | removes it |
+| `reconcile -e <instance> --no-extend` | reconciles without extending | removes it |
+| `reconcile -e <instance> --renew` | extends, then reconciles | extends, then reconciles |
+| `reconcile -e <instance> --template <name> --param …` | creates or updates it, extends, then reconciles | the same: updating an active pull request never removes its preview; an instance whose state was deleted is created again |
+| `reconcile --template <name>` | reconciles at its own recorded commit, without extending | removes it |
+
+- **Removal** runs `teardown --all` and then `state delete`, the way [`nyl state
+  delete --teardown`](/nyl/reference/cli/state/#nyl-state-delete) does, and
+  reports the instance as `removed` under `instance.action` (`-o json`). The
+  state stays while any unit has an incarnation, so a teardown that waits,
+  fails, or is uncertain leaves the instance in place (`removal-incomplete`),
+  and the exit is that of the teardown: 2 for a wait, 3 for a failure, 4 for
+  an uncertain outcome. The teardown starts only when the template sets
+  `allowTeardown` or the run passes `--allow-teardown`; otherwise the units
+  are recorded as pending teardown and the run exits 2
+  (`NYL-INSTANCE-REMOVAL-PENDING`, `removal-pending`). `--allow-dependents`,
+  `--allow-incomplete`, `--approve`, `--source`, and `--confirm-removed`
+  (through [`nyl teardown`](/nyl/reference/cli/teardown/)) apply as they do to a
+  teardown. A removal decided on one `expiresAt` repeats the check under the
+  lease, so an instance another run renewed meanwhile is kept
+  (`NYL-INSTANCE-RENEWED`, exit 2).
+- **`--renew`** keeps an expired instance and undoes a removal that was
+  recorded as pending and has not started. **`--no-extend`** reconciles an
+  instance as maintenance. They conflict, and `--no-extend` conflicts with
+  `--template`. Both are rejected for a declared Environment, which has no
+  expiry, and `--renew`, `--param`, `--source-ref`, `--make-room`, `--source`, and
+  `--worktree` for the fleet; every one of these is exit 1 with
+  `NYL-INSTANCE-OPTION-INVALID`.
+- **`--make-room`**, with `--template` and `-e`, removes expired instances of
+  a template at `maxInstances` first, oldest expiry first and only as many as
+  the new instance needs, then creates the instance; without it the run exits 2
+  (`NYL-INSTANCE-LIMIT`) and names the expired instances that could go.
+- **`reconcile --template <name>` without `-e`** is the scheduled fleet job. It
+  finds the template's instances by listing its state location, reconciles each
+  live one at its own recorded source commit, removes the expired ones, and
+  never extends an expiry. An instance whose lease another run holds is
+  skipped and reported as `busy` (`instance.action`), which does not fail the
+  run: the exit category reflects only the instances it processed. With no
+  instance it exits 0. The template's state location must be listable
+  (`NYL-INSTANCE-NOT-LISTABLE`).
+
+`status`, `plan`, and `nyl get environments` show an expired instance until a
+reconcile removes it, and warn with `NYL-INSTANCE-EXPIRED`. Every instance
+report carries `instance.template`, `instance.expiresAt`, and
+`instance.expired`.
+
+## Observed values
+
+A run reads the [observed values](/nyl/orchestration/runs/#observed-values) of
+every unit that has a current receipt and declares `observations` once, before it
+resolves the unit's consumers, and after it executed such a unit waits up to
+the unit's `observationWait` for values that are still pending, polling about
+every 15 seconds and only while no other unit is ready. A consumer of a pending
+value is blocked (`NYL-OBSERVATION-PENDING`, exit 2); a changed value makes its
+consumers execute again in the same run, without the producer executing. A read
+that fails warns (`NYL-OBSERVATION-FAILED`) and keeps the last recorded value.
+The transition commit's summary lists the observations whose value changed under
+`observationsChanged`. The run needs the read credentials the unit admits; a job
+without them can leave the reading to [`nyl observe`](/nyl/reference/cli/observe/)
+elsewhere.
+
+## Other environments
+
+A reconcile reads the producer environments its units' references name, so
+they are [required](/nyl/orchestration/runs/#other-environments): one whose
+declaration cannot be used or whose state cannot be read stops the consumer
+with that environment's `NYL-STATE-UNAVAILABLE` error and its fix, exit 1,
+before any unit executes. When a unit is leaving, every other environment is
+read to find its consumers, so one that cannot be read is an error and nothing
+is torn down on a guess; without a leaving unit, no other environment is read
+for that. An environment the reconcile does not read, however broken its
+declaration, never fails it.
+
 ## Deletion
+
+`plan` and `reconcile` warn about each unmet teardown requirement, and each
+object a teardown would leave behind, of every publication that would be torn
+down (the `NYL-TEARDOWN-*` codes below), so a target that cannot tear down
+cleanly is known before a teardown runs.
 
 After the execution waves, a run carries out the lifecycle work of units
 that left the ownership set and of teardowns an operator requested with
@@ -60,6 +168,55 @@ commit lists it under `driftRepaired`. A drifted unit that is not safe to
 re-run is `awaiting-approval` while the rest of the run continues. Under `driftRepair: manual`,
 drifted units stay `drifted` until `--reapply` names them. See
 [Repairing drift](/nyl/orchestration/recovery/#repairing-drift).
+
+A reconcile never detects drift by itself. `--detect-drift` makes it check the
+units that are current for drift first, under the lease it holds, and repair
+what drifted by the same rules in the same run and the same transition commit,
+so a scheduled job needs one command and there is no gap between
+[`nyl detect-drift`](/nyl/reference/cli/detect-drift/) and `nyl reconcile`
+in which another run could change the resources:
+
+```console
+$ nyl reconcile -e dev --detect-drift
+[dev/api] starting Command (reconcile): repair drift
+[dev/api] executed in 0.0s
+UNIT  KIND     RESULT             DETAIL
+api   Command  executed           reason: repair drift; drift check: drifted (detectDrift reported drift (exit code 2))
+job   Command  awaiting-approval  drift check: drifted (detectDrift reported drift (exit code 2))
+
+  run:      01a1c0b6-bbfd-793c-80a0-6e4ebaf21ae9
+  source:   429b6ae7ebecd644c4752951497bf68626121274
+  observed: 5af2de018d762e653a183c4a184c0329800e8f3d
+
+warning  job in dev drifted from its receipt: detectDrift reported drift (exit code 2)
+
+  Action  it awaits approval, since job is not safe to re-run: run `nyl reconcile -e dev --approve job`
+
+  NYL-DRIFT-DETECTED (job)
+```
+
+`api` was repaired in the same run and left no record; `job` awaits approval and
+keeps the record the run wrote, so `nyl status` shows it `drifted` with no
+further check.
+
+- A unit that executes anyway, because its inputs changed or it has no current
+  receipt, is not checked. `--unit` limits the check to the named units. A unit
+  whose kind cannot detect drift is left out of the check, and is reported
+  `unsupported` only when `--unit` names it.
+- Each checked unit's `driftCheck` in `-o json`, and in the commit summary, is
+  `clean`, `drifted` (with a `summary`), `unknown` (with a `reason`), or
+  `unsupported`; the table adds it to the unit's detail. The run records the
+  records the check found, unless the unit's new receipt replaced the one
+  they are about.
+- A check that cannot tell (`unknown`, `NYL-DRIFT-UNKNOWN`) makes the run exit
+  2, as `detect-drift` does. A check that fails to run or passes its deadline
+  is an error (`NYL-DRIVER-ERROR`, exit 1) that records nothing for the unit,
+  and the run goes on: it does not act on the unit's stored `drifted` record,
+  which stays in the state. Drift the run left is `NYL-DRIFT-DETECTED` with the
+  fix to apply.
+- `--detect-drift` is refused with `--leaving` and `--reapply`
+  (`NYL-DRIFT-OPTION-INVALID`, exit 1, before the run takes the lease).
+  Each selected environment checks within its own run.
 
 
 ## Stopping at the first failure
@@ -125,6 +282,8 @@ for qualified unit options and independent state transactions.
 | Option | Meaning |
 | --- | --- |
 | `-e`, `--environment <name>` | Select named environments; repeatable. Use exactly one of `-e`, `-l`, or `-g`. |
+| `--template <name>`, `--param <name>=<value>` | Create or update `-e <instance>` of this EnvironmentTemplate before reconciling it. `--param` is repeatable and needs `--template`; one `-e` only. |
+| `--source-ref <ref>` | With `--template` and `-e`, record this full ref name of `origin` next to the instance's source commit, where a host that will not serve the commit by its id serves it by ref. Checked by syntax only; omitted, the recorded one stays. |
 | `-l`, `--labels <key=value>` | Select declared environments by literal labels; comma-separated pairs use AND. |
 | `-g`, `--group <name>` | Select the members of an EnvironmentGroup. |
 | `--unit <name>`, `--units <a>,<b>` | Execute only these units, and do no lifecycle work. Resolution still covers the whole environment, and a named unit whose dependency has no current receipt stays blocked. An unknown name exits 1 with `NYL-UNIT-UNKNOWN`. |
@@ -134,6 +293,7 @@ for qualified unit options and independent state transactions.
 | `--leaving` | Do only the lifecycle work of units outside the ownership set. Conflicts with `--unit`. |
 | `--reapply` | Execute the units named by `--unit` although their receipts are current, such as to repair drift under `driftRepair: manual`. Requires `--unit` and `--reason`; recorded under `reapplied`. A named unit that is not safe to re-run awaits approval, or runs with a matching `--approve`. |
 | `--reason <text>` | Why, for `--reapply`; recorded with the `Nyl-Reason` trailer. |
+| `--detect-drift` | Before selecting units, check the current units for drift under the run's own lease, and repair what drifted by each unit's `driftRepair`, in the same transition commit. Conflicts with `--leaving` and `--reapply` (`NYL-DRIFT-OPTION-INVALID`). See [Drift](#drift). |
 | `--fail-fast` | Start no further unit after the first failure, uncertain outcome, or approval wait. Units not started report `blocked`, and the run warns with `NYL-RUN-STOPPED`. |
 | `--concurrency <n>` | Units a wave executes at once. Default 4. |
 | `--source <rev>` | Render units at this revision or commit instead of the Environment's source, for this run only. It must pass the same [reachability checks](/nyl/orchestration/runs/#source-commit), and the transition commit marks it as an override. |
@@ -175,7 +335,7 @@ a stable code and its fix.
 | --- | --- |
 | 0 | Every selected unit is current, or its deletion completed (`removed`, `retained`, `released`). |
 | 1 | A configuration, resolution, or operational error, such as `NYL-STATE-MISSING`, `NYL-SOURCE-UNREACHABLE`, `NYL-UNIT-UNKNOWN`, or `NYL-COMMIT-IDENTITY-MISSING`. |
-| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`). |
+| 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`); with `--detect-drift`, a drift check could not tell (`NYL-DRIFT-UNKNOWN`). |
 | 3 | At least one execution failed. |
 | 4 | At least one execution is uncertain, the run lost its lease (`NYL-LEASE-LOST`), or it was cancelled (`NYL-RUN-CANCELLED`). |
 
@@ -188,6 +348,8 @@ Besides the codes above, a reconcile reports:
 
 | Code | Meaning and fix |
 | --- | --- |
+| `NYL-DRIFT-DETECTED`, `NYL-DRIFT-UNKNOWN`, `NYL-DRIFT-UNSUPPORTED` | With `--detect-drift`, as [`nyl detect-drift`](/nyl/reference/cli/detect-drift/#codes) reports them, except that drift the run repaired is not warned about. |
+| `NYL-DRIFT-OPTION-INVALID` | `--detect-drift` was given with `--leaving` or `--reapply`, which leave it nothing to check. Drop the option, or run `nyl detect-drift` as a separate command. |
 | `NYL-SOURCE-WORKTREE` | The run uses an immutable working-file snapshot retained in state history. Commit changes and run without `--worktree` for committed-source evidence. |
 | `NYL-UNIT-UNCERTAIN` | A unit may have had effects without a recorded result. Check what it did; a converging unit runs again in the next reconcile, others need [`nyl recover`](/nyl/reference/cli/recover/). |
 | `NYL-RUN-SUPERSEDED` | A dead run checkpointed a unit with an execution key the new resolution no longer has. Its effects are real, so the unit becomes `uncertain` when the result recorded effects. |
@@ -204,6 +366,14 @@ Besides the codes above, a reconcile reports:
 | `NYL-TEARDOWN-INCOMPLETE` | A teardown cannot complete, or completed without a claim of removal. Meet the requirement or pass `--allow-incomplete`, and check what remains. |
 | `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM` | A publication's target does not let its teardown complete; each names the setting that fixes it. |
 | `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS` | A publication's teardown leaves these objects behind. |
+| `NYL-KUBERNETES-OWNER-FENCED` | Another existing unit incarnation owns the publication prefix, so nothing was published (a retryable failure). Tear that unit down or release it with `nyl state forget`; see [Ownership](/nyl/orchestration/resource-guides/kubernetes-publication/#ownership). |
+| `NYL-KUBERNETES-OWNER-UNKNOWN` | The prefix's owner is in an environment that was renamed, removed, or cannot be read, so the fence holds. Declare the environment again and tear its unit down, or release the prefix as the same page describes. |
+| `NYL-KUBERNETES-TARGET-CHANGED` | A publication's target name or destination changed since it last published, and nothing was published. Restore it, or run `nyl teardown --unit <u>` and reconcile again. |
+| `NYL-KUBERNETES-OBSERVATION-UNOWNED` | A publication observes a resource its target does not render. Observe a resource one of the target's Releases renders. |
+| `NYL-OBSERVATIONS-UNSUPPORTED` | A unit declares `observations`, but its kind cannot read observed values for its spec, such as a Command, or a publication that does not declare `observe: {}`. |
+| `NYL-OBSERVATION-PENDING` | A consumer waits for an observed value that its producer's current receipt has none of yet. Run `nyl observe` or `nyl reconcile` once the system holds it, or give the producer an `observationWait`. |
+| `NYL-OBSERVATION-FAILED` | An observed value could not be read; the last recorded value stays usable. Fix the cause, such as missing credentials. |
+| `NYL-OBSERVATION-CHANGED` | Reported by `nyl status` and `nyl observe`: an observed value changed or arrived, so its consumers, in this or another environment, are ready for the next reconcile. |
 | `NYL-UNIT-RELEASED` | A unit's resources were left in place. Remove them by hand when nothing needs them. |
 | `NYL-UNIT-KIND-CHANGE` | A unit changed its kind; the old incarnation is deleting first. |
 | `NYL-STATE-DELETED` | The environment's state was deleted with `nyl state delete`. Remove the Environment, or start over with `nyl state init --fresh`. |

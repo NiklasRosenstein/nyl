@@ -1,6 +1,6 @@
 //! Read-only preparation of a unit from the current worktree or a source revision.
 //! Shared by direct artifact builds and operator tools using a worktree spec.
-use crate::orchestration::project::{open_store, resolve_environment};
+use crate::orchestration::project::{list_instances, open_store, resolve_environment};
 use crate::orchestration::run::Wiring;
 use nyl_core::orchestration::driver::{ResolutionContext, SourceRoot};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
@@ -12,7 +12,8 @@ use nyl_orchestration::rules::{
     sources,
 };
 use nyl_render::gitops::discover_gitops_inventory;
-use nyl_render::gitops::units::{render_direct_unit, resolve_effective_environment};
+use nyl_render::gitops::instances::resolve_environment as resolve_effective_environment;
+use nyl_render::gitops::units::render_direct_unit;
 use nyl_render::gitops::GitOpsInventory;
 use nyl_render::{NylError, Result};
 use nyl_state::source::GitSourceResolver;
@@ -84,6 +85,32 @@ pub fn prepare(
     };
     let name = UnitName::new(name).map_err(config)?;
     let selected = environment.map(EnvironmentName::new).transpose().map_err(config)?;
+    // An instance of an EnvironmentTemplate is known by its record.
+    let selected_environment = selected
+        .as_ref()
+        .map(|name| resolve_environment(&entry, name.as_str()).map_err(config))
+        .transpose()?;
+    // Every listed instance joins the inventory, so a direct `--push` consults
+    // all the targets environments own; a listing that fails refuses the build.
+    let listing = list_instances(&entry, false);
+    if !listing.unavailable.is_empty() {
+        return Err(config(format!(
+            "cannot list the instances of EnvironmentTemplate {}, whose targets a direct build must check; \
+             check access to the template's state repository",
+            listing.unavailable.join(", ")
+        )));
+    }
+    let mut instances: nyl_core::orchestration::instance::Instances = listing
+        .instances
+        .into_iter()
+        .map(|instance| (instance.name, instance.descriptor))
+        .collect();
+    if let Some((resolved, name)) = selected_environment.as_ref().zip(selected.as_ref()) {
+        if let Some(instance) = &resolved.instance {
+            instances.insert(name.clone(), instance.descriptor());
+        }
+    }
+    let inventory = inventory.with_instances(instances);
     let effective = selected
         .as_ref()
         .map(|name| resolve_effective_environment(&inventory, name))
@@ -97,8 +124,8 @@ pub fn prepare(
     let mut snapshot = EnvironmentSnapshot::default();
     let mut environments = BTreeMap::new();
     if let Some(environment) = selected.as_ref() {
-        let resolved = resolve_environment(&entry, environment.as_str()).map_err(config)?;
-        snapshot = open_store(&entry, &resolved, None)?
+        let resolved = selected_environment.as_ref().expect("selected");
+        snapshot = open_store(&entry, resolved, None)?
             .snapshot(&resolved.location)
             .map_err(config)?;
         for name in nyl_orchestration::rules::multi_environment::dependencies(&spec) {
@@ -152,6 +179,9 @@ pub fn prepare(
             desired: &snapshot.desired,
             observed: &snapshot.observed,
             artifacts: &snapshot.artifacts,
+            attestations: &snapshot.attestations,
+            observations: &snapshot.observations,
+            now: wiring.clock.now(),
             observed_commit: snapshot.tips.observed.as_ref(),
             run: None,
             produced_in_run: &BTreeSet::new(),
@@ -160,7 +190,14 @@ pub fn prepare(
         &unit,
     );
     if !resolved.errors.is_empty() {
-        return Err(config(resolved.errors.join("; ")));
+        return Err(config(
+            resolved
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
     }
     let mut spec = resolved
         .resolved_spec
@@ -194,7 +231,7 @@ pub fn prepare(
             let default = resolver.default_branch(&lock.repository).map_err(config)?;
             let refs = effective.as_ref().map_or_else(
                 || vec![default.clone(), lock.revision.clone()],
-                |environment| sources::pin_refs(environment, &default, Some(&lock.revision)),
+                |environment| sources::pin_refs(&environment.environment, &default, Some(&lock.revision)),
             );
             if resolver
                 .reachable_from(&lock.repository, locked, &refs)
@@ -228,6 +265,7 @@ pub fn prepare(
         driver,
         &spec,
         &commit,
+        None,
         &project_record,
         &workspace.path().join("contexts"),
         None,
@@ -272,7 +310,7 @@ pub fn prepare(
     .map_err(config)?;
     let local_inputs_in_worktree = source.is_none() && fields.first().is_none_or(|field| unpinned.contains(field));
     if !local_inputs_in_worktree {
-        nyl_orchestration::shell::sources::validate_local_inputs(&resolver, driver, &validation_spec, &commit)
+        nyl_orchestration::shell::sources::validate_local_inputs(&resolver, driver, &validation_spec, &commit, None)
             .map_err(config)?;
     }
     snapshot_entry(&mut prepared, driver, &validation_spec, local_inputs_in_worktree)?;
@@ -290,6 +328,7 @@ pub fn prepare(
         deadline,
     };
     let context = ResolutionContext {
+        instances: &prepared.inventory.instances,
         environment,
         worktree: prepared.worktree.clone(),
         project_dir: prepared.project_dir.clone(),
@@ -301,17 +340,22 @@ pub fn prepare(
         cache_dir: prepared.workspace.path().join("cache"),
     };
     let inputs = driver.execution_key_inputs(&context, &spec).map_err(config)?;
+    // The key covers what the driver records into the resolved spec, as in a run.
+    let mut keyed_spec = spec.clone();
+    inputs.record_into(&mut keyed_spec).map_err(config)?;
     prepared.unit.execution_key = Some(
         execution_key(&KeyMaterial {
             api_version: &prepared.unit.unit.api_version,
             kind: &prepared.unit.unit.kind,
             behavior_version: driver.behavior_version(),
-            resolved_spec: &spec,
+            resolved_spec: &keyed_spec,
             source_fields: &fields,
             inputs: &inputs,
         })
         .map_err(config)?,
     );
+    // The unit's document carries what its key covers, as a run's does.
+    prepared.unit.resolved_spec = Some(keyed_spec);
     Ok(prepared)
 }
 
@@ -462,6 +506,11 @@ pub fn snapshot_entry(
             root.worktree.clone_from(&destination);
         }
     }
+    // The snapshot is a Git worktree with those files committed, so tools that
+    // discover a project the way Nyl does (through Git visibility) work on it.
+    // The commit is fixed and stands for no source commit: the unit's own
+    // source commit stays in `unit.source_commit`.
+    nyl_render::gitops::publication::ensure_git_worktree(&destination)?;
     prepared.worktree = destination;
     Ok(())
 }

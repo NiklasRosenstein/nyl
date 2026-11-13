@@ -18,7 +18,11 @@ nyl validate [path] [--strict]
 3. Existence of each `project.components_search_paths` entry
 4. Existence of each `project.helm_chart_search_paths` entry
 5. Git-visible GitOps resources and references when the project is in Git
-6. Environments, their groups, and their state locations
+6. Environments, their groups, and their state locations: one that cannot be
+   resolved, such as a `repositoryRef` that names no GitRepository or a
+   `file://` URL that names no local path, is an error for every environment,
+   including the ones a command does not read (see
+   [Other environments](/nyl/orchestration/runs/#other-environments))
 7. Unit envelopes: a literal `apiVersion`, `kind`, `metadata.name`, and
    `metadata.labels`, and names unique across unit kinds
 8. Which Environment places each DeploymentTarget, and the `fromUnit` bindings
@@ -81,11 +85,21 @@ before reading state, with the same codes: `NYL-UNIT-INVALID`,
 `NYL-UNIT-KIND-UNKNOWN`, `NYL-UNIT-SECRETS-UNSUPPORTED`,
 `NYL-UNIT-OWNERSHIP-OVERLAP`, `NYL-DEPENDENCY-UNKNOWN`, `NYL-DEPENDENCY-CYCLE`,
 `NYL-REFERENCE-INVALID` for a reference to an output its producer does not
-declare or marks `sensitive`, and `NYL-ATTESTATIONS-UNSUPPORTED`. An `artifact`
+declare or marks `sensitive`, and `NYL-ATTESTATION-UNDECLARED` for a `dependsOn` entry or
+reference that requires an attestation its producer does not declare, and
+`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` for one that requires an attestation only an external source supplies. An `artifact`
 reference between units is checked only for the producer's existence. A
 `KubernetesPublication` unit places the DeploymentTarget its `spec.target`
 names into that Environment. A target placed by publication units of two
 Environments fails with `NYL-TARGET-ENVIRONMENT-CONFLICT`.
+
+A unit that declares its target inline (`spec.target.inline`) places the
+inline target, named `<environment>-<unit>` or by `spec.target.name`. Validation
+parses it as strictly as a discovered target, compiles it with every other
+target, and checks the Argo CD Application and AppProject names it generates
+against theirs. A name that a declared target already uses fails, and so does a
+spec that is no DeploymentTarget spec, naming the unit's file. A disabled unit
+contributes no inline target.
 
 A placed target compiles with a placeholder of the declared type for each
 `fromUnit` and `fromPromotion` binding, because only a run resolves their

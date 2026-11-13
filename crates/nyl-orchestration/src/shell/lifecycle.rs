@@ -221,6 +221,9 @@ fn hold_since(
                 if snapshot.drift.contains_key(unit) {
                     changes.drift.insert(unit.clone(), None);
                 }
+                if snapshot.observations.contains_key(unit) {
+                    changes.observations.insert(unit.clone(), None);
+                }
                 if snapshot.attestations.contains_key(unit) {
                     changes.attestations.insert(unit.clone(), None);
                 }

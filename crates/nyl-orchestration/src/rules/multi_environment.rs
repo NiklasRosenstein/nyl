@@ -36,6 +36,29 @@ pub fn dependencies(spec: &Value) -> BTreeSet<EnvironmentName> {
     result
 }
 
+/// The instances of EnvironmentTemplates that a rendered unit names as the
+/// producer of a reference or a `dependsOn` entry. Instances are consumers
+/// only: they are too short-lived to depend on, so a producer is always a
+/// declared environment.
+pub fn instance_producers(spec: &Value, instances: &BTreeSet<EnvironmentName>) -> BTreeSet<EnvironmentName> {
+    dependencies(spec)
+        .into_iter()
+        .filter(|environment| instances.contains(environment))
+        .collect()
+}
+
+/// The refusal of a reference to an instance, with the fix.
+pub fn instance_producer_finding(consumer: &str, producer: &EnvironmentName) -> Finding {
+    Finding::new(
+        Code::ReferenceInstanceProducer,
+        format!(
+            "{consumer} reads a unit of {producer}, which is an instance of an EnvironmentTemplate; \
+             instances are consumers only, because they are too short-lived to depend on"
+        ),
+        "read from a declared Environment, whose units persist, and move what the instance needs there",
+    )
+}
+
 /// Producers before consumers, ties by name. Validate the entire declared graph,
 /// including environments outside the invocation's selection.
 pub fn order(graph: &BTreeMap<EnvironmentName, BTreeSet<EnvironmentName>>) -> Result<Vec<EnvironmentName>, Finding> {
@@ -141,20 +164,39 @@ pub fn units(
     Ok(result)
 }
 
+/// The result of validating the environments' sources together: their order,
+/// producers first, and the findings that belong to one consumer environment.
+/// A consumer's bad reference stops that environment, never the others: a
+/// preview that names an instance, or a unit its producer no longer selects,
+/// cannot hold dev back.
+#[derive(Debug)]
+pub struct SourceValidation {
+    pub order: Vec<EnvironmentName>,
+    pub errors: BTreeMap<EnvironmentName, Finding>,
+}
+
 /// Validate the environment graph and cross-environment declarations before
-/// receipts exist. Shared by source validation and command selection.
+/// receipts exist, failing on the first finding of any environment, as `nyl
+/// validate` does.
 pub fn validate_sources(
     sources: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::RenderedSource>,
+    instances: &BTreeSet<EnvironmentName>,
 ) -> Result<Vec<EnvironmentName>, Finding> {
-    validate_available_sources(sources, &BTreeSet::new())
+    let validation = validate_available_sources(sources, &BTreeSet::new(), instances)?;
+    match validation.errors.into_values().next() {
+        Some(finding) => Err(finding),
+        None => Ok(validation.order),
+    }
 }
 
 /// Validate all available declarations, retaining failed environments as graph
-/// nodes that cannot execute; one unavailable source does not stop independent runs.
+/// nodes that cannot execute; one unavailable source does not stop independent
+/// runs. A cycle between environments is the only failure of the whole.
 pub fn validate_available_sources(
     sources: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::RenderedSource>,
     unavailable: &BTreeSet<EnvironmentName>,
-) -> Result<Vec<EnvironmentName>, Finding> {
+    instances: &BTreeSet<EnvironmentName>,
+) -> Result<SourceValidation, Finding> {
     let mut graph: BTreeMap<EnvironmentName, BTreeSet<EnvironmentName>> = sources
         .iter()
         .map(|(environment, source)| {
@@ -167,13 +209,15 @@ pub fn validate_available_sources(
                     .filter_map(|unit| unit.spec.as_ref())
                     .filter(|spec| spec.get("enabled") != Some(&Value::Bool(false)))
                     .flat_map(dependencies)
-                    .filter(|other| other != environment)
+                    // An instance is no producer: its reference is refused below, not ordered.
+                    .filter(|other| other != environment && !instances.contains(other))
                     .collect(),
             )
         })
         .collect();
     graph.extend(unavailable.iter().map(|name| (name.clone(), BTreeSet::new())));
-    let ordered = order(&graph)?;
+    let order = order(&graph)?;
+    let mut errors = BTreeMap::new();
     for (consumer_environment, source) in sources {
         for (consumer, unit) in source.units.iter().filter(|(_, unit)| unit.selected) {
             let Some(spec) = &unit.spec else {
@@ -182,69 +226,95 @@ pub fn validate_available_sources(
             if spec.get("enabled") == Some(&Value::Bool(false)) {
                 continue;
             }
-            if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
-                for reference in references {
-                    let Some(environment) = reference.source.environment.as_deref() else {
-                        continue;
-                    };
-                    if environment == consumer_environment.as_str() {
-                        continue;
-                    }
-                    let name = EnvironmentName::new(environment).map_err(|error| {
-                        Finding::new(
-                            Code::EnvironmentUnknown,
-                            error.to_string(),
-                            "name a declared Environment",
-                        )
-                    })?;
-                    if unavailable.contains(&name) {
-                        continue;
-                    }
-                    let producer = nyl_core::orchestration::ids::UnitName::new(&reference.source.unit).ok();
-                    let producer_spec = producer_spec(sources, &name, &reference.source.unit);
-                    let Some(producer_spec) = producer_spec else {
-                        return Err(Finding::new(Code::ReferenceInvalid, format!("{consumer_environment}/{consumer} references unit {environment}/{}, which is outside its ownership set", reference.source.unit), "reference an enabled unit the producer Environment selects"));
-                    };
-                    super::references::check_spec_declaration(
-                        producer.as_ref().unwrap(),
-                        producer_spec,
-                        &reference.source,
-                    )
-                    .map_err(|error| {
-                        Finding::new(
-                            Code::ReferenceInvalid,
-                            format!("{consumer_environment}/{consumer}: {error}"),
-                            "reference a declared, non-sensitive producer output",
-                        )
-                    })?;
-                }
-            }
-            if let Ok(entries) = super::references::depends_on(spec) {
-                for entry in entries {
-                    let Some(environment) = entry.environment() else {
-                        continue;
-                    };
-                    if environment == consumer_environment.as_str() {
-                        continue;
-                    }
-                    let name = EnvironmentName::new(environment).map_err(|error| {
-                        Finding::new(
-                            Code::EnvironmentUnknown,
-                            error.to_string(),
-                            "name a declared Environment",
-                        )
-                    })?;
-                    if unavailable.contains(&name) {
-                        continue;
-                    }
-                    if producer_spec(sources, &name, entry.unit()).is_none() {
-                        return Err(Finding::new(Code::DependencyUnknown, format!("{consumer_environment}/{consumer} depends on unit {environment}/{}, which is outside its ownership set", entry.unit()), "depend on an enabled unit the producer Environment selects"));
-                    }
-                }
+            let at = format!("{consumer_environment}/{consumer}");
+            if let Err(finding) = check_references(sources, unavailable, instances, consumer_environment, &at, spec) {
+                errors.entry(consumer_environment.clone()).or_insert(finding);
             }
         }
     }
-    Ok(ordered)
+    Ok(SourceValidation { order, errors })
+}
+
+/// The references and `dependsOn` entries of one consumer unit, `at`
+/// `<environment>/<unit>`, against the producers' declarations.
+fn check_references(
+    sources: &BTreeMap<EnvironmentName, nyl_core::orchestration::ports::RenderedSource>,
+    unavailable: &BTreeSet<EnvironmentName>,
+    instances: &BTreeSet<EnvironmentName>,
+    consumer_environment: &EnvironmentName,
+    at: &str,
+    spec: &Value,
+) -> Result<(), Finding> {
+    if let Some(producer) = instance_producers(spec, instances).into_iter().next() {
+        return Err(instance_producer_finding(at, &producer));
+    }
+    let producer_environment = |environment: &str| {
+        EnvironmentName::new(environment).map_err(|error| {
+            Finding::new(
+                Code::EnvironmentUnknown,
+                error.to_string(),
+                "name a declared Environment",
+            )
+        })
+    };
+    if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
+        for reference in references {
+            let Some(environment) = reference.source.environment.as_deref() else {
+                continue;
+            };
+            if environment == consumer_environment.as_str() {
+                continue;
+            }
+            let name = producer_environment(environment)?;
+            if unavailable.contains(&name) {
+                continue;
+            }
+            let producer = nyl_core::orchestration::ids::UnitName::new(&reference.source.unit).ok();
+            let Some(producer_spec) = producer_spec(sources, &name, &reference.source.unit) else {
+                return Err(Finding::new(
+                    Code::ReferenceInvalid,
+                    format!(
+                        "{at} references unit {environment}/{}, which is outside its ownership set",
+                        reference.source.unit
+                    ),
+                    "reference an enabled unit the producer Environment selects",
+                ));
+            };
+            super::references::check_spec_declaration(producer.as_ref().unwrap(), producer_spec, &reference.source)
+                .map_err(|error| {
+                    Finding::new(
+                        Code::ReferenceInvalid,
+                        format!("{at}: {error}"),
+                        "reference a declared, non-sensitive producer output",
+                    )
+                })?;
+        }
+    }
+    if let Ok(entries) = super::references::depends_on(spec) {
+        for entry in entries {
+            let Some(environment) = entry.environment() else {
+                continue;
+            };
+            if environment == consumer_environment.as_str() {
+                continue;
+            }
+            let name = producer_environment(environment)?;
+            if unavailable.contains(&name) {
+                continue;
+            }
+            if producer_spec(sources, &name, entry.unit()).is_none() {
+                return Err(Finding::new(
+                    Code::DependencyUnknown,
+                    format!(
+                        "{at} depends on unit {environment}/{}, which is outside its ownership set",
+                        entry.unit()
+                    ),
+                    "depend on an enabled unit the producer Environment selects",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Inputs wait for selected producers whose run failed or is waiting, or whose preceding
@@ -254,6 +324,7 @@ pub fn blocked_references(
     planned: &BTreeMap<EnvironmentName, BTreeSet<nyl_core::orchestration::ids::UnitName>>,
     unavailable: &BTreeSet<EnvironmentName>,
 ) -> Vec<nyl_core::orchestration::state::BlockedReason> {
+    use nyl_core::orchestration::blocked::{Blocker, ProducerRef};
     use nyl_core::orchestration::ids::UnitName;
     use nyl_core::orchestration::state::BlockedReason;
     let mut reasons = Vec::new();
@@ -264,14 +335,15 @@ pub fn blocked_references(
         let Ok(environment) = EnvironmentName::new(environment) else {
             return;
         };
-        let reason = if unavailable.contains(&environment) {
-            format!("{environment}/{unit} waits because its producer environment failed or is waiting")
+        let producer = ProducerRef::new(Some(environment.clone()), unit.clone());
+        let blocker = if unavailable.contains(&environment) {
+            Blocker::ProducerUnavailable { producer }
         } else if planned.get(&environment).is_some_and(|units| units.contains(&unit)) {
-            format!("{environment}/{unit} has a planned change; waiting for its new receipt")
+            Blocker::PlannedChange { producer }
         } else {
             return;
         };
-        reasons.push(BlockedReason { pointer, reason });
+        reasons.push(BlockedReason::new(pointer, blocker));
     };
     if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
         for binding in references {
@@ -325,6 +397,32 @@ mod tests {
         graph.get_mut(&name("z")).unwrap().insert(name("a"));
         assert!(order(&graph).unwrap_err().message.contains("a -> z -> a"));
     }
+    /// Instances are consumers only: a reference or a `dependsOn` entry whose
+    /// producer is an instance is found, whichever form names it, and
+    /// refused with its stable code and the fix. Catches an instance read as a
+    /// producer, which would make a unit depend on something that expires.
+    #[test]
+    fn test_instance_producers_are_found_in_references_and_depends_on() {
+        let instances = BTreeSet::from([name("pr-1")]);
+        let by_reference =
+            json!({"values": {"vpc": {"fromUnit": {"environment": "pr-1", "unit": "network", "output": "id"}}}});
+        let by_depends_on = json!({"dependsOn": [{"environment": "pr-1", "unit": "seed"}]});
+        let declared = json!({"dependsOn": [{"environment": "dev", "unit": "seed"}]});
+        assert_eq!(
+            instance_producers(&by_reference, &instances),
+            BTreeSet::from([name("pr-1")])
+        );
+        assert_eq!(
+            instance_producers(&by_depends_on, &instances),
+            BTreeSet::from([name("pr-1")])
+        );
+        assert!(instance_producers(&declared, &instances).is_empty());
+        let finding = instance_producer_finding("dev/web", &name("pr-1"));
+        assert_eq!(finding.code, Code::ReferenceInstanceProducer);
+        assert!(finding.message.contains("dev/web") && finding.message.contains("pr-1"));
+        assert!(finding.fix.contains("declared Environment"));
+    }
+
     #[test]
     fn test_dependencies_and_qualified_units() {
         assert_eq!(

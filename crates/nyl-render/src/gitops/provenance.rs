@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use git2::Repository;
 
 use super::{CompiledTargetTree, GitOpsInventory};
-use crate::resources::GitOpsResourceKind;
+use crate::resources::{GitOpsResource, GitOpsResourceKind};
 use crate::{NylError, Result};
 
 /// The commit a worktree is at and whether it differs from it.
@@ -56,6 +56,10 @@ pub fn worktree_source_state(project_root: &Path, carried: &[PathBuf]) -> Result
 /// index/worktree status codes and paths relative to the repository root.
 /// Paths are quoted and escaped so whitespace and control characters stay unambiguous.
 /// The diagnostic is bounded; git status can show the complete list.
+///
+/// When changed tracked files use Git LFS and Git cannot run its clean
+/// filter, the summary explains how to install it, since such files read as
+/// modified even when their content is unchanged. The files still count as changes.
 pub fn dirty_worktree_summary(project_root: &Path, carried: &[PathBuf]) -> Result<String> {
     const MAX_PATHS: usize = 20;
 
@@ -66,16 +70,81 @@ pub fn dirty_worktree_summary(project_root: &Path, carried: &[PathBuf]) -> Resul
     let mut summary = format!("Dirty files (relative to {}):", root.display());
     for change in changes.iter().take(MAX_PATHS) {
         summary.push_str("\n  ");
-        summary.push_str(change);
+        summary.push_str(&format_change(change));
     }
     if changes.len() > MAX_PATHS {
         write!(summary, "\n  ... and {} more", changes.len() - MAX_PATHS).expect("writing to a String cannot fail");
     }
     summary.push_str("\nRun `git status --short --untracked-files=all` at that repository root for the full status.");
+    if let Some(hint) = lfs_filter_hint(&repository, root, &changes) {
+        summary.push('\n');
+        summary.push_str(&hint);
+    }
     Ok(summary)
 }
 
-fn dirty_worktree_changes(repository: &Repository, project_root: &Path, carried: &[PathBuf]) -> Result<Vec<String>> {
+/// Explains changed tracked LFS files that Git cannot compare through the LFS
+/// clean filter. A failure to inspect Git LFS only omits the hint, so it never
+/// replaces the cleanliness error it accompanies.
+fn lfs_filter_hint(
+    repository: &Repository,
+    worktree: &Path,
+    changes: &[nyl_git::WorktreeStatusEntry],
+) -> Option<String> {
+    let tracked = changes
+        .iter()
+        .filter(|change| !change.untracked)
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
+    let inspect = || -> nyl_git::Result<Option<(usize, nyl_git::LfsFilterProblem)>> {
+        let lfs = nyl_git::lfs_tracked_paths(repository.path(), worktree, &tracked)?;
+        if lfs.is_empty() {
+            return Ok(None);
+        }
+        Ok(nyl_git::lfs_filter_problem(repository.path(), worktree)?.map(|problem| (lfs.len(), problem)))
+    };
+    let (count, problem) = match inspect() {
+        Ok(found) => found?,
+        Err(error) => {
+            tracing::debug!(%error, "Failed to inspect Git LFS for the dirty worktree summary");
+            return None;
+        }
+    };
+    Some(lfs_filter_hint_text(count, problem))
+}
+
+fn lfs_filter_hint_text(count: usize, problem: nyl_git::LfsFilterProblem) -> String {
+    let files = if count == 1 {
+        "1 changed file is".to_string()
+    } else {
+        format!("{count} changed files are")
+    };
+    let reason = match problem {
+        nyl_git::LfsFilterProblem::ExecutableMissing => "Git finds no `git-lfs` executable",
+        nyl_git::LfsFilterProblem::FilterNotConfigured => "Git has no `filter.lfs` clean or process filter configured",
+    };
+    format!(
+        "Hint: {files} tracked by Git LFS, but {reason}. Without the LFS clean filter, Git compares a hydrated file \
+         with its committed pointer, so an unchanged file can appear modified. Install Git LFS where Nyl runs and run \
+         `git lfs install --local --skip-repo` in the checkout. When CI checks the repository out in a separate \
+         container, such as GitLab Runner's helper container, the job's own image needs Git LFS too."
+    )
+}
+
+fn format_change(change: &nyl_git::WorktreeStatusEntry) -> String {
+    format!(
+        "{}{} {:?}",
+        char::from(change.status[0]),
+        char::from(change.status[1]),
+        change.path.to_string_lossy()
+    )
+}
+
+fn dirty_worktree_changes(
+    repository: &Repository,
+    project_root: &Path,
+    carried: &[PathBuf],
+) -> Result<Vec<nyl_git::WorktreeStatusEntry>> {
     let worktree = repository
         .workdir()
         .ok_or_else(|| NylError::config("Source Git repository has no worktree"))?;
@@ -83,20 +152,14 @@ fn dirty_worktree_changes(repository: &Repository, project_root: &Path, carried:
         .map_err(|error| NylError::config(format!("Failed to inspect source Git status: {error}")))?;
     let carried = carried.iter().map(|path| canonical_file_path(path)).collect::<Vec<_>>();
     let worktree = canonical_file_path(worktree);
-    let mut changes = Vec::new();
-    for entry in &statuses {
-        let carried_file = entry.untracked && carried.contains(&worktree.join(&entry.path));
-        if carried_file || is_project_cache_status(repository, project_root, &entry.path) {
-            continue;
-        }
-        changes.push(format!(
-            "{}{} {:?}",
-            char::from(entry.status[0]),
-            char::from(entry.status[1]),
-            entry.path.to_string_lossy()
-        ));
-    }
-    changes.sort();
+    let mut changes = statuses
+        .into_iter()
+        .filter(|entry| {
+            let carried_file = entry.untracked && carried.contains(&worktree.join(&entry.path));
+            !carried_file && !is_project_cache_status(repository, project_root, &entry.path)
+        })
+        .collect::<Vec<_>>();
+    changes.sort_by_cached_key(format_change);
     Ok(changes)
 }
 
@@ -133,8 +196,10 @@ fn is_project_cache_status(repository: &Repository, project_root: &Path, status_
 /// project-relative path, plus the `@`-prefixed digests of its resolved
 /// Release inputs: the `inputs` map of the ownership index.
 ///
-/// The Cluster document is hashed without its local `live` connection
-/// settings, which never affect rendered bytes.
+/// Every Cluster document is hashed without its local `live` connection
+/// settings, which never affect rendered bytes (the target's Cluster always
+/// through its normalized form; another one, such as the control-plane Cluster
+/// of the ArgoCDInstance, when it declares `live`).
 pub fn hash_inputs(inventory: &GitOpsInventory, compiled: &CompiledTargetTree) -> Result<BTreeMap<String, String>> {
     let cluster_resource = inventory
         .get(GitOpsResourceKind::Cluster, &compiled.cluster.metadata.name)
@@ -153,24 +218,73 @@ pub fn hash_inputs(inventory: &GitOpsInventory, compiled: &CompiledTargetTree) -
         }
         let path = paths.path_for_key(relative);
         if path.is_file() {
-            let bytes = if relative == cluster_path {
-                let contents = std::fs::read_to_string(&path)?;
-                if contents.matches(&cluster_resource.raw_document).count() != 1 {
+            let mut contents = None;
+            let mut replace = |raw: &str, replacement: &str, what: &str| -> Result<()> {
+                let text = match contents.take() {
+                    Some(text) => text,
+                    None => std::fs::read_to_string(&path)?,
+                };
+                if text.matches(raw).count() != 1 {
                     return Err(NylError::config(format!(
-                        "Cannot safely locate Cluster '{}' in {} for provenance hashing",
-                        compiled.cluster.metadata.name,
+                        "Cannot safely locate {what} in {} for provenance hashing",
                         path.display()
                     )));
                 }
-                contents
-                    .replacen(
-                        &cluster_resource.raw_document,
-                        std::str::from_utf8(&cluster_bytes).expect("JSON serialization is UTF-8"),
-                        1,
-                    )
-                    .into_bytes()
-            } else {
-                std::fs::read(path)?
+                contents = Some(text.replacen(raw, replacement, 1));
+                Ok(())
+            };
+            if relative == cluster_path {
+                replace(
+                    &cluster_resource.raw_document,
+                    std::str::from_utf8(&cluster_bytes).expect("JSON serialization is UTF-8"),
+                    &format!("Cluster '{}'", compiled.cluster.metadata.name),
+                )?;
+            }
+            // Every other Cluster document in the file that declares `live`
+            // (the ArgoCDInstance's control-plane Cluster, for one) is hashed
+            // without it too, so moving a kube context never changes the
+            // index. A Cluster without `live` keeps its bytes as written.
+            for discovered in inventory.resources.values().filter(|discovered| {
+                &discovered.source_path == relative && discovered.identity.kind == GitOpsResourceKind::Cluster
+            }) {
+                if let Some(GitOpsResource::Cluster(cluster)) = &discovered.resource {
+                    if cluster.spec.live.is_some() && cluster.metadata.name != compiled.cluster.metadata.name {
+                        let mut render_cluster = cluster.clone();
+                        render_cluster.spec.live = None;
+                        replace(
+                            &discovered.raw_document,
+                            std::str::from_utf8(&serde_json::to_vec(&render_cluster)?)
+                                .expect("JSON serialization is UTF-8"),
+                            &format!("Cluster '{}'", cluster.metadata.name),
+                        )?;
+                    }
+                }
+            }
+            // An ArgoCDInstance that declares `spec.access` is hashed without
+            // it: how Nyl reads Argo CD never affects rendered bytes, so
+            // editing it must not change the index. An instance without
+            // `access` keeps its bytes as written.
+            for discovered in inventory
+                .resources
+                .values()
+                .filter(|discovered| &discovered.source_path == relative)
+            {
+                if let Some(GitOpsResource::ArgoCDInstance(instance)) = &discovered.resource {
+                    if instance.spec.access.is_some() {
+                        let mut render_instance = instance.clone();
+                        render_instance.spec.access = None;
+                        replace(
+                            &discovered.raw_document,
+                            std::str::from_utf8(&serde_json::to_vec(&render_instance)?)
+                                .expect("JSON serialization is UTF-8"),
+                            &format!("ArgoCDInstance '{}'", instance.metadata.name),
+                        )?;
+                    }
+                }
+            }
+            let bytes = match contents {
+                Some(text) => text.into_bytes(),
+                None => std::fs::read(&path)?,
             };
             hashes.insert(
                 relative.to_string_lossy().replace('\\', "/"),
@@ -239,7 +353,11 @@ mod tests {
         index.write().unwrap();
         let carried = [project.join("carried.json")];
 
-        let changes = dirty_worktree_changes(&repository, &project, &carried).unwrap();
+        let changes = dirty_worktree_changes(&repository, &project, &carried)
+            .unwrap()
+            .iter()
+            .map(format_change)
+            .collect::<Vec<_>>();
         assert_eq!(
             changes,
             [" M \"nyl.toml\"", "?? \"untracked note.txt\"", "A  \"staged.txt\""]
@@ -247,6 +365,37 @@ mod tests {
         let summary = dirty_worktree_summary(&project, &carried).unwrap();
         assert!(summary.contains(&format!("relative to {}", repository.workdir().unwrap().display())));
         assert!(summary.contains("git status --short --untracked-files=all"));
+    }
+
+    #[test]
+    fn test_dirty_worktree_summary_keeps_lfs_changes_and_explains_a_missing_filter() {
+        let (directory, repository) = committed_worktree();
+        let root = directory.path();
+        std::fs::write(root.join(".gitattributes"), "*.tgz filter=lfs -text\n").unwrap();
+        std::fs::write(root.join("chart.tgz"), "pointer").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
+        index.write().unwrap();
+        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = Signature::now("Test", "test@example.invalid").unwrap();
+        let head = repository.head().unwrap().peel_to_commit().unwrap();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "LFS", &tree, &[&head])
+            .unwrap();
+        std::fs::write(root.join("chart.tgz"), "hydrated chart").unwrap();
+        std::fs::write(root.join("notes.txt"), "untracked").unwrap();
+
+        let summary = dirty_worktree_summary(root, &[]).unwrap();
+        assert!(summary.contains(r#" M "chart.tgz""#), "{summary}");
+        // The hint depends on whether Git can run the LFS filter here, but it
+        // counts only tracked LFS changes and always carries the fix.
+        let workdir = repository.workdir().unwrap();
+        match nyl_git::lfs_filter_problem(repository.path(), workdir).unwrap() {
+            Some(problem) => assert!(summary.ends_with(&lfs_filter_hint_text(1, problem)), "{summary}"),
+            None => assert!(!summary.contains("Git LFS"), "{summary}"),
+        }
+        assert!(lfs_filter_hint_text(1, nyl_git::LfsFilterProblem::ExecutableMissing)
+            .contains("git lfs install --local --skip-repo"));
     }
 
     #[test]

@@ -17,9 +17,25 @@
 //!   receipt (source `{driver: attest}`). A document equal to the stored one
 //!   but for `at` keeps the stored one, so a check that found nothing new
 //!   writes nothing.
-//! - Exit: 0 every checked unit clean, or its attestations pass; 2 a unit
-//!   could not be checked (no current receipt, unsupported, or unknown);
-//!   3 drift or a failing attestation; 1 an error. Most severe wins.
+//! - `nyl observe` is the third check, of observed values: it covers the
+//!   units whose kind reads observed values for their spec and that declare
+//!   observations (the decisions about the record are
+//!   [`super::observed_values`]'s); a unit named with `--unit` whose kind
+//!   cannot is `unsupported`.
+//! - `nyl reconcile --detect-drift` runs the `detect-drift` check inside the
+//!   run, under the run's own lease: [`reconcile_targets`] names the units it
+//!   checks (those selection leaves current whose driver detects drift for
+//!   their spec, so a unit that executes anyway is never checked, and a kind
+//!   that cannot detect drift is `unsupported` only when `--unit` names it, as
+//!   in `detect-drift`), [`reconcile_warnings`] and [`reconcile_drift_exit`] say
+//!   what its results add to the reconcile report, and
+//!   [`detect_drift_conflict`] refuses the options it leaves nothing to check
+//!   for. The drift record, its settling, and the driver call are the ones
+//!   `nyl detect-drift` uses.
+//! - Exit: 0 every checked unit clean, its attestations pass, or every
+//!   observation has a value; 2 a unit could not be checked (no current
+//!   receipt, unsupported, or unknown) or an observation is `pending` or
+//!   `failed`; 3 drift or a failing attestation; 1 an error. Most severe wins.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,14 +45,17 @@ use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::state::{
     ArtifactUnit, Attestation, AttestationKind, AttestationResult, DesiredUnit, Drift, DriftRecord, DriftRecordKind,
-    Operation, Receipt, StateV1,
+    Operation, Receipt, RecordedObservation, StateV1,
 };
-use nyl_core::orchestration::time::Timestamp;
+use nyl_core::orchestration::time::{Duration, Timestamp};
 use nyl_core::resources::environment::DriftRepair;
+use nyl_core::resources::units::ObservationDeclaration;
 use serde_json::json;
 
 use crate::rules::freshness::receipt_is_current;
-use crate::run_report::{CheckResult, ExitCategory, ReportKind, UnitCheck, UnitReport};
+use crate::rules::observed_values::Settled;
+use crate::rules::selection::{select, Candidates, Skipped};
+use crate::run_report::{CheckResult, ExitCategory, ObservationStatus, ReportKind, UnitCheck, UnitReport};
 
 /// The check an invocation runs against current receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +64,8 @@ pub enum Check {
     DetectDrift,
     /// `nyl attest`: the driver attestations of each receipt.
     Attest,
+    /// `nyl observe`: the observed values of each receipt.
+    Observe,
 }
 
 impl Check {
@@ -53,6 +74,7 @@ impl Check {
         match self {
             Self::DetectDrift => "detect-drift",
             Self::Attest => "attest",
+            Self::Observe => "observe",
         }
     }
 
@@ -61,6 +83,7 @@ impl Check {
         match self {
             Self::DetectDrift => Operation::DetectDrift,
             Self::Attest => Operation::Attest,
+            Self::Observe => Operation::Observe,
         }
     }
 
@@ -69,6 +92,7 @@ impl Check {
         match self {
             Self::DetectDrift => DriverOperation::DetectDrift,
             Self::Attest => DriverOperation::Attest,
+            Self::Observe => DriverOperation::Observe,
         }
     }
 
@@ -76,6 +100,7 @@ impl Check {
         match self {
             Self::DetectDrift => ReportKind::DetectDriftReport,
             Self::Attest => ReportKind::AttestReport,
+            Self::Observe => ReportKind::ObserveReport,
         }
     }
 
@@ -84,6 +109,7 @@ impl Check {
         match self {
             Self::DetectDrift => &["clean", "drifted", "unknown", "unsupported", "no-receipt"],
             Self::Attest => &["attested", "unknown", "unsupported", "no-receipt"],
+            Self::Observe => &["observed", "unknown", "unsupported", "no-receipt"],
         }
     }
 }
@@ -95,7 +121,7 @@ pub enum Target {
     Check,
     /// It has no current receipt: reported, exit 2.
     NoReceipt,
-    /// `attest --unit` named it, but its driver does not attest for its spec: reported, exit 2.
+    /// `attest` or `observe --unit` named it, but its driver does not attest or observe for its spec: reported, exit 2.
     Unsupported,
 }
 
@@ -115,7 +141,12 @@ pub fn targets(
         .iter()
         .filter(|(name, _)| named.is_none_or(|named| named.contains(*name)))
         .filter_map(|(name, desired)| {
-            if check == Check::Attest && !attests(drivers, desired) {
+            let covers = match check {
+                Check::DetectDrift => true,
+                Check::Attest => attests(drivers, desired),
+                Check::Observe => observes(drivers, desired),
+            };
+            if !covers {
                 return named.is_some().then(|| (name.clone(), Target::Unsupported));
             }
             let target = if receipt_is_current(desired, snapshot.observed.get(name)) {
@@ -128,12 +159,132 @@ pub fn targets(
         .collect()
 }
 
+/// The units `nyl reconcile --detect-drift` covers before it selects what to
+/// execute: the units selection leaves current when no drift record is known
+/// ([`Skipped::Current`]), so one decision, [`select`], names them. That
+/// keeps out every unit this run cannot judge or need not judge:
+///
+/// - a unit selection leaves out (`--unit` names others, held, blocked,
+///   awaiting an approval, uncertain, or failed without a retry). Selection
+///   runs once, when the run first selects, so a unit blocked then is not
+///   checked in this run even if it ends up current;
+/// - a unit that executes anyway, because its inputs changed, it has no
+///   current receipt, or `--reapply` forces it: a drift check of a receipt
+///   about to be replaced says nothing the new receipt keeps.
+///
+/// Of those, [`Target::Check`] is a unit whose driver detects drift for its
+/// spec. One that cannot is left out, as `attest` leaves out units that cannot
+/// attest, unless `--unit` names it: then it is [`Target::Unsupported`] and
+/// reported. [`Target::NoReceipt`] never appears: such a unit executes.
+///
+/// A unit whose stored drift record says `drifted` is still checked: the
+/// check replaces the record, so a unit someone repaired by hand is not
+/// executed again on stale evidence. `candidates.drift` is therefore ignored.
+pub fn reconcile_targets(candidates: &Candidates<'_>) -> BTreeMap<UnitName, Target> {
+    let none = BTreeMap::new();
+    let (_, skipped) = select(&Candidates {
+        drift: &none,
+        ..candidates.clone()
+    });
+    skipped
+        .into_iter()
+        .filter(|(_, why)| *why == Skipped::Current)
+        .filter_map(|(name, _)| {
+            if detects_drift(candidates.drivers, &candidates.desired[&name]) {
+                Some((name, Target::Check))
+            } else {
+                candidates.named.is_some().then_some((name, Target::Unsupported))
+            }
+        })
+        .collect()
+}
+
+/// `NYL-DRIFT-OPTION-INVALID` for the options `--detect-drift` leaves
+/// nothing to check with: `--leaving` acts only on units outside the
+/// ownership set, which have no receipt to check, and `--reapply` executes
+/// every named unit whether or not it drifted.
+pub fn detect_drift_conflict(leaving: bool, reapply: bool) -> Option<Finding> {
+    let (option, why) = if leaving {
+        (
+            "--leaving",
+            "--leaving acts only on units outside the ownership set, and --detect-drift checks the units inside it",
+        )
+    } else if reapply {
+        (
+            "--reapply",
+            "--reapply executes the named units whether or not they drifted, so there is nothing for --detect-drift to decide",
+        )
+    } else {
+        return None;
+    };
+    Some(Finding::new(
+        Code::DriftOptionInvalid,
+        format!("--detect-drift cannot be combined with {option}: {why}"),
+        format!("drop {option}, or run `nyl detect-drift` as a separate command"),
+    ))
+}
+
+/// What a drift check inside a reconcile adds to the unit's exit: `unknown`
+/// means the check did not conclude, so the run is incomplete (2), as
+/// `nyl detect-drift` is. Every other result adds nothing: drift the run found
+/// is already the unit's reconcile result (`executed` after a repair,
+/// `drifted` or `awaiting-approval` without one), and `unsupported` is
+/// reported only for a unit `--unit` named, as a note.
+pub fn reconcile_drift_exit(check: Option<&CheckResult>) -> ExitCategory {
+    match check {
+        Some(CheckResult::Unknown { .. }) => ExitCategory::Incomplete,
+        _ => ExitCategory::Ok,
+    }
+}
+
+/// The warnings a drift check inside a reconcile adds to a unit: the codes
+/// and fixes of `nyl detect-drift`, except that drift this run repaired
+/// (`repaired`) is not a warning, since the report's `driftRepaired` lists it.
+pub fn reconcile_warnings(
+    environment: &EnvironmentName,
+    unit: &UnitName,
+    result: &CheckResult,
+    policy: Option<RecoveryPolicy>,
+    drift_repair: DriftRepair,
+    repaired: bool,
+) -> Vec<Finding> {
+    if repaired {
+        return Vec::new();
+    }
+    warnings(
+        Check::DetectDrift,
+        environment,
+        unit,
+        &UnitCheck::from(result.clone()),
+        policy,
+        drift_repair,
+    )
+}
+
+/// Whether `desired`'s driver detects drift for its spec.
+fn detects_drift(drivers: &DriverSet, desired: &DesiredUnit) -> bool {
+    let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
+    drivers
+        .get(&desired.unit.api_version, &desired.unit.kind)
+        .is_some_and(|driver| driver.capabilities(spec).detect_drift)
+}
+
 /// Whether `desired`'s driver attests for its spec.
 fn attests(drivers: &DriverSet, desired: &DesiredUnit) -> bool {
     let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
     drivers
         .get(&desired.unit.api_version, &desired.unit.kind)
         .is_some_and(|driver| driver.capabilities(spec).attest)
+}
+
+/// Whether `desired`'s driver reads observed values for its spec, which
+/// declares some.
+fn observes(drivers: &DriverSet, desired: &DesiredUnit) -> bool {
+    let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
+    super::observed_values::declares(desired)
+        && drivers
+            .get(&desired.unit.api_version, &desired.unit.kind)
+            .is_some_and(|driver| driver.capabilities(spec).observed_values)
 }
 
 /// The drift record of `detection` of `unit`'s current `receipt` at `now`.
@@ -167,12 +318,15 @@ pub fn settle_drift(new: DriftRecord, stored: Option<&DriftRecord>) -> DriftReco
 }
 
 /// The attestation documents of `outcomes` for `unit`'s current `receipt`
-/// at `now`, each with `source: {driver: attest}` and the driver's details.
+/// at `now`, each with `source: {driver: <source>}` (`attest` for `nyl
+/// attest`, `reconcile` for the outcome of an execution) and the driver's
+/// details.
 pub fn attestations(
     environment: &EnvironmentName,
     unit: &DesiredUnit,
     receipt: &Receipt,
     outcomes: &[AttestationOutcome],
+    source: &str,
     now: Timestamp,
 ) -> BTreeMap<String, Attestation> {
     let subject = unit.unit.uid.clone().map(|uid| ArtifactUnit {
@@ -193,7 +347,7 @@ pub fn attestations(
                     execution_key: receipt.execution_key.to_string(),
                     result: outcome.result,
                     at: now,
-                    source: json!({"driver": "attest"}),
+                    source: json!({"driver": source}),
                     reason: outcome.reason.clone(),
                     details: outcome.details.clone(),
                 },
@@ -203,8 +357,12 @@ pub fn attestations(
 }
 
 /// The complete attestation set to store, given the stored one: a new
-/// document equal to the stored one but for `at` keeps the stored one;
-/// stored documents of the same receipt that this check did not report stay
+/// document equal to the stored one but for `at` keeps the stored one while
+/// the stored one is younger than `refresh`, so a repeated `attest` writes
+/// nothing within the interval; once it is older, the new `at` replaces it,
+/// so a system that is re-verified keeps a fresh attestation (and satisfies a
+/// `maxAttestationAge` longer than `refresh`) while one that cannot be
+/// reached grows stale; stored documents of the same receipt that this check did not report stay
 /// (the newest per name and receipt wins); stored documents of an earlier
 /// receipt are dropped, since they no longer describe it.
 #[must_use]
@@ -212,6 +370,8 @@ pub fn settle_attestations(
     mut new: BTreeMap<String, Attestation>,
     stored: Option<&BTreeMap<String, Attestation>>,
     receipt: &Receipt,
+    now: Timestamp,
+    refresh: Duration,
 ) -> BTreeMap<String, Attestation> {
     for (name, stored) in stored.into_iter().flatten() {
         let keep = match new.get(name) {
@@ -220,6 +380,7 @@ pub fn settle_attestations(
                     at: stored.at,
                     ..new.clone()
                 } == *stored
+                    && now < refresh.after(stored.at)
             }
             None => stored.execution_key == receipt.execution_key.as_str(),
         };
@@ -250,6 +411,40 @@ pub fn attest_check(attestations: &BTreeMap<String, Attestation>) -> UnitCheck {
             .iter()
             .map(|(name, attestation)| (name.clone(), attestation.result))
             .collect(),
+        observations: BTreeMap::new(),
+    }
+}
+
+/// What `nyl observe` reports for a unit: each declared observation as the
+/// read left it after the engine's checks ([`super::observed_values::settle`]):
+/// `failed` for a failed read, a value of the wrong type included, `pending`,
+/// else the value now recorded. The report and the record agree.
+pub fn observe_check(settled: &Settled, declared: &BTreeMap<String, ObservationDeclaration>) -> UnitCheck {
+    UnitCheck {
+        result: CheckResult::Observed,
+        attestations: BTreeMap::new(),
+        observations: declared
+            .keys()
+            .map(|name| {
+                let status = if let Some(reason) = settled.failed.get(name) {
+                    ObservationStatus::Failed { reason: reason.clone() }
+                } else if let Some(reason) = settled.pending.get(name) {
+                    ObservationStatus::Pending { reason: reason.clone() }
+                } else if let Some(value) = settled
+                    .record
+                    .as_ref()
+                    .and_then(|record| record.values.get(name))
+                    .and_then(RecordedObservation::value)
+                {
+                    ObservationStatus::Value { value: value.clone() }
+                } else {
+                    ObservationStatus::Failed {
+                        reason: format!("nothing is recorded for observation {name}"),
+                    }
+                };
+                (name.clone(), status)
+            })
+            .collect(),
     }
 }
 
@@ -265,7 +460,15 @@ pub fn unit_exit(unit: &UnitReport) -> ExitCategory {
     match &check.result {
         CheckResult::Drifted { .. } => ExitCategory::Failed,
         _ if failing => ExitCategory::Failed,
-        CheckResult::Clean | CheckResult::Attested => ExitCategory::Ok,
+        CheckResult::Observed
+            if check
+                .observations
+                .values()
+                .any(|status| !matches!(status, ObservationStatus::Value { .. })) =>
+        {
+            ExitCategory::Incomplete
+        }
+        CheckResult::Clean | CheckResult::Attested | CheckResult::Observed => ExitCategory::Ok,
         CheckResult::NoReceipt | CheckResult::Unsupported | CheckResult::Unknown { .. } => ExitCategory::Incomplete,
     }
 }
@@ -292,9 +495,10 @@ pub fn warnings(
     let codes = match check {
         Check::DetectDrift => (Code::DriftNoReceipt, Code::DriftUnsupported, Code::DriftUnknown),
         Check::Attest => (Code::AttestNoReceipt, Code::AttestUnsupported, Code::AttestUnknown),
+        Check::Observe => (Code::ObserveNoReceipt, Code::ObserveUnsupported, Code::DriverError),
     };
     match &result.result {
-        CheckResult::Clean | CheckResult::Attested => {}
+        CheckResult::Clean | CheckResult::Attested | CheckResult::Observed => {}
         CheckResult::NoReceipt => warnings.push(Finding::new(
             codes.0,
             format!("{unit} in {environment} has no current receipt to check"),
@@ -311,12 +515,18 @@ pub fn warnings(
                 format!("the kind of {unit} produces no attestations for its spec"),
                 "attestations only someone else can produce are declared with `attestations: [{name, from: external}]`",
             ),
+            Check::Observe => Finding::new(
+                codes.1,
+                format!("{unit} declares no observed values its kind can read"),
+                "declare `observations` on a unit whose kind reads observed values for its spec",
+            ),
         }),
         CheckResult::Unknown { reason } => warnings.push(Finding::new(
             codes.2,
             match check {
                 Check::DetectDrift => format!("drift of {unit} in {environment} is unknown: {reason}"),
                 Check::Attest => format!("attestations of {unit} in {environment} are unknown: {reason}"),
+                Check::Observe => format!("observed values of {unit} in {environment} are unknown: {reason}"),
             },
             format!("fix the cause, such as a missing tool or credentials, and run `nyl {command}` again"),
         )),
@@ -325,6 +535,21 @@ pub fn warnings(
             format!("{unit} in {environment} drifted from its receipt: {summary}"),
             drift_fix(environment, unit, policy, drift_repair),
         )),
+    }
+    for (name, status) in &result.observations {
+        match status {
+            ObservationStatus::Value { .. } => {}
+            ObservationStatus::Pending { reason } => warnings.push(Finding::new(
+                Code::ObservationPending,
+                format!("observed value {name} of {unit} in {environment} has none yet: {reason}"),
+                format!("run `nyl observe -e {environment}` again once the system holds it; consumers of it stay blocked"),
+            )),
+            ObservationStatus::Failed { reason } => warnings.push(Finding::new(
+                Code::ObservationFailed,
+                format!("observed value {name} of {unit} in {environment} could not be read: {reason}; the last recorded value for its current receipt stays usable"),
+                "fix the cause, such as missing credentials, and run `nyl observe` again",
+            )),
+        }
     }
     for (name, result) in &result.attestations {
         if *result == AttestationResult::Fail {
@@ -367,6 +592,7 @@ fn drift_fix(
 mod tests {
     use std::sync::Arc;
 
+    use nyl_core::orchestration::driver::{ObservedValue, ObservedValues};
     use serde_json::Value;
 
     use super::*;
@@ -432,6 +658,121 @@ mod tests {
         );
     }
 
+    /// Catches `observe` covering units that read nothing for their spec:
+    /// only a unit that declares observations and whose kind reads them is
+    /// checked, and `--unit` reports the others as unsupported.
+    #[test]
+    fn test_targets_for_observe_cover_units_that_declare_observations_their_kind_reads() {
+        let mut snapshot = snapshot();
+        let declaring = json!({"observes": true, "observations": {"ip": {"type": "string", "from": {}}}});
+        for unit in ["network", "database", "web"] {
+            let desired = snapshot.desired.get_mut(&name(unit)).unwrap();
+            desired.spec = declaring.clone();
+        }
+        // `cache` reads observed values but declares none.
+        snapshot.desired.get_mut(&name("cache")).unwrap().spec = json!({"observes": true});
+        let drivers = drivers();
+        assert_eq!(
+            targets(Check::Observe, &snapshot, None, &drivers),
+            BTreeMap::from([
+                (name("database"), Target::NoReceipt),
+                (name("network"), Target::Check),
+                (name("web"), Target::NoReceipt),
+            ])
+        );
+        let named = BTreeSet::from([name("network"), name("cache")]);
+        assert_eq!(
+            targets(Check::Observe, &snapshot, Some(&named), &drivers),
+            BTreeMap::from([(name("cache"), Target::Unsupported), (name("network"), Target::Check)])
+        );
+    }
+
+    /// Catches `observe` exiting 0 while a value is pending or failed, which
+    /// a scheduled job would read as healthy, and a pending or failed
+    /// observation without its own code and fix.
+    #[test]
+    fn test_observe_exits_and_warns_by_each_observation() {
+        let declared: BTreeMap<String, ObservationDeclaration> = serde_json::from_value(json!({
+            "ip": {"type": "string", "from": {}}, "port": {"type": "integer", "from": {}}
+        }))
+        .unwrap();
+        let readings = |port: ObservedValue| ObservedValues {
+            values: BTreeMap::from([
+                (
+                    "ip".to_owned(),
+                    ObservedValue::Value {
+                        value: json!("203.0.113.10"),
+                    },
+                ),
+                ("port".to_owned(), port),
+            ]),
+        };
+        let settled = |readings: &ObservedValues| {
+            let unit = desired_numbered("lb", 1, Some(hex_key('a')));
+            let receipt = observed_numbered("lb", 1, Some(hex_key('a'))).receipt.unwrap();
+            crate::rules::observed_values::settle(&crate::rules::observed_values::SettleInputs {
+                unit: &unit,
+                receipt: &receipt,
+                declared: &declared,
+                stored: None,
+                readings,
+                now: at(1),
+                refresh: Duration::from_mins(60),
+            })
+        };
+        let check = |port| {
+            let unit = UnitReport {
+                check: Some(observe_check(&settled(&readings(port)), &declared)),
+                ..UnitReport::new("Command")
+            };
+            let findings = warnings(
+                Check::Observe,
+                &env(),
+                &name("lb"),
+                unit.check.as_ref().unwrap(),
+                None,
+                DriftRepair::Converge,
+            );
+            (
+                unit_exit(&unit),
+                findings.iter().map(|finding| finding.code).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            check(ObservedValue::Value { value: json!(443) }),
+            (ExitCategory::Ok, vec![])
+        );
+        assert_eq!(
+            check(ObservedValue::Pending {
+                reason: "no port".to_owned()
+            }),
+            (ExitCategory::Incomplete, vec![Code::ObservationPending])
+        );
+        assert_eq!(
+            check(ObservedValue::Failed {
+                reason: "no credentials".to_owned()
+            }),
+            (ExitCategory::Incomplete, vec![Code::ObservationFailed])
+        );
+        // A name the driver left out is failed.
+        let missing = observe_check(
+            &settled(&ObservedValues {
+                values: BTreeMap::new(),
+            }),
+            &declared,
+        );
+        assert!(missing
+            .observations
+            .values()
+            .all(|status| matches!(status, ObservationStatus::Failed { .. })));
+        // A value of the wrong type is a failed read, as the record has it,
+        // not a value with exit 0.
+        assert_eq!(
+            check(ObservedValue::Value { value: json!("https") }),
+            (ExitCategory::Incomplete, vec![Code::ObservationFailed])
+        );
+    }
+
     /// Catches a second check of an unchanged unit writing a commit only
     /// because time moved on, and a changed result not being written.
     #[test]
@@ -462,15 +803,51 @@ mod tests {
             reason: None,
             details: json!({"applications": 1}),
         };
-        let attested = attestations(&env(), &unit, receipt, &[outcome(AttestationResult::Pass)], at(1));
+        let attested = attestations(
+            &env(),
+            &unit,
+            receipt,
+            &[outcome(AttestationResult::Pass)],
+            "attest",
+            at(1),
+        );
         assert_eq!(attested["healthy"].source, json!({"driver": "attest"}));
         assert_eq!(attested["healthy"].details, json!({"applications": 1}));
         let again = settle_attestations(
-            attestations(&env(), &unit, receipt, &[outcome(AttestationResult::Pass)], at(2)),
+            attestations(
+                &env(),
+                &unit,
+                receipt,
+                &[outcome(AttestationResult::Pass)],
+                "attest",
+                at(2),
+            ),
             Some(&attested),
             receipt,
+            at(2),
+            Duration::from_mins(15),
         );
         assert_eq!(again, attested);
+
+        // Once the stored attestation is older than the refresh interval, an
+        // unchanged result is written again with its new time.
+        let later = at(1) + chrono::Duration::minutes(16);
+        let refreshed = settle_attestations(
+            attestations(
+                &env(),
+                &unit,
+                receipt,
+                &[outcome(AttestationResult::Pass)],
+                "attest",
+                later,
+            ),
+            Some(&attested),
+            receipt,
+            later,
+            Duration::from_mins(15),
+        );
+        assert_eq!(refreshed["healthy"].at, later);
+        assert_eq!(refreshed["healthy"].details, attested["healthy"].details);
     }
 
     /// Catches an attestation of an earlier receipt surviving into the new
@@ -485,9 +862,22 @@ mod tests {
             reason: None,
             details: Value::Null,
         };
-        let earlier = attestations(&env(), &unit, old.receipt.as_ref().unwrap(), &[outcome], at(1));
+        let earlier = attestations(
+            &env(),
+            &unit,
+            old.receipt.as_ref().unwrap(),
+            &[outcome],
+            "attest",
+            at(1),
+        );
         let current = observed_numbered("network", 1, Some(hex_key('a')));
-        let settled = settle_attestations(BTreeMap::new(), Some(&earlier), current.receipt.as_ref().unwrap());
+        let settled = settle_attestations(
+            BTreeMap::new(),
+            Some(&earlier),
+            current.receipt.as_ref().unwrap(),
+            at(1),
+            Duration::from_mins(15),
+        );
         assert!(settled.is_empty());
     }
 
@@ -499,6 +889,7 @@ mod tests {
                     .map(|result| ("healthy".to_owned(), result))
                     .into_iter()
                     .collect(),
+                observations: BTreeMap::new(),
             }),
             ..UnitReport::new("OpenTofu")
         }
@@ -559,13 +950,16 @@ mod tests {
             .map(|finding| finding.code)
             .collect();
             let expected_codes: Vec<Code> = match (check, &result) {
-                (_, CheckResult::Clean | CheckResult::Attested) => vec![],
+                (_, CheckResult::Clean | CheckResult::Attested | CheckResult::Observed) => vec![],
                 (Check::DetectDrift, CheckResult::NoReceipt) => vec![Code::DriftNoReceipt],
                 (Check::DetectDrift, CheckResult::Unsupported) => vec![Code::DriftUnsupported],
                 (Check::DetectDrift, CheckResult::Unknown { .. }) => vec![Code::DriftUnknown],
                 (Check::Attest, CheckResult::NoReceipt) => vec![Code::AttestNoReceipt],
                 (Check::Attest, CheckResult::Unsupported) => vec![Code::AttestUnsupported],
                 (Check::Attest, CheckResult::Unknown { .. }) => vec![Code::AttestUnknown],
+                (Check::Observe, CheckResult::NoReceipt) => vec![Code::ObserveNoReceipt],
+                (Check::Observe, CheckResult::Unsupported) => vec![Code::ObserveUnsupported],
+                (Check::Observe, CheckResult::Unknown { .. }) => vec![Code::DriverError],
                 (_, CheckResult::Drifted { .. }) => vec![Code::DriftDetected],
             }
             .into_iter()
@@ -615,5 +1009,149 @@ mod tests {
             "repair it with `nyl reconcile -e {environment} --unit network --reapply --reason <text> --approve network`"
         ))
         );
+    }
+
+    /// `reconcile --detect-drift` checks the units selection leaves current
+    /// whose driver detects drift, and only those. Catches a check of a
+    /// receipt this run replaces anyway (a unit whose inputs changed, or that
+    /// `--reapply` forces), a check of a unit `--unit` did not name or that
+    /// waits for `recover`, a stored `drifted` record keeping its unit from
+    /// being checked again, and a kind that cannot detect drift reported on
+    /// every run instead of only when `--unit` names it.
+    #[test]
+    fn test_reconcile_targets_are_the_units_selection_leaves_current() {
+        use nyl_core::orchestration::driver::DriftDetection;
+        use nyl_core::orchestration::state::{Condition, Drift};
+        let mut snapshot = snapshot();
+        // `cache` carries a stored `drifted` record; `network` is current and clean;
+        // `queue` is current, but its kind cannot detect drift.
+        for unit in ["network", "cache"] {
+            snapshot.desired.get_mut(&name(unit)).unwrap().spec = json!({"detectsDrift": true});
+        }
+        snapshot
+            .desired
+            .insert(name("queue"), desired_numbered("queue", 1, Some(hex_key('e'))));
+        snapshot
+            .observed
+            .insert(name("queue"), observed_numbered("queue", 1, Some(hex_key('e'))));
+        let cache = &snapshot.desired[&name("cache")];
+        let receipt = snapshot.observed[&name("cache")].receipt.clone().unwrap();
+        let stored = drift_record(
+            cache,
+            &receipt,
+            &DriftDetection {
+                drift: Drift::Drifted {
+                    summary: "1 change".to_owned(),
+                },
+                details: Value::Null,
+            },
+            at(1),
+        );
+        snapshot.drift.insert(name("cache"), stored);
+        let drivers = drivers();
+        let attempted = BTreeSet::new();
+        let targets = |snapshot: &EnvironmentSnapshot,
+                       named: Option<&BTreeSet<UnitName>>,
+                       reapply: &BTreeSet<UnitName>|
+         -> Vec<(String, Target)> {
+            reconcile_targets(&Candidates {
+                desired: &snapshot.desired,
+                observed: &snapshot.observed,
+                drivers: &drivers,
+                named,
+                attempted: &attempted,
+                local: None,
+                approvals: None,
+                drift: &snapshot.drift,
+                drift_repair: DriftRepair::Converge,
+                reapply,
+            })
+            .into_iter()
+            .map(|(name, target)| (name.to_string(), target))
+            .collect()
+        };
+        let checked = |names: &[&str]| -> Vec<(String, Target)> {
+            names.iter().map(|name| ((*name).to_owned(), Target::Check)).collect()
+        };
+        let none = BTreeSet::new();
+        // `database` has a stale receipt and `web` none: both execute anyway.
+        // `queue` cannot detect drift and no `--unit` names it: it is left out.
+        assert_eq!(targets(&snapshot, None, &none), checked(&["cache", "network"]));
+        // `--unit` names the units the run touches, and reports a named kind
+        // that cannot detect drift as unsupported.
+        let named = BTreeSet::from([name("network"), name("database"), name("queue")]);
+        assert_eq!(
+            targets(&snapshot, Some(&named), &none),
+            vec![
+                ("network".to_owned(), Target::Check),
+                ("queue".to_owned(), Target::Unsupported)
+            ]
+        );
+        // `--reapply` executes its units whatever a check would say.
+        let forced = BTreeSet::from([name("network")]);
+        assert_eq!(targets(&snapshot, None, &forced), checked(&["cache"]));
+        // An uncertain unit is recovered or waits for `nyl recover`, not checked.
+        snapshot.observed.get_mut(&name("cache")).unwrap().condition = Some(Condition::Uncertain {
+            since: at(2),
+            run: crate::rules::fixtures::run("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90"),
+            reason: "interrupted".to_owned(),
+        });
+        assert_eq!(targets(&snapshot, None, &none), checked(&["network"]));
+    }
+
+    /// Catches `--detect-drift` running with an option that leaves it nothing
+    /// to check, and a refusal without its code and a fix naming the option.
+    #[test]
+    fn test_detect_drift_conflict_names_the_option_and_its_fix() {
+        assert!(detect_drift_conflict(false, false).is_none());
+        for (leaving, reapply, option) in [(true, false, "--leaving"), (false, true, "--reapply")] {
+            let finding = detect_drift_conflict(leaving, reapply).expect("a conflict");
+            assert_eq!(finding.code, Code::DriftOptionInvalid);
+            assert!(finding.message.contains(option), "{}", finding.message);
+            assert!(finding.fix.contains(option), "{}", finding.fix);
+        }
+    }
+
+    /// A drift check inside a reconcile affects the exit only when it could
+    /// not conclude, and drift the run repaired is not warned about while drift
+    /// it left is, with `detect-drift`'s code. Catches a run that exits 0 after a
+    /// check that could not conclude, or that stays silent about it.
+    #[test]
+    fn test_reconcile_drift_checks_add_exit_and_warnings_by_result() {
+        let unknown = CheckResult::Unknown {
+            reason: "no credentials".to_owned(),
+        };
+        let drifted = CheckResult::Drifted {
+            summary: "1 change".to_owned(),
+        };
+        assert_eq!(reconcile_drift_exit(Some(&unknown)), ExitCategory::Incomplete);
+        for result in [CheckResult::Clean, CheckResult::Unsupported, drifted.clone()] {
+            assert_eq!(
+                reconcile_drift_exit(Some(&result)),
+                ExitCategory::Ok,
+                "{}",
+                result.name()
+            );
+        }
+        assert_eq!(reconcile_drift_exit(None), ExitCategory::Ok);
+
+        let codes = |result: &CheckResult, repaired: bool| -> Vec<Code> {
+            reconcile_warnings(
+                &env(),
+                &name("api"),
+                result,
+                Some(RecoveryPolicy::Converge),
+                DriftRepair::Converge,
+                repaired,
+            )
+            .into_iter()
+            .map(|finding| finding.code)
+            .collect()
+        };
+        assert_eq!(codes(&drifted, true), Vec::<Code>::new());
+        assert_eq!(codes(&drifted, false), [Code::DriftDetected]);
+        assert_eq!(codes(&unknown, false), [Code::DriftUnknown]);
+        assert_eq!(codes(&CheckResult::Unsupported, false), [Code::DriftUnsupported]);
+        assert_eq!(codes(&CheckResult::Clean, false), Vec::<Code>::new());
     }
 }

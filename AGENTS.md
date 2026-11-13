@@ -91,8 +91,14 @@ These rules keep it maintainable:
 - Render every output (tables, JSON/YAML, transition commit summaries, status,
   exit categories) from the operation's single typed report; give errors and
   warnings stable codes with the fix attached.
-- State-file formats are versioned with golden files; a format change adds a
-  version and a migration.
+- State-file formats are versioned with golden files. Before changing one,
+  ask the user whether to bump or break, and do neither on your own: a bump
+  adds a version and a migration, and a break changes the format in place.
+  Say what the change is, whether a release has shipped the format, and what
+  each choice costs: a bump means a migration and readers that refuse the new
+  version, a break means every Nyl sharing the state must upgrade together.
+  Agents and reviewers working on a change ask; they do not assume either
+  answer from an earlier change.
 
 ### Driver boundary
 
@@ -142,7 +148,8 @@ Reviewers must check the boundary explicitly:
 │   ├── nyl-render/    # Kubernetes rendering and Kubernetes GitOps
 │   ├── nyl-state/     # State store implementations (Git; in-memory for tests)
 │   ├── nyl-orchestration/ # Orchestration decisions and shell; depends only on nyl-core
-│   └── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
+│   ├── nyl-units/     # Built-in unit kinds (declaration + driver each), registry, process runner
+│   └── nyl-e2e/       # Cluster E2E suite (`nyl-e2e` binary); drives the real `nyl`, depends on no Nyl crate
 ├── nyl/               # The `nyl` command line (plays the nyl-cli role)
 │   ├── src/cli/      # Argument parsing, output formats, command wiring
 │   ├── tests/        # Integration tests
@@ -188,6 +195,9 @@ mise run build            # or: cargo build --release -p nyl
 
 # Run benchmarks
 mise run bench            # or: cargo bench -p nyl
+
+# Cluster E2E suite (docker, kind, kubectl, OpenTofu); see crates/nyl-e2e/README.md
+mise run e2e              # or: cargo build -p nyl -p nyl-e2e && target/debug/nyl-e2e run --variant all
 
 # Documentation
 mise run docs-serve       # Serve the documentation site
@@ -371,9 +381,13 @@ fn test_operation() -> Result<()> {
 - `DeploymentTarget.spec.applicationGroupSelector` matches literal
   `ApplicationGroup.metadata.labels` before target rendering. Effective
   `ApplicationGroup.spec.enabled` is evaluated after selection.
-- An explicit `ArgoCDInstance` makes `DeploymentTarget.spec.argocdRef` mandatory for
-  every target. With no explicit instances, each target receives an implicit
-  target-local instance using its workload Cluster and the `argocd` namespace.
+- `DeploymentTarget.spec.reconciler` is required and names exactly one of
+  `argocd` and `direct`; no reconciler is implied. An explicit `ArgoCDInstance`
+  makes `reconciler.argocd.instanceRef` mandatory for every Argo CD target.
+  With no explicit instances, `reconciler: {argocd: {}}` selects an implicit
+  target-local instance using the target's workload Cluster and the `argocd`
+  namespace, and `instanceRef` is refused. The former top-level `argocdRef` is
+  rejected with its fix.
 - Every enabled catalog Application recursively sources `_nyl/catalog`. Its
   defaults require manual sync with apply-only-out-of-sync and server-side
   apply options, cascade deletion in the foreground, and require confirmation
@@ -421,6 +435,11 @@ src/
 - Cluster and Release use `k8s.nyl/v1`; Argo CD control resources
   (DeploymentTarget, ArgoCDInstance, ApplicationGroup, AppProjectDefinition) use
   `k8s.gitops.nyl/v1`; shared GitRepository resources use `gitops.nyl/v1`. They have a static `apiVersion`, `kind`, and `metadata.name` envelope.
+- Nyl's labels, annotations, and Secret types use the `.nyl` API group of the
+  layer that owns them (`k8s.nyl/`, `k8s.gitops.nyl/`), never another domain;
+  the reserved `.nyl` suffix is deliberate. Keys are defined in
+  `nyl_core::constants`; identifiers from before the `.nyl` groups live only in
+  `constants::legacy`, for reading and migration diagnostics.
 - A Cluster describes one concrete Argo CD destination, its deterministic
   Kubernetes capabilities, cluster-fact values, and an optional local context.
   A DeploymentTarget binds exactly one Cluster to one publication destination.
@@ -468,9 +487,14 @@ src/
 - Direct commands (`render`, `diff`, `apply`) take a target's Release from the
   compiled target (`gitops::direct`), so they work on what its Application
   deploys; `--release-only` and standalone renders share the per-Release rules
-  of `settle_standalone_release`. `render` never connects to Kubernetes, and no
-  command takes a namespace from the kube context. Pruning and purging follow
-  each live resource's Argo CD `Prune`/`Delete` sync option.
+  of `settle_standalone_release`. A declared DeploymentTarget always supplies
+  the cluster, and `render` with a target never connects to Kubernetes.
+  Without GitOps configuration, `--context` is the explicit opt-in to a kube
+  context whose live capabilities replace the Cluster's; one decision,
+  `select_cluster_source`, chooses for every direct command, and tree and
+  publication commands accept no such mode. No command takes a namespace from
+  the kube context. Pruning and purging follow each live resource's Argo CD
+  `Prune`/`Delete` sync option.
 - Generated Argo CD Applications use ordinary recursive directory sources.
 
 ## Common Tasks
@@ -543,6 +567,20 @@ src/
 - Sensitive context uses the cache-local keyed fingerprint and never appears
   raw or as a directly guessable digest in dependency records. Cache artifacts
   can contain rendered secrets and must retain private filesystem permissions.
+- Helm `lookup` reads only a declared source: the target's last publication,
+  restricted to the objects of the Release being rendered. Every lookup, with
+  its result digest (a keyed fingerprint for Secret data), enters the dependency
+  recorder at each cache layer, and a cached render is reused only while each
+  recorded lookup still returns the same result, under the scope it was made
+  for (a Helm cache key includes it). An unreadable source is an error, never
+  an absent object, and so is an object held at another version than it was
+  looked up at. What the lookup API lists as `.Capabilities` never depends on
+  what the source holds or on what the chart renders. Live lookups
+  (`--lookup=live`, `render`, `diff`, and `apply` only) are never cached, read
+  only the Release's own objects one by one (never a cluster-wide list), fail
+  on an object the cluster holds that no recorded revision or publication of
+  the Release lists instead of reading it as absent, and are refused by tree
+  and publication commands like `--context`.
 - The rendered ownership index describes published ownership and provenance;
   it is not a complete render-cache key.
 - Corrupt, incomplete, or unavailable cache state is a cache miss. It must not
@@ -646,9 +684,13 @@ mise run docs-rustdoc      # Opens in browser
 - **release.yml:** Binary releases with cargo-dist
 
 ### Release Process
-1. Update `CHANGELOG.md`
+1. Make sure `.changelog/_unreleased.toml` describes every user-visible change
+   since the last release. Changes add their entry there as they land.
 2. Run `scripts/release.sh X.Y.Z`: it bumps the shared workspace version in the
-   root `Cargo.toml` and `Cargo.lock`, commits, tags `vX.Y.Z`, and pushes
+   root `Cargo.toml` and `Cargo.lock`, renames `.changelog/_unreleased.toml` to
+   `.changelog/X.Y.Z.toml` with the release date, commits both in one commit,
+   tags `vX.Y.Z`, and pushes. A prerelease such as `X.Y.Z-rc.1` keeps the
+   unreleased file
 3. GitHub Actions builds and publishes binaries and images; nothing is published
    to crates.io
 

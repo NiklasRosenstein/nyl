@@ -84,6 +84,18 @@ codes! {
     UnitOwnershipOverlap => "NYL-UNIT-OWNERSHIP-OVERLAP",
     /// A reference names a unit outside the ownership set, an undeclared or sensitive output, a mismatched artifact kind, or a value of the wrong type.
     ReferenceInvalid => "NYL-REFERENCE-INVALID",
+    /// A target's publication found the shared catalog manifest on the branch different from the one it renders; it left it alone. A warning.
+    KubernetesSharedCatalogDiffers => "NYL-KUBERNETES-SHARED-CATALOG-DIFFERS",
+    /// A direct target's apply kept objects whose `Prune=confirm` sync option awaits a confirmation the driver never gives. A warning.
+    KubernetesPruneAwaitingConfirmation => "NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION",
+    /// A Cluster's recorded capabilities (vendored CRDs included) give a kind one scope and the live cluster another; the command used the recorded one. A warning.
+    KubernetesScopeMismatch => "NYL-KUBERNETES-SCOPE-MISMATCH",
+    /// A Release declares delete hooks (Helm's `pre-delete` and `post-delete`, Argo CD's `PreDelete` and `PostDelete`), which Argo CD would run when it removes the Release and Nyl never runs; the apply left them out. A warning.
+    KubernetesHookIgnored => "NYL-KUBERNETES-HOOK-IGNORED",
+    /// A direct target's apply found a Release that left the tree and is not this unit's to purge, and left it. A warning.
+    KubernetesReleaseLeftBehind => "NYL-KUBERNETES-RELEASE-LEFT-BEHIND",
+    /// A cross-environment reference or `dependsOn` entry names an instance of an EnvironmentTemplate as its producer. Instances are consumers only.
+    ReferenceInstanceProducer => "NYL-REFERENCE-INSTANCE-PRODUCER",
     /// A `nyl get` value form found no current receipt to read.
     ReferenceUnresolved => "NYL-REFERENCE-UNRESOLVED",
     /// `--allow-stale` printed a value from a receipt that is not current.
@@ -96,6 +108,8 @@ codes! {
     SourceUnavailable => "NYL-SOURCE-UNAVAILABLE",
     /// A source commit is not reachable from the refs it must be reachable from.
     SourceUnreachable => "NYL-SOURCE-UNREACHABLE",
+    /// A teardown with `--source` took a unit's files from another revision than its recorded source commit. A warning.
+    SourceOverride => "NYL-SOURCE-OVERRIDE",
     /// A driver call failed on Nyl's side before any effect started.
     DriverError => "NYL-DRIVER-ERROR",
     /// A unit reported outputs it does not declare; they were ignored.
@@ -107,9 +121,14 @@ codes! {
     /// A unit declares `env.secrets`, but no secrets provider is wired into
     /// orchestration yet (M3).
     UnitSecretsUnsupported => "NYL-UNIT-SECRETS-UNSUPPORTED",
-    /// A reference or `dependsOn` entry requires `evidence: attested` or
-    /// names attestations, which no kind records yet (M3).
-    AttestationsUnsupported => "NYL-ATTESTATIONS-UNSUPPORTED",
+    /// A reference or `dependsOn` entry requires an attestation its producer does not declare.
+    AttestationUndeclared => "NYL-ATTESTATION-UNDECLARED",
+    /// A reference or `dependsOn` entry requires an attestation only an external source supplies, which Nyl cannot record yet.
+    AttestationExternalUnsupported => "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED",
+    /// A consumer waits for an attestation of its producer's current receipt that is not recorded yet.
+    AttestationPending => "NYL-ATTESTATION-PENDING",
+    /// A consumer waits for an attestation of its producer's current receipt that is recorded as failing.
+    AttestationFailing => "NYL-ATTESTATION-FAILING",
     /// A unit has an uncertain condition: its effects may or may not have happened.
     UnitUncertain => "NYL-UNIT-UNCERTAIN",
     /// A leftover run's checkpoint no longer matches the unit's desired document; it was reported as superseded.
@@ -132,10 +151,24 @@ codes! {
     DriftUnsupported => "NYL-DRIFT-UNSUPPORTED",
     /// A unit drifted from its current receipt.
     DriftDetected => "NYL-DRIFT-DETECTED",
+    /// `nyl reconcile --detect-drift` was combined with an option that leaves it nothing to check.
+    DriftOptionInvalid => "NYL-DRIFT-OPTION-INVALID",
     /// `nyl attest --unit` named a unit without a current receipt to attest.
     AttestNoReceipt => "NYL-ATTEST-NO-RECEIPT",
     /// A unit's driver could not produce its attestations.
     AttestUnknown => "NYL-ATTEST-UNKNOWN",
+    /// A unit declares `observations`, but its kind cannot read observed values.
+    ObservationsUnsupported => "NYL-OBSERVATIONS-UNSUPPORTED",
+    /// A consumer waits for an observed value of its producer's current receipt that has none yet.
+    ObservationPending => "NYL-OBSERVATION-PENDING",
+    /// An observed value could not be read; the last recorded value for the current receipt stays usable.
+    ObservationFailed => "NYL-OBSERVATION-FAILED",
+    /// An observed value changed, so the consumers that read it are ready for the next reconcile.
+    ObservationChanged => "NYL-OBSERVATION-CHANGED",
+    /// `nyl observe` found no current receipt to observe for a unit.
+    ObserveNoReceipt => "NYL-OBSERVE-NO-RECEIPT",
+    /// `nyl observe --unit` named a unit whose kind reads no observed values for its spec.
+    ObserveUnsupported => "NYL-OBSERVE-UNSUPPORTED",
     /// `nyl attest --unit` named a unit whose kind produces no attestations for its spec.
     AttestUnsupported => "NYL-ATTEST-UNSUPPORTED",
     /// A driver attestation of a unit's current receipt failed.
@@ -179,18 +212,27 @@ codes! {
     /// an unmet readiness requirement or an unconfirmed removal.
     TeardownIncomplete => "NYL-TEARDOWN-INCOMPLETE",
     /// Teardown readiness: the catalog does not prune removed workload
-    /// Applications on its own (blocking).
+    /// Applications on its own, because it does not sync with pruning or its
+    /// `Prune` sync option waits for confirmation or skips them (blocking).
     TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
     /// Teardown readiness: deleting an Application orphans its workloads (blocking).
     TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",
-    /// Teardown readiness: an owned Namespace's `deletePolicy: Confirm` holds
-    /// the Application's finalizer until someone confirms (blocking).
+    /// Teardown readiness: a resource a workload Application would delete,
+    /// whose own sync options or the Application's `syncPolicy.syncOptions`
+    /// resolve `Delete` or `Prune` to `confirm`, holds the Application's
+    /// finalizer until someone confirms the deletion in Argo CD (blocking).
+    /// An owned Namespace with the default `prunePolicy` or `deletePolicy`
+    /// of `Confirm` is the usual case.
     TeardownNamespaceConfirm => "NYL-TEARDOWN-NAMESPACE-CONFIRM",
     /// Teardown readiness: owned Namespaces remain after teardown (remnant).
     TeardownNamespacesRemain => "NYL-TEARDOWN-NAMESPACES-REMAIN",
     /// Teardown readiness: a self-managing catalog Application and its
     /// AppProjects remain after teardown (remnant).
     TeardownCatalogRemains => "NYL-TEARDOWN-CATALOG-REMAINS",
+    /// Teardown readiness: the unit's teardown waits for an operator to
+    /// confirm the removal, so an unattended removal, such as the expiry of a
+    /// template instance, stops after its first phase. A warning.
+    TeardownWaitManual => "NYL-TEARDOWN-WAIT-MANUAL",
     /// A unit whose kind cannot tear down was released: its resources were
     /// left in place and the transition commit lists them.
     UnitReleased => "NYL-UNIT-RELEASED",
@@ -210,6 +252,39 @@ codes! {
     StateDeleted => "NYL-STATE-DELETED",
     /// `nyl state delete` refuses while units still have an incarnation.
     StateDeleteIncarnations => "NYL-STATE-DELETE-INCARNATIONS",
+    /// `--template` names no EnvironmentTemplate of the project.
+    InstanceTemplateUnknown => "NYL-INSTANCE-TEMPLATE-UNKNOWN",
+    /// An instance's parameters do not satisfy its template's declarations.
+    InstanceParameterInvalid => "NYL-INSTANCE-PARAMETER-INVALID",
+    /// An environment name is used by a declared Environment or by an
+    /// instance of another template.
+    InstanceNameTaken => "NYL-INSTANCE-NAME-TAKEN",
+    /// `--param` without `--template`: parameters are recorded when an instance is created or updated.
+    InstanceTemplateRequired => "NYL-INSTANCE-TEMPLATE-REQUIRED",
+    /// The state of an environment name belongs to instances of several templates.
+    InstanceAmbiguous => "NYL-INSTANCE-AMBIGUOUS",
+    /// An EnvironmentTemplate does not render to a valid Environment for an instance.
+    TemplateInvalid => "NYL-TEMPLATE-INVALID",
+    /// `--renew` or `--no-extend` where it does not apply: for a declared
+    /// Environment, which has no expiry, or for the fleet reconcile.
+    InstanceOptionInvalid => "NYL-INSTANCE-OPTION-INVALID",
+    /// An instance is expired: the next `reconcile` of it removes it, unless
+    /// `--renew` or the pull request job's `--template` renews it. A warning.
+    InstanceExpired => "NYL-INSTANCE-EXPIRED",
+    /// The removal of an expired instance waits: its teardown needs
+    /// `allowTeardown` on the template or `--allow-teardown`. Exit 2.
+    InstanceRemovalPending => "NYL-INSTANCE-REMOVAL-PENDING",
+    /// An instance was renewed while its removal was starting, so nothing was removed. Exit 2.
+    InstanceRenewed => "NYL-INSTANCE-RENEWED",
+    /// A template is at `maxInstances`: no instance is created until an
+    /// expired one is removed (`--make-room`). Exit 2.
+    InstanceLimit => "NYL-INSTANCE-LIMIT",
+    /// The instances of a template cannot be listed, which `maxInstances` and
+    /// the fleet reconcile need: its state location depends on the instance name.
+    InstanceNotListable => "NYL-INSTANCE-NOT-LISTABLE",
+    /// An instance's source commit could not be kept fetchable with a keep ref
+    /// in the source repository, or its keep ref could not be removed.
+    InstanceKeepFailed => "NYL-INSTANCE-KEEP-FAILED",
     /// `nyl hold` was delivered to the run holding the lease, through its
     /// signal ref: the run starts no held unit and writes the hold in its
     /// own transition commit. Exit 0.

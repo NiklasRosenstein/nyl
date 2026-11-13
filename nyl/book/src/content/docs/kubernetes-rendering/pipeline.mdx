@@ -18,19 +18,117 @@ import { Steps } from '@astrojs/starlight/components';
 2. Build the template context. Project secrets and admitted `NYL_*` environment variables enter it only with `--allow-secret-inputs`, for direct and tree commands alike.
 3. Load the input manifest file and render Jinja templates.
 4. Apply `--only-source-kind` filtering on top-level input resources (before expansion).
-5. Expand resources recursively (`HelmChart`, `Component`, `RemoteManifest`, aliases) with `--max-depth`.
+5. Expand resources recursively (`HelmChart`, `Component`, `RemoteManifest`, aliases) with `--max-depth`. Generated resources inherit the expanding resource's [Argo CD sync wave and phase](#argo-cd-sync-waves-and-phases).
 6. Apply Kyverno policies (Global scope currently supported).
 7. Deduplicate final manifests (last occurrence wins).
-8. Take the Release's resources as its Argo CD Application deploys them
+8. Write [`k8s.nyl/checksum-sha256`](/nyl/kubernetes-rendering/pod-template-checksums/) on each Pod
+   template that sets `k8s.nyl/checksum`, from the ConfigMaps and Secrets the Release renders.
+9. Take the Release's resources as its Argo CD Application deploys them
    ([below](#the-releases-application)).
-9. Apply post-render kind filtering with `--only-kind` / `--exclude-kind`.
+10. Apply post-render kind filtering with `--only-kind` / `--exclude-kind`.
 
 </Steps>
 
 Bundle expansion and parsed Helm output are cached by their complete observed
-inputs. `--refresh` bypasses cache reads and replaces successful entries;
+inputs, including what a chart's Helm `lookup` returned ([below](#helm-lookup)). `--refresh` bypasses cache reads and replaces successful entries;
 `--no-cache` disables persistent reads and writes. `diff` and `apply` always
 perform their live-cluster work even when desired-manifest rendering is reused.
+
+## Helm `lookup`
+
+A [HelmChart with `spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) renders with Helm's server-side
+dry run against a read-only Kubernetes API that Nyl serves locally. The API answers
+from the Release's own objects in the target's last publication, so `render`, `diff`,
+`apply` and the tree commands all see the same objects. Each lookup result is a cache
+input, so a cached render is reused only while every lookup returns the same result.
+
+`render`, `diff` and `apply` can read the cluster instead with `--lookup=live`
+([details](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reading-the-live-cluster)). Those renders are never cached.
+
+## Argo CD sync waves and phases
+
+A `HelmChart`, `Component`, or `RemoteManifest` is never applied itself; the
+resources it generates are. When it declares an Argo CD sync wave or phase,
+every generated resource that declares none of its own inherits it, so a
+chart can be ordered as a whole:
+
+```yaml
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: cert-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  chart:
+    repository: https://charts.jetstack.io
+    name: cert-manager
+```
+
+- `argocd.argoproj.io/sync-wave` is copied to each generated resource without
+  its own sync wave or a `helm.sh/hook-weight`, which Argo CD uses as the wave
+  of a Helm hook.
+- `argocd.argoproj.io/hook`, the phase, is copied to each generated resource
+  without its own Argo CD hook or a `helm.sh/hook`. The expanding resource's
+  `argocd.argoproj.io/hook-delete-policy` comes with it, so a resource never
+  combines its own phase with another resource's deletion policy, and one that
+  inherits a phase without a deletion policy keeps none.
+
+Other annotations are not copied. Nested expansion inherits transitively: a
+`HelmChart` that a Component's chart renders passes on the wave it inherited.
+Every command renders the same annotations, from `render` to `publish-tree`.
+
+### Applying waves and hooks
+
+The annotations only take effect when something syncs the resources. Argo CD does,
+and so do the commands that apply a Release themselves: `nyl apply`, `nyl release
+rollback`, and the [direct reconciler](/nyl/kubernetes-gitops/workflow/direct-reconciler/).
+They share one implementation, so a Release is applied the same way by each:
+
+- `PreSync` hooks run first and must finish (a Job completed, a Pod succeeded) before
+  anything else is applied; then the `Sync` phase applies the ordinary resources and
+  the `Sync` hooks wave by wave; then `PostSync` hooks run once the workloads are
+  healthy. `SyncFail` hooks run only after a failure. `Skip` documents are never
+  applied.
+- Within a phase, resources and hooks run by sync wave, lowest first, then by kind,
+  then by name. `helm.sh/hook-weight` is the wave of a document without its own sync
+  wave.
+- A hook is deleted before it is created again unless its delete policy says
+  otherwise (`HookSucceeded` after a good sync, `HookFailed` after a failed one).
+- Helm hooks map as Argo CD maps them: `pre-install` and `pre-upgrade` to `PreSync`,
+  `post-install` and `post-upgrade` to `PostSync`; `crd-install` documents are
+  ordinary resources; hooks with no sync phase are left out: `test` and the rollback
+  hooks silently, delete hooks (`pre-delete`, `post-delete`, `PreDelete`,
+  `PostDelete`), which Nyl never runs, with a warning.
+- Hooks are not owned objects: they are not pruned or compared, and a hook that is
+  gone is not drift. A purge of the Release deletes them with the rest.
+- A Namespace or CustomResourceDefinition applies in the step of the first document
+  that needs it when that comes earlier, as in Argo CD.
+
+A Release that declares no waves or hooks is applied in one step, as before. The
+rules, the waits, the failure behavior, and where Nyl differs from Argo CD are in
+[`nyl apply`](/nyl/reference/cli/apply/#hooks-and-sync-waves); `nyl diff` lists the
+hooks that would run apart from the resource changes.
+
+## Resource errors
+
+Nyl's own resources (`HelmChart`, `Component`, `RemoteManifest`, `Release`,
+and the Kubernetes GitOps resources) reject unknown fields and values of the
+wrong type. The error names the source document, the resource kind, the path
+of the offending field, and a hint for fixing it:
+
+```console
+$ nyl render chart.yaml --kube-version 1.28.0 --kube-api-versions v1
+ERROR nyl: Render error:
+Source: chart.yaml (document 1)
+Resource: k8s.nyl/v1 HelmChart default/web (chart: web)
+Caused by: Invalid HelmChart: Type mismatch at `spec.chart.version`: invalid type: sequence, expected a string
+Hint: Check that the field value matches the expected type. For example, numbers should not be quoted, booleans should be true/false.
+```
+
+Failures are classified as an unknown field, a type mismatch, or a missing
+required field; a missing field is reported at the path of the object that
+lacks it.
 
 ## YAML Data Preservation
 
@@ -46,6 +144,31 @@ Duplicate mapping keys are rejected. YAML aliases are expanded within parser
 resource limits. Manifest streams apply complexity limits per document, so
 combining many resources does not impose a fixed document-count ceiling. Empty
 and null documents are omitted from manifest streams.
+
+## Embedding JSON in templates
+
+Templates print a list or mapping in Python-like syntax, such as
+`{'enabled': true}`, which is not JSON. To embed a value as JSON, for example
+in a ConfigMap or an annotation, serialize it with the `tojson` filter:
+
+```yaml
+data:
+  config.json: '{{ values.config | tojson }}'
+```
+
+`tojson` escapes quotes, newlines, and backslashes as JSON requires, and writes
+`<`, `>`, `&`, and `'` as `\u` escapes. That keeps the output valid JSON inside a
+single-quoted YAML string. For readable output in a block scalar, indent the
+serialized lines to the block's depth:
+
+```yaml
+data:
+  config.json: |
+    {{ values.config | tojson(indent=2) | indent(4) }}
+```
+
+Other values print as written in manifest templates, without JSON or HTML
+escaping.
 
 ## The Release's Application
 
@@ -74,8 +197,7 @@ none.
 
 ## Namespaces in diff and apply
 
-`render` never connects to Kubernetes and leaves missing namespaces unset, as
-the published tree does. `diff` and `apply` fill them in for namespaced kinds,
+`render` leaves missing namespaces unset, as the published tree does. `diff` and `apply` fill them in for namespaced kinds,
 as Argo CD does when it syncs:
 
 1. the resource's own `metadata.namespace`;
@@ -85,6 +207,32 @@ as Argo CD does when it syncs:
 
 The kube context's default namespace is never used, so the result depends only
 on the declaration.
+
+## Without GitOps configuration
+
+`render`, `diff`, `apply`, `release`, and [`argocd`](/nyl/reference/cli/argocd/)
+also work in a project that declares no DeploymentTarget, or that has no
+`nyl.toml` or Git worktree, when `--context` names a kube context. That flag is
+the explicit opt-in to a cluster the declaration does not describe:
+
+- The Kubernetes version and API versions Helm renders with come from the live
+  cluster instead of a Cluster resource; `--kube-version` and
+  `--kube-api-versions` are rejected.
+- There are no target or Cluster values and no ApplicationGroup bindings, so a
+  Release is settled alone, as without a target.
+- Namespaces follow the same rules as above: the context's default namespace is
+  still never used.
+- Nothing checks the context against a declared server, because there is none.
+
+When the project declares DeploymentTargets, a target is always used, even with
+`--context`; the flag then only selects how to reach its Cluster, and Nyl checks
+that context against the Cluster's server. `render` with a target never
+connects. Without `--target` or `--context` and without targets, `diff`,
+`apply`, and `release` fail and name both flags.
+
+`render-tree`, `diff-tree`, and `publish-tree` have no such mode, so nothing
+read from a live cluster reaches a publication. In this mode a chart's Helm
+[`lookup`](#helm-lookup) reads the context's cluster by default.
 
 ## Pruning and deletion
 

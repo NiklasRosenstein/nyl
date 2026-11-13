@@ -22,6 +22,7 @@ pub mod catalog;
 pub mod command;
 #[cfg(any(test, feature = "test-kinds"))]
 pub mod fake;
+pub mod kubernetes_publication;
 pub mod oci_image;
 pub mod process;
 pub mod registry;

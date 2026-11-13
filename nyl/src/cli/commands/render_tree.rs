@@ -28,6 +28,9 @@ pub struct RenderTreeArgs {
     #[command(flatten)]
     pub progress: TreeProgressArgs,
 
+    #[command(flatten)]
+    pub lookup: nyl_render::helm::lookup::LookupArgs,
+
     /// Project directory or a path beneath it.
     #[arg(default_value = ".")]
     pub path: PathBuf,
@@ -59,10 +62,12 @@ pub struct RenderTreeArgs {
 
 #[allow(clippy::too_many_lines)] // One linear command flow from arguments to the rendered tree.
 pub async fn execute(args: RenderTreeArgs) -> Result<()> {
+    args.lookup.refuse_live("render-tree")?;
     args.validation
         .validate_outputs(true, &[], std::slice::from_ref(&args.output_dir))?;
     let started = Instant::now();
     let initial = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
+    nyl_render::gitops::shared_catalog::validate_with_samples(&initial)?;
     let target_name = resolve_deployment_target_name(&initial, args.target.as_deref())?;
     let target = initial
         .get(GitOpsResourceKind::DeploymentTarget, &target_name)
@@ -111,6 +116,7 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         TreeRenderOptions {
             allow_secret_inputs: args.allow_secret_inputs,
             publication_read: nyl_render::gitops::inputs::PublicationRead::from_offline(args.offline),
+            refresh_lookup: args.lookup.refresh(),
             ..TreeRenderOptions::default()
         },
     )
@@ -151,7 +157,8 @@ pub async fn execute(args: RenderTreeArgs) -> Result<()> {
         source_commit,
         dirty,
         inputs,
-    );
+    )
+    .delivered_directly(compiled.target.is_direct());
     reconcile_rendered_tree_with_options(
         &output_root,
         &compiled.owned_files(),
@@ -241,6 +248,7 @@ fn render_index_owner(target_name: &str, target: &DeploymentTarget) -> RenderInd
         false,
         BTreeMap::new(),
     )
+    .delivered_directly(target.is_direct())
 }
 
 fn format_file_count(count: usize) -> String {

@@ -12,6 +12,7 @@ use super::{
     resolve_strip_empty_metadata_labels_mode, ProvenanceRoots, RenderResource,
 };
 use crate::config::ProjectConfig;
+use crate::helm::lookup::{record_observed, LookupConfig, LookupHandle, ReleaseIdentity, ScopeSource};
 use crate::helm::HelmChartResolver;
 use crate::kubernetes::ResourceKey;
 use crate::postprocess::apply_kyverno_policies;
@@ -36,6 +37,9 @@ pub struct RenderSession {
     missing_capabilities_error: Option<String>,
     cache: Option<RenderCache>,
     git_offline: bool,
+    /// How Helm `lookup` is answered for charts that declare it. `None`: no
+    /// source was configured, and nothing is found.
+    lookup: Option<LookupConfig>,
 }
 
 /// Options that select one bundle and control its recursive expansion.
@@ -54,6 +58,16 @@ pub struct RenderRequest<'a> {
     pub strip_empty_metadata_labels_default: bool,
     /// Resolved inputs of a Release that declares inputs, exposed as `inputs.*`.
     pub inputs: Option<&'a serde_json::Map<String, Value>>,
+    /// Where the Release is published, for the Helm `lookup` of charts that
+    /// declare it. Without it, `lookup` finds nothing.
+    pub lookup_scope: Option<ScopeSource>,
+    /// The `destinationNamespace` of the ApplicationGroup that deploys the
+    /// Release, which documents without a namespace take instead of the
+    /// Release's own. Pod template checksums resolve references in it.
+    pub destination_namespace: Option<&'a str>,
+    /// The namespace documents take when the file declares no Release, as
+    /// `apply` and `diff` take it from `--namespace`.
+    pub namespace_without_release: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +88,9 @@ impl<'a> RenderRequest<'a> {
             track_parent: false,
             strip_empty_metadata_labels_default: false,
             inputs: None,
+            lookup_scope: None,
+            destination_namespace: None,
+            namespace_without_release: None,
         }
     }
 }
@@ -305,6 +322,7 @@ impl RenderSession {
             missing_capabilities_error: None,
             cache: None,
             git_offline: false,
+            lookup: None,
         })
     }
 
@@ -358,6 +376,7 @@ impl RenderSession {
                 missing_capabilities_error,
                 cache: None,
                 git_offline: false,
+                lookup: None,
             }
         };
         Ok(session)
@@ -384,6 +403,18 @@ impl RenderSession {
     /// Resolve Git chart selectors from cached refs without contacting remotes.
     pub fn set_git_offline(&mut self, offline: bool) {
         self.git_offline = offline;
+    }
+
+    /// Answer the Helm `lookup` of charts that declare it from `lookup`.
+    pub fn set_lookup(&mut self, lookup: Option<LookupConfig>) {
+        self.lookup = lookup;
+    }
+
+    /// Answer the Helm `lookup` of charts that declare it from `lookup`.
+    #[must_use]
+    pub fn with_lookup(mut self, lookup: Option<LookupConfig>) -> Self {
+        self.set_lookup(lookup);
+        self
     }
 
     /// Select cached-ref resolution for Git chart versions.
@@ -421,21 +452,26 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
     ) -> Result<RenderedBundle> {
-        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None)
+        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None, None, None)
             .await
     }
 
-    /// Render one Release entry file of a target with its resolved inputs.
+    /// Render one Release entry file of a target with its resolved inputs, and
+    /// say where the Release is published, for the Helm `lookup` of its charts.
     pub async fn render_release_file_with_inputs(
         &self,
         path: &Path,
         provenance_root: &Path,
         worktree_root: Option<&Path>,
         inputs: Option<&serde_json::Map<String, Value>>,
+        lookup_scope: Option<ScopeSource>,
+        destination_namespace: Option<&str>,
     ) -> Result<RenderedBundle> {
         let mut request = RenderRequest::new(path, Some(provenance_root));
         request.provenance_worktree_root = worktree_root;
         request.inputs = inputs;
+        request.lookup_scope = lookup_scope;
+        request.destination_namespace = destination_namespace;
         self.render(request).await
     }
 
@@ -483,7 +519,13 @@ impl RenderSession {
                 NylError::from(error).with_render_provenance(resource.provenance.resource(&resource.value).to_string())
             })?;
         }
+        let lookup_handle = LookupHandle::new(
+            self.lookup.clone().unwrap_or_default(),
+            release_identity(&bundle.resources),
+            request.lookup_scope.clone(),
+        );
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
+        let has_lookup_chart = resources.iter().any(declares_lookup);
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
         let mut cacheable = cache_bypass_reasons.is_empty();
         let ReleaseCacheLookup {
@@ -497,6 +539,7 @@ impl RenderSession {
                 &bundle.dependency_directories,
                 &resources,
                 &request,
+                &lookup_handle,
             )?
         } else {
             ReleaseCacheLookup {
@@ -530,7 +573,8 @@ impl RenderSession {
         let mut pending = resources;
         let artifact_resolver =
             super::artifact::ArtifactResolver::new(&self.project_root, &self.project_config, self.cache.clone())?
-                .with_git_offline(self.git_offline);
+                .with_git_offline(self.git_offline)
+                .with_lookup(Some(lookup_handle.clone()));
         for _ in 0..request.max_depth {
             let mut next = Vec::new();
             for resource in pending {
@@ -601,7 +645,40 @@ impl RenderSession {
         } else {
             apply_kyverno_policies(&manifests, &global)?
         };
-        let (manifests, duplicates) = deduplicate_manifests(manifests)?;
+        let (mut manifests, duplicates) = deduplicate_manifests(manifests)?;
+        // The checksums are derived from the final documents, after everything
+        // that can change a ConfigMap, a Secret, or a Pod template. Documents
+        // without a namespace take the group's destination namespace, else the
+        // Release's, else the one the command was given for a file without a Release.
+        let default_namespace = request
+            .destination_namespace
+            .or(release.as_ref().map(|release| release.metadata.namespace.as_str()))
+            .or(request.namespace_without_release)
+            .filter(|namespace| !namespace.trim().is_empty());
+        let options = super::pod_checksum::Options {
+            default_namespace,
+            // `--only-source-kind` renders a part of the Release, which may lack
+            // the documents a checksum reads.
+            partial: request.only_source_kind.is_some(),
+        };
+        match super::pod_checksum::apply(&mut manifests, &options) {
+            Ok(warnings) => {
+                for warning in warnings {
+                    tracing::warn!("{warning}");
+                }
+            }
+            Err(error) => {
+                let provenance = ResourceKey::from_json_value(&manifests[error.document])
+                    .ok()
+                    .and_then(|key| manifest_provenance.get(&key))
+                    .map(ToString::to_string);
+                let error = error.into_nyl();
+                return Err(match provenance {
+                    Some(provenance) => error.with_render_provenance(provenance),
+                    None => error,
+                });
+            }
+        }
         let strip_empty_metadata_labels = strip_mode.should_strip(request.strip_empty_metadata_labels_default);
         let manifests = prepare_manifests_for_output(&manifests, strip_empty_metadata_labels);
 
@@ -615,10 +692,43 @@ impl RenderSession {
             });
         }
 
-        let cache_dependencies = cache_probe
+        // What the charts looked up is an input of this Release, and of the
+        // target that renders it.
+        let lookups = lookup_handle.observed();
+        if lookups.is_empty() && has_lookup_chart {
+            // Nothing was looked up, but the record names the scope it was made for all the
+            // same, which is what the next render's key asks for.
+            if let Some(probe) = &mut cache_probe {
+                probe
+                    .recorder
+                    .record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup_handle.scope_input())?;
+            }
+        }
+        if !lookups.is_empty() {
+            if let Some(config) = self.lookup.as_ref().filter(|config| !config.cacheable()) {
+                cacheable = false;
+                cache_bypass_reasons.insert(format!("Helm lookup reads {}", config.describe()));
+            }
+            if let Some(probe) = &mut cache_probe {
+                record_observed(&mut probe.recorder, &lookups);
+                probe
+                    .recorder
+                    .record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup_handle.scope_input())?;
+            }
+        }
+        let mut cache_dependencies = cache_probe
             .as_ref()
             .map(|probe| probe.recorder.filesystem_dependencies())
             .unwrap_or_default();
+        if cache_probe.is_none() && !lookups.is_empty() {
+            // The target above records what its Releases looked up even when
+            // this Release's own cache is off.
+            if let Some(cache) = &self.cache {
+                let mut recorder = cache.recorder();
+                record_observed(&mut recorder, &lookups);
+                cache_dependencies.extend(recorder.filesystem_dependencies());
+            }
+        }
         if cache_probe.as_ref().is_some_and(|probe| !probe.recorder.is_cacheable()) {
             cacheable = false;
             cache_bypass_reasons.insert("unobservable filesystem dependency".to_string());
@@ -640,6 +750,8 @@ impl RenderSession {
         Ok(rendered)
     }
 
+    // Each argument is one independent input of the Release's cache key.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn prepare_release_cache(
         &self,
         template_context: &TemplateContext,
@@ -648,6 +760,7 @@ impl RenderSession {
         dependency_directories: &[PathBuf],
         resources: &[RenderResource],
         request: &RenderRequest<'_>,
+        lookup: &LookupHandle,
     ) -> Result<ReleaseCacheLookup> {
         let Some(cache) = &self.cache else {
             return Ok(ReleaseCacheLookup {
@@ -697,6 +810,8 @@ impl RenderSession {
                 "maxDepth": request.max_depth,
                 "trackParent": request.track_parent,
                 "stripEmptyMetadataLabelsDefault": request.strip_empty_metadata_labels_default,
+                "destinationNamespace": request.destination_namespace,
+                "namespaceWithoutRelease": request.namespace_without_release,
             }),
         )?;
         cache.record_renderer_tools(&mut recorder)?;
@@ -705,6 +820,22 @@ impl RenderSession {
         }
         if let Some(previous) = &previous {
             recorder.replay_filesystem_dependencies(previous)?;
+        }
+        // Where the Release is published decides which objects its lookups read, so a render
+        // for another group (or for none) never reuses one that looked up in this group's
+        // Release. A Release records it when its own HelmCharts declare `lookup`, and when the
+        // previous render recorded one because a chart it expanded did.
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.dependencies.contains_key(LOOKUP_SCOPE_DEPENDENCY))
+            || resources.iter().any(declares_lookup)
+        {
+            recorder.record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup.scope_input())?;
+        }
+        if let Some(previous) = &previous {
+            // The lookups the previous render made are inputs: the record is
+            // reused only while each still returns what it did.
+            recorder.replay_lookup_dependencies(previous, lookup.config());
         }
         let current = recorder.clone().finish("release-provenance-v2", String::new());
         let cached = if cache.bypasses_render_artifacts() {
@@ -980,6 +1111,28 @@ fn target_template_context(target: &DeploymentTarget, trusted_source: bool) -> R
     Ok(context)
 }
 
+/// The cache dependency that records where a Release that looked up objects is
+/// published; only such a Release records one.
+const LOOKUP_SCOPE_DEPENDENCY: &str = "lookup-scope";
+
+/// Whether a resource is a HelmChart that declares `lookup`.
+fn declares_lookup(resource: &RenderResource) -> bool {
+    resource.value.get("kind").and_then(Value::as_str) == Some("HelmChart")
+        && resource.value.pointer("/spec/lookup").is_some()
+}
+
+/// The Release a bundle declares: the Helm release its charts render for, and
+/// the namespace they render into by default.
+fn release_identity(resources: &[RenderResource]) -> Option<ReleaseIdentity> {
+    let release = resources.iter().find(|resource| Release::is_release(&resource.value))?;
+    let name = release.value.pointer("/metadata/name")?.as_str()?;
+    let namespace = release.value.pointer("/metadata/namespace")?.as_str()?;
+    Some(ReleaseIdentity {
+        name: name.to_owned(),
+        namespace: namespace.to_owned(),
+    })
+}
+
 fn required_cluster_capabilities(cluster: &Cluster) -> Result<(String, Vec<String>)> {
     let capabilities = cluster
         .spec
@@ -1017,6 +1170,7 @@ mod tests {
             "metadata": {"name": "production", "labels": {"environment": "production"}},
             "spec": {
                 "clusterRef": {"name": "prod-eu-1"},
+                "reconciler": {"argocd": {}},
                 "values": {"environment": "production", "nested": {"target": true}},
                 "publication": {
                     "repository": {"repoURL": "https://example.invalid/deploy.git"},
@@ -1408,5 +1562,156 @@ spec:
                 .err()
                 .unwrap();
         assert!(error.to_string().contains("symbolic links"));
+    }
+
+    /// A source of lookups whose objects the test changes between renders.
+    struct Moving {
+        value: std::sync::Arc<std::sync::Mutex<String>>,
+        cacheable: bool,
+    }
+
+    impl crate::helm::lookup::LookupBackend for Moving {
+        fn describe(&self) -> String {
+            "a moving source".to_owned()
+        }
+
+        fn store(
+            &self,
+            scope: &crate::helm::lookup::ReleaseScope,
+        ) -> std::sync::Arc<dyn crate::helm::lookup::ObjectStore> {
+            let documents = if scope.is_none() {
+                Vec::new()
+            } else {
+                vec![serde_json::json!({
+                    "apiVersion": "v1", "kind": "ConfigMap",
+                    "metadata": {"name": "settings", "namespace": scope.namespace},
+                    "data": {"value": *self.value.lock().unwrap()},
+                })]
+            };
+            std::sync::Arc::new(
+                crate::helm::lookup::ObjectSet::from_documents(documents, &|_, _| Some(true), &scope.namespace)
+                    .unwrap(),
+            )
+        }
+
+        fn cacheable(&self) -> bool {
+            self.cacheable
+        }
+    }
+
+    fn write_lookup_release(root: &Path) {
+        let chart = root.join("chart");
+        fs::create_dir_all(chart.join("templates")).unwrap();
+        fs::write(chart.join("Chart.yaml"), "apiVersion: v2\nname: seen\nversion: 1.0.0\n").unwrap();
+        fs::write(
+            chart.join("templates/seen.yaml"),
+            "{{- $cm := lookup \"v1\" \"ConfigMap\" .Release.Namespace \"settings\" }}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: seen\ndata:\n  value: {{ dig \"data\" \"value\" \"none\" $cm | quote }}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app.yaml"),
+            format!(
+                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: seen\n  namespace: apps\n---\napiVersion: {API_VERSION}\nkind: HelmChart\nmetadata:\n  name: seen\n  namespace: apps\nspec:\n  chart:\n    name: chart\n  lookup: {{}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    async fn render_seen(session: &RenderSession) -> RenderedBundle {
+        let mut request = RenderRequest::new(Path::new("app.yaml"), Some(&session.project_root));
+        request.lookup_scope = Some(crate::helm::lookup::ScopeSource::new(|release| {
+            Ok(Some(crate::helm::lookup::ReleaseScope {
+                directory: format!("group/{}", release.name),
+                namespace: release.namespace.clone(),
+                release: Some(release.clone()),
+            }))
+        }));
+        session.render(request).await.unwrap()
+    }
+
+    fn seen(bundle: &RenderedBundle) -> String {
+        bundle
+            .manifests
+            .iter()
+            .find(|manifest| manifest["metadata"]["name"] == "seen")
+            .and_then(|manifest| manifest["data"]["value"].as_str())
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Catches a Release cached across a change in what its charts looked up: the
+    /// cached render is reused while every lookup returns what it did, and the
+    /// Release is rendered again once one returns something else.
+    #[tokio::test]
+    async fn a_cached_release_is_reused_only_while_its_lookups_return_the_same_results() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        write_lookup_release(temp.path());
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
+        let value = std::sync::Arc::new(std::sync::Mutex::new("one".to_owned()));
+        let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        session.set_cache(Some(
+            RenderCache::with_root(temp.path().join("cache"), CacheMode::Default).unwrap(),
+        ));
+        session.set_lookup(Some(crate::helm::lookup::LookupConfig::new(
+            std::sync::Arc::new(Moving {
+                value: value.clone(),
+                cacheable: true,
+            }),
+            std::collections::BTreeSet::new(),
+        )));
+
+        let first = render_seen(&session).await;
+        assert_eq!(seen(&first), "one");
+        assert!(first.cacheable);
+        assert!(
+            first.cache_dependencies.keys().any(|name| name.starts_with("lookup")),
+            "the target above records what the Release looked up: {:?}",
+            first.cache_dependencies.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(seen(&render_seen(&session).await), "one");
+
+        *value.lock().unwrap() = "two".to_owned();
+        assert_eq!(
+            seen(&render_seen(&session).await),
+            "two",
+            "a changed lookup result invalidates the cached Release"
+        );
+    }
+
+    /// Catches a render that read the live cluster being cached: what the
+    /// cluster holds changes without Nyl observing it, so every render looks it up again.
+    #[tokio::test]
+    async fn a_render_that_used_a_live_source_is_never_cached() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        write_lookup_release(temp.path());
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
+        let value = std::sync::Arc::new(std::sync::Mutex::new("one".to_owned()));
+        let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        session.set_cache(Some(
+            RenderCache::with_root(temp.path().join("cache"), CacheMode::Default).unwrap(),
+        ));
+        session.set_lookup(Some(crate::helm::lookup::LookupConfig::new(
+            std::sync::Arc::new(Moving {
+                value: value.clone(),
+                cacheable: false,
+            }),
+            std::collections::BTreeSet::new(),
+        )));
+
+        let first = render_seen(&session).await;
+        assert_eq!(seen(&first), "one");
+        assert!(!first.cacheable);
+        assert!(
+            first
+                .cache_bypass_reasons
+                .iter()
+                .any(|reason| reason.contains("Helm lookup reads")),
+            "{:?}",
+            first.cache_bypass_reasons
+        );
+        *value.lock().unwrap() = "two".to_owned();
+        assert_eq!(seen(&render_seen(&session).await), "two");
     }
 }

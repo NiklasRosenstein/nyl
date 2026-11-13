@@ -30,6 +30,8 @@ fn real_native(driver: &TerraformDriver, binary: &str) {
     let tools = ProcessRunner::new();
     let now = "2026-10-28T12:00:00Z".parse().unwrap();
     let mut context = ExecutionContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+        clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
         source_roots: BTreeMap::new(),
         unit: "dev/network".parse().unwrap(),
         operation: DriverOperation::Reconcile,
@@ -48,6 +50,8 @@ fn real_native(driver: &TerraformDriver, binary: &str) {
         commit_identity: None,
         cache_dir: root.path().join("cache"),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+        dirty_source: false,
     };
     let unit = desired(&spec);
     let Supported::Supported(first) = driver.reconcile(&context, &unit).unwrap() else {
@@ -132,6 +136,8 @@ fn real_empty(driver: &TerraformDriver, count_zero: bool) {
     let tools = ProcessRunner::new();
     let now = "2026-10-28T12:00:00Z".parse().unwrap();
     let mut context = ExecutionContext {
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+        clock: &nyl_core::orchestration::ports::FrozenClock(chrono::DateTime::<chrono::Utc>::MIN_UTC),
         source_roots: BTreeMap::new(),
         unit: "dev/network".parse().unwrap(),
         operation: DriverOperation::Reconcile,
@@ -150,6 +156,8 @@ fn real_empty(driver: &TerraformDriver, count_zero: bool) {
         commit_identity: None,
         cache_dir: root.path().join("cache"),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+        dirty_source: false,
     };
     let Supported::Supported(first) = driver.reconcile(&context, &unit).unwrap() else {
         panic!("unsupported")

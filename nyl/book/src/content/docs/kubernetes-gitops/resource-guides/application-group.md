@@ -183,7 +183,19 @@ ordinary release overrides are rejected.
 ## Structural templating
 
 The ApplicationGroup `spec` can vary per target or render to no document to
-omit the group. Its API version, kind, and metadata name remain static. Remote
+omit the group, which then counts as `enabled: false` for that target. Any other
+result that is not one ApplicationGroup with the same identity is an error;
+Nyl never drops a selected group silently. Its API version, kind, and metadata
+name remain static, and so do its `metadata.labels`, which targets select on
+before rendering. A document that is valid YAML before rendering may write them
+in any YAML form, with string values and no template syntax. One that is not,
+such as a spec wrapped in `{% if %}`, must write them directly under `metadata`
+as a block mapping of plain `key: value` lines or a one-line `{key: value}`
+mapping, with no template syntax among them, no label after a template line, and
+no anchors, aliases, or merge keys. A statement right after the labels, such as
+the `{% if %}` that wraps the spec, is fine. Nyl rejects any other form instead
+of reading it as fewer labels, and rejects a group whose rendered labels differ
+from the literal ones. Remote
 source coordinates and commit locks must remain statically parseable for
 `nyl update source-locks`.
 
@@ -192,3 +204,99 @@ source coordinates and commit locks must remain statically parseable for
 - [Project structure and discovery](/nyl/kubernetes-gitops/project-structure/)
 - [Targets and cluster variation](/nyl/kubernetes-gitops/targets-and-clusters/)
 - [Trust and admission boundaries](/nyl/kubernetes-gitops/security/)
+
+## Retiring Applications safely
+
+Argo CD synchronizes AppProject permissions independently of Application pruning.
+Disabling automatic catalog pruning does not preserve those permissions. During
+cascading deletion, Argo CD skips managed resources outside the Application's
+current AppProject scope, which can leave resources orphaned even with a deletion
+finalizer. This filtering happens in
+[`getPermittedAppLiveObjects()` and `finalizeApplicationDeletion()`](https://github.com/argoproj/argo-cd/blob/master/controller/appcontroller.go).
+
+Keep cleanup scope in the group-owned generated project with additive settings:
+
+```yaml
+apiVersion: k8s.gitops.nyl/v1
+kind: ApplicationGroup
+metadata:
+  name: workloads
+spec:
+  applicationNamespace: argocd
+  retainedProjectNamespaces:
+    - retired-service
+  retainedNamespaceResourceWhitelist:
+    - group: batch
+      kind: CronJob
+  retainedClusterResourceWhitelist:
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: retired-service-reader
+```
+
+`retainedProjectNamespaces` defaults to `[]`. It adds concrete Kubernetes namespace
+names to the existing inferred or explicit destinations on the target Cluster.
+Duplicates are removed deterministically. It participates in the existing generated
+Namespace-management permissions when namespace creation is enabled, and creates no
+Namespace, Release, or Application. Wildcards and invalid namespace names are rejected.
+The setting keeps project inference enabled and needs no complete `projectTemplate`.
+With `projectRef`, retain scope in the owning AppProjectDefinition instead; the
+retention setting is rejected for independently managed and external projects.
+
+A generated project derives its resource whitelists from the kinds the group
+renders, so removing the last resource of a kind narrows the whitelist in the same
+publication, whether its Application retires or keeps running. Argo CD then neither
+prunes nor deletes the live resources of that kind. `retainedNamespaceResourceWhitelist`
+and `retainedClusterResourceWhitelist` keep such permissions: their entries take the
+form of the AppProject `namespaceResourceWhitelist` and `clusterResourceWhitelist`
+entries and are appended to the derived or declared lists, without duplicates. A
+list that already admits every resource is left as is. Cluster entries can name one
+object; namespaced entries cannot, because Argo CD's namespaced resource permissions
+apply to a whole kind. Like `retainedProjectNamespaces`, they are rejected with `projectRef`.
+
+Retention does not override explicit destination denies, resource blacklists, or
+other restrictions. A change of cluster or project identity can also require
+retaining the original destination or project declaration.
+
+`diff-tree` and `publish-tree` fail with `NYL_PROJECT_SCOPE_CONTRACTION` when their
+baseline contains a cascading Application whose retiring resources lose effective
+project permission. The check uses target-owned catalog sources and rendered resources,
+including additional namespaces, Namespace objects, and other cluster-scoped
+resources such as ClusterRoles and CRDs, which Argo CD permits by the cluster
+resource lists alone. A resource rendered without `metadata.namespace` is checked in
+its Application's destination namespace, so moving the destination retires it from
+the old one. The Cluster's [recorded capabilities](/nyl/kubernetes-gitops/resource-guides/cluster/),
+CRDs in either publication, and the fixed scopes of built-in Kubernetes kinds tell namespaced kinds from cluster-scoped ones; any other kind of unknown scope is
+checked both ways. Every document of a multi-document file counts, so baselines that
+store a Release's stream in one `resources.yaml` are compared resource by resource. The diagnostic names the retention entries
+that restore each permission and anything they cannot restore. Equivalent wildcard
+permission is sufficient. Resources Argo CD intentionally leaves in place need no
+cleanup permission: `Delete=false` in their `argocd.argoproj.io/sync-options` when
+their Application is deleted, `Prune=false` when a running Application stops
+rendering them. Applications configured for orphan deletion do not require cascading
+cleanup. External project permissions absent from the catalog and live Argo CD
+cluster registration are outside the published snapshots the guard evaluates.
+
+For automatic catalog synchronization with manual Application pruning:
+
+1. Remove or replace the Application in source. Run `diff-tree` in MR CI to detect
+   simultaneous cleanup permission contractions.
+2. Add the reported entries to `retainedProjectNamespaces`,
+   `retainedNamespaceResourceWhitelist`, and `retainedClusterResourceWhitelist`,
+   preserving existing entries.
+3. Publish. Let Argo CD synchronize the catalog and project permissions.
+4. Manually prune the retiring Application from the catalog, then complete any
+   required resource deletion confirmations.
+5. Verify live cascading deletion has completed before removing retention entries
+   and publishing the narrower project.
+
+**This is a publication-transition check, not confirmation of live deletion.** Once
+an Application is absent from the comparison baseline, the guard cannot establish
+whether its live deletion has completed. A successful publication does not prove
+there are no orphaned resources. Operators own that verification. Retained storage
+remains governed by its reclaim and deletion policies.
+
+The check needs no live Kubernetes access and keeps no durable retirement state.
+It does not change automatic pruning, finalizers, or deletion policies. For a
+reviewed exception, both commands accept `--ignore-project-scope-contraction` and
+print the findings as a warning; baseline integrity errors still fail.

@@ -1,8 +1,9 @@
-//! `nyl detect-drift -e <env>` and `nyl attest -e <env>`: checks of current
-//! receipts by their drivers.
+//! `nyl detect-drift -e <env>`, `nyl attest -e <env>`, and `nyl observe -e
+//! <env>`: checks of current receipts by their drivers.
 //!
 //! Contract: [Drift](../../../../design/orchestration-core.md#drift),
 //! [Attestations](../../../../design/orchestration-core.md#attestations),
+//! [Observed values](../../../../design/orchestration-core.md#observed-values),
 //! [Commands](../../../../design/orchestration-core.md#commands),
 //! [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases)
 //! (a check takes the lease, its deadline set by the timeouts of the units
@@ -12,11 +13,23 @@
 //! Reads one snapshot, picks the units the check covers
 //! ([`crate::rules::checks::targets`]), checks each out at its effective
 //! commit in a concurrency slot ([`super::run::slots`]), calls the driver's
-//! `detect_drift` or `attest`, and writes one observed commit (operation
-//! `detect-drift` or `attest`) with the drift records or the attestations;
-//! it never writes a receipt and writes nothing when nothing changed. The
-//! report is a `DetectDriftReport` or an `AttestReport`, rendered like a
-//! reconcile's.
+//! `detect_drift`, `attest`, or `observe`, and writes one observed commit
+//! (operation `detect-drift`, `attest`, or `observe`) with the drift records,
+//! the attestations, or the observed values; it never writes a receipt and
+//! writes nothing when nothing changed. The report is a `DetectDriftReport`,
+//! an `AttestReport`, or an `ObserveReport`, rendered like a reconcile's.
+//! `observe` also names, with `NYL-OBSERVATION-CHANGED`, the consumers whose
+//! stored resolution of an observed value no longer equals the recorded one;
+//! they are work for the next reconcile. They include consumers in other
+//! environments that read the value through a cross-environment reference:
+//! their snapshots are read without a lease and never written, and a problem
+//! with one is a warning, because they are read only for this advice
+//! ([Other environments](../../../../design/orchestration-core.md#other-environments)).
+//!
+//! `nyl reconcile --detect-drift` runs the same drift check inside a
+//! reconcile, under the reconcile's lease ([`detect_in_run`]): the driver call,
+//! the drift record, and its settling are this module's, and the reconcile
+//! decides what to select and writes the records in its own transition commit.
 //!
 //! The lease it holds lists no units: a check has no effects, so a run
 //! taking over from a dead check has nothing to mark uncertain. It writes
@@ -39,17 +52,20 @@
 //! checkout's directory, so a project moved since the unit executed is
 //! still checked where it reconciled.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{AttestationCheck, DriftDetection, DriverSet, ExecutionContext, Supported};
+use nyl_core::orchestration::driver::{
+    AttestationCheck, DriftDetection, DriverSet, ExecutionContext, ObservedValues, Supported,
+};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, TransitionChanges};
-use nyl_core::orchestration::state::{Attestation, DriftRecord, StateLocation};
+use nyl_core::orchestration::state::{Attestation, DriftRecord, ObservationRecord, StateLocation};
 use nyl_core::orchestration::time::{Duration, Timestamp};
 
 use super::lease::{self, HeldLease};
+use super::peers::Peers;
 use super::run::slots::Slots;
 use super::run::{
     execution_credentials, fresh_directory, join, longest_timeout, off_runtime, project_path, unit_timeout, RunContext,
@@ -57,10 +73,12 @@ use super::run::{
 };
 use super::{store_error, Settings};
 use crate::rules::checks::{
-    attest_check, attestations, drift_check, drift_record, settle_attestations, settle_drift, targets, warnings, Check,
-    Target,
+    attest_check, attestations, drift_check, drift_record, observe_check, settle_attestations, settle_drift, targets,
+    warnings, Check, Target,
 };
 use crate::rules::drift::stored_drift_repair;
+use crate::rules::observed_values::{self, SettleInputs};
+use crate::rules::peers::Need;
 use crate::rules::selection::execution_recovery;
 use crate::rules::sources::effective_commit;
 use crate::rules::unit_state::receipt_state;
@@ -77,6 +95,11 @@ pub fn attest(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
     check(context, request, Check::Attest)
 }
 
+/// `nyl observe -e <env>`; `request.units` limits the units observed.
+pub fn observe(context: &RunContext<'_>, request: &RunRequest) -> RunReport {
+    check(context, request, Check::Observe)
+}
+
 fn check(context: &RunContext<'_>, request: &RunRequest, check: Check) -> RunReport {
     // Drivers may block on runtimes of their own: run outside any caller's.
     let environment = off_runtime(|| check_environment(context, request, check));
@@ -90,16 +113,32 @@ fn check(context: &RunContext<'_>, request: &RunRequest, check: Check) -> RunRep
 enum Records {
     Drift(DriftRecord),
     Attestations(BTreeMap<String, Attestation>),
+    /// The unit's observed values after the read, and the observations whose
+    /// recorded value changed.
+    Observations {
+        record: Option<ObservationRecord>,
+        changed: BTreeSet<String>,
+    },
 }
 
 /// What checking one unit found.
-struct Checked {
-    name: UnitName,
+pub(super) struct Checked {
+    pub(super) name: UnitName,
     /// The documents to store, `None` when the driver reported nothing to record.
     records: Option<Records>,
-    result: UnitCheck,
-    message: Option<String>,
-    error: Option<Finding>,
+    pub(super) result: UnitCheck,
+    pub(super) message: Option<String>,
+    pub(super) error: Option<Finding>,
+}
+
+impl Checked {
+    /// The drift record of a `detect-drift` check that concluded.
+    pub(super) fn drift_record(&self) -> Option<&DriftRecord> {
+        match &self.records {
+            Some(Records::Drift(record)) => Some(record),
+            _ => None,
+        }
+    }
 }
 
 fn check_environment(context: &RunContext<'_>, request: &RunRequest, check: Check) -> EnvironmentRunReport {
@@ -153,25 +192,37 @@ fn check_environment(context: &RunContext<'_>, request: &RunRequest, check: Chec
     // A run exists only once it holds the lease: a refused one reports none.
     report.run = Some(run.clone());
 
-    if let Err(finding) = holding(context, request, check, &mut held, &mut report) {
-        report.errors.push(finding);
+    let mut observed = None;
+    match holding(context, request, check, &mut held, &mut report) {
+        Ok(after) => observed = after,
+        Err(finding) => report.errors.push(finding),
     }
     if let Err(error) = lease::release(base, &held, true) {
         report.warnings.push(store_error(environment, &error));
+    }
+    // Other environments are read once the lease is released, so the time
+    // it is held does not grow with their number.
+    if let Some(observed) = observed {
+        report
+            .warnings
+            .extend(other_environment_warnings(context, request, &observed));
     }
     finish(report)
 }
 
 /// Everything a check does while it holds the lease: read the snapshot
 /// again (another run may have changed state since), check, and write the
-/// changed documents in one fenced commit.
+/// changed documents in one fenced commit. An `observe` of an environment
+/// that declares observations returns the snapshot as it stands with the
+/// observed values written, which the consumers in other environments are
+/// judged against.
 fn holding(
     context: &RunContext<'_>,
     request: &RunRequest,
     check: Check,
     held: &mut HeldLease,
     report: &mut EnvironmentRunReport,
-) -> Result<(), Finding> {
+) -> Result<Option<EnvironmentSnapshot>, Finding> {
     let base = context.base;
     let environment = &request.environment;
     let location = &request.location;
@@ -195,11 +246,36 @@ fn holding(
                     changes.attestations.insert(result.name.clone(), set);
                 }
             }
+            Some(Records::Observations { record, changed }) => {
+                if snapshot.observations.get(&result.name) != record.as_ref() {
+                    changes.observations.insert(result.name.clone(), record.clone());
+                }
+                if !changed.is_empty() {
+                    report
+                        .observations_changed
+                        .insert(result.name.clone(), changed.iter().cloned().collect());
+                }
+            }
+        }
+    }
+    let mut after = None;
+    if check == Check::Observe {
+        let records = records_after(&snapshot, &changes.observations);
+        report.warnings.extend(changed_consumer_warnings(
+            &request.environment,
+            &snapshot,
+            &records,
+            context.base.clock.now(),
+        ));
+        if snapshot.desired.values().any(observed_values::declares) {
+            let mut observed = snapshot.clone();
+            observed.observations = records;
+            after = Some(observed);
         }
     }
     report_units(check, report, &snapshot, &planned, results, context.drivers);
     if changes.is_empty() {
-        return Ok(());
+        return Ok(after);
     }
     let trailers = Trailers {
         local: request.local.is_some(),
@@ -216,7 +292,78 @@ fn holding(
     )
     .map_err(|error| store_error(environment, &error))?;
     report.commits.extend(commits);
-    Ok(())
+    Ok(after)
+}
+
+/// The observation records the snapshot holds with `written` applied.
+fn records_after(
+    snapshot: &EnvironmentSnapshot,
+    written: &BTreeMap<UnitName, Option<ObservationRecord>>,
+) -> BTreeMap<UnitName, ObservationRecord> {
+    let mut records = snapshot.observations.clone();
+    for (unit, record) in written {
+        match record {
+            Some(record) => records.insert(unit.clone(), record.clone()),
+            None => records.remove(unit),
+        };
+    }
+    records
+}
+
+/// `NYL-OBSERVATION-CHANGED` for each consumer of this environment whose
+/// stored resolution of an observed value differs from what `records`
+/// holds: its inputs changed, so it is ready for the next reconcile.
+fn changed_consumer_warnings(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    records: &BTreeMap<UnitName, ObservationRecord>,
+    now: Timestamp,
+) -> Vec<Finding> {
+    let changed = observed_values::changed_consumers(environment, &snapshot.desired, &snapshot.observed, records, now);
+    let consumers: BTreeSet<&UnitName> = changed.iter().map(|changed| &changed.consumer).collect();
+    consumers
+        .into_iter()
+        .flat_map(|consumer| {
+            let reasons: Vec<_> = changed.iter().filter(|changed| &changed.consumer == consumer).collect();
+            observed_values::changed_warnings(environment, consumer, &reasons)
+        })
+        .collect()
+}
+
+/// `NYL-OBSERVATION-CHANGED` for each consumer in another environment that
+/// reads an observed value of this one through a cross-environment
+/// reference and resolved another value than `observed` (this environment's
+/// snapshot with the values written) holds, or that waits for a value of this
+/// environment that `observed` now holds.
+///
+/// The other environments' snapshots are read like a reconcile reads its
+/// producers' (no lease, no write), but only for this advice, so they are
+/// [`Need::Advisory`]: one whose declaration cannot be used, or whose state
+/// cannot be read, is a `NYL-STATE-UNAVAILABLE` warning that names it, never
+/// a failed check; its consumers were not checked.
+fn other_environment_warnings(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    observed: &EnvironmentSnapshot,
+) -> Vec<Finding> {
+    let environment = &request.environment;
+    let peers = Peers::of(request);
+    let mut warnings = Vec::new();
+    let mut others = BTreeMap::new();
+    for name in peers.others(environment) {
+        match peers.read(context.base.store, name, Need::Advisory) {
+            Ok(other) => {
+                others.insert(name.clone(), other);
+            }
+            Err(problem) => warnings.push(problem.into_finding()),
+        }
+    }
+    warnings.extend(
+        observed_values::changed_consumers_reading(environment, observed, &others, context.base.clock.now())
+            .iter()
+            .map(observed_values::external_changed_warning),
+    );
+    warnings
 }
 
 /// The snapshot, refused like a reconcile's when state is missing or
@@ -248,10 +395,9 @@ fn read(
     Ok(snapshot)
 }
 
-/// Check every `Check` target, in batches of the concurrency limit, each
-/// unit of a batch on its own thread and slot. Before each batch the
-/// lease's deadline moves to cover the batch's longest unit timeout; a lease
-/// lost meanwhile ends the check with `NYL-LEASE-LOST`.
+/// Check every `Check` target of a standalone check: the units' project
+/// directories located as reconcile located them, and the lease's deadline
+/// moved to cover each batch ([`check_batches`]).
 fn check_units(
     context: &RunContext<'_>,
     request: &RunRequest,
@@ -268,28 +414,105 @@ fn check_units(
         .map(|(name, _)| name)
         .collect();
     let projects = project_dirs(context, request, snapshot, &names, &slots);
+    let outcome = check_batches(
+        context,
+        request,
+        check,
+        snapshot,
+        &names,
+        &slots,
+        &directory,
+        &projects,
+        &mut |longest| {
+            // Move the lease's deadline to cover the batch about to start.
+            let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
+            lease::update(context.base, held, held.lease.units.clone(), deadline)
+                .map_err(|error| store_error(&request.environment, &error))?;
+            Ok(held.lease.deadline)
+        },
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+    outcome.map_err(|halted| match halted {
+        Halted::Cancelled(signal) => cancelled(check, &request.environment, signal),
+        Halted::Lease(finding) => finding,
+    })
+}
+
+/// Why a check stopped before it checked every unit.
+pub(super) enum Halted<E> {
+    /// SIGINT or SIGTERM (the signal) cancelled it.
+    Cancelled(i32),
+    /// The caller could not move the lease's deadline for the next batch.
+    Lease(E),
+}
+
+/// `nyl reconcile --detect-drift`: check `names`, units of `view` with a
+/// current receipt, as `nyl detect-drift` checks them, while the run holds
+/// its lease. `view` holds the units as the run resolved them and the
+/// receipts and artifacts as the run stands (`desired`, `observed`,
+/// `artifacts`, and the stored `drift`), and `project_dir` is the project
+/// directory the run's own executions use, so a driver sees the same
+/// checkout its unit would execute in. `extend` moves the run's lease for the
+/// longest unit timeout of a batch and returns the lease's new deadline.
+/// Contract: [Drift](../../../../design/orchestration-core.md#drift).
+pub(super) fn detect_in_run<E>(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    view: &EnvironmentSnapshot,
+    names: &[&UnitName],
+    project_dir: &str,
+    extend: &mut dyn FnMut(Duration) -> Result<Timestamp, E>,
+) -> Result<Vec<Checked>, Halted<E>> {
+    let directory = fresh_directory(context.workspace, Check::DetectDrift.command());
+    let slots = Slots::new(&directory);
+    let projects = names
+        .iter()
+        .map(|name| ((*name).clone(), Ok(project_dir.to_owned())))
+        .collect();
+    let outcome = check_batches(
+        context,
+        request,
+        Check::DetectDrift,
+        view,
+        names,
+        &slots,
+        &directory,
+        &projects,
+        extend,
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+    outcome
+}
+
+/// Check `names` in batches of the concurrency limit, each unit of a batch
+/// on its own thread and slot. Before each batch `extend` moves the lease's
+/// deadline to cover the batch's longest unit timeout and returns the
+/// lease's deadline, which bounds each unit's own; a failure of `extend`
+/// ends the check ([`Halted::Lease`]), as does a signal ([`Halted::Cancelled`]).
+#[allow(clippy::too_many_arguments)] // One check's inputs: the run, the units, their directories, and the lease.
+fn check_batches<E>(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    check: Check,
+    snapshot: &EnvironmentSnapshot,
+    names: &[&UnitName],
+    slots: &Slots,
+    directory: &Path,
+    projects: &BTreeMap<UnitName, Result<String, String>>,
+    extend: &mut dyn FnMut(Duration) -> Result<Timestamp, E>,
+) -> Result<Vec<Checked>, Halted<E>> {
     let mut results = Vec::new();
-    let mut outcome = Ok(());
     for batch in names.chunks(request.concurrency.max(1)) {
         if let Some(signal) = request.cancellation.signal() {
-            outcome = Err(cancelled(check, &request.environment, signal));
-            break;
+            return Err(Halted::Cancelled(signal));
         }
         let longest = longest_timeout(context.drivers, batch.iter().map(|name| &snapshot.desired[*name]));
-        // Move the lease's deadline to cover the batch about to start.
-        let deadline = lease::deadline(context.base, context.base.clock.now(), longest);
-        if let Err(error) = lease::update(context.base, held, held.lease.units.clone(), deadline) {
-            outcome = Err(store_error(&request.environment, &error));
-            break;
-        }
-        let lease_deadline = held.lease.deadline;
+        let lease_deadline = extend(longest).map_err(Halted::Lease)?;
         let batch_results: Vec<Checked> = std::thread::scope(|scope| {
             let handles: Vec<_> = batch
                 .iter()
                 .enumerate()
                 .map(|(slot, name)| {
-                    let slots = &slots;
-                    let directory = &directory;
                     let project_dir = &projects[*name];
                     scope.spawn(move || {
                         let job = UnitJob {
@@ -306,11 +529,10 @@ fn check_units(
         });
         results.extend(batch_results);
     }
-    if let (Ok(()), Some(signal)) = (&outcome, request.cancellation.signal()) {
-        outcome = Err(cancelled(check, &request.environment, signal));
+    if let Some(signal) = request.cancellation.signal() {
+        return Err(Halted::Cancelled(signal));
     }
-    let _ = std::fs::remove_dir_all(&directory);
-    outcome.map(|()| results)
+    Ok(results)
 }
 
 /// `NYL-RUN-CANCELLED` for a check cancelled by `signal`
@@ -436,8 +658,17 @@ fn check_unit(
     let temp_dir = directory.join(format!("tmp-{name}"));
     let (worktree, source_roots) = match std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("cannot create {}: {error}", temp_dir.display()))
-        .and_then(|()| slots.checkout_unit(context.sources, job.slot, &commit, driver, spec, project_dir))
-    {
+        .and_then(|()| {
+            slots.checkout_unit(
+                context.sources,
+                job.slot,
+                &commit,
+                Some(revision),
+                driver,
+                spec,
+                project_dir,
+            )
+        }) {
         Ok(roots) => roots,
         Err(message) => return failed(message),
     };
@@ -457,6 +688,8 @@ fn check_unit(
         deadline,
     };
     let ctx = ExecutionContext {
+        instances: context.instances,
+        clock: context.base.clock,
         secrets,
         interactive: false,
         artifacts: snapshot.artifacts.get(name).cloned().unwrap_or_default(),
@@ -475,6 +708,8 @@ fn check_unit(
         commit_identity: context.commit_identity,
         cache_dir: context.cache_dir(),
         teardown_wait: None,
+        incarnations: &nyl_core::orchestration::driver::UnknownIncarnations,
+        dirty_source: false,
     };
     let outcome = match check {
         Check::DetectDrift => driver
@@ -485,6 +720,10 @@ fn check_unit(
             }),
         Check::Attest => driver.attest(&ctx, unit, receipt).map(|supported| match supported {
             Supported::Supported(check) => Supported::Supported(Found::Attestations(check)),
+            Supported::Unsupported => Supported::Unsupported,
+        }),
+        Check::Observe => driver.observe(&ctx, unit, receipt).map(|supported| match supported {
+            Supported::Supported(readings) => Supported::Supported(Found::Observations(readings)),
             Supported::Unsupported => Supported::Unsupported,
         }),
     };
@@ -522,6 +761,31 @@ fn check_unit(
                 error: None,
             }
         }
+        Ok(Supported::Supported(Found::Observations(readings))) => {
+            let declared = match observed_values::declarations(spec) {
+                Ok(declared) => declared,
+                Err(message) => return failed(message),
+            };
+            let settled = observed_values::settle(&SettleInputs {
+                unit,
+                receipt,
+                declared: &declared,
+                stored: snapshot.observations.get(name),
+                readings: &readings,
+                now,
+                refresh: context.base.settings.observation_refresh,
+            });
+            Checked {
+                name: name.clone(),
+                result: observe_check(&settled, &declared),
+                records: Some(Records::Observations {
+                    record: settled.record.clone(),
+                    changed: settled.changed.clone(),
+                }),
+                message: None,
+                error: None,
+            }
+        }
         Ok(Supported::Supported(Found::Attestations(AttestationCheck::Unknown { reason }))) => Checked {
             name: name.clone(),
             records: None,
@@ -531,9 +795,11 @@ fn check_unit(
         },
         Ok(Supported::Supported(Found::Attestations(AttestationCheck::Attested { outcomes }))) => {
             let set = settle_attestations(
-                attestations(environment, unit, receipt, &outcomes, now),
+                attestations(environment, unit, receipt, &outcomes, "attest", now),
                 snapshot.attestations.get(name),
                 receipt,
+                now,
+                context.base.settings.attestation_refresh,
             );
             Checked {
                 name: name.clone(),
@@ -550,6 +816,7 @@ fn check_unit(
             message: Some(match check {
                 Check::DetectDrift => format!("kind {} cannot detect drift", unit.unit.kind),
                 Check::Attest => format!("kind {} cannot attest", unit.unit.kind),
+                Check::Observe => format!("kind {} cannot read observed values", unit.unit.kind),
             }),
             error: None,
         },
@@ -561,6 +828,7 @@ fn check_unit(
 enum Found {
     Drift(DriftDetection),
     Attestations(AttestationCheck),
+    Observations(ObservedValues),
 }
 
 /// One unit report per planned unit, with its check result and warnings.
@@ -614,6 +882,12 @@ fn summary(check: Check, report: &EnvironmentRunReport) -> TransitionSummary {
     };
     let headline = headline(results().map(|(_, result)| result.result.name()), check.headline());
     let mut summary = super::state::summary(check.operation(), &report.name, &headline);
+    if !report.observations_changed.is_empty() {
+        summary.details.insert(
+            "observationsChanged".to_owned(),
+            serde_json::json!(report.observations_changed),
+        );
+    }
     summary.units = results()
         .map(|(name, result)| {
             (

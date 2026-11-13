@@ -1,0 +1,58 @@
+# The e2e project: the end-to-end example of the Orchestration guide, trimmed to
+# the dev environment and made to run on a kind cluster. `nyl-e2e` renders this
+# file once per variant: the upper-case words between percent signs are the
+# harness's coordinates (Git server, kubeconfig context) and the variant's
+# reconciler declaration.
+apiVersion: gitops.nyl/v1
+kind: GitRepository
+metadata:
+  name: shop
+spec:
+  # What Argo CD reads from inside the cluster, and what Nyl pushes to from
+  # the host: one Git server, reached by its address on the kind network and by
+  # its published loopback port.
+  repoURL: '%REPO_URL%'
+  publishURL: '%PUBLISH_URL%'
+---
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: dev
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  # The kubeconfig context that reaches this cluster, for `nyl attest` and
+  # `nyl observe`; the kubeconfig itself reaches Nyl only as an admitted variable.
+  live: {context: %KUBE_CONTEXT%}
+  %CLUSTER_CAPABILITIES%
+%INSTANCE_DOCUMENTS%
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: dev
+spec:
+  clusterRef: {name: %TARGET_CLUSTER%}
+  %TARGET_RECONCILER_FIELDS%
+  applicationGroupSelector:
+    matchLabels: {app: web}
+  publication:
+    repositoryRef: {name: shop}
+    revision: deploy
+    pathPrefix: dev
+  releaseInputs:
+    web/web:
+      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+      namespace: {value: web}
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {stage: dev}
+  state:
+    repositoryRef: {name: shop}
+  allowUnprotectedSource: true

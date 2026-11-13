@@ -24,11 +24,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nyl_core::orchestration::blocked::{Blocker, ProducerRef};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::DriverSet;
 use nyl_core::orchestration::ids::{EnvironmentName, RunId, UnitName};
 use nyl_core::orchestration::ports::{Coordination, EnvironmentSnapshot, RunState};
-use nyl_core::orchestration::state::{Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress};
+use nyl_core::orchestration::state::{
+    BlockedReason, Condition, DesiredUnit, Lifecycle, ObservedUnit, Readiness, TeardownProgress,
+};
 use nyl_core::orchestration::time::Timestamp;
 
 use crate::rules::freshness::receipt_is_current;
@@ -40,6 +43,12 @@ use crate::run_report::{
 
 /// The stable reason of a blocker waiting for a producer's receipt.
 pub const NO_CURRENT_RECEIPT: &str = "no-current-receipt";
+/// The stable reason of a blocker waiting for the new receipt of a producer
+/// that the plan before a multi-environment run would change.
+pub const PLANNED_CHANGE: &str = "planned-change";
+/// The stable reason of a blocker waiting for a producer whose environment
+/// failed or is waiting in a multi-environment run.
+pub const PRODUCER_UNAVAILABLE: &str = "producer-unavailable";
 
 /// Current, stale, or none, by [`crate::rules::freshness::receipt_is_current`].
 pub fn receipt_state(desired: Option<&DesiredUnit>, observed: Option<&ObservedUnit>) -> ReceiptState {
@@ -217,22 +226,42 @@ fn acceptable_runs<'c>(coordination: &'c Coordination, observed: &ObservedUnit) 
         .collect()
 }
 
-/// A stored blocked reason in the report's form: `no-current-receipt` with
-/// the producer when the reason says the producer has no current receipt.
-fn blocked_by(pointer: &str, reason: &str) -> BlockedBy {
-    let producer = reason
-        .strip_suffix(" has no current receipt")
-        .and_then(|unit| UnitName::new(unit).ok());
-    match producer {
-        Some(unit) => BlockedBy {
-            pointer: pointer.to_owned(),
-            unit: Some(unit),
-            reason: NO_CURRENT_RECEIPT.to_owned(),
+/// A stored blocked reason in the report's form, read from its typed
+/// blocker: `no-current-receipt` with the producer when the producer has no
+/// current receipt, `attestation-pending` or `attestation-failing` with the
+/// producer and the attestation when it waits for one (see
+/// [`super::evidence`]), and `observation-pending` with the producer and the
+/// observation (see [`super::observed_values`]), `planned-change` and
+/// `producer-unavailable` with the producer for the waits of a
+/// multi-environment run. Any other blocker shows its text as the reason.
+pub(crate) fn blocked_by(reason: &BlockedReason) -> BlockedBy {
+    let waiting = |producer: &ProducerRef, reason_code: &str| BlockedBy {
+        pointer: reason.pointer.clone(),
+        environment: producer.environment.clone(),
+        unit: Some(producer.unit.clone()),
+        reason: reason_code.to_owned(),
+        attestation: None,
+        observation: None,
+    };
+    match &reason.blocker {
+        Blocker::NoCurrentReceipt { producer } => waiting(producer, NO_CURRENT_RECEIPT),
+        Blocker::PlannedChange { producer } => waiting(producer, PLANNED_CHANGE),
+        Blocker::ProducerUnavailable { producer } => waiting(producer, PRODUCER_UNAVAILABLE),
+        Blocker::Attestation { producer, name, state } => BlockedBy {
+            attestation: Some(name.clone()),
+            ..waiting(producer, super::evidence::stable(*state))
         },
-        None => BlockedBy {
-            pointer: pointer.to_owned(),
+        Blocker::Observation { producer, name, .. } => BlockedBy {
+            observation: Some(name.clone()),
+            ..waiting(producer, super::observed_values::OBSERVATION_PENDING)
+        },
+        Blocker::Other { message } => BlockedBy {
+            pointer: reason.pointer.clone(),
+            environment: None,
             unit: None,
-            reason: reason.to_owned(),
+            reason: message.clone(),
+            attestation: None,
+            observation: None,
         },
     }
 }
@@ -405,9 +434,7 @@ pub fn status(
 
 /// [`status`], with each publication unit's teardown readiness, which the
 /// shell computes from the stored desired document
-/// (`Driver::teardown_settings` and
-/// [`crate::rules::teardown_readiness::evaluate`]) without rendering.
-#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
+/// (`Driver::teardown_readiness`) without rendering.
 pub fn status_with_readiness(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
@@ -415,6 +442,32 @@ pub fn status_with_readiness(
     now: Timestamp,
     drivers: Option<&DriverSet>,
     readiness: &BTreeMap<UnitName, TeardownReadiness>,
+) -> EnvironmentRunReport {
+    status_with_producers(
+        environment,
+        snapshot,
+        coordination,
+        now,
+        drivers,
+        readiness,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`status_with_readiness`], with the snapshots of the other environments
+/// whose observed values this environment's units read
+/// ([`super::observed_values::observed_producer_environments`] names them): a
+/// unit whose cross-environment observed input differs from the value it
+/// resolved is `ready`, as one whose input in its own environment differs is.
+#[allow(clippy::too_many_lines)] // One pass over the units: state, receipt, condition, drift, lifecycle, blockers.
+pub fn status_with_producers(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    coordination: &Coordination,
+    now: Timestamp,
+    drivers: Option<&DriverSet>,
+    readiness: &BTreeMap<UnitName, TeardownReadiness>,
+    producers: &BTreeMap<EnvironmentName, EnvironmentSnapshot>,
 ) -> EnvironmentRunReport {
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
@@ -460,6 +513,10 @@ pub fn status_with_readiness(
             half_executed.extend(units);
         }
     }
+    // A current consumer whose observed value changed is work for the next
+    // reconcile: state `ready`, exit 2. Contract:
+    // [Observed values](../../../../design/orchestration-core.md#observed-values).
+    let changed = super::observed_values::changed_consumers_across(environment, snapshot, producers, now);
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());
@@ -470,6 +527,34 @@ pub fn status_with_readiness(
             unit_state(desired, observed, running.contains(name))
         });
         unit.receipt = Some(receipt_state(Some(desired), observed));
+        // What the driver warned about when it executed, until it executes again.
+        if let Some(receipt) = observed.and_then(|observed| observed.receipt.as_ref()) {
+            unit.warnings.extend(receipt.warnings.iter().cloned());
+        }
+        if matches!(unit.state, Some(UnitState::Current | UnitState::Blocked)) {
+            let reasons = changed
+                .iter()
+                .filter(|changed| &changed.consumer == name)
+                .collect::<Vec<_>>();
+            if !reasons.is_empty() {
+                unit.state = Some(UnitState::Ready);
+                unit.message = Some(format!(
+                    "ready: {}",
+                    reasons
+                        .iter()
+                        .map(|changed| format!(
+                            "observed value {} of {} {}",
+                            changed.observation,
+                            changed.producer,
+                            if changed.arrived { "arrived" } else { "changed" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                unit.warnings
+                    .extend(super::observed_values::changed_warnings(environment, name, &reasons));
+            }
+        }
         if drivers.is_some() {
             unit.drift = crate::rules::drift::status_drift(desired, observed, snapshot.drift.get(name));
             // A current unit whose latest drift record is `drifted` is
@@ -482,11 +567,14 @@ pub fn status_with_readiness(
         }
         let condition = observed.and_then(|observed| observed.condition.as_ref());
         unit.last_run = observed.and_then(ObservedUnit::last_run).cloned();
-        if let Readiness::Blocked { reasons } = &desired.readiness {
-            unit.blocked_by = reasons
-                .iter()
-                .map(|reason| blocked_by(&reason.pointer, &reason.reason))
-                .collect();
+        // A unit whose every blocker is an observed value that has arrived
+        // since is ready, and shows no blocker.
+        if let (Readiness::Blocked { reasons }, false) = (&desired.readiness, unit.state == Some(UnitState::Ready)) {
+            unit.blocked_by = reasons.iter().map(blocked_by).collect();
+            unit.warnings
+                .extend(super::evidence::warnings(name, environment.as_str(), reasons));
+            unit.warnings
+                .extend(super::observed_values::warnings(name, environment.as_str(), reasons));
         }
         if let Some(condition) = condition {
             unit.message = Some(condition.message().to_owned());
@@ -525,6 +613,7 @@ pub fn status_with_readiness(
 mod tests {
     use std::collections::BTreeMap;
 
+    use nyl_core::orchestration::blocked::AttestationWait;
     use nyl_core::orchestration::ports::{Checkpoint, HeldLease};
     use nyl_core::orchestration::state::{Lease, Run};
     use serde_json::json;
@@ -696,7 +785,7 @@ mod tests {
         let mut blocked = desired_numbered("database", 2, None);
         blocked.readiness = serde_json::from_value(json!({
             "state": "blocked",
-            "reasons": [{"pointer": "/values/vpc", "reason": "network has no current receipt"}]
+            "reasons": [{"pointer": "/values/vpc", "blocker": {"type": "no-current-receipt", "producer": {"unit": "network"}}}]
         }))
         .unwrap();
         snapshot.desired.insert(name("database"), blocked);
@@ -718,8 +807,11 @@ mod tests {
             unit("database").blocked_by,
             [BlockedBy {
                 pointer: "/values/vpc".to_owned(),
+                environment: None,
                 unit: Some(name("network")),
                 reason: NO_CURRENT_RECEIPT.to_owned(),
+                attestation: None,
+                observation: None,
             }]
         );
         let web = unit("web");
@@ -789,11 +881,11 @@ mod tests {
         let coordination = Coordination {
             lease: None,
             runs: vec![RunState {
-                checkpoints: vec![Checkpoint {
-                    desired: desired_numbered("web", 3, Some(hex_key('a'))),
-                    observed: cancelled,
-                    artifacts: BTreeMap::new(),
-                }],
+                checkpoints: vec![Checkpoint::new(
+                    desired_numbered("web", 3, Some(hex_key('a'))),
+                    cancelled,
+                    BTreeMap::new(),
+                )],
                 ..run_state(Run {
                     finished: true,
                     ..run_naming(&["db"])
@@ -837,11 +929,11 @@ mod tests {
                 ..run_naming(&["web"])
             })],
             evidence: vec![RunState {
-                checkpoints: vec![Checkpoint {
-                    desired: desired_numbered("database", 2, Some(hex_key('a'))),
-                    observed: observed_numbered("database", 2, Some(hex_key('a'))),
-                    artifacts: BTreeMap::new(),
-                }],
+                checkpoints: vec![Checkpoint::new(
+                    desired_numbered("database", 2, Some(hex_key('a'))),
+                    observed_numbered("database", 2, Some(hex_key('a'))),
+                    BTreeMap::new(),
+                )],
                 ..run_state(Run {
                     finished: true,
                     ..run_naming(&["web"])
@@ -1054,6 +1146,110 @@ mod tests {
 
     fn codes(findings: &[Finding]) -> Vec<Code> {
         findings.iter().map(|finding| finding.code).collect()
+    }
+
+    /// Catches a consumer of another environment's unit losing its producer
+    /// in the report: the producer's environment and unit are separate
+    /// fields for every blocker that names one, as for a unit of the same
+    /// environment, and a blocker that names no producer keeps its text.
+    #[test]
+    fn test_blocked_by_keeps_the_producer_of_another_environment() {
+        let producer = |label: &str| ProducerRef::parse(label).unwrap();
+        let pending = blocked_by(&BlockedReason::new(
+            "/dependsOn/0",
+            Blocker::Attestation {
+                producer: producer("infra/network"),
+                name: "healthy".to_owned(),
+                state: AttestationWait::Pending,
+            },
+        ));
+        assert_eq!(
+            pending,
+            BlockedBy {
+                pointer: "/dependsOn/0".to_owned(),
+                environment: Some(EnvironmentName::new("infra").unwrap()),
+                unit: Some(name("network")),
+                reason: "attestation-pending".to_owned(),
+                attestation: Some("healthy".to_owned()),
+                observation: None,
+            }
+        );
+        let local = blocked_by(&BlockedReason::new(
+            "/dependsOn/0",
+            Blocker::Attestation {
+                producer: producer("network"),
+                name: "healthy".to_owned(),
+                state: AttestationWait::Failing,
+            },
+        ));
+        assert_eq!(
+            (local.environment, local.unit, local.reason.as_str()),
+            (None, Some(name("network")), "attestation-failing")
+        );
+        let missing = blocked_by(&BlockedReason::new(
+            "/values/x",
+            Blocker::no_current_receipt(producer("infra/network")),
+        ));
+        assert_eq!(
+            (missing.environment, missing.unit, missing.reason.as_str()),
+            (
+                Some(EnvironmentName::new("infra").unwrap()),
+                Some(name("network")),
+                NO_CURRENT_RECEIPT
+            )
+        );
+        let observation = blocked_by(&BlockedReason::new(
+            "/values/ip",
+            Blocker::Observation {
+                producer: producer("infra/kubernetes"),
+                name: "ip".to_owned(),
+                why: "not observed yet".to_owned(),
+            },
+        ));
+        assert_eq!(
+            (
+                observation.environment,
+                observation.unit,
+                observation.reason.as_str(),
+                observation.observation.as_deref()
+            ),
+            (
+                Some(EnvironmentName::new("infra").unwrap()),
+                Some(name("kubernetes")),
+                "observation-pending",
+                Some("ip")
+            )
+        );
+        for (blocker, reason) in [
+            (
+                Blocker::PlannedChange {
+                    producer: producer("infra/network"),
+                },
+                PLANNED_CHANGE,
+            ),
+            (
+                Blocker::ProducerUnavailable {
+                    producer: producer("infra/network"),
+                },
+                PRODUCER_UNAVAILABLE,
+            ),
+        ] {
+            let waiting = blocked_by(&BlockedReason::new("/values/x", blocker));
+            assert_eq!(
+                (waiting.environment, waiting.unit, waiting.reason.as_str()),
+                (
+                    Some(EnvironmentName::new("infra").unwrap()),
+                    Some(name("network")),
+                    reason
+                )
+            );
+        }
+        let other = blocked_by(&BlockedReason::new(
+            "/values/x",
+            Blocker::other("the deleting incarnation of cache (kind Command) is removed first"),
+        ));
+        assert_eq!((other.environment, other.unit), (None, None));
+        assert!(other.reason.starts_with("the deleting incarnation"));
     }
 }
 

@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use nyl_core::constants::ANNOTATION_KYVERNO_SCOPE;
+use nyl_core::constants::{legacy, ANNOTATION_KYVERNO_SCOPE};
 use nyl_core::{CoreError, Result};
 
 /// Scope for Kyverno policy application
@@ -52,10 +52,7 @@ pub struct AnnotatedKyvernoPolicy {
 impl AnnotatedKyvernoPolicy {
     /// Extract annotated policy from manifest
     pub fn from_manifest(manifest: &serde_json::Value) -> Result<Self> {
-        let scope_str = manifest
-            .get("metadata")
-            .and_then(|m| m.get("annotations"))
-            .and_then(|a| a.get(ANNOTATION_KYVERNO_SCOPE))
+        let scope_str = scope_annotation(manifest)
             .and_then(|s| s.as_str())
             .ok_or_else(|| CoreError::Config("Kyverno policy missing scope annotation".to_string()))?;
 
@@ -110,11 +107,31 @@ pub fn is_kyverno_policy(manifest: &serde_json::Value) -> bool {
 
 /// Check if manifest has Kyverno scope annotation
 pub fn has_kyverno_scope_annotation(manifest: &serde_json::Value) -> bool {
-    manifest
-        .get("metadata")
-        .and_then(|m| m.get("annotations"))
-        .and_then(|a| a.get(ANNOTATION_KYVERNO_SCOPE))
-        .is_some()
+    scope_annotation(manifest).is_some()
+}
+
+/// The scope annotation's value, read from the deprecated key, with a warning,
+/// when the current one is absent.
+fn scope_annotation(manifest: &serde_json::Value) -> Option<&serde_json::Value> {
+    let annotations = manifest.get("metadata")?.get("annotations")?;
+    if let Some(value) = annotations.get(ANNOTATION_KYVERNO_SCOPE) {
+        return Some(value);
+    }
+    let value = annotations.get(legacy::ANNOTATION_KYVERNO_SCOPE)?;
+    let kind = manifest
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .unwrap_or("Kyverno policy");
+    let name = manifest
+        .pointer("/metadata/name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("<unnamed>");
+    crate::util::deprecation::warn_deprecated_key(
+        &format!("{kind} {name:?}"),
+        legacy::ANNOTATION_KYVERNO_SCOPE,
+        &format!("use {ANNOTATION_KYVERNO_SCOPE} instead"),
+    );
+    Some(value)
 }
 
 /// Extract Kyverno policies by scope from manifests
@@ -233,7 +250,7 @@ mod tests {
             "metadata": {
                 "name": "test",
                 "annotations": {
-                    "nyl.niklasrosenstein.github.com/apply-policy-scope": "Subtree"
+                    "k8s.nyl/apply-policy-scope": "Subtree"
                 }
             }
         });
@@ -258,7 +275,7 @@ mod tests {
             "metadata": {
                 "name": "test-policy",
                 "annotations": {
-                    "nyl.niklasrosenstein.github.com/apply-policy-scope": "Subtree"
+                    "k8s.nyl/apply-policy-scope": "Subtree"
                 }
             },
             "spec": {}
@@ -268,6 +285,27 @@ mod tests {
         assert_eq!(policy.scope, KyvernoScope::Subtree);
         assert_eq!(policy.name, "test-policy");
         assert_eq!(policy.kind, "MutatingPolicy");
+    }
+
+    #[test]
+    fn test_deprecated_scope_annotation_still_applies_and_current_key_wins() {
+        let mut manifest = json!({
+            "apiVersion": "kyverno.io/v1",
+            "kind": "ClusterPolicy",
+            "metadata": {
+                "name": "legacy",
+                "annotations": {legacy::ANNOTATION_KYVERNO_SCOPE: "Global"}
+            }
+        });
+        assert_eq!(
+            AnnotatedKyvernoPolicy::from_manifest(&manifest).unwrap().scope,
+            KyvernoScope::Global
+        );
+        manifest["metadata"]["annotations"][ANNOTATION_KYVERNO_SCOPE] = json!("Immediate");
+        assert_eq!(
+            AnnotatedKyvernoPolicy::from_manifest(&manifest).unwrap().scope,
+            KyvernoScope::Immediate
+        );
     }
 
     #[test]
@@ -296,7 +334,7 @@ mod tests {
                 "metadata": {
                     "name": "policy1",
                     "annotations": {
-                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Immediate"
+                        "k8s.nyl/apply-policy-scope": "Immediate"
                     }
                 }
             }),
@@ -311,7 +349,7 @@ mod tests {
                 "metadata": {
                     "name": "policy2",
                     "annotations": {
-                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Global"
+                        "k8s.nyl/apply-policy-scope": "Global"
                     }
                 }
             }),
@@ -333,7 +371,7 @@ mod tests {
                 "metadata": {
                     "name": "policy1",
                     "annotations": {
-                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Immediate"
+                        "k8s.nyl/apply-policy-scope": "Immediate"
                     }
                 }
             }),
@@ -348,7 +386,7 @@ mod tests {
                 "metadata": {
                     "name": "policy2",
                     "annotations": {
-                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Global"
+                        "k8s.nyl/apply-policy-scope": "Global"
                     }
                 }
             }),
@@ -358,7 +396,7 @@ mod tests {
                 "metadata": {
                     "name": "policy3",
                     "annotations": {
-                        "nyl.niklasrosenstein.github.com/apply-policy-scope": "Subtree"
+                        "k8s.nyl/apply-policy-scope": "Subtree"
                     }
                 }
             }),

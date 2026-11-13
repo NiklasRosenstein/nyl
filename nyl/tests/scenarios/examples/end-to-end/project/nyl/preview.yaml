@@ -1,0 +1,30 @@
+# Every pull request is an instance: its own state under its name in one shared
+# ref, its own database, image, and tree, behind one shared catalog.
+apiVersion: gitops.nyl/v1
+kind: EnvironmentTemplate
+metadata: {name: preview}
+spec:
+  parameters: {pr: {type: integer}}
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values:
+    stateDir: '%SCENARIO_TMP%/tofu'
+    teardownWait: {strategy: delay, duration: 2m}   # previews expire unattended
+    target:
+      inline:
+        clusterRef: {name: dev}
+        reconciler: {argocd: {instanceRef: {name: dev}}}
+        catalogApplication:
+          shared: {name: previews}      # one self-managing catalog for every instance
+        applicationGroupSelector: {matchLabels: {app: web}}
+        publication: {repositoryRef: {name: shop}, revision: previews, pathPrefix: '{{ environment.name }}'}
+        releaseInputs:
+          web/web:
+            image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+            databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+            namespace: {value: '{{ environment.name }}-web'}
+  state: {repositoryRef: {name: shop}, path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
+  allowUnprotectedSource: true
+  deletionPolicy: Teardown
+  allowTeardown: true
+  ttl: 7d
+  maxInstances: 20

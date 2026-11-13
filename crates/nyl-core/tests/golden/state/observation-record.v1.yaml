@@ -1,0 +1,17 @@
+apiVersion: gitops.nyl/v1
+kind: ObservationRecord
+unit:
+  environment: dev
+  name: kubernetes
+  uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+  apiVersion: units.gitops.nyl/v1
+  kind: KubernetesPublication
+executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90
+at: "2026-09-25T16:40:00Z"
+values:
+  ingressIp:
+    value: "203.0.113.10"
+    observedAt: "2026-09-25T16:40:00Z"
+  ingressPort:
+    pending: "field-not-set: /status/loadBalancer/ingress/0/port"

@@ -13,6 +13,17 @@ pub enum CoreError {
     #[error("{0}")]
     Config(String),
 
+    /// A document does not match its resource type.
+    #[error("Invalid {kind}: {message}\nHint: {hint}")]
+    ResourceParse {
+        /// The resource kind the document was parsed as.
+        kind: String,
+        /// The classified failure and the path of the offending field.
+        message: String,
+        /// How to fix the document.
+        hint: String,
+    },
+
     /// A value could not be converted to or from JSON.
     #[error("{0}")]
     Json(#[from] serde_json::Error),

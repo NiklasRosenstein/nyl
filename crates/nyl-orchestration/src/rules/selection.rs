@@ -42,6 +42,7 @@ use super::drift::{self, Repair};
 use super::freshness::{receipt_is_current, same_incarnation};
 
 /// What selection reads.
+#[derive(Clone)]
 pub struct Candidates<'a> {
     /// The units selection may select.
     pub desired: &'a BTreeMap<UnitName, DesiredUnit>,
@@ -561,6 +562,8 @@ mod tests {
                 execution_key: key("current-old"),
                 observed_commit: Some(commit(COMMIT)),
                 run: None,
+                observation: None,
+                observed_at: None,
             }),
         );
         let (ready, skipped) = world.select(None);

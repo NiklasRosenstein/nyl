@@ -20,3 +20,11 @@ todo.txt
 
 /target
 .codex
+
+# Python client
+python/.venv/
+python/dist/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

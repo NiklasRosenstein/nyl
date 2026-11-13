@@ -13,7 +13,10 @@ nyl render [OPTIONS] <FILE>
 ## Description
 
 The `render` command generates Kubernetes manifests and writes final YAML to stdout.
-It never connects to Kubernetes. With `--target`, a Release renders as
+It connects to Kubernetes only with `--context` in a project without GitOps
+configuration, to read the cluster's version and APIs
+([Without GitOps configuration](/nyl/kubernetes-rendering/pipeline/#without-gitops-configuration)).
+With `--target`, a Release renders as
 `render-tree` publishes it for its Argo CD Application, including managed
 Namespaces; resources without a namespace keep none. See
 [Rendering Pipeline](/nyl/kubernetes-rendering/pipeline/#the-releases-application) for the
@@ -27,7 +30,7 @@ behavior `render`, `diff`, and `apply` share.
 
 ### Common Options
 
-- `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion.
+- `--only-source-kind <KIND>` - Filter top-level resources by kind (e.g., `ConfigMap`, `Deployment`) or by apiVersion/kind (e.g., `apps/v1/Deployment`) before expansion. A render with this option fails with `NYL-KUBERNETES-CHECKSUM-PARTIAL` when a remaining Pod template sets [`k8s.nyl/checksum`](/nyl/kubernetes-rendering/pod-template-checksums/#where-it-runs), because a digest of part of the Release would differ from the one other commands write.
 - `--only-kind <KIND,...>` - Filter final rendered manifests to only include specific kinds (post-render).
 - `--exclude-kind <KIND,...>` - Filter final rendered manifests to exclude specific kinds (post-render, mutually exclusive with `--only-kind`).
 - `--target <TARGET>` - DeploymentTarget whose Cluster, values, and Kubernetes capabilities are used for rendering. Optional for base rendering.
@@ -39,6 +42,8 @@ behavior `render`, `diff`, and `apply` share.
 - `--allow-secret-inputs` - Let the project secrets provider and `NYL_*` environment variables affect the output, as for the tree commands. Without it, templates see neither.
 - `--max-depth <MAX_DEPTH>` - Maximum evaluation depth for recursive resource expansion (default: 10)
 - `--track-parent` - Track parent resource information in annotations
+- `--lookup <snapshot|live>` - Where a chart with [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) reads from: the target's last publication (`snapshot`, the default with a target) or the cluster (`live`, the default with `--context` and no GitOps configuration). See [Reading the live cluster](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reading-the-live-cluster).
+- `--refresh-lookup <KIND/NAMESPACE/NAME>` - Regenerate this object, which a chart with [`spec.lookup`](/nyl/kubernetes-rendering/resource-guides/helm-chart/#reusing-generated-objects-with-lookup) reads, for this render, for example to rotate a CA. `Kind/name` for a cluster-scoped object. Repeatable.
 - `--refresh` - Bypass cached rendering results and replace successful entries.
 - `--no-cache` - Perform no persistent cache reads or writes.
 
@@ -47,7 +52,7 @@ behavior `render`, `diff`, and `apply` share.
 - `--offline` - Resolve Git charts from cached refs and read `fromPublication` Release inputs at the cached publication branch head, as with `render-tree --offline`.
 - `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless render of Helm charts. With `--target`, the Cluster's committed capabilities apply.
 - `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless render, comma-separated or repeated.
-- `--context` - Deprecated and ignored, since `render` never connects to Kubernetes; see [Deprecations](/nyl/reference/deprecations/).
+- `--context <CONTEXT>` - Without GitOps configuration, render with this kube context's live Kubernetes version and API versions, in place of `--kube-version` and `--kube-api-versions`. With a DeploymentTarget, `render` uses the Cluster's committed capabilities, never connects (except for `--lookup=live`, where `--context` selects how to reach the Cluster), and otherwise ignores the flag with a warning.
 
 ## Examples
 
@@ -117,6 +122,9 @@ nyl render --only-kind Deployment,Service manifest.yaml
 ```bash
 # Targetless render of Helm charts with explicit Kubernetes capabilities
 nyl render --kube-version 1.30 --kube-api-versions v1,apps/v1 manifest.yaml
+
+# Render with a live cluster's capabilities, without GitOps configuration
+nyl render --context kind-kind manifest.yaml
 
 # Use the Cluster's committed capabilities and only cached Git refs
 nyl render --target production --offline manifest.yaml

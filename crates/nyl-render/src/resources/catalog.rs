@@ -177,7 +177,7 @@ pub fn resource_example(kind: ResourceKind) -> Value {
         }
         ResourceKind::ArgoCDInstance => json!({"clusterRef": {"name": "primary"}, "namespace": "argocd"}),
         ResourceKind::DeploymentTarget => {
-            json!({"clusterRef": {"name": "primary"}, "argocdRef": {"name": "primary"}, "publication": {"repositoryRef": {"name": "deploy"}, "revision": "deploy", "pathPrefix": "targets/production"}})
+            json!({"clusterRef": {"name": "primary"}, "reconciler": {"argocd": {"instanceRef": {"name": "primary"}}}, "publication": {"repositoryRef": {"name": "deploy"}, "revision": "deploy", "pathPrefix": "targets/production"}})
         }
         ResourceKind::AppProjectDefinition => {
             json!({"management": "External", "manifest": {"apiVersion": "argoproj.io/v1alpha1", "kind": "AppProject", "metadata": {"name": "workloads", "namespace": "argocd"}, "spec": {}}})
@@ -234,6 +234,30 @@ pub(crate) fn cluster_contract_constraints(schema: &mut schemars::Schema) {
     );
 }
 
+/// `reconciler` is required, though its absence is reported with a stable code
+/// by validation rather than as a missing field.
+pub(crate) fn deployment_target_constraints(schema: &mut schemars::Schema) {
+    let required = schema.ensure_object().entry("required").or_insert_with(|| json!([]));
+    if let Some(required) = required.as_array_mut() {
+        required.push(json!("reconciler"));
+        required.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+}
+
+pub(crate) fn reconciler_constraints(schema: &mut schemars::Schema) {
+    exclusive_fields(
+        schema,
+        &[
+            (
+                "argocd",
+                "Argo CD syncs the published tree; `instanceRef` names the ArgoCDInstance when any is declared.",
+            ),
+            ("direct", "Nyl applies the Releases to the target's Cluster itself."),
+        ],
+        None,
+    );
+}
+
 pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
     exclusive_fields(
         schema,
@@ -249,6 +273,15 @@ pub(crate) fn publication_constraints(schema: &mut schemars::Schema) {
 }
 
 pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties["retainedProjectNamespaces"]["items"] = json!({
+            "type": "string", "minLength": 1, "maxLength": 63,
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        });
+        let items = properties["retainedNamespaceResourceWhitelist"]["items"].take();
+        properties["retainedNamespaceResourceWhitelist"]["items"] =
+            json!({"allOf": [items, {"not": {"required": ["name"]}}]});
+    }
     exclusive_fields(
         schema,
         &[
@@ -263,6 +296,13 @@ pub(crate) fn application_group_constraints(schema: &mut schemars::Schema) {
         ],
         Some("Generates an AppProject named after the group that admits only what it deploys: the target publication repository, the target Cluster with the group's Release namespaces, and the resource kinds it renders."),
     );
+    for field in [
+        "retainedProjectNamespaces",
+        "retainedNamespaceResourceWhitelist",
+        "retainedClusterResourceWhitelist",
+    ] {
+        schema.get_mut("oneOf").unwrap()[0]["properties"][field] = json!({"maxItems": 0});
+    }
 }
 
 pub(crate) fn remote_manifest_constraints(schema: &mut schemars::Schema) {
@@ -405,8 +445,8 @@ mod tests {
     fn test_moved_envelopes_require_the_canonical_api() {
         for kind in ResourceKind::ALL {
             let old_api = match kind {
-                ResourceKind::HelmChart | ResourceKind::RemoteManifest => "nyl.niklasrosenstein.github.com/v1",
-                ResourceKind::Component => "components.nyl.niklasrosenstein.github.com/v1",
+                ResourceKind::HelmChart | ResourceKind::RemoteManifest => nyl_core::constants::legacy::API_VERSION,
+                ResourceKind::Component => nyl_core::constants::legacy::API_VERSION_COMPONENTS,
                 _ => API_VERSION_GITOPS,
             };
             let mut example = resource_example(kind);

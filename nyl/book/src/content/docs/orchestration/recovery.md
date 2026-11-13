@@ -24,7 +24,8 @@ for resolution, the longest `timeout` of the units starting for a wave, plus a
 10-minute grace period either way. Before a unit the run creates starts, the
 run records its desired document and new uid on the run ref; when a unit
 finishes, the run checkpoints its receipt or failure there before the next
-wave. [Git storage](/nyl/reference/git-storage/#coordination-refs) lists every
+wave, with the receipt's artifacts, the attestations the unit reported, and,
+once the run has read them, its observed values. [Git storage](/nyl/reference/git-storage/#coordination-refs) lists every
 file on these refs.
 
 While a run is alive, its lease and its run ref both hold the environment:
@@ -54,6 +55,13 @@ executing.
   selected.
 - A checkpoint whose execution key equals the unit's key in the new
   resolution becomes the unit's receipt. The unit is listed under `imported`.
+  The attestations and observed values the checkpoint carries become the
+  receipt's too, with the times they were recorded at, so a dependent that
+  [requires them](/nyl/orchestration/runs/#requiring-attestations) or reads an
+  observed value proceeds without `nyl attest` or `nyl observe`. An
+  attestation must name the receipt's execution key and the unit's
+  incarnation, and an observation record also the run that wrote the receipt;
+  a record that does not is dropped.
 - A unit the dead run was executing without a checkpoint gets an `uncertain`
   condition naming the dead run. The unit is listed under `recovered`.
 - A checkpoint with another key is superseded (`NYL-RUN-SUPERSEDED`). When it
@@ -102,7 +110,7 @@ its kind's recovery policy:
 
 | Policy | Next run | Kinds |
 | --- | --- | --- |
-| `converge` | Executes the unit again, in the same run that marked it. The result is `recovered`. | [Command](/nyl/orchestration/resource-guides/command/) with `idempotent: true`, OpenTofu, Terraform, and OciImage; KubernetesPublication is planned |
+| `converge` | Executes the unit again, in the same run that marked it. The result is `recovered`. | [Command](/nyl/orchestration/resource-guides/command/) with `idempotent: true`, OpenTofu, Terraform, OciImage, and [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/) |
 | `inspect` | Asks the driver whether the effects were applied: applied records the receipt (`recovered`), not applied executes again, and unknown leaves the condition for `nyl recover` | Kinds that can observe their effects |
 | `manual` | Leaves the condition; the unit waits for `nyl recover` | Command without `idempotent: true` |
 
@@ -152,7 +160,7 @@ migrate   Command  executed
 ```
 
 `--accept <run>` adopts what a run checkpointed for the unit, its receipt,
-outputs, and artifacts, as the unit's receipt, when the checkpoint's execution
+outputs, artifacts, attestations, and observed values, as the unit's receipt, when the checkpoint's execution
 key and uid equal the unit's current desired document's. Accepting an
 execution as applied needs its outputs, so a checkpoint is the only evidence
 `recover` accepts. The `evidence` that `recover` prints lists every checkpoint
@@ -270,6 +278,53 @@ on it. Attestations, the evidence that dependents and promotion require, are
 separate: [`nyl attest`](/nyl/reference/cli/detect-drift/#nyl-attest)
 records them.
 
+Nyl does not watch for drift itself. A pipeline either runs `nyl detect-drift`
+on a schedule, followed by `nyl reconcile`, or runs one command,
+`nyl reconcile --detect-drift`, which does both under the lease the reconcile
+already holds and in its one transition commit, so nothing can change the
+resources between the check and the repair. Without the flag, a reconcile never
+detects drift: it repairs only drift that `detect-drift` recorded earlier.
+
+### Detecting drift in a reconcile
+
+`nyl reconcile -e <env> --detect-drift` checks the units that are current
+before it selects what to execute, then repairs what came back `drifted` by
+the rules below, in the same run:
+
+- **Which units.** The units the run would otherwise leave current. A unit
+  that executes anyway, because its inputs changed or it has no current
+  receipt, is not checked: its receipt is about to be replaced. A unit that
+  is blocked when the run first selects is not checked in that run, even if it
+  ends the run current. A kind that cannot detect drift is not checked either.
+  `--unit` limits the check to the named units, as it limits execution, and
+  pulls in neither their dependencies nor their dependents; it also reports a
+  named unit whose kind cannot detect drift as `unsupported`. A unit whose stored record
+  says `drifted` is checked again, so a unit you repaired by hand since the
+  last `detect-drift` is not executed on stale evidence.
+- **One decision.** The fresh records go through the same rule as the stored
+  ones, so a drifted unit is repaired exactly as the next reconcile would have
+  repaired it: executed under `driftRepair: converge` when its recovery policy
+  is `converge`, `awaiting-approval` otherwise, and left `drifted` under
+  `driftRepair: manual`. The transition commit lists the repaired units under
+  `driftRepaired` and each checked unit's result under `driftCheck`; a unit
+  left drifted keeps its record there, so `nyl status` shows it without
+  another check. A repaired unit leaves no record, because its new receipt
+  replaces the one the record was about.
+- **Reports.** Each checked unit's entry in the report carries `driftCheck`
+  (`clean`, `drifted`, `unknown`, or `unsupported`). Drift the run did not
+  repair is a `NYL-DRIFT-DETECTED` warning whose fix says what to do next; a
+  check that cannot tell is `NYL-DRIFT-UNKNOWN` and makes the run exit 2, as
+  `detect-drift` does. A check that fails to run or passes its deadline is a
+  `NYL-DRIVER-ERROR` (exit 1) that records nothing; the run does not repair the
+  unit on its stored `drifted` record, which stays for `nyl status`.
+- **Several environments.** Each selected environment checks and repairs inside
+  its own run, lease, and transition commit.
+- **Options.** `--detect-drift` is refused, with `NYL-DRIFT-OPTION-INVALID`,
+  next to `--leaving` and `--reapply`, which leave it nothing to check.
+  `--worktree`, `--source`, `--local`, `--fail-fast`, `--unit`, and
+  `--template` combine with it. `nyl plan` has no `--detect-drift`, because a
+  check takes the lease and writes records.
+
 ## Repairing drift
 
 A unit whose latest drift record is `drifted` is `drifted` in
@@ -281,7 +336,8 @@ like a changed unit, it is work for the next reconcile.
   `nyl reconcile` executes every drifted unit whose recovery policy is
   `converge` again, and its transition commit lists it under `driftRepaired`.
   The new receipt removes the drift record in the same commit, so the
-  unit is not repaired again until `detect-drift` finds new drift.
+  unit is not repaired again until `detect-drift` finds new drift. A
+  reconcile with `--detect-drift` checks first and repairs in the same run.
 - A drifted unit that is not safe to re-run is reported `awaiting-approval`
   (exit 2) while the rest of the run continues. A matching
   `--approve <unit>` executes it and records the approval's identity.
