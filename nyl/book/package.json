@@ -11,10 +11,10 @@
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",
-    "@astrojs/markdown-remark": "7.3.8",
-    "@astrojs/starlight": "0.42.11",
+    "@astrojs/markdown-remark": "7.3.9",
+    "@astrojs/starlight": "0.43.1",
     "ajv": "^8.20.0",
-    "astro": "7.4.11",
+    "astro": "7.4.12",
     "typescript": "6.0.3",
     "yaml": "^2.9.0"
   },
