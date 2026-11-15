@@ -8,6 +8,7 @@ use super::cache::RenderCache;
 use super::RenderResource;
 use crate::components::value_imports::{apply_value_imports, ComponentContract, ImportScope};
 use crate::config::ProjectConfig;
+use crate::helm::lookup::{component_lookup, helm_chart_lookup, warn_if_undeclared, LookupOwner};
 use crate::helm::{HelmChartResolver, HelmTemplateExecutor};
 use crate::resources::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef,
@@ -164,6 +165,45 @@ pub(crate) fn levenshtein_distance(s1: &str, s2: &str) -> usize {
 }
 
 /// Check if a resource is a known Nyl resource type
+/// Whether a HelmChart or Component resource turns Helm `lookup` on. A resource
+/// whose setting cannot be read is not one: rendering it reports why.
+pub(crate) fn enables_lookup(resource: &serde_json::Value, config: &ProjectConfig) -> bool {
+    let kind = resource.get("kind").and_then(|k| k.as_str());
+    let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
+    if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
+        return matches!(
+            nyl_core::resources::parse_resource::<HelmChart>(resource, "HelmChart"),
+            Ok(chart) if chart.spec.lookup.as_ref().is_some_and(crate::resources::LookupSetting::is_enabled)
+        );
+    }
+    let aliased = api_version
+        .zip(kind)
+        .and_then(|(av, k)| config.get_alias_target_for_kind(av, k));
+    if !(is_nyl_component(resource) || aliased.is_some()) {
+        return false;
+    }
+    let Ok(component) = nyl_core::resources::parse_resource::<NylComponent>(resource, "Component") else {
+        return false;
+    };
+    let kind = aliased.unwrap_or(&component.kind);
+    let contract = if is_remote_helm_chart_shortcut(kind) {
+        None
+    } else {
+        config
+            .resolve_component_chart_dir(kind)
+            .ok()
+            .and_then(|dir| ComponentContract::load(&dir).ok().flatten())
+    };
+    component_lookup(
+        &component.metadata.name,
+        &component.metadata.annotations,
+        contract.as_ref().and_then(|contract| contract.lookup),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
 pub(crate) fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
@@ -331,7 +371,24 @@ async fn expand_resource(
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         // Parse as HelmChart and render
         let chart: HelmChart = nyl_core::resources::parse_resource(resource, "HelmChart")?;
-        let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
+        let lookup = helm_chart_lookup(
+            &chart.metadata.name,
+            &chart.metadata.annotations,
+            chart.spec.lookup.as_ref(),
+        )?;
+        let owner = LookupOwner::HelmChart {
+            name: &chart.metadata.name,
+        };
+        let manifests = render_helm_chart(
+            &chart,
+            lookup,
+            owner,
+            context,
+            config,
+            kube_version,
+            api_versions,
+            artifact_resolver,
+        )?;
 
         Ok(apply_parent_tracking_annotations(
             manifests,
@@ -389,6 +446,8 @@ async fn expand_resource(
                 component.spec,
             )?;
 
+            // Remote shortcuts and aliases have no nyl-component.yaml: only the annotation decides.
+            let lookup = component_lookup(&component.metadata.name, &component.metadata.annotations, None)?;
             let release_namespace = component.metadata.namespace.clone();
             let component_api_version = component.api_version.clone();
             let component_kind = component.kind.clone();
@@ -406,7 +465,20 @@ async fn expand_resource(
                 },
             };
 
-            let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
+            let owner = LookupOwner::Component {
+                kind: &component_kind,
+                name: &component_name,
+            };
+            let manifests = render_helm_chart(
+                &chart,
+                lookup,
+                owner,
+                context,
+                config,
+                kube_version,
+                api_versions,
+                artifact_resolver,
+            )?;
 
             Ok(apply_parent_tracking_annotations(
                 manifests,
@@ -428,6 +500,11 @@ async fn expand_resource(
                 component.spec,
             )?;
 
+            let lookup = component_lookup(
+                &component.metadata.name,
+                &component.metadata.annotations,
+                contract.as_ref().and_then(|contract| contract.lookup),
+            )?;
             let release_namespace = component.metadata.namespace.clone();
             let component_api_version = component.api_version.clone();
             let component_kind = component.kind.clone();
@@ -448,7 +525,20 @@ async fn expand_resource(
                 },
             };
 
-            let manifests = render_helm_chart(&chart, context, config, kube_version, api_versions, artifact_resolver)?;
+            let owner = LookupOwner::Component {
+                kind: &component_kind,
+                name: &component_name,
+            };
+            let manifests = render_helm_chart(
+                &chart,
+                lookup,
+                owner,
+                context,
+                config,
+                kube_version,
+                api_versions,
+                artifact_resolver,
+            )?;
 
             Ok(apply_parent_tracking_annotations(
                 manifests,
@@ -716,9 +806,14 @@ pub(crate) fn apply_parent_tracking_annotations(
         .collect()
 }
 
-/// Render a Helm chart
+/// Render a Helm chart. `lookup` is the effective setting: `Some(true)` renders
+/// against the lookup API, `Some(false)` without it, and `None` (undeclared)
+/// without it too, warning when the chart calls `lookup`.
+#[allow(clippy::too_many_arguments)]
 fn render_helm_chart(
     chart: &HelmChart,
+    lookup: Option<bool>,
+    owner: LookupOwner<'_>,
     context: &TemplateContext,
     config: &ProjectConfig,
     kube_version: &str,
@@ -740,13 +835,26 @@ fn render_helm_chart(
     .with_render_cache(gitops_cache.cloned())
     .with_artifact_resolver(Some(artifact_resolver.clone()));
     let resolved = resolver.resolve_chart(&chart.spec.chart)?;
+    // A local chart is named by its directory, not by the path it was found at.
+    let chart_name = chart
+        .spec
+        .chart
+        .name
+        .as_deref()
+        .map_or(resolved.path.as_path(), Path::new)
+        .file_name()
+        .map_or_else(
+            || "<unknown-chart>".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+    warn_if_undeclared(owner, &chart_name, &resolved.path, lookup);
 
     let executor = HelmTemplateExecutor::new()
         .with_kube_version(kube_version.to_string())
         .with_api_versions(api_versions.to_vec())
         .with_include_crds(chart.spec.include_crds.unwrap_or(true))
         .with_gitops_cache(gitops_cache.cloned())
-        .with_lookup(chart.spec.lookup.as_ref().map(|_| {
+        .with_lookup((lookup == Some(true)).then(|| {
             // A chart that declares lookup renders against the lookup API even
             // where no source was configured: then nothing is found.
             artifact_resolver.lookup_handle().cloned().unwrap_or_else(|| {

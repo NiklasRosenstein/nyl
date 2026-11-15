@@ -39,6 +39,12 @@ pub struct ComponentContract {
     /// Selections of target values that become chart value defaults.
     #[serde(default)]
     pub value_imports: Vec<ValueImport>,
+    /// `true` lets Helm's `lookup` read the Release's objects in every invocation
+    /// of the component; `false` declares it off, which silences the warning
+    /// for a chart that calls `lookup`. A `k8s.nyl/helm-lookup` annotation on
+    /// the invocation takes precedence.
+    #[serde(default)]
+    pub lookup: Option<bool>,
 }
 
 /// One selection of target values copied to one chart-value destination.
@@ -624,6 +630,22 @@ valueImports:
                 .unwrap_err()
                 .to_string();
             assert!(message.contains(expected), "{source}: {message}");
+        }
+    }
+
+    #[test]
+    fn test_contract_lookup_is_a_boolean_and_undeclared_by_default() {
+        let parse = |lookup: &str| {
+            ComponentContract::parse(
+                &format!("apiVersion: components.nyl/v1alpha1\n{lookup}"),
+                "nyl-component.yaml",
+            )
+        };
+        assert_eq!(parse("").unwrap().lookup, None);
+        assert_eq!(parse("lookup: true\n").unwrap().lookup, Some(true));
+        assert_eq!(parse("lookup: false\n").unwrap().lookup, Some(false));
+        for invalid in ["lookup: {}\n", "lookup: yes please\n"] {
+            assert!(parse(invalid).is_err(), "{invalid}");
         }
     }
 

@@ -525,7 +525,9 @@ impl RenderSession {
             request.lookup_scope.clone(),
         );
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
-        let has_lookup_chart = resources.iter().any(declares_lookup);
+        let has_lookup_chart = resources
+            .iter()
+            .any(|resource| declares_lookup(resource, &self.project_config));
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
         let mut cacheable = cache_bypass_reasons.is_empty();
         let ReleaseCacheLookup {
@@ -828,7 +830,9 @@ impl RenderSession {
         if previous
             .as_ref()
             .is_some_and(|previous| previous.dependencies.contains_key(LOOKUP_SCOPE_DEPENDENCY))
-            || resources.iter().any(declares_lookup)
+            || resources
+                .iter()
+                .any(|resource| declares_lookup(resource, &self.project_config))
         {
             recorder.record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup.scope_input())?;
         }
@@ -1115,10 +1119,9 @@ fn target_template_context(target: &DeploymentTarget, trusted_source: bool) -> R
 /// published; only such a Release records one.
 const LOOKUP_SCOPE_DEPENDENCY: &str = "lookup-scope";
 
-/// Whether a resource is a HelmChart that declares `lookup`.
-fn declares_lookup(resource: &RenderResource) -> bool {
-    resource.value.get("kind").and_then(Value::as_str) == Some("HelmChart")
-        && resource.value.pointer("/spec/lookup").is_some()
+/// Whether a resource is a HelmChart or Component that turns `lookup` on.
+fn declares_lookup(resource: &RenderResource, config: &ProjectConfig) -> bool {
+    super::expand::enables_lookup(&resource.value, config)
 }
 
 /// The Release a bundle declares: the Helm release its charts render for, and

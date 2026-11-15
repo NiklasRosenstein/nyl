@@ -21,6 +21,7 @@
 pub mod api;
 pub(crate) mod builtin;
 pub mod capabilities;
+mod declaration;
 mod model;
 mod run;
 mod server;
@@ -108,6 +109,14 @@ pub const KIND_UNDECLARED_CODE: &str = "NYL-HELM-LOOKUP-KIND-UNDECLARED";
 pub const VERSION_MISMATCH_CODE: &str = "NYL-HELM-LOOKUP-VERSION-MISMATCH";
 /// The code of the error for a Helm that does not take the flags a lookup render needs.
 pub const HELM_UNSUPPORTED_CODE: &str = "NYL-HELM-LOOKUP-HELM-UNSUPPORTED";
+/// The code of the error for a `k8s.nyl/helm-lookup` annotation that is not `"true"` or `"false"`.
+pub const ANNOTATION_INVALID_CODE: &str = "NYL-HELM-LOOKUP-ANNOTATION-INVALID";
+/// The code of the error for a `k8s.nyl/helm-lookup` annotation on a HelmChart, which declares `spec.lookup`.
+pub const ANNOTATION_MISPLACED_CODE: &str = "NYL-HELM-LOOKUP-ANNOTATION-MISPLACED";
+/// The code of the warning for the deprecated `lookup: {}`, which means `true`.
+pub const OBJECT_DEPRECATED_CODE: &str = "NYL-HELM-LOOKUP-OBJECT-DEPRECATED";
+/// The code of the warning for a chart that calls `lookup` where lookup is neither enabled nor disabled.
+pub const UNDECLARED_CODE: &str = "NYL-HELM-LOOKUP-UNDECLARED";
 /// The code of the warning for a `--refresh-lookup` reference that matched nothing.
 pub const REFRESH_UNMATCHED_CODE: &str = "NYL-HELM-LOOKUP-REFRESH-UNMATCHED";
 
@@ -420,6 +429,10 @@ pub fn record_observed(recorder: &mut DependencyRecorder, observed: &BTreeMap<St
 pub fn snapshot_unavailable(message: impl std::fmt::Display) -> StoreError {
     StoreError::new(SNAPSHOT_UNAVAILABLE_CODE, message.to_string())
 }
+
+pub use declaration::{
+    component_lookup, helm_chart_lookup, lookup_templates, template_calls_lookup, warn_if_undeclared, LookupOwner,
+};
 
 pub(crate) fn lookup_error(code: &str, message: impl std::fmt::Display) -> NylError {
     NylError::Other(format!("{code}: {message}"))

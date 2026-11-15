@@ -30,7 +30,7 @@
     },
     "HelmChartLookup": {
       "additionalProperties": false,
-      "description": "Lets Helm's `lookup` read the objects of the chart's Release.\n\nDeclare it as `lookup: {}`. It takes no fields: where the objects come from\nis chosen by the command that renders (the target's last publication, or the\nlive cluster with `--lookup=live`), never by the declaration, so a chart renders\nthe same way for every command that takes the same path.",
+      "description": "The deprecated object form of `lookup`, `{}`, which means `true`.\n\nIt takes no fields: where the objects come from\nis chosen by the command that renders (the target's last publication, or the\nlive cluster with `--lookup=live`), never by the declaration, so a chart renders\nthe same way for every command that takes the same path.",
       "type": "object"
     },
     "HelmChartSpec": {
@@ -51,13 +51,13 @@
         "lookup": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HelmChartLookup"
+              "$ref": "#/$defs/LookupSetting"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Lets the chart's Helm `lookup` read the objects of the Release it belongs\nto, so a chart that reuses what it generated earlier, such as a Secret\nholding a CA, finds it when it renders again.\n\nDeclare it as `lookup: {}`. `lookup` then reads the Release's objects from the\ntarget's last publication (or, with `--lookup=live`, from the cluster) and sees\nnothing else: any other object is absent. Without a target, or before the\nRelease is published, nothing is found and the chart generates.\n\nCharts that declare it render through Helm's server-side dry run against a\nread-only API that Nyl serves on 127.0.0.1 for the duration of the render;\nHelm never gets a cluster or credentials. The Cluster's declared Kubernetes\nversion and API versions describe that API, plus the API versions of\nCustomResourceDefinitions the chart ships in `crds/`."
+          "description": "Lets the chart's Helm `lookup` read the objects of the Release it belongs\nto, so a chart that reuses what it generated earlier, such as a Secret\nholding a CA, finds it when it renders again.\n\nDeclare it as `lookup: true`, or `lookup: false` to state that the chart must not use it\n(which silences `NYL-HELM-LOOKUP-UNDECLARED`). `{}` is the deprecated form of `true`.\n`lookup` then reads the Release's objects from the\ntarget's last publication (or, with `--lookup=live`, from the cluster) and sees\nnothing else: any other object is absent. Without a target, or before the\nRelease is published, nothing is found and the chart generates.\n\nCharts that declare it render through Helm's server-side dry run against a\nread-only API that Nyl serves on 127.0.0.1 for the duration of the render;\nHelm never gets a cluster or credentials. The Cluster's declared Kubernetes\nversion and API versions describe that API, plus the API versions of\nCustomResourceDefinitions the chart ships in `crds/`."
         },
         "values": {
           "default": null,
@@ -68,6 +68,22 @@
         "chart"
       ],
       "type": "object"
+    },
+    "LookupSetting": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HelmChartLookup"
+            }
+          ],
+          "deprecated": true,
+          "description": "Deprecated: `{}` means `true`. Write `lookup: true`."
+        }
+      ]
     },
     "ObjectMetadata": {
       "additionalProperties": false,
