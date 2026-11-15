@@ -108,7 +108,10 @@ jobs:
           source-dir: dist
           preview-branch: gh-pages
           umbrella-dir: pr-preview
-          wait-for-pages-deployment: true
+          # Don't wait for the GitHub Pages build: the action gives up after a fixed
+          # 180s if Pages hasn't started building, which failed the job for
+          # previews that had been pushed and published fine.
+          wait-for-pages-deployment: false
 
       - name: Prepare Pages root marker
         if: steps.preview.outputs.deployment-action == 'deploy'
@@ -155,7 +158,7 @@ jobs:
               environment,
               environment_url: process.env.PREVIEW_URL,
               log_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-              description: "Documentation preview is ready.",
+              description: "Documentation preview pushed; GitHub Pages publishes it shortly.",
             });
 
       - name: Deactivate GitHub deployment
