@@ -8144,7 +8144,7 @@ fn lookup_fixture() -> (TempDir, TempDir, TempDir) {
     .unwrap();
     fs::write(chart.join("templates/ca.yaml"), LOOKUP_CA_TEMPLATE).unwrap();
     fs::write(chart.join("templates/scope.yaml"), LOOKUP_SCOPE_TEMPLATE).unwrap();
-    for (release, lookup) in [("lookup", "  lookup: {}\n"), ("plain", "")] {
+    for (release, lookup) in [("lookup", "  lookup: true\n"), ("plain", "")] {
         fs::write(
             fixture.path().join(format!("applications/workloads/{release}.yaml")),
             format!(
@@ -8461,7 +8461,7 @@ fn test_lookup_without_a_target_finds_nothing_and_generates() {
     fs::write(chart.join("templates/ca.yaml"), LOOKUP_CA_TEMPLATE).unwrap();
     fs::write(
         fixture.path().join("lookup.yaml"),
-        "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: lookup\n  namespace: lookup\nspec:\n  chart:\n    name: ./charts/ca-chart\n  lookup: {}\n",
+        "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: lookup\n  namespace: lookup\nspec:\n  chart:\n    name: ./charts/ca-chart\n  lookup: true\n",
     )
     .unwrap();
     let cache = TempDir::new().unwrap();
@@ -8481,6 +8481,177 @@ fn test_lookup_without_a_target_finds_nothing_and_generates() {
         stdout.contains("kind: Secret") && stdout.contains("ca.crt: "),
         "{stdout}"
     );
+}
+
+/// The `lookup` fixture plus a local component `example/v1/CaChart` (the same chart as the
+/// HelmChart releases) invoked by a `comp` Release. `contract` is the component's
+/// `nyl-component.yaml` content, `annotation` the invocation's `k8s.nyl/helm-lookup`.
+fn component_lookup_fixture(contract: Option<&str>, annotation: Option<&str>) -> (TempDir, TempDir, TempDir) {
+    let (fixture, destination, seed) = lookup_fixture();
+    let component = fixture.path().join("components/example/v1/CaChart");
+    fs::create_dir_all(component.join("templates")).unwrap();
+    fs::write(
+        component.join("Chart.yaml"),
+        "apiVersion: v2\nname: ca-chart\nversion: 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(component.join("templates/ca.yaml"), LOOKUP_CA_TEMPLATE).unwrap();
+    if let Some(contract) = contract {
+        fs::write(
+            component.join("nyl-component.yaml"),
+            format!("apiVersion: components.nyl/v1alpha1\n{contract}"),
+        )
+        .unwrap();
+    }
+    write_component_release(&fixture, annotation);
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Add the lookup component");
+    (fixture, destination, seed)
+}
+
+fn write_component_release(fixture: &TempDir, annotation: Option<&str>) {
+    let annotations = annotation.map_or(String::new(), |value| {
+        format!("  annotations:\n    k8s.nyl/helm-lookup: {value}\n")
+    });
+    fs::write(
+        fixture.path().join("applications/workloads/comp.yaml"),
+        format!(
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: comp\n  namespace: comp\n---\napiVersion: components.k8s.nyl/v1\nkind: example/v1/CaChart\nmetadata:\n  name: comp\n  namespace: comp\n{annotations}"
+        ),
+    )
+    .unwrap();
+}
+
+fn render_stderr(fixture: &TempDir, release: &str) -> String {
+    let assert = nyl_with_cache(fixture, &TempDir::new().unwrap())
+        .args([
+            "render",
+            &format!("applications/workloads/{release}.yaml"),
+            "--target",
+            "production",
+        ])
+        .assert()
+        .success();
+    String::from_utf8(assert.get_output().stderr.clone()).unwrap()
+}
+
+/// Catches a component's `lookup: true` in nyl-component.yaml not reaching the lookup
+/// machinery: the published CA must be read back by every later render.
+#[test]
+fn test_a_component_enables_lookup_in_nyl_component_yaml() {
+    let (fixture, destination, _seed) = component_lookup_fixture(Some("lookup: true\n"), None);
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "comp");
+    assert_eq!(rendered_ca(&fixture, &TempDir::new().unwrap(), "comp", &[]), ca);
+}
+
+/// Catches the annotation not taking precedence: `"false"` turns off what nyl-component.yaml
+/// enables, so the CA generates again, and the render cache keeps the two apart.
+#[test]
+fn test_the_false_annotation_overrides_nyl_component_yaml() {
+    let (fixture, destination, _seed) = component_lookup_fixture(Some("lookup: true\n"), None);
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "comp");
+    let warm = TempDir::new().unwrap();
+    assert_eq!(rendered_ca(&fixture, &warm, "comp", &[]), ca);
+
+    write_component_release(&fixture, Some("\"false\""));
+    assert_ne!(
+        rendered_ca(&fixture, &warm, "comp", &[]),
+        ca,
+        "a warm cache from the enabled render is not reused for the disabled one"
+    );
+    write_component_release(&fixture, None);
+    assert_eq!(rendered_ca(&fixture, &warm, "comp", &[]), ca);
+}
+
+/// Catches the annotation working only for local components with a contract: a Component
+/// whose chart ships no nyl-component.yaml is enabled by the annotation alone.
+#[test]
+fn test_the_true_annotation_enables_lookup_without_nyl_component_yaml() {
+    let (fixture, destination, _seed) = component_lookup_fixture(None, Some("\"true\""));
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "comp");
+    assert_eq!(rendered_ca(&fixture, &TempDir::new().unwrap(), "comp", &[]), ca);
+}
+
+/// Catches an annotation value Nyl cannot read being guessed at.
+#[test]
+fn test_an_invalid_helm_lookup_annotation_fails_with_its_code() {
+    let (fixture, _destination, _seed) = component_lookup_fixture(None, Some("\"yes\""));
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args(["render", "applications/workloads/comp.yaml", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-ANNOTATION-INVALID"));
+}
+
+/// Catches a chart that calls `lookup` without opting in rendering silently, and the opt-outs
+/// (and opt-ins) not silencing the warning.
+#[test]
+fn test_a_chart_calling_lookup_without_opting_in_warns_until_declared() {
+    // A target renders all of its Releases, so each assertion names its owner.
+    let (fixture, _destination, _seed) = component_lookup_fixture(None, None);
+    let warns =
+        |owner: &str| render_stderr(&fixture, "plain").contains(&format!("NYL-HELM-LOOKUP-UNDECLARED: {owner}"));
+    let stderr = render_stderr(&fixture, "plain");
+    assert!(
+        stderr.contains("NYL-HELM-LOOKUP-UNDECLARED: HelmChart 'plain'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("NYL-HELM-LOOKUP-UNDECLARED: Component 'comp'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("spec.lookup") && stderr.contains("k8s.nyl/helm-lookup"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("NYL-HELM-LOOKUP-UNDECLARED: HelmChart 'lookup'"),
+        "a chart that enables lookup does not warn: {stderr}"
+    );
+
+    // Opting out renders without lookup and says nothing.
+    let plain = fixture.path().join("applications/workloads/plain.yaml");
+    let declared = fs::read_to_string(&plain).unwrap() + "  lookup: false\n";
+    fs::write(&plain, declared).unwrap();
+    assert!(!warns("HelmChart 'plain'"));
+    assert!(warns("Component 'comp'"));
+    for annotation in ["\"false\"", "\"true\""] {
+        write_component_release(&fixture, Some(annotation));
+        assert!(!warns("Component 'comp'"), "{annotation}");
+    }
+}
+
+/// Catches the deprecated `spec.lookup: {}` going unnoticed while it keeps working.
+#[test]
+fn test_the_object_form_of_spec_lookup_is_deprecated_but_enables_lookup() {
+    let (fixture, destination, _seed) = lookup_fixture();
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "lookup");
+    let file = fixture.path().join("applications/workloads/lookup.yaml");
+    let object_form = fs::read_to_string(&file).unwrap().replace("lookup: true", "lookup: {}");
+    fs::write(&file, object_form).unwrap();
+    assert!(render_stderr(&fixture, "lookup").contains("NYL-HELM-LOOKUP-OBJECT-DEPRECATED"));
+    assert_eq!(rendered_ca(&fixture, &TempDir::new().unwrap(), "lookup", &[]), ca);
+}
+
+/// Catches a HelmChart accepting the Component annotation, which would give it two homes.
+#[test]
+fn test_a_helm_chart_with_the_lookup_annotation_points_to_spec_lookup() {
+    let (fixture, _destination, _seed) = lookup_fixture();
+    let file = fixture.path().join("applications/workloads/plain.yaml");
+    let annotated = fs::read_to_string(&file).unwrap().replace(
+        "kind: HelmChart\nmetadata:\n  name: plain\n",
+        "kind: HelmChart\nmetadata:\n  annotations:\n    k8s.nyl/helm-lookup: \"true\"\n  name: plain\n",
+    );
+    fs::write(&file, annotated).unwrap();
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args(["render", "applications/workloads/plain.yaml", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-ANNOTATION-MISPLACED"))
+        .stderr(predicate::str::contains("spec.lookup"));
 }
 
 /// Catches a tree or publication depending on what a cluster holds today:
