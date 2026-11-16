@@ -285,7 +285,7 @@ afterwards: they call `genCA` or `randAlphaNum` only when `lookup` finds nothing
 Cilium's chart does this for its Hubble CA. Nyl renders charts without a cluster, so
 `lookup` finds nothing and such a chart generates new bytes on every cold render.
 
-Set `spec.lookup: {}` to let `lookup` read the objects the Release last published:
+Set `spec.lookup: true` to let `lookup` read the objects the Release last published:
 
 ```yaml
 apiVersion: k8s.nyl/v1
@@ -298,10 +298,39 @@ spec:
     repository: https://helm.cilium.io
     name: cilium
     version: 1.17.6
-  lookup: {}
+  lookup: true
 ```
 
-`lookup` is opt-in. A chart without it renders exactly as before.
+`lookup` is opt-in. A chart without it renders exactly as before. `spec.lookup: false` is the
+explicit opt-out: it renders the same way, and tells Nyl you know the chart calls `lookup`
+(see [Undeclared `lookup`](#undeclared-lookup)). The object form `spec.lookup: {}` from 0.7.0 is
+no longer accepted: it fails with `NYL-HELM-LOOKUP-OBJECT-REMOVED`, so write `spec.lookup: true`.
+
+[Components](/nyl/kubernetes-rendering/components/overview/) pass `spec` as chart values, so
+they opt in elsewhere: the `k8s.nyl/helm-lookup: "true"` annotation on the Component, or
+`lookup: true` in the local component's `nyl-component.yaml` (the annotation wins). See
+[Lookup in components](/nyl/kubernetes-rendering/components/authoring-local-components/#helm-lookup).
+
+### Undeclared `lookup`
+
+When a template of the chart, a subchart under `charts/` (unpacked or `.tgz`), or a library
+chart calls `lookup` and lookup is neither enabled nor disabled, Nyl warns with
+`NYL-HELM-LOOKUP-UNDECLARED`: the call finds nothing, so the chart generates on every render.
+Set `lookup: true` to read the Release's objects, or `lookup: false` to silence the warning.
+The warning comes from a scan of the template sources for `lookup` used as a function inside
+`{{ ... }}` (comments, strings, and fields such as `.Values.lookup` are skipped), so it is a
+heuristic. It works for local charts and for charts pulled from a repository or registry.
+
+A call inside `{{ define "name" }}` counts only when that template is reached: included with
+`include "name"`, `template "name"` or `block "name"` from template content outside any define,
+or from another template that is reached. So a library chart such as Bitnami's `common`, which
+defines lookup helpers a chart may never include, does not make every chart warn. The warning
+names where the call was found, for example `in library chart common, template
+common.secrets.passwords.manage`, so choosing `false` is an informed choice. Names built at
+render time (`include (print ...)`) and subcharts disabled by a `condition` are not modelled.
+
+The warning shows when the Release renders, not when Nyl reuses its cached render, and once per
+chart and resource per run.
 
 ### What `lookup` sees
 
@@ -381,6 +410,10 @@ Requirements:
 | `NYL-HELM-LOOKUP-LIVE-UNRECORDED` | The cluster holds an object no revision or publication of the Release lists. Run `nyl apply --lookup=snapshot` once, or `--refresh-lookup` the object. |
 | `NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER` | `--lookup=live` without a cluster. Pass `--target`, or `--context` without GitOps configuration. |
 | `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree or publication command got `--lookup=live`. Use `render`, `diff` or `apply` for live lookups. |
+| `NYL-HELM-LOOKUP-ANNOTATION-INVALID` | A Component's `k8s.nyl/helm-lookup` annotation is not `"true"` or `"false"`. Quote the value. |
+| `NYL-HELM-LOOKUP-ANNOTATION-MISPLACED` | A HelmChart carries `k8s.nyl/helm-lookup`. Set `spec.lookup: true` or `false` and remove the annotation. |
+| `NYL-HELM-LOOKUP-UNDECLARED` | Warning: a chart calls `lookup` but lookup is not enabled or disabled. Opt in or out as above. |
+| `NYL-HELM-LOOKUP-OBJECT-REMOVED` | `spec.lookup` is an object such as `{}`. It is a boolean now: write `spec.lookup: true`. |
 | `NYL-HELM-LOOKUP-FAILED` | The lookup API couldn't answer a request Helm made. The message names the request. |
 
 ## Sync waves and phases

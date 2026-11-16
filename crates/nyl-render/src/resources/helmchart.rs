@@ -90,15 +90,83 @@ impl ObjectMetadata {
     }
 }
 
-/// Lets Helm's `lookup` read the objects of the chart's Release.
+/// The code of the error for `spec.lookup` written as an object, the form
+/// `lookup: {}` that enabled lookup before the field became a boolean.
+pub const LOOKUP_OBJECT_REMOVED_CODE: &str = "NYL-HELM-LOOKUP-OBJECT-REMOVED";
+
+/// Whether a chart's Helm `lookup` reads the Release's objects: `true` enables
+/// it, `false` declares that it is deliberately off.
 ///
-/// Declare it as `lookup: {}`. It takes no fields: where the objects come from
-/// is chosen by the command that renders (the target's last publication, or the
-/// live cluster with `--lookup=live`), never by the declaration, so a chart renders
-/// the same way for every command that takes the same path.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HelmChartLookup {}
+/// Leaving the field out is the third state: undeclared, which warns when the
+/// chart calls `lookup` anyway. The object form `{}` is no longer accepted and
+/// fails with [`LOOKUP_OBJECT_REMOVED_CODE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LookupSetting {
+    enabled: bool,
+}
+
+impl LookupSetting {
+    /// `lookup: true`
+    pub const ENABLED: Self = Self { enabled: true };
+    /// `lookup: false`
+    pub const DISABLED: Self = Self { enabled: false };
+
+    /// Whether lookup is on.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+impl Serialize for LookupSetting {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_bool(self.enabled)
+    }
+}
+
+impl<'de> Deserialize<'de> for LookupSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct SettingVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SettingVisitor {
+            type Value = LookupSetting;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("`true` or `false`")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> std::result::Result<Self::Value, E> {
+                Ok(if value {
+                    LookupSetting::ENABLED
+                } else {
+                    LookupSetting::DISABLED
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, _map: A) -> std::result::Result<Self::Value, A::Error> {
+                Err(serde::de::Error::custom(format!(
+                    "{LOOKUP_OBJECT_REMOVED_CODE}: spec.lookup is a boolean; write `lookup: true` \
+                     (or `lookup: false` to opt out)"
+                )))
+            }
+        }
+
+        deserializer.deserialize_any(SettingVisitor)
+    }
+}
+
+impl JsonSchema for LookupSetting {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LookupSetting".into()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "boolean"})
+    }
+}
 
 /// HelmChart specification
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -120,7 +188,9 @@ pub struct HelmChartSpec {
     /// to, so a chart that reuses what it generated earlier, such as a Secret
     /// holding a CA, finds it when it renders again.
     ///
-    /// Declare it as `lookup: {}`. `lookup` then reads the Release's objects from the
+    /// Declare it as `lookup: true`, or `lookup: false` to state that the chart must not use it
+    /// (which silences `NYL-HELM-LOOKUP-UNDECLARED`).
+    /// `lookup` then reads the Release's objects from the
     /// target's last publication (or, with `--lookup=live`, from the cluster) and sees
     /// nothing else: any other object is absent. Without a target, or before the
     /// Release is published, nothing is found and the chart generates.
@@ -131,7 +201,7 @@ pub struct HelmChartSpec {
     /// version and API versions describe that API, plus the API versions of
     /// CustomResourceDefinitions the chart ships in `crds/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lookup: Option<HelmChartLookup>,
+    pub lookup: Option<LookupSetting>,
 }
 
 impl Default for HelmChartSpec {
@@ -386,42 +456,46 @@ spec:
         assert!(!yaml.contains("includeCrds"));
     }
 
-    #[test]
-    fn test_lookup_is_declared_as_an_empty_object_and_off_by_default() {
-        let declared = r"
-apiVersion: k8s.nyl/v1
-kind: HelmChart
-metadata:
-  name: test
-spec:
-  chart:
-    name: mychart
-  lookup: {}
-";
-        let chart: HelmChart = serde_saphyr::from_str(declared).unwrap();
-        assert_eq!(chart.spec.lookup, Some(HelmChartLookup {}));
-        assert!(serde_saphyr::to_string(&chart).unwrap().contains("lookup:"));
-
-        let omitted: HelmChart = serde_saphyr::from_str(&declared.replace("  lookup: {}\n", "")).unwrap();
-        assert_eq!(omitted.spec.lookup, None);
-        assert!(!serde_saphyr::to_string(&omitted).unwrap().contains("lookup"));
+    fn chart_with_lookup(lookup: &str) -> std::result::Result<HelmChart, String> {
+        let line = if lookup.is_empty() {
+            String::new()
+        } else {
+            format!("  lookup: {lookup}\n")
+        };
+        serde_saphyr::from_str(&format!(
+            "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: test\nspec:\n  chart:\n    name: c\n{line}"
+        ))
+        .map_err(|error| error.to_string())
     }
 
     #[test]
-    fn test_lookup_takes_no_fields() {
-        let yaml = r"
-apiVersion: k8s.nyl/v1
-kind: HelmChart
-metadata:
-  name: test
-spec:
-  chart:
-    name: mychart
-  lookup:
-    source: live
-";
-        let error = serde_saphyr::from_str::<HelmChart>(yaml).unwrap_err().to_string();
-        assert!(error.contains("unknown field"), "{error}");
+    fn test_lookup_is_a_boolean_and_off_when_omitted() {
+        assert_eq!(chart_with_lookup("").unwrap().spec.lookup, None);
+        let on = chart_with_lookup("true").unwrap();
+        assert_eq!(on.spec.lookup, Some(LookupSetting::ENABLED));
+        assert!(serde_saphyr::to_string(&on).unwrap().contains("lookup: true"));
+        let off = chart_with_lookup("false").unwrap();
+        assert_eq!(off.spec.lookup, Some(LookupSetting::DISABLED));
+        assert!(serde_saphyr::to_string(&off).unwrap().contains("lookup: false"));
+        assert!(!serde_saphyr::to_string(&chart_with_lookup("").unwrap())
+            .unwrap()
+            .contains("lookup"));
+    }
+
+    #[test]
+    fn test_lookup_object_is_removed_with_its_code_and_fix() {
+        for object in ["{}", "{source: live}"] {
+            let error = chart_with_lookup(object).unwrap_err();
+            assert!(error.contains(LOOKUP_OBJECT_REMOVED_CODE), "{object}: {error}");
+            assert!(error.contains("lookup: true"), "{object}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_lookup_rejects_other_values() {
+        for invalid in ["\"yes\"", "1", "[]"] {
+            assert!(chart_with_lookup(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

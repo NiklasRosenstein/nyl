@@ -46,6 +46,11 @@ pub const ANNOTATION_PARENT_NAMESPACE: &str = "k8s.nyl/parent-namespace";
 /// Annotation declaring when Nyl applies a Kyverno policy during rendering.
 pub const ANNOTATION_KYVERNO_SCOPE: &str = "k8s.nyl/apply-policy-scope";
 
+/// Annotation on a Component that turns Helm `lookup` on (`"true"`) or off
+/// (`"false"`) for that invocation. It takes precedence over the `lookup` field
+/// of the component's `nyl-component.yaml`.
+pub const ANNOTATION_HELM_LOOKUP: &str = "k8s.nyl/helm-lookup";
+
 /// Annotation on a Pod template that opts into a checksum of the ConfigMaps and
 /// Secrets it consumes: `auto`, or a comma-separated list of `Kind/name` with an
 /// optional `#key`.

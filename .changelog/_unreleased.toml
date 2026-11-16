@@ -1,0 +1,17 @@
+[[entries]]
+id = "6f19ee07-712c-43aa-b040-58f496aa4cb5"
+type = "feature"
+description = "Components can use Helm `lookup`: a local component enables it for every invocation with `lookup: true` in its `nyl-component.yaml`, and the annotation `k8s.nyl/helm-lookup: \"true\"` or `\"false\"` on a Component overrides it, including for remote shortcuts and aliases. It reads the Release's objects exactly as `spec.lookup` does. Any other annotation value fails with `NYL-HELM-LOOKUP-ANNOTATION-INVALID`; a HelmChart takes `spec.lookup` and rejects the annotation with `NYL-HELM-LOOKUP-ANNOTATION-MISPLACED`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "7cd64f65-1aae-48bd-abea-190ebb632ffc"
+type = "feature"
+description = "A chart whose templates call Helm's `lookup`, in the chart, its subcharts (unpacked or `.tgz`), or library charts, warns with `NYL-HELM-LOOKUP-UNDECLARED` when lookup is neither enabled nor disabled. `spec.lookup: false`, the annotation `k8s.nyl/helm-lookup: \"false\"`, and `lookup: false` in `nyl-component.yaml` render without lookup and silence it. Detection scans template sources, so it is a heuristic"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "64ea32f9-6556-4764-9e17-b141ef8f4310"
+type = "breaking"
+description = "HelmChart `spec.lookup` is a boolean: write `spec.lookup: true` (or `false` to opt out). The object form `spec.lookup: {}` from 0.7.0 is removed and fails with `NYL-HELM-LOOKUP-OBJECT-REMOVED`"
+author = "@NiklasRosenstein"

@@ -1,6 +1,6 @@
 //! Helm `lookup` from the target's last publication.
 //!
-//! A chart that declares `spec.lookup` reads the objects of its Release as the
+//! A chart with lookup enabled reads the objects of its Release as the
 //! target last published them: the files the ownership index
 //! (`<prefix>/_nyl/index.json`) lists beneath `<group output>/<release>/` at the
 //! publication base commit, the same commit `fromPublication` reads. Every

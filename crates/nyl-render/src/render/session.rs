@@ -525,7 +525,9 @@ impl RenderSession {
             request.lookup_scope.clone(),
         );
         let resources = filter_render_resources(bundle.resources, request.only_source_kind);
-        let has_lookup_chart = resources.iter().any(declares_lookup);
+        let has_lookup_chart = resources
+            .iter()
+            .any(|resource| declares_lookup(resource, &self.project_config));
         let mut cache_bypass_reasons = resources_render_cache_bypass_reasons(&resources, &self.project_config);
         let mut cacheable = cache_bypass_reasons.is_empty();
         let ReleaseCacheLookup {
@@ -823,12 +825,14 @@ impl RenderSession {
         }
         // Where the Release is published decides which objects its lookups read, so a render
         // for another group (or for none) never reuses one that looked up in this group's
-        // Release. A Release records it when its own HelmCharts declare `lookup`, and when the
+        // Release. A Release records it when its own HelmCharts or Components enable `lookup`, and when the
         // previous render recorded one because a chart it expanded did.
         if previous
             .as_ref()
             .is_some_and(|previous| previous.dependencies.contains_key(LOOKUP_SCOPE_DEPENDENCY))
-            || resources.iter().any(declares_lookup)
+            || resources
+                .iter()
+                .any(|resource| declares_lookup(resource, &self.project_config))
         {
             recorder.record_value(LOOKUP_SCOPE_DEPENDENCY, &lookup.scope_input())?;
         }
@@ -1006,9 +1010,11 @@ fn record_resource_directory_dependency(
         }
         return Ok(());
     }
-    if is_nyl_component(resource) {
-        let api_version = resource.get("apiVersion").and_then(Value::as_str).unwrap_or_default();
-        let kind = resource.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let api_version = resource.get("apiVersion").and_then(Value::as_str).unwrap_or_default();
+    let kind = resource.get("kind").and_then(Value::as_str).unwrap_or_default();
+    // An aliased kind renders as the component it points at, so its directory (and the
+    // nyl-component.yaml in it) is as much an input as a component's own.
+    if is_nyl_component(resource) || config.get_alias_target_for_kind(api_version, kind).is_some() {
         let effective = config.get_alias_target_for_kind(api_version, kind).unwrap_or(kind);
         if !is_remote_helm_chart_shortcut(effective) {
             recorder.record_directory(&config.resolve_component_chart_dir(effective)?)?;
@@ -1115,10 +1121,9 @@ fn target_template_context(target: &DeploymentTarget, trusted_source: bool) -> R
 /// published; only such a Release records one.
 const LOOKUP_SCOPE_DEPENDENCY: &str = "lookup-scope";
 
-/// Whether a resource is a HelmChart that declares `lookup`.
-fn declares_lookup(resource: &RenderResource) -> bool {
-    resource.value.get("kind").and_then(Value::as_str) == Some("HelmChart")
-        && resource.value.pointer("/spec/lookup").is_some()
+/// Whether a resource is a HelmChart or Component that turns `lookup` on.
+fn declares_lookup(resource: &RenderResource, config: &ProjectConfig) -> bool {
+    super::expand::enables_lookup(&resource.value, config)
 }
 
 /// The Release a bundle declares: the Helm release its charts render for, and
@@ -1611,7 +1616,7 @@ spec:
         fs::write(
             root.join("app.yaml"),
             format!(
-                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: seen\n  namespace: apps\n---\napiVersion: {API_VERSION}\nkind: HelmChart\nmetadata:\n  name: seen\n  namespace: apps\nspec:\n  chart:\n    name: chart\n  lookup: {{}}\n"
+                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: seen\n  namespace: apps\n---\napiVersion: {API_VERSION}\nkind: HelmChart\nmetadata:\n  name: seen\n  namespace: apps\nspec:\n  chart:\n    name: chart\n  lookup: true\n"
             ),
         )
         .unwrap();

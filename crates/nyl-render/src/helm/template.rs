@@ -34,7 +34,7 @@ pub struct HelmTemplateExecutor {
 
     gitops_cache: Option<crate::gitops::GitOpsCache>,
 
-    /// Present when the chart declares `spec.lookup`: Helm's `lookup` reads the
+    /// Present when lookup is enabled for the chart: Helm's `lookup` reads the
     /// Release's objects from a local read-only API instead of finding nothing.
     lookup: Option<LookupHandle>,
 }
@@ -52,7 +52,7 @@ impl HelmTemplateExecutor {
     }
 
     /// Render with `lookup` answered from `handle`, which is how a chart that
-    /// declares `spec.lookup` renders. Without it, Helm renders offline and
+    /// has lookup enabled renders. Without it, Helm renders offline and
     /// `lookup` finds nothing.
     #[must_use]
     pub fn with_lookup(mut self, handle: Option<LookupHandle>) -> Self {
