@@ -5291,6 +5291,34 @@ promote` writes nothing, names what lacks evidence in the newest state, and
 exits 2 with `NYL-PROMOTE-NO-EVIDENCE`. The walkthrough runs from M6.
 ([`stale-promotion-evidence`](../nyl/tests/scenarios/walkthroughs/stale-promotion-evidence/scenario.yaml))
 
+**Value-only promotion (M6).** Dev publishes two Releases, `web` and `api`,
+through `kubernetes` with `observe: {}`. `dev-to-staging` promotes only
+values, each selected as the publication unit's resolved input of the
+Release that consumes it; `dev-to-prod` promotes dev's source with the same
+values. After R2, Argo CD runs R2's publication for `web` and still R1's for
+`api`: `nyl attest` records `accepted` failing for R2's receipt, with
+`other-publication` for `api` in its details. `nyl promote dev-to-staging`
+nevertheless takes `webImage` from R2's state and `apiImage` from R1's, the
+states their Applications run, and the record names `apiImage`'s own state.
+`nyl promote dev-to-prod` refuses with `NYL-PROMOTE-NO-EVIDENCE`, because one
+source commit must fit every value and what runs is mixed; with
+`--state-revision` naming R1's state it promotes R1 on the attestations
+recorded for it. Once `api` runs R2 too, both paths promote R2. An
+Application that runs no publication of dev (`unmatched`) or is `Degraded`
+blocks the value-only path as well. The walkthrough runs from M6.
+([`value-only-promotion`](../nyl/tests/scenarios/walkthroughs/value-only-promotion/scenario.yaml))
+
+**A promotion recorded in source (M6).** Prod's `source.fromPromotion` sets
+`record: source`, so `nyl promote dev-to-prod` writes the PromotionRecord into
+prod's Environment as a commit on `main`, with `sequence` 1, and leaves prod's
+state alone; `reconcile -e prod` runs at the promoted commit and records the
+sequence it applied. After a second promotion, a reconcile from a checkout
+made before it reads the sequence-1 block, refuses with
+`NYL-PROMOTION-SEQUENCE-OLDER`, writes nothing, and names `nyl promote
+dev-to-prod --revision`; the rollback is that new promotion, with sequence 3.
+The walkthrough runs from M6.
+([`promotion-record-source`](../nyl/tests/scenarios/walkthroughs/promotion-record-source/scenario.yaml))
+
 **Deletion.** `cache` and its only consumer `worker` are removed from source;
 `cache` has a teardown step and therefore the default `Teardown` policy,
 `worker` declares `Retain`. The next run replaces `worker`'s files with a

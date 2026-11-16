@@ -27,6 +27,8 @@ deadlines match the walkthroughs' prose. The
 | [`attested-evidence`](attested-evidence/scenario.yaml) | Attested evidence for dependents: consumers wait for `pending` and `failing` attestations, a pass unblocks them without executing the producer, and a new receipt starts pending again | M5 |
 | [`health-wait`](health-wait/scenario.yaml) | A publication that waits for health and times out: a retryable `timeout` failure with no receipt, converged by the next reconcile | M5 |
 | [`stale-promotion-evidence`](stale-promotion-evidence/scenario.yaml) | Promotion with stale source evidence | M6 |
+| [`value-only-promotion`](value-only-promotion/scenario.yaml) | Value-only promotion: each value from the publication its consuming Application runs, while a source path blocks on the same mixed revisions | M6 |
+| [`promotion-record-source`](promotion-record-source/scenario.yaml) | `record: source`: the record in prod's Environment, its sequence applied by runs, an old checkout refused, and a rollback as a new promotion | M6 |
 
 These files are the contract's acceptance tests.
 [`scenario_harness_test.rs`](../../scenario_harness_test.rs) validates every

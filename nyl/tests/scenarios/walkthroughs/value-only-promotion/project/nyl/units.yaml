@@ -1,0 +1,35 @@
+# dev builds two images and publishes both Releases; staging and prod only
+# publish, with the images promoted from what dev's Applications run.
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: web-image
+  labels: {dev: 'true'}
+spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
+  context: {path: ../services/web}
+  repository: '%REGISTRY%/web'
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: api-image
+  labels: {dev: 'true'}
+spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
+  context: {path: ../services/api}
+  repository: '%REGISTRY%/api'
+  timeout: 60m
+---
+# `observe: {}` declares `accepted` and `healthy`, which `nyl attest` records
+# from the (scripted) Argo CD, per Application.
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {dev: 'true', staging: 'true', prod: 'true'}
+spec:
+  target: '{{ values.target }}'
+  observe: {}
+  timeout: 10m

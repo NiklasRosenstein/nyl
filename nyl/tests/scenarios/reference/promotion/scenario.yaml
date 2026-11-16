@@ -1,0 +1,270 @@
+# Reference scenario 4, promotion to prod (design/reference-scenarios.md):
+# prod runs exactly the source commit and image digest one recorded dev
+# state proved, with its own infrastructure and reviewed-plan approvals;
+# missing and aged evidence block; rolling back is promoting an older state.
+# Runs in both tiers; the missing-artifact steps at the end script the image
+# driver and run in tier 1 only.
+contract: design/reference-scenarios.md#scenario-4-promotion-to-prod
+milestone: M6
+steps:
+  # 1. The path validates: its source and target exist, its selector names a
+  #    unit dev selects, and the value fits prod's `image` input.
+  - nyl: [validate]
+    exit: 0
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [state, init, -e, prod]
+    exit: 0
+
+  # 2. Before the first promotion prod has no source commit, and dev has no
+  #    recorded state yet: evidence is missing.
+  - nyl: [reconcile, -e, prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTION-MISSING]
+      messages: [nyl promote dev-to-prod]
+      commits: {desired: 0, observed: 0}
+  - nyl: [promote, dev-to-prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-NO-EVIDENCE]
+      commits: {desired: 0, observed: 0}
+
+  # 3. dev runs S1 (main). Receipts alone do not reach `attested`: dev
+  #    declares the environment-wide `qa`, which nobody recorded yet.
+  - nyl: [reconcile, -e, dev]
+    id: r1
+    exit: 0
+    expect:
+      executed: [network, web-image, database, kubernetes]
+  - nyl: [promote, dev-to-prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-NO-EVIDENCE]
+      messages: [qa]
+      commits: {desired: 0, observed: 0}
+
+  # 4. A person records qa for dev's current state (an external attestation).
+  - nyl: [attest, -e, dev, --name, qa, --result, pass, --reason, "QA signed off release 1"]
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 1}
+
+  # 5. Inspection and a dry run write nothing and show the state and record
+  #    the promotion would use.
+  - nyl: [promote, dev-to-prod, --dry-run]
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 0}
+      promotion:
+        path: dev-to-prod
+        sequence: 1
+        sourceCommit: main
+        from: {environment: dev, run: r1}
+      get:
+        args: [get, promotion-candidates, dev-to-prod]
+        json:
+          /path: dev-to-prod
+          /candidates/0/desiredCommit: '%STATE(r1)%'
+          /candidates/0/sourceCommit: '%COMMIT(main)%'
+          /candidates/0/level: attested
+          /candidates/0/promoted: false
+
+  # 6. The promotion: one desired commit on prod's state with the record.
+  - nyl: [promote, dev-to-prod, --reason, "Release 1"]
+    exit: 0
+    expect:
+      commits: {desired: 1, observed: 0}
+      promotion:
+        path: dev-to-prod
+        sequence: 1
+        sourceCommit: main
+        from: {environment: dev, run: r1}
+        values:
+          webImage:
+            equals: [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r1)%']
+        evidence: {level: attested, override: false, attestations: [environment/qa]}
+        superseded: []
+        artifactsVerified: true
+      get:
+        args: [get, promotions, -e, prod]
+        json:
+          /promotions/0/path: dev-to-prod
+          /promotions/0/sequence: 1
+          /promotions/0/from/desiredCommit: '%STATE(r1)%'
+
+  # 7. prod runs at S1. Its own units keep their approvals: network applies,
+  #    database waits for a reviewed plan, and `--approve-all` cannot stand
+  #    in for the digest that `requireDigest` asks for.
+  - nyl: [reconcile, -e, prod]
+    exit: 2
+    expect:
+      source: main
+      source-chosen-by: {by: promotion, path: dev-to-prod, sequence: 1}
+      executed: [network]
+      awaiting-approval: [database]
+      blocked: [kubernetes]
+  - nyl: [reconcile, -e, prod, --approve-all]
+    exit: 2
+    expect:
+      executed: []
+      awaiting-approval: [database]
+      blocked: [kubernetes]
+  - nyl: [reconcile, -e, prod, --approve, 'database=%PLAN-DIGEST(prod/database)%']
+    exit: 0
+    expect:
+      source: main
+      executed: [database, kubernetes]
+      current: [network]
+      # prod publishes the image digest dev's state S1 recorded, and its own
+      # database's host.
+      deploy:
+        branch: deploy
+        contains: ['prod/web/**', 'prod/_nyl/index.json']
+        mentions:
+          'prod/web/**':
+            - [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r1)%']
+            - [get, output, database/connection, -e, prod, --pointer, /host]
+      # `status` shows the lineage of what prod runs.
+      get:
+        args: [status, -e, prod]
+        json:
+          /environments/0/promotion/path: dev-to-prod
+          /environments/0/promotion/sequence: 1
+          /environments/0/promotion/sourceCommit: '%COMMIT(main)%'
+          /environments/0/promotion/from/environment: dev
+          /environments/0/promotion/from/desiredCommit: '%STATE(r1)%'
+
+  # 8. dev moves on to S2. Its newest state has no qa yet, and the newest
+  #    state that reaches `attested` is the one prod already runs.
+  - commit: {branch: main, message: "Release 2", apply: patches/web}
+  - nyl: [reconcile, -e, dev]
+    id: r2
+    exit: 0
+    expect:
+      executed: [web-image, kubernetes]
+  - nyl: [promote, dev-to-prod]
+    exit: 0
+    expect:
+      outcome: unchanged
+      commits: {desired: 0, observed: 0}
+
+  # 9. Attestations older than the path's maxAttestationAge (1h) no longer
+  #    count, for any state.
+  - nyl: [attest, -e, dev, --name, qa, --result, pass, --reason, "QA signed off release 2"]
+    exit: 0
+  - clock: {advance: 2h}
+  - nyl: [promote, dev-to-prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-NO-EVIDENCE]
+      messages: [maxAttestationAge]
+      commits: {desired: 0, observed: 0}
+  - nyl: [attest, -e, dev, --name, qa, --result, pass, --reason, "QA re-checked release 2"]
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 1}
+
+  # 10. Release 2 reaches prod. Nothing in prod's infrastructure changed, so
+  #     only the publication runs and no approval is needed.
+  - nyl: [promote, dev-to-prod, --reason, "Release 2"]
+    exit: 0
+    expect:
+      commits: {desired: 1, observed: 0}
+      promotion:
+        path: dev-to-prod
+        sequence: 2
+        sourceCommit: main
+        from: {environment: dev, run: r2}
+        values:
+          webImage:
+            equals: [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r2)%']
+        evidence: {level: attested, override: false, attestations: [environment/qa]}
+  - nyl: [reconcile, -e, prod]
+    exit: 0
+    expect:
+      source: main
+      source-chosen-by: {by: promotion, path: dev-to-prod, sequence: 2}
+      executed: [kubernetes]
+      current: [network, database]
+      deploy:
+        branch: deploy
+        mentions:
+          'prod/web/**':
+            - [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r2)%']
+
+  # 11. Rolling back is promoting an older state. S1's qa is older than
+  #     maxAttestationAge, so the explicit state reaches only `published`,
+  #     which takes the override; a rollback on the same path needs no
+  #     --supersede.
+  - nyl: [promote, dev-to-prod, --revision, '%COMMIT(main~1)%', --reason, "Roll back release 2"]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-NO-EVIDENCE]
+      commits: {desired: 0, observed: 0}
+  - nyl: [promote, dev-to-prod, --revision, '%COMMIT(main~1)%', --evidence, published, --reason, "Roll back release 2"]
+    exit: 0
+    expect:
+      codes: [NYL-PROMOTE-EVIDENCE-OVERRIDE]
+      commits: {desired: 1, observed: 0}
+      promotion:
+        path: dev-to-prod
+        sequence: 3
+        sourceCommit: main~1
+        from: {environment: dev, run: r1}
+        values:
+          webImage:
+            equals: [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r1)%']
+        evidence: {level: published, override: true}
+        superseded: []
+  - nyl: [reconcile, -e, prod]
+    exit: 0
+    expect:
+      source: main~1
+      source-chosen-by: {by: promotion, path: dev-to-prod, sequence: 3}
+      executed: [kubernetes]
+      current: [network, database]
+      deploy:
+        branch: deploy
+        mentions:
+          'prod/web/**':
+            - [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r1)%']
+
+  # 12. Release 3 is proven in dev, but the registry no longer has its image:
+  #     artifact verification refuses, and only an explicit skip records the
+  #     promotion, saying so in the record.
+  - commit: {branch: main, message: "Release 3", apply: patches/web-v3}
+  - nyl: [reconcile, -e, dev]
+    id: r3
+    exit: 0
+    expect:
+      executed: [web-image, kubernetes]
+  - nyl: [attest, -e, dev, --name, qa, --result, pass, --reason, "QA signed off release 3"]
+    exit: 0
+  - driver: {unit: web-image, operation: verify-artifact, outcome: failed}
+  - nyl: [promote, dev-to-prod, --reason, "Release 3"]
+    tier: 1
+    exit: 1
+    expect:
+      codes: [NYL-PROMOTE-ARTIFACT-MISSING]
+      commits: {desired: 0, observed: 0}
+  - nyl: [promote, dev-to-prod, --no-verify-artifacts, --reason, "Release 3; registry checked by hand"]
+    tier: 1
+    exit: 0
+    expect:
+      commits: {desired: 1, observed: 0}
+      promotion:
+        path: dev-to-prod
+        sequence: 4
+        sourceCommit: main
+        from: {environment: dev, run: r3}
+        artifactsVerified: false
+
+  # 13. (Scenario 1, step 21.) Removing dev's Environment leaves the path
+  #     without a source: validation names it.
+  - commit: {branch: main, message: "Remove dev", apply: patches/no-dev}
+  - nyl: [validate]
+    tier: 1
+    exit: 1
+    expect:
+      messages: [dev-to-prod]

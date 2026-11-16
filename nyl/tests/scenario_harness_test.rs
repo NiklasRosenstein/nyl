@@ -185,6 +185,7 @@ fn test_scenario_git_steps_apply_in_the_test_world() {
                 StepKind::Commit => world.commit(step.commit.as_ref().unwrap(), &loaded.directory),
                 StepKind::Branch => world.branch(step.branch.as_ref().unwrap()),
                 StepKind::SquashMerge => world.squash_merge(step.squash_merge.as_ref().unwrap()),
+                StepKind::Merge => world.merge(step.merge.as_ref().unwrap()),
                 StepKind::DeleteBranch => world.delete_branch(step.delete_branch.as_ref().unwrap()),
                 _ => {}
             }
@@ -310,6 +311,68 @@ fn test_validate_observe_driver_steps() {
     assert!(pending.contains("only an observe outcome"), "{pending}");
     let early = validation_error("  - driver: {unit: kubernetes, operation: observe, outcome: pending}\n");
     assert!(early.contains("runs from M5"), "{early}");
+}
+
+/// M6 step kinds, the verify-artifact operation, and argument placeholders
+/// run from M6, and each names only what an earlier step defines. Catches an
+/// M6 scenario whose placeholder or Argo CD reading could never resolve,
+/// found only once the harness reaches M6.
+#[test]
+fn test_validate_m6_steps_and_placeholders() {
+    use scenario::format::{placeholders, Placeholder};
+    let at_m6 = |steps: &str| {
+        let text = format!(
+            "contract: design/promotion.md#promotion-paths\nmilestone: M6\ntiers: [1]\nproject: ../_project\nsteps:\n{steps}"
+        );
+        let loaded = inline_scenario("inline/m6", &text);
+        scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())
+    };
+    let reconcile = "  - nyl: [reconcile, -e, dev]\n    id: r1\n    exit: 0\n";
+    assert_eq!(
+        at_m6(&format!(
+            "{reconcile}  - nyl: [promote, p, --state-revision, '%STATE(r1)%', --revision, '%COMMIT(main~1)%']\n    exit: 0\n  - argocd: {{target: dev, all: {{runs: r1}}, releases: {{web/web: {{runs: unmatched, health: Degraded}}}}}}\n  - merge: {{branch: main, into: main}}\n"
+        )),
+        Ok(())
+    );
+    let early = at_m6("  - nyl: [promote, p, --state-revision, '%STATE(r1)%']\n    exit: 0\n").unwrap_err();
+    assert!(early.contains("no earlier nyl step has that id"), "{early}");
+    let unknown = at_m6("  - nyl: [get, x, '%NOW(1)%']\n    exit: 0\n").unwrap_err();
+    assert!(unknown.contains("unknown placeholder"), "{unknown}");
+    let reading = at_m6("  - argocd: {target: dev, all: {runs: r9}}\n").unwrap_err();
+    assert!(reading.contains("no earlier nyl step has that id"), "{reading}");
+    let release = at_m6(&format!(
+        "{reconcile}  - argocd: {{target: dev, all: {{runs: r1}}, releases: {{web: {{runs: r1}}}}}}\n"
+    ))
+    .unwrap_err();
+    assert!(release.contains("<group>/<release>"), "{release}");
+    let verify = at_m6("  - driver: {unit: web-image, operation: verify-artifact, outcome: uncertain}\n").unwrap_err();
+    assert!(verify.contains("succeeded or failed"), "{verify}");
+    assert_eq!(
+        at_m6("  - driver: {unit: web-image, operation: verify-artifact, outcome: failed}\n"),
+        Ok(())
+    );
+    let state = validation_error(&format!("{reconcile}  - nyl: [get, x, '%STATE(r1)%']\n    exit: 0\n"));
+    assert!(state.contains("placeholders run from M6"), "{state}");
+    let merge = validation_error("  - merge: {branch: a, into: main}\n");
+    assert!(merge.contains("Merge runs from M6"), "{merge}");
+    let argocd = validation_error("  - argocd: {target: dev, all: {runs: unmatched}}\n");
+    assert!(argocd.contains("Argocd runs from M6"), "{argocd}");
+    assert_eq!(
+        placeholders("%COMMIT(s1)%..%COMMIT(release/prod)%=reason"),
+        Ok(vec![
+            Placeholder::Commit("s1".to_owned()),
+            Placeholder::Commit("release/prod".to_owned())
+        ])
+    );
+    assert_eq!(
+        placeholders("database=%PLAN-DIGEST(prod/database)%"),
+        Ok(vec![Placeholder::PlanDigest {
+            environment: "prod".to_owned(),
+            unit: "database".to_owned()
+        }])
+    );
+    assert_eq!(placeholders("100% sure, %SCENARIO_TMP%"), Ok(vec![]));
+    assert!(placeholders("%STATE(r1").unwrap_err().contains("not closed"));
 }
 
 /// A resume names an earlier paused step, once, and every paused step is resumed.
@@ -873,7 +936,12 @@ fn test_publication_drivers_default_to_both_and_real_narrows_them() {
         .filter(|loaded| loaded.scenario.publication == PublicationDrivers::Fake)
         .map(|loaded| loaded.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(fake_only, ["walkthroughs/health-wait"]);
+    // health-wait scripts the publication's outcome; value-only-promotion
+    // scripts the Argo CD that only the fake publication reads in tier 1.
+    assert_eq!(
+        fake_only,
+        ["walkthroughs/health-wait", "walkthroughs/value-only-promotion"]
+    );
     let bad = "contract: design/reference-scenarios.md#tiers\nmilestone: M3\npublication: neither\nsteps: []\n";
     assert!(serde_saphyr::from_str::<scenario::format::Scenario>(bad).is_err());
 }

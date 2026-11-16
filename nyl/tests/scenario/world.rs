@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::TempDir;
 
-use super::format::{BranchStep, CommitStep, FileStep, SquashMergeStep};
+use super::format::{BranchStep, CommitStep, FileStep, MergeStep, SquashMergeStep};
 
 /// The registry host tier 1 substitutes for `%REGISTRY%`; nothing listens there.
 pub const FAKE_REGISTRY: &str = "registry.invalid:5000";
@@ -179,6 +179,27 @@ impl World {
             &["merge", "--quiet", "--squash", &format!("origin/{}", step.branch)],
         );
         self.commit_and_push(&step.into, &format!("Squash-merge {}", step.branch));
+    }
+
+    /// A `merge` step: a merge commit, keeping the branch, so every commit
+    /// of the branch is reachable from `into`.
+    pub fn merge(&self, step: &MergeStep) {
+        self.checkout(&step.into);
+        git(
+            &self.work(),
+            &[
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "--message",
+                &format!("Merge {} into {}", step.branch, step.into),
+                &format!("origin/{}", step.branch),
+            ],
+        );
+        git(
+            &self.work(),
+            &["push", "--quiet", "origin", &format!("HEAD:refs/heads/{}", step.into)],
+        );
     }
 
     /// A `delete-branch` step. The host forgets what no ref names anymore, as

@@ -1,0 +1,53 @@
+# Units of reference scenario 4 (design/reference-scenarios.md): dev runs
+# everything; prod selects the infrastructure and the publication and takes
+# its image from dev through the promotion. prod's database applies only
+# reviewed plans with their digest.
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: network
+  labels: {dev: 'true', prod: 'true'}
+spec:
+  source: {path: ../infra/network}
+  backend: {path: '{{ values.backendDir }}/{{ environment.name }}-network.tfstate'}
+  outputs:
+    vpcId: {type: string}
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata:
+  name: database
+  labels:
+    dev: 'true'
+    prod: 'true'
+spec:
+  source: {path: ../infra/database}
+  backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
+  variables:
+    vpc_id: {fromUnit: {unit: network, output: vpcId}}
+  outputs:
+    connection: {type: object}
+  approval: {{ values.approval | tojson }}
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: web-image
+  labels: {dev: 'true'}
+spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
+  context: {path: ../services/web}
+  repository: '%REGISTRY%/web'
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {dev: 'true', prod: 'true'}
+spec:
+  target: '{{ values.target }}'
+  teardownWait: {strategy: manual}
+  timeout: 10m
