@@ -319,7 +319,18 @@ chart calls `lookup` and lookup is neither enabled nor disabled, Nyl warns with
 Set `lookup: true` to read the Release's objects, or `lookup: false` to silence the warning.
 The warning comes from a scan of the template sources for `lookup` used as a function inside
 `{{ ... }}` (comments, strings, and fields such as `.Values.lookup` are skipped), so it is a
-heuristic. It shows when the Release renders, not when Nyl reuses its cached render.
+heuristic. It works for local charts and for charts pulled from a repository or registry.
+
+A call inside `{{ define "name" }}` counts only when that template is reached: included with
+`include "name"`, `template "name"` or `block "name"` from template content outside any define,
+or from another template that is reached. So a library chart such as Bitnami's `common`, which
+defines lookup helpers a chart may never include, does not make every chart warn. The warning
+names where the call was found, for example `in library chart common, template
+common.secrets.passwords.manage`, so choosing `false` is an informed choice. Names built at
+render time (`include (print ...)`) and subcharts disabled by a `condition` are not modelled.
+
+The warning shows when the Release renders, not when Nyl reuses its cached render, and once per
+chart and resource per run.
 
 ### What `lookup` sees
 
