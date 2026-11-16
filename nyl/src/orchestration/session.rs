@@ -770,6 +770,14 @@ fn table(report: &RunReport) -> String {
                 let _ = writeln!(text, "            {repository}");
             }
         }
+        if let Some(promotion) = &environment.promotion {
+            let _ = writeln!(
+                text,
+                "  {} {}",
+                styled("promoted:", Style::Dim),
+                promotion_line(promotion)
+            );
+        }
         for (side, commit) in &environment.commits {
             let _ = writeln!(
                 text,
@@ -789,6 +797,23 @@ fn table(report: &RunReport) -> String {
         }
     }
     text
+}
+
+/// The promotion line of `status`: the path and sequence the environment
+/// runs, the source state it came from, and a newer record waiting for a run.
+fn promotion_line(promotion: &nyl_orchestration::run_report::PromotionLineage) -> String {
+    let mut line = format!("{} #{}", promotion.path, promotion.sequence);
+    if let Some(nyl_core::orchestration::promotion::PromotionFrom::Environment(from)) = &promotion.from {
+        let _ = write!(
+            line,
+            " from {} run {} (desired {})",
+            from.environment, from.run, from.desired_commit
+        );
+    }
+    if let Some(pending) = promotion.pending_sequence {
+        let _ = write!(line, "; #{pending} waits for the next reconcile");
+    }
+    line
 }
 
 /// The instance line of the table form: its template, expiry, and what the command did about it.

@@ -366,9 +366,17 @@ spec:
 - Inspection: `nyl get states -e <env>` lists an environment's recorded states
   with source commit, results, publication, and recorded attestations;
   `nyl get promotion-candidates <path>` evaluates the path's source states
-  against the path, showing the level each reaches or why not, the values it
-  would carry, and which one the target runs now; `nyl promote … --dry-run`
-  shows the chosen state and the exact change without writing anything.
+  against the path with the rules and the reading of state `nyl promote`
+  uses, showing the level each reaches (up to the path's) or why not, the
+  values it would carry, the state `nyl promote` would take now or the code
+  it would refuse with, and which one the path's record names; `nyl promote
+  … --dry-run` shows the chosen state and the exact change without writing
+  anything. `nyl get promotions -e <env>` lists the environment's records and
+  every promotion in its desired history, and `status` shows the lineage of
+  what a promoted environment runs: the applied record's path, sequence,
+  source commit, and source state, and a newer record no run applied yet.
+  Each reads a history after one sync, so its round trips to the state
+  remote do not grow with the history.
 - Evidence covers the whole source, not only the selected values: in that
   state, every unit the target environment also selects has a current
   receipt, and at `attested` every such unit's required attestations pass for

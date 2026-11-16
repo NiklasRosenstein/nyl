@@ -57,3 +57,15 @@ id = "d7283997-e441-42de-bda2-c4d6da0a1e8a"
 type = "fix"
 description = "`nyl validate` reports a failing DeploymentTarget compile together with invalid units and PromotionPaths instead of stopping at the target, so a path whose source Environment was removed is named next to the target that no environment places any more; `nyl get --state-revision` pairs the other state ref's commit by `Nyl-Run-Id`, so a state whose commits share a second is read whole"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "851f8906-0f64-4ac7-879a-066975840ff0"
+type = "feature"
+description = "`nyl get states -e <env>` lists an environment's recorded states, newest first, with each state's desired, observed, and source commits, which units have a current receipt, and the attestations recorded for it. `nyl get promotion-candidates <path>` judges the path's source states with the rules `nyl promote` uses: the level each reaches, what it lacks, the values it would carry, the state `nyl promote` would take now or the code it would refuse with, and the state the path's record already names. `nyl get promotions -e <env>` lists the environment's PromotionRecords, the one its last run applied, and every promotion in its desired history. Each prints text, or a typed `StatesReport`, `PromotionCandidatesReport`, or `PromotionsReport` with `-o json`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6d690e8a-824e-427a-bd46-220c16cc2f0e"
+type = "feature"
+description = "`nyl status` shows the promotion lineage of an environment whose source a promotion chose: the path and sequence of the applied record, its source commit, the source state it promoted, and a newer record waiting for the next reconcile (`promotion: {path, sequence, sourceCommit, from, pendingSequence}` in JSON)"
+author = "@NiklasRosenstein"

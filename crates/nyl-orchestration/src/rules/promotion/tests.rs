@@ -906,6 +906,55 @@ fn test_evaluate_reports_the_level_each_state_reaches() {
     assert!(!evaluations[1].gaps.is_empty());
 }
 
+/// A `published` path reports a state at `published` even when it would
+/// also pass `attested`: the level is the path's, not the strongest
+/// imaginable, as `get promotion-candidates` shows it. Catches a candidate
+/// listed as `attested` on a path that never asks for attestations.
+#[test]
+fn test_evaluate_caps_the_level_at_the_paths() {
+    let history = vec![
+        state(2, 'b', "sha256:two").without_receipt("kubernetes"),
+        state(1, 'a', "sha256:one")
+            .env_attestation("qa", Pass, FRESH)
+            .kubernetes_attestation("accepted", Pass, FRESH, running("p1"))
+            .kubernetes_attestation("healthy", Pass, FRESH, running("p1")),
+    ];
+    let evaluations = case(published(), history).evaluations();
+    let levels: Vec<_> = evaluations.iter().map(|evaluation| evaluation.level).collect();
+    assert_eq!(levels, [None, Some(EvidenceLevel::Published)]);
+    assert_eq!(evaluations[0].gaps[0].scope, "kubernetes");
+}
+
+/// A value-only path judges each state as `nyl promote` does: for the units
+/// its values read, so a receipt missing elsewhere does not lower it.
+/// Catches candidates judged by the whole-source rule on a path whose
+/// promotion would take them.
+#[test]
+fn test_evaluate_judges_a_value_only_path_for_its_values() {
+    let image_only = path(json!({
+        "evidence": "attested",
+        "attestations": {"units": {"web-image": []}, "environment": []},
+        "values": {
+            "webImage": {"select": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
+        }
+    }));
+    let mut value_case = case(
+        image_only,
+        vec![state(1, 'a', "sha256:one").without_receipt("kubernetes")],
+    );
+    value_case.promotes_source = false;
+    let evaluations = value_case.evaluations();
+    assert_eq!(
+        evaluations[0].level,
+        Some(EvidenceLevel::Attested),
+        "{:?}",
+        evaluations[0].gaps
+    );
+    // The same state, judged for the whole source, lacks kubernetes.
+    value_case.promotes_source = true;
+    assert_eq!(value_case.evaluations()[0].level, None);
+}
+
 /// `--evidence published` without an explicit state takes the newest state
 /// that reaches `published`, recording an override only when that state is
 /// below the path's level: the newer unattested state wins over the older

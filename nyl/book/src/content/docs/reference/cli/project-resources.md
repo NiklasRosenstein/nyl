@@ -75,7 +75,13 @@ nyl get artifacts -e dev                      # UNIT NAME KIND SUMMARY
 nyl get artifact web/image -e dev --pointer /reference
 nyl get units -e dev --state-revision 41f0c2e
 nyl get units -e dev --local                  # this clone's local view
+nyl get states -e dev                         # recorded states with their evidence
+nyl get promotion-candidates dev-to-prod      # the path's source states, judged as nyl promote judges them
+nyl get promotions -e prod                    # promotion records and their history
 ```
+
+The promotion forms, `states`, `promotion-candidates`, and `promotions`, are
+described on [their own page](/nyl/reference/cli/get-promotions/).
 
 - `get units -e` joins desired and observed state into one row per unit:
   its kind, its [state](/nyl/reference/cli/status/), whether its latest

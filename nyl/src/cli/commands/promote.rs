@@ -11,16 +11,16 @@
 //! `nyl_orchestration::rules::promotion`'s and the effects the shell's; this
 //! module resolves the invocation, the project's declaration, and who asks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::ids::{CommitId, UnitName};
-use nyl_core::orchestration::ports::{SourceRenderer as _, SourceResolver as _};
+use nyl_core::orchestration::ids::CommitId;
+use nyl_core::orchestration::ports::SourceResolver as _;
 use nyl_core::orchestration::promotion::PromotionRequest;
 use nyl_core::orchestration::time::Duration;
-use nyl_core::resources::promotion::{ChangeGate, PromotionPath};
+use nyl_core::resources::promotion::PromotionPath;
 use nyl_orchestration::report::PromoteReport;
 use nyl_orchestration::rules::promotion::{IgnoreRequest, Selection};
 use nyl_orchestration::shell::promote::{self, PromoteOptions};
@@ -31,6 +31,7 @@ use nyl_state::git::CommitAuthor;
 
 use super::state::Output;
 use crate::orchestration::approval::attester;
+use crate::orchestration::promotion::{target_view, TargetView};
 use crate::orchestration::run::{CommandOutcome, Wiring};
 use crate::orchestration::session::{placeholder_environment, pretty_json, write_finding, RunOptions, Session, Stop};
 
@@ -107,34 +108,10 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         )
     };
     let inventory = discover_gitops_inventory(&args.path, None, crate::resource_catalogue())?;
-    let Some(path) = crate::orchestration::promotion::declared_paths(&inventory)
-        .into_iter()
-        .find(|path| path.metadata.name == args.name)
-    else {
-        return Ok(refused(Finding::new(
-            Code::PromoteBindingUnknown,
-            format!("the project declares no PromotionPath {:?}", args.name),
-            "list the declared paths with `nyl get promotion-paths`",
-        )));
+    let (path, source, target) = match crate::orchestration::promotion::promotable_path(&inventory, &args.name) {
+        Ok(found) => found,
+        Err(finding) => return Ok(refused(finding)),
     };
-    if path.spec.change_gate != ChangeGate::None || path.spec.from.target.is_some() || path.spec.to.target.is_some() {
-        return Ok(refused(Finding::new(
-            Code::PromoteUnsupported,
-            format!(
-                "path {} uses changeGate: pullRequest or a DeploymentTarget as its source or target, which M11 delivers",
-                args.name
-            ),
-            "use environments at both ends and `changeGate: none`",
-        )));
-    }
-    let (Some(source), Some(target)) = (&path.spec.from.environment, &path.spec.to.environment) else {
-        return Ok(refused(Finding::new(
-            Code::PromoteEnvironmentUnknown,
-            format!("path {} names no source or target environment", args.name),
-            "set `spec.from.environment` and `spec.to.environment`",
-        )));
-    };
-    let (source, target) = (source.clone(), target.clone());
     let session = match Session::open(&args.path, &target) {
         Ok(session) => session,
         Err(Stop::Finding(finding)) => return Ok(refused(finding)),
@@ -199,7 +176,6 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 
 /// The invocation resolved against the declaration: what to promote and who
 /// asks, and the identity that writes the commit (none for a dry run).
-#[allow(clippy::too_many_lines)] // Selection, identity, then the target's rendering, in the order the options resolve.
 fn prepare(
     args: &PromoteArgs,
     wiring: &Wiring<'_>,
@@ -274,42 +250,11 @@ fn prepare(
             "remove `record: source`: the record then lives in the environment's state",
         ));
     }
-    let promotes_source = entry
-        .spec
-        .source
-        .as_ref()
-        .and_then(|source| source.from_promotion.as_ref())
-        .is_some_and(|promoted| {
-            promoted
-                .path
-                .iter()
-                .chain(&promoted.paths)
-                .any(|name| *name == path.metadata.name)
-        });
-    // The units the target selects, as the entry worktree renders them.
-    let target = session.resolved.name.clone();
-    let commit = session.entry_commit()?;
-    let rendered = session
-        .renderer()
-        .render(&session.inventory.worktree_root, &target, &commit)
-        .map_err(|error| {
-            Finding::new(
-                Code::SourceUnavailable,
-                format!("cannot render the units of {target}: {error}"),
-                "correct the environment's unit declarations; `nyl validate` reports them",
-            )
-        })?;
-    let readers = nyl_orchestration::rules::promotion_paths::unit_readers(
-        &BTreeMap::from([(target.clone(), rendered.clone())]),
-        wiring.drivers,
-    );
-    let rebuilt = nyl_orchestration::rules::promotion_paths::rebuilt(path, &target, &rendered, &readers);
-    let target_units: BTreeSet<UnitName> = rendered
-        .units
-        .iter()
-        .filter(|(_, unit)| unit.selected)
-        .map(|(name, _)| name.clone())
-        .collect();
+    let TargetView {
+        target_units,
+        promotes_source,
+        rebuilt,
+    } = target_view(session, wiring.drivers, path)?;
     Ok((
         PromoteOptions {
             path: path.clone(),

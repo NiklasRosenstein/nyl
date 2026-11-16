@@ -19,6 +19,7 @@
 //!   failing attestations.
 //! - [`values`]: reading each promoted value through the shared reference
 //!   resolver.
+//! - [`lineage`]: what `status` shows of the promotion an environment runs.
 //! - this module: state selection and the record.
 //!
 //! **State selection.** Without flags, the newest state whose evidence
@@ -69,6 +70,7 @@
 //! from the driver's private `details`; see the M6 plan.
 
 mod history;
+mod lineage;
 mod standing;
 mod values;
 
@@ -87,6 +89,7 @@ use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::promotion::PromotionPath;
 
 pub use history::{recorded_states, DesiredEntry, RecordedState, StateAttestations, StateRef};
+pub use lineage::lineage;
 pub use standing::{Gap, GapKind, Judgement, Used, ENVIRONMENT_SCOPE};
 pub use values::ArtifactCheck;
 
@@ -245,6 +248,9 @@ pub struct StateEvaluation {
     pub level: Option<EvidenceLevel>,
     /// Why the state does not reach the path's level; empty when it does.
     pub gaps: Vec<Gap>,
+    /// The values the state would carry, by name; a value the state cannot
+    /// supply (its producer has no current receipt) is left out.
+    pub values: BTreeMap<String, serde_json::Value>,
 }
 
 fn context<'a>(input: &'a PromotionInput<'_>, value_units: &'a BTreeSet<UnitName>) -> Context<'a> {
@@ -261,28 +267,45 @@ fn value_units(path: &PromotionPath) -> BTreeSet<UnitName> {
     values::units(path.spec.values.values().map(|value| &value.select))
 }
 
-/// Every candidate state of the source judged by the whole-source rule,
-/// newest first, without applying the invocation's selection or ignores.
+/// Every candidate state of the source judged as `nyl promote` judges it,
+/// newest first, without applying the invocation's selection or ignores: a
+/// path that promotes the target's source (or no values) by the whole-source
+/// rule, a value-only path for the environment and the units its values
+/// read. The level is the highest the state reaches up to the path's own:
+/// a `published` path reports `published` or nothing.
 pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
     let value_units = value_units(input.path);
     let ctx = Context {
         ignores: &[],
         ..context(input, &value_units)
     };
-    let subject = Subject::Source;
+    let whole = input.promotes_source || input.path.spec.values.is_empty();
+    let consumers: BTreeSet<UnitName> = input
+        .path
+        .spec
+        .values
+        .values()
+        .filter_map(|value| values::consumer(&value.select))
+        .collect();
+    let subject = if whole {
+        Subject::Source
+    } else {
+        Subject::Units(&consumers)
+    };
+    let levels: &[EvidenceLevel] = match ctx.level() {
+        EvidenceLevel::Attested => &[EvidenceLevel::Attested, EvidenceLevel::Published],
+        EvidenceLevel::Published => &[EvidenceLevel::Published],
+    };
     input
         .history
         .iter()
         .filter(|state| state.is_candidate())
         .map(|state| {
             let at_path = judge(&ctx, state, &subject, ctx.level());
-            let level = if judge(&ctx, state, &subject, EvidenceLevel::Attested).gaps.is_empty() {
-                Some(EvidenceLevel::Attested)
-            } else if judge(&ctx, state, &subject, EvidenceLevel::Published).gaps.is_empty() {
-                Some(EvidenceLevel::Published)
-            } else {
-                None
-            };
+            let level = levels
+                .iter()
+                .copied()
+                .find(|level| judge(&ctx, state, &subject, *level).gaps.is_empty());
             StateEvaluation {
                 run: state.run.clone(),
                 desired_commit: state.desired_commit.clone(),
@@ -290,6 +313,17 @@ pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
                 source_commit: state.source_commit().cloned(),
                 level,
                 gaps: at_path.gaps,
+                values: input
+                    .path
+                    .spec
+                    .values
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        values::read(input.source, state, name, &value.select, input.now)
+                            .ok()
+                            .map(|read| (name.clone(), read.value.value))
+                    })
+                    .collect(),
             }
         })
         .collect()

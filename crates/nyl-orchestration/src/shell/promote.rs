@@ -85,7 +85,8 @@ pub fn promote(context: &RunContext<'_>, request: &RunRequest, options: &Promote
     super::run::off_runtime(|| promote_in(context, request, options))
 }
 
-fn source_of(path: &PromotionPath) -> Option<EnvironmentName> {
+/// The path's source environment; `None` for a target source (M11).
+pub fn source_of(path: &PromotionPath) -> Option<EnvironmentName> {
     path.spec
         .from
         .environment
@@ -153,20 +154,14 @@ fn body(
     let target = &request.environment;
     let location = &request.location;
     let store = base.store;
-    let snapshot = store.snapshot(location).map_err(|error| store_error(target, &error))?;
-    check_record(store, snapshot.record.as_ref(), target, location)?;
-    let source_location = request.environments.get(source).ok_or_else(|| {
-        request.environment_errors.get(source).cloned().unwrap_or_else(|| {
-            Finding::new(
-                Code::PromoteEnvironmentUnknown,
-                format!(
-                    "the source environment {source} of path {} is not declared",
-                    options.path.metadata.name
-                ),
-                "declare the Environment, or correct the path's `spec.from`",
-            )
-        })
-    })?;
+    let source_location = source_location(
+        &request.environments,
+        &request.environment_errors,
+        source,
+        &options.path.metadata.name,
+    )?;
+    let PathReading { snapshot, history } =
+        read_path(store, (target, location), (source, source_location), &options.select)?;
 
     // The values to promote: a subset narrows the path, leaving the rest at their lineage.
     let mut path = options.path.clone();
@@ -209,7 +204,6 @@ fn body(
         }
     }
 
-    let history = read_history(store, source_location, source, &options.select)?;
     let target_history = store.history(location).map_err(|error| store_error(target, &error))?;
     // PR 8 adds the sequence of a `record: source` block here.
     let history_sequence = next_sequence(&target_history, &snapshot, []);
@@ -456,6 +450,52 @@ fn unverified_warning(check: &ArtifactCheck, why: &str) -> Finding {
     )
 }
 
+/// What a promotion along a path reads, for `nyl promote` and `nyl get
+/// promotion-candidates` alike: the target's current state, whose records
+/// the decision compares with, and the source's recorded states.
+pub struct PathReading {
+    /// The target environment's snapshot.
+    pub snapshot: EnvironmentSnapshot,
+    /// The source environment's recorded states, newest first.
+    pub history: Vec<RecordedState>,
+}
+
+/// Read what a promotion decides on: the target's snapshot (its state must
+/// exist) and the source's recorded states for `select`. Two syncs, one per
+/// environment, whatever the length of the history.
+pub fn read_path(
+    store: &dyn StateStore,
+    (target, target_location): (&EnvironmentName, &StateLocation),
+    (source, source_location): (&EnvironmentName, &StateLocation),
+    select: &Selection,
+) -> Result<PathReading, Finding> {
+    let snapshot = store
+        .snapshot(target_location)
+        .map_err(|error| store_error(target, &error))?;
+    check_record(store, snapshot.record.as_ref(), target, target_location)?;
+    let history = read_history(store, source_location, source, select)?;
+    Ok(PathReading { snapshot, history })
+}
+
+/// Where the path's source environment keeps its state, or why it cannot be
+/// read: the finding its location resolved with, or an undeclared source.
+pub fn source_location<'a>(
+    environments: &'a BTreeMap<EnvironmentName, StateLocation>,
+    errors: &BTreeMap<EnvironmentName, Finding>,
+    source: &EnvironmentName,
+    path: &str,
+) -> Result<&'a StateLocation, Finding> {
+    environments.get(source).ok_or_else(|| {
+        errors.get(source).cloned().unwrap_or_else(|| {
+            Finding::new(
+                Code::PromoteEnvironmentUnknown,
+                format!("the source environment {source} of path {path} is not declared"),
+                "declare the Environment, or correct the path's `spec.from`",
+            )
+        })
+    })
+}
+
 /// The recorded states of `environment` at `location`, newest first, with the
 /// documents at each and the attestations recorded for it, and the history
 /// they were read from.
@@ -483,8 +523,21 @@ pub fn read_history(
     environment: &EnvironmentName,
     select: &Selection,
 ) -> Result<Vec<RecordedState>, Finding> {
+    let history = store
+        .history(location)
+        .map_err(|error| store_error(environment, &error))?;
+    states_of(store, location, environment, &history, select)
+}
+
+/// [`read_history`] over a history already read, without another sync.
+pub fn states_of(
+    store: &dyn StateStore,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+    history: &StateHistory,
+    select: &Selection,
+) -> Result<Vec<RecordedState>, Finding> {
     let error = |error| store_error(environment, &error);
-    let history = store.history(location).map_err(error)?;
     let entries: Vec<DesiredEntry> = history
         .desired
         .iter()
@@ -675,11 +728,17 @@ pub fn next_sequence(
 
 /// The sequence a `promote` transition commit's summary records.
 pub fn recorded_sequence(message: &str) -> Option<u64> {
+    recorded_summary(message)?.get("sequence")?.as_u64()
+}
+
+/// The `promotion` summary of a `promote` transition commit: its path,
+/// sequence, source commit, and source state, as `promote` writes it.
+pub fn recorded_summary(message: &str) -> Option<Value> {
     if trailer(message, "Nyl-Operation") != Some("promote") {
         return None;
     }
     let line = message.lines().find_map(|line| line.strip_prefix("promotion: "))?;
-    serde_json::from_str::<Value>(line).ok()?.get("sequence")?.as_u64()
+    serde_json::from_str::<Value>(line).ok().filter(Value::is_object)
 }
 
 #[cfg(test)]

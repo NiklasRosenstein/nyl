@@ -499,6 +499,7 @@ pub fn status_with_producers(
 ) -> EnvironmentRunReport {
     let mut report = EnvironmentRunReport::new(environment.clone());
     report.source_commit = snapshot.environment.as_ref().map(|record| record.source_commit.clone());
+    report.promotion = super::promotion::lineage(snapshot);
     let running = running_units(coordination, now);
     let mut half_executed = BTreeSet::new();
     for lost in dead_runs(coordination, now) {

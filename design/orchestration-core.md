@@ -5092,7 +5092,9 @@ nyl get artifact web-image/image -e dev --pointer /reference   # pointer relativ
 
 nyl get environments
 nyl get promotion-paths
-nyl get promotions -e staging      # PromotionRecords with each value's source and evidence
+nyl get promotions -e staging      # PromotionRecords with each value's source and evidence, and their history
+nyl get states -e dev              # recorded states with their evidence, newest first
+nyl get promotion-candidates dev-to-prod   # dev's states judged as nyl promote judges them
 ```
 
 - Tables join desired and observed state for reading. `-o yaml` and `-o json`

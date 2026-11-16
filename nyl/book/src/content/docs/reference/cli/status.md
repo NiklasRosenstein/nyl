@@ -82,6 +82,23 @@ suggested fix in each block. Warning and error headings use color according to
 the global `--color auto|always|never` setting. Environment names are quoted,
 such as `environment 'local'`.
 
+For an environment whose source commit a [promotion](/nyl/orchestration/promotion/)
+chose, the report shows its lineage beneath the source commit: the path and
+sequence of the record the last run applied, and the source state that record
+promoted. A newer record that no run applied yet is named too, and then the
+replaced record's source state is left out; [`nyl get promotions`](/nyl/reference/cli/get-promotions/#get-promotions)
+lists it.
+
+```console
+$ nyl status -e prod
+  source:   c966aa0c15d9c431c15728aec36d32e7adef056e
+  promoted: dev-to-prod #1; #2 waits for the next reconcile
+```
+
+In JSON it is `promotion` on the environment: `path`, `sequence`,
+`sourceCommit`, `from` (`environment`, `run`, `desiredCommit`,
+`observedCommit`), and `pendingSequence`.
+
 The report identifies the configured state repository and its local path.
 `--local` reads that repository without contacting the remote.
 
