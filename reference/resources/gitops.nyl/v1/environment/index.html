@@ -452,7 +452,7 @@ a unit that leaves the set is deleted under its deletion policy.</p>
 <p><a id="field-spec.source.fromPromotion.promoted.values%5Bkey%5D.inputDigest"></a></p>
 <h3 id="specsourcefrompromotionpromotedvalueskeyinputdigest">spec.source.fromPromotion.promoted.values[key].inputDigest</h3>
 <p><strong>Optional</strong> · string or null</p>
-<p>The digest of the unit’s resolved input, for an <code>input</code> selector.</p>
+<p>The <code>sha256:</code> digest of the canonical JSON of the value an <code>input</code> selector read: the same digest the ownership index records for a <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Release</a> input.</p>
 <p><a id="field-spec.source.fromPromotion.promoted.values%5Bkey%5D.select"></a></p>
 <h3 id="specsourcefrompromotionpromotedvalueskeyselect">spec.source.fromPromotion.promoted.values[key].select</h3>
 <p><strong>Required</strong> · object</p>

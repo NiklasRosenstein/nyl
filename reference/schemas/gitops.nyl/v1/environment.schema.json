@@ -544,7 +544,7 @@
           "description": "The receipt the value came from, for an output or artifact selector."
         },
         "inputDigest": {
-          "description": "The digest of the unit's resolved input, for an `input` selector.",
+          "description": "The `sha256:` digest of the canonical JSON of the value an `input` selector read: the same digest the ownership index records for a Release input.",
           "type": [
             "string",
             "null"
