@@ -2828,6 +2828,16 @@ only on the observed ref; `state.yaml` exists on both. `admission.yaml` exists
 only on the admission ref, which is the desired ref unless `state.admissionRef`
 names another.
 
+`desired/promotions/<path>.yaml` and `observed/attestations.yaml` were listed
+from the start but are first written in M6; they are added to format `v1`
+without a version change. A Nyl older than that release keeps them through
+its transitions but cannot act on them: it refuses a `fromPromotion` source,
+must not run `reconcile` in an environment that uses promotion, and does not
+read environment-wide attestations. Its `state move`, when it copies
+documents rather than history, does not carry them, and its `state restore`
+leaves them as they are. The documentation of the release that writes them
+says so.
+
 Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
 the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
 `ObservedUnit`, `DriftRecord`, `ObservationRecord`, `AttestationRecord`, `Lease`, `Run`, and `Signal`, plus
@@ -3487,8 +3497,8 @@ run after <unit>`, and the run warns with `NYL-RUN-STOPPED` (owner:
 **Who writes desired state.** Desired state is derived deterministically from
 source and observed evidence, so the reconcile runner writes it. Review happens
 on source commits (the pull requests that change units and bindings) and on
-promotions (`changeGate: pullRequest` opens a pull request against the desired
-ref). Separate refs let that promotion review and different branch protection
+promotions (from M11, `changeGate: pullRequest` opens a pull request against
+the desired ref). Separate refs let that promotion review and different branch protection
 apply to desired state without mixing with observed commits.
 
 **Selection with `--unit`/`--units`:**
@@ -4893,7 +4903,7 @@ spec:
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the transition commit that imports the broken run |
 | `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only through driver arguments (for example `-- --push`) where the kind allows it |
-| `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or a pull request under `changeGate: pullRequest` |
+| `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or (M11) a pull request under `changeGate: pullRequest` |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
 history and `delete` by source editing, so lifting a hold is `resume` and
@@ -5309,9 +5319,7 @@ source commit must fit every value and what runs is mixed; with
 `--state-revision` naming R1's state it promotes R1 on the attestations
 recorded for it. Once `api` runs R2 too, both paths promote R2. An
 Application that runs no publication of dev (`unmatched`) or is `Degraded`
-blocks the value-only path as well. The walkthrough runs from M6. It
-assumes the recommended answers to decisions D6–D8 and D11 of the
-[M6 plan](m6-plan.md#open-decisions), which are not settled yet.
+blocks the value-only path as well. The walkthrough runs from M6.
 ([`value-only-promotion`](../nyl/tests/scenarios/walkthroughs/value-only-promotion/scenario.yaml))
 
 **A promotion recorded in source (M6).** Prod's `source.fromPromotion` sets
@@ -5322,9 +5330,7 @@ sequence it applied. After a second promotion, a reconcile from a checkout
 made before it reads the sequence-1 block, refuses with
 `NYL-PROMOTION-SEQUENCE-OLDER`, writes nothing, and names `nyl promote
 dev-to-prod --revision`; the rollback is that new promotion, with sequence 3.
-The walkthrough runs from M6. Its code and the branch it commits to assume
-the recommended answers to decisions D1 and D3 of the
-[M6 plan](m6-plan.md#open-decisions), which are not settled yet.
+The walkthrough runs from M6.
 ([`promotion-record-source`](../nyl/tests/scenarios/walkthroughs/promotion-record-source/scenario.yaml))
 
 **Deletion.** `cache` and its only consumer `worker` are removed from source;

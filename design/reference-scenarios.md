@@ -773,10 +773,9 @@ environment that exists and 1 for one that does not.
 
 ## Scenario 4: promotion to prod
 
-Scenarios 4 and 5 use the codes and behaviours the
-[M6 plan](m6-plan.md#open-decisions) recommends where the promotion contract
-leaves a choice open (decisions D1, D2, D5, D13, D14). They change with
-those decisions.
+Scenario 4's step 12 assumes that recording a failing attestation exits 3,
+as the driver form does; that is decision D14 of the
+[M6 plan](m6-plan.md#open-decisions), still open.
 
 `reference/promotion` runs a project of its own: scenario 1's dev units
 (`network`, `database`, `web-image`, `kubernetes`), and prod, whose source is

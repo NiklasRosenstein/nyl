@@ -45,6 +45,7 @@ stable for references from issues and pull requests:
 | M8 | Provider-neutral CI execution and first GitLab adapter |
 | M9 | Domain modeling for units and Releases |
 | M10 | Direct reconciler for Kubernetes publications |
+| M11 | Promotion for non-orchestrated targets and change gates |
 
 ## Product direction
 
@@ -479,7 +480,7 @@ organization. The rules units and Releases share live in a pure
 `nyl-collections` crate that both `nyl-render` and `nyl-orchestration` use,
 so the two consumers cannot diverge.
 
-### Promotion paths (M6)
+### Promotion paths (M6, M11)
 
 A PromotionPath is the explicit link between source selectors and target
 bindings. Source and target may differ in unit names, input names, and document
@@ -487,6 +488,16 @@ shape; the path states the mapping. The
 [promotion contract](design/promotion.md) defines PromotionPath and
 PromotionRecord field by field, how states are chosen, the supersede check,
 hotfix paths, and promotion from non-orchestrated targets.
+
+M6 promotes between environments and records every promotion directly. M11
+adds the rest of the contract: DeploymentTargets that no environment
+orchestrates as promotion sources and targets, `nyl attest --target`, and
+`changeGate: pullRequest`. They are split off because they reach outside
+orchestration (the ownership index, the publication tree's reserved files,
+tree and direct commands) or need a forge integration, and the M6 exit
+criterion needs none of them; the [M6 plan](design/m6-plan.md) records the
+split. Until M11, validation rejects `changeGate: pullRequest` and a target
+in `from` or `to`.
 
 ```yaml
 apiVersion: gitops.nyl/v1
@@ -496,7 +507,7 @@ spec:
   from: {environment: dev}
   to: {environment: prod}
   evidence: attested           # published | attested
-  changeGate: pullRequest      # or: none
+  changeGate: none             # pullRequest from M11
   values:
     webImage:
       select: {unit: web-image, artifact: image, pointer: /reference}
@@ -517,9 +528,10 @@ spec:
 - Several paths may feed one environment. A supersede check refuses a
   promotion that would drop a fix another path delivered, which gives hotfixes
   a path of their own.
-- A DeploymentTarget can be a promotion source without being orchestrated, and
-  a target without an environment promotes through locked `fromGit` bindings
-  instead.
+- From M11, a DeploymentTarget can be a promotion source without being
+  orchestrated, and a target outside every environment can receive
+  promotions, recorded in its own source; it can also follow another target
+  through locked `fromGit` bindings, without promotion.
 - Native state is never promoted; each environment keeps its own Terraform
   backend and lock.
 
