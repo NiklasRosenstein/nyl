@@ -47,8 +47,10 @@ branch's upstream (`branch.<name>.remote` and `branch.<name>.merge`)
 fast-forward only; the push is never forced. The report lists the commit
 under `commits.source`, and nothing is written to the target's state. The
 block in the checkout is the path's current record for
-[Unchanged](#unchanged) only when a run would take it (it is valid and not
-older than what prod applied); records in state on that path never count.
+[Unchanged](#unchanged); records in state on that path never count. A block
+a run would refuse, invalid or older than what prod applied, refuses the
+promotion the same way (`NYL-PROMOTION-RECORD-INVALID`,
+`NYL-PROMOTION-SEQUENCE-OLDER`): update the checkout first.
 `--dry-run` checks everything below without committing. The
 [promotion guide](/nyl/orchestration/promotion/#keeping-the-record-in-source)
 explains how runs read the block.
@@ -122,44 +124,47 @@ commit of the other's history it lacks, merge commits aside, has a commit
 with the same changes in its own history since their merge base, as
 `git cherry` decides: an ancestor counts, and so do clean cherry-picks and a
 squash of a single commit; a squash of several commits counts as none of
-them. Commits are compared within their own repository: a value's source
-commits are those its producing unit resolved, such as an `OciImage`'s
-contexts.
+them. Commits are compared within their own repository, paired by the
+source field they came from: a value's source commits are those its
+producing unit resolved, such as an `OciImage`'s contexts. The records are
+the target's current ones and those in its desired history; with
+`record: source` only the current block counts.
 
 A promotion that would drop commits writes nothing and exits 2 with
 `NYL-PROMOTE-SUPERSEDES`, so a promote job succeeds once the commits are
-merged. The message names each missing commit by subject and a range to
-copy, and `-o json` lists them under `missing`:
-
-```console
-$ nyl promote dev-to-prod
-promote dev-to-prod: dev -> prod: refused
-  missing from hotfix-to-prod #2 (source, webImage), --supersede 0f0d77a5b1c2^..9e1f4c3a2b7d:
-    0f0d77a5b1c2 Fix pool size
-    9e1f4c3a2b7d Bump timeout
-error  path dev-to-prod would replace what other paths promoted into prod: …
-```
-
-Merge the commits into the source and promote a state that runs them, or
-accept the loss with `--supersede`:
+merged. The message names each missing commit by subject, oldest first, and
+the `--supersede` entries to copy, with full commit IDs; `-o json` lists
+them under `missing` (`commits`, and `supersede` with the entries). Merge the
+commits into the source and promote a state that runs them, or accept the
+loss with `--supersede`:
 
 ```bash
-nyl promote dev-to-prod --supersede '0f0d77a5b1c2^..9e1f4c3a2b7d=Squash-merged into main' --reason "Release 3"
+nyl promote dev-to-prod --supersede '<oldest missing>^..<record commit>=Squash-merged into main' --reason "Release 3"
 ```
 
-An entry is a commit or a Git range, resolved when the promotion runs.
-Commits it names that are not missing are ignored, and a missing commit no
-entry covers keeps the promotion refused. When the missing commits are in
-several repositories, qualify the entry with the repository's GitRepository
-name (or the name the refusal prints, `project` for the project's own
-repository without a GitRepository of its URL): `--supersede web:<range>=<reason>`.
-The record lists every superseded commit on its own, with its repository,
-the reason, and who gave it, never the range. Once a path has promoted, its
-next promotion is no longer checked against the records it superseded.
+An entry is a commit or a Git range, resolved when the promotion runs; a
+commit ID may be abbreviated and take `^` and `~` suffixes. Commits it names
+that are not missing are ignored, and a missing commit no entry covers keeps
+the promotion refused. An unqualified entry belongs to the repository whose
+missing commits it names; when it names missing commits in several, qualify
+it with the repository: `--supersede web:<range>=<reason>`. A repository is
+named by the GitRepository whose URL matches its URL, else by its normalized
+URL (no credentials, scheme, or trailing `.git`; `git@host:org/r` reads
+`host/org/r`); the project's own repository by its `origin` URL, or
+`project` without one. The record lists every superseded commit on its own,
+with that repository name, the reason, and who gave it, never the range.
+Once a path has promoted, its next promotion is no longer checked against
+the records it superseded.
 
-A value without a known source commit, such as an image built outside Nyl
-or a command output, cannot be checked; the promotion warns with
-`NYL-PROMOTE-UNCHECKED`.
+The check needs the whole history: in a shallow clone it exits 1 with
+`NYL-PROMOTE-SHALLOW-CLONE`; fetch with `git fetch --unshallow`, or
+`fetch-depth: 0` with `actions/checkout`. Commits the clone lacks are fetched
+like a recorded source commit. A record whose commit cannot be fetched, such
+as from a deleted branch, is not a refusal: the promotion warns with
+`NYL-PROMOTE-UNCHECKED`, naming the record, and `--supersede <full commit
+ID>=<reason>` naming that commit records that the promotion replaces it. A
+value without a known source commit, such as an image built outside Nyl or a
+command output, cannot be checked either and warns the same way.
 
 ## Artifacts
 
@@ -177,7 +182,8 @@ false`.
   the path's level, or an `--ignore-attestation` entry set nothing aside.
 - `NYL-PROMOTE-ARTIFACT-UNVERIFIED`: an artifact's kind cannot verify it.
 - `NYL-PROMOTE-UNCHECKED`: a value, or another path's record of it, has no
-  known source commit, so the [supersede check](#superseding) cannot check it.
+  known source commit, or a record's commit cannot be fetched, so the
+  [supersede check](#superseding) cannot check it.
 - `NYL-PROMOTE-REBUILT`: the target builds a unit and also binds a value that
   unit supplies, so one result is built and the other used. Only a target that
   does both is warned about.
@@ -187,7 +193,7 @@ false`.
 | Exit | When |
 | --- | --- |
 | 0 | The record was written, or the path's record already names the chosen state (`unchanged`), or the dry run found a promotion to make. |
-| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), an unreadable commit or a `--supersede` entry that names none, or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
+| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a shallow clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), a `record: source` block a run would refuse (`NYL-PROMOTION-RECORD-INVALID`, `NYL-PROMOTION-SEQUENCE-OLDER`), an unreadable commit or a `--supersede` entry that names none, or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
 | 2 | Nothing was written because evidence is missing, stale, or failing (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the promotion would drop commits another path promoted (`NYL-PROMOTE-SUPERSEDES`, see [Superseding](#superseding)), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
 
 Run [`nyl reconcile`](/nyl/reference/cli/reconcile/) on the target afterwards:

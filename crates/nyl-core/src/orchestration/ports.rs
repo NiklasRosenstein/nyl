@@ -694,6 +694,8 @@ pub struct MissingCommit {
     pub commit: CommitId,
     /// The first line of its message.
     pub subject: String,
+    /// Whether it has no parent, so no `<commit>^` names the history before it.
+    pub root: bool,
 }
 
 /// A failure of source operations.
@@ -822,6 +824,23 @@ pub trait SourceResolver: Send + Sync {
         Err(SourceError(
             "this source resolver cannot compare commit histories".to_owned(),
         ))
+    }
+    /// Whether `commit` is available for history questions, fetched like a
+    /// recorded commit when it is missing; `false` when it cannot be found.
+    fn fetch_commit(&self, repository: &SourceRepository, commit: &CommitId) -> SourceResult<bool> {
+        let _ = (repository, commit);
+        Err(SourceError("this source resolver cannot fetch commits".to_owned()))
+    }
+    /// Whether the entry clone is shallow, so histories end early and
+    /// [`Self::missing_commits`] cannot be trusted.
+    fn is_shallow(&self) -> bool {
+        false
+    }
+    /// Whether `ancestor` is `of` or an ancestor of it; `false` when either
+    /// is not available.
+    fn is_ancestor(&self, repository: &SourceRepository, ancestor: &CommitId, of: &CommitId) -> SourceResult<bool> {
+        let _ = repository;
+        Ok(ancestor == of)
     }
     /// The commits a revision range names, newest first: `A..B` every commit
     /// reachable from `B` and not from `A`, any other revision exactly one.

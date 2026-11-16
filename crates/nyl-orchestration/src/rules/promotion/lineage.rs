@@ -56,11 +56,9 @@ pub fn lineage_with(
         .or_else(|| crate::rules::sources::promoted_source_paths(&record.spec))
         .unwrap_or_default();
     paths.insert(path.clone());
-    let pending = records
-        .values()
-        .filter(|record| paths.contains(record.path.as_str()) && record.source_commit.is_some())
+    let paths: Vec<String> = paths.into_iter().collect();
+    let pending = crate::rules::sources::source_supplier(records.values(), &paths)
         .map(|record| record.sequence)
-        .max()
         .filter(|newest| newest > sequence);
     Some(PromotionLineage {
         path: path.clone(),

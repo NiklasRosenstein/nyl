@@ -74,7 +74,7 @@ kind: Environment
 metadata: {name: prod-hotfix}
 spec:
   source: {revision: release/prod}     # cut from what prod runs
-  unitSelector: {matchLabels: {hotfix: 'true'}}   # the image and a publication to a target of its own
+  unitSelector: {matchLabels: {hotfix: 'true'}}   # the image and a publication to a target on a Cluster or Argo CD instance of its own
   attestations: [qa]
 ---
 apiVersion: gitops.nyl/v1

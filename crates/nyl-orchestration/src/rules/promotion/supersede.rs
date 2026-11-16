@@ -2,30 +2,37 @@
 //! other paths promoted into the same environment.
 //!
 //! Contract: [Several paths into one environment](../../../../../design/promotion.md#several-paths-into-one-environment)
-//! ("Rule", "Source commit of a value", "Refusal", "Override", "Record") and
-//! decision D5 of the [M6 plan](../../../../../design/m6-plan.md#open-decisions).
+//! ("Rule", "Source commit of a value", "Refusal", "Override", "Record",
+//! "Which records") and decision D5 of the
+//! [M6 plan](../../../../../design/m6-plan.md#open-decisions).
 //!
 //! - **Rule.** Before writing an item on path P (the target's source commit,
 //!   or a value), every record for that item that another path wrote since P
-//!   last promoted it must be contained in the item's source commits: per
-//!   repository, [`SourceResolver::missing_commits`] (`git cherry`) of the
-//!   new item's commit against the record's lists nothing. [`plan`] lists
-//!   these obligations; the shell answers each [`Check`] once.
+//!   last promoted it ([`since`]) must be contained in the item's source
+//!   commits: per repository, [`SourceResolver::missing_commits`] (`git
+//!   cherry`) of the new item's commit against the record's lists nothing.
+//!   [`plan`] lists these obligations, pairing commits by the source field
+//!   they came from; [`Plan::prune`] drops a record whose commit a newer
+//!   record of the same path contains by ancestry; the shell answers each
+//!   distinct [`Check`] once.
 //! - **Source commits.** The source item has the state's source commit; a
 //!   value has the commits its producing unit's desired document resolved
 //!   into its Git source fields ([`value_commits`]). A value without one is
-//!   unchecked (`NYL-PROMOTE-UNCHECKED`, a warning), and so is a record's
-//!   value whose source state cannot be read.
+//!   unchecked (`NYL-PROMOTE-UNCHECKED`, a warning), and so is a record whose
+//!   value's state cannot be read or whose commit cannot be fetched.
 //! - **Override.** `--supersede [<repository>:]<commit or range>[=<reason>]`
 //!   ([`SupersedeRequest`]) accepts missing commits as replaced; an entry
 //!   with neither its own reason nor `--reason` is refused
-//!   ([`require_reasons`], `NYL-PROMOTE-SUPERSEDE-REASON`, exit 1). Commits a
-//!   range names that are not missing are ignored.
+//!   ([`require_reasons`], `NYL-PROMOTE-SUPERSEDE-REASON`, exit 1). An
+//!   unqualified entry belongs to the one repository whose missing commits
+//!   it names ([`match_entry`]). Commits it names that are not missing are
+//!   ignored. An entry naming the commit of a record that cannot be fetched
+//!   supersedes that record.
 //! - **Refusal.** A missing commit no entry covers refuses the promotion
 //!   ([`judge`], `NYL-PROMOTE-SUPERSEDES`, exit 2), listing per record the
-//!   missing commits with their subjects and a range to copy.
+//!   missing commits with their subjects and the entries to copy.
 //! - **Record.** Each superseded commit is recorded on its own, with its
-//!   repository, reason, and who gave it, never the range.
+//!   repository ([`RepositoryNames`]), reason, and who gave it, never the range.
 //!
 //! [`SourceResolver::missing_commits`]: nyl_core::orchestration::ports::SourceResolver::missing_commits
 
@@ -56,8 +63,27 @@ impl fmt::Display for Item {
     }
 }
 
-/// The source commits of one item, each in its own repository.
-pub type Commits = BTreeSet<(SourceRepository, CommitId)>;
+/// One source commit of an item: the source field it came from (empty for
+/// the environment's source commit), its repository, and the commit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SourceCommit {
+    pub field: String,
+    pub repository: SourceRepository,
+    pub commit: CommitId,
+}
+
+/// The source commits of one item.
+pub type Commits = BTreeSet<SourceCommit>;
+
+/// The environment's source commit as an item's commits.
+pub fn source_commits(commit: &CommitId) -> Commits {
+    [SourceCommit {
+        field: String::new(),
+        repository: SourceRepository::This,
+        commit: commit.clone(),
+    }]
+    .into()
+}
 
 /// A record into the target environment with the source commits of each item
 /// it carries; `None` when an item's commits are not known.
@@ -76,6 +102,16 @@ pub struct Check {
     pub record: CommitId,
 }
 
+/// What the shell found for a check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// The record's commits the value lacks, oldest first; empty when it
+    /// contains the record.
+    Missing(Vec<MissingCommit>),
+    /// The record's commit cannot be fetched, so nothing can be compared.
+    Unavailable,
+}
+
 /// A commit of another path's record that an item must contain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Obligation {
@@ -85,8 +121,9 @@ pub struct Obligation {
     pub sequence: u64,
     pub repository: SourceRepository,
     pub record: CommitId,
-    /// One check per source commit the item has in `repository`; any one
-    /// that finds nothing missing satisfies the obligation.
+    /// One check per source commit the item has for the same field in
+    /// `repository`, or for any field there when none matches; any one that
+    /// finds nothing missing satisfies the obligation.
     pub checks: Vec<Check>,
 }
 
@@ -107,30 +144,53 @@ impl Plan {
             .collect()
     }
 
-    /// The repositories the obligations compare in.
-    pub fn repositories(&self) -> BTreeSet<SourceRepository> {
-        self.obligations
-            .iter()
-            .map(|obligation| obligation.repository.clone())
-            .collect()
+    /// Drop each obligation whose record commit a newer record of the same
+    /// path contains by ancestry (`is_ancestor(repository, older, newer)`):
+    /// whatever contains the newer one contains the older one, so it needs
+    /// no check of its own.
+    pub fn prune(&mut self, is_ancestor: &dyn Fn(&SourceRepository, &CommitId, &CommitId) -> bool) {
+        let all = self.obligations.clone();
+        self.obligations.retain(|older| {
+            !all.iter().any(|newer| {
+                newer.item == older.item
+                    && newer.path == older.path
+                    && newer.repository == older.repository
+                    && newer.sequence > older.sequence
+                    && is_ancestor(&older.repository, &older.record, &newer.record)
+            })
+        });
     }
+}
+
+/// Since when other paths' records count for `item` on `path`: the newest
+/// record on `path` that carries the item, among every record known (current
+/// and from history), or 0.
+pub fn since(path: &PromotionPathName, item: &Item, records: &[RecordCommits]) -> u64 {
+    records
+        .iter()
+        .filter(|record| record.path == *path && record.items.contains_key(item))
+        .map(|record| record.sequence)
+        .max()
+        .unwrap_or(0)
+}
+
+fn unchecked(message: String) -> Finding {
+    Finding::new(
+        Code::PromoteUnchecked,
+        message,
+        "check by hand that the promotion keeps what the other path promoted, such as by its image's build inputs",
+    )
 }
 
 /// The obligations of a promotion on `path` that writes `writes`, against
 /// `records`: every record into the target (current, and from the target's
 /// history), on any path. Records on `path` itself only say since when
-/// another path's records count: for each item, after the newest record on
-/// `path` that carries it.
+/// another path's records count ([`since`]).
 pub fn plan(path: &PromotionPathName, writes: &BTreeMap<Item, Option<Commits>>, records: &[RecordCommits]) -> Plan {
     let mut plan = Plan::default();
-    let mut unchecked = BTreeSet::new();
+    let mut messages = BTreeSet::new();
     for (item, written) in writes {
-        let since = records
-            .iter()
-            .filter(|record| record.path == *path && record.items.contains_key(item))
-            .map(|record| record.sequence)
-            .max()
-            .unwrap_or(0);
+        let since = since(path, item, records);
         let mut others: Vec<&RecordCommits> = records
             .iter()
             .filter(|record| record.path != *path && record.sequence > since)
@@ -141,35 +201,41 @@ pub fn plan(path: &PromotionPathName, writes: &BTreeMap<Item, Option<Commits>>, 
                 continue;
             };
             let Some(theirs) = theirs else {
-                unchecked.insert(format!(
+                messages.insert(format!(
                     "{item} of record {} #{} has no known source commit, so path {path} cannot check that it keeps it",
                     record.path, record.sequence
                 ));
                 continue;
             };
             let Some(written) = written else {
-                unchecked.insert(format!(
+                messages.insert(format!(
                     "{item} has no known source commit, so path {path} cannot check that it keeps what record {} #{} promoted",
                     record.path, record.sequence
                 ));
                 continue;
             };
-            for (repository, commit) in theirs {
-                let checks: Vec<Check> = written
+            for theirs in theirs {
+                let in_repository: Vec<&SourceCommit> = written
                     .iter()
-                    .filter(|(written_repository, _)| written_repository == repository)
-                    .map(|(_, value)| Check {
-                        repository: repository.clone(),
-                        value: value.clone(),
-                        record: commit.clone(),
-                    })
+                    .filter(|ours| ours.repository == theirs.repository)
                     .collect();
-                if checks.is_empty() {
-                    unchecked.insert(format!(
-                        "{item} has no source commit in {} (repository of record {} #{}'s {commit}), so path {path} cannot check that it keeps it",
-                        describe(repository),
+                let same_field: Vec<&SourceCommit> = in_repository
+                    .iter()
+                    .copied()
+                    .filter(|ours| ours.field == theirs.field)
+                    .collect();
+                let paired = if same_field.is_empty() {
+                    in_repository
+                } else {
+                    same_field
+                };
+                if paired.is_empty() {
+                    messages.insert(format!(
+                        "{item} has no source commit in {} (repository of record {} #{}'s {}), so path {path} cannot check that it keeps it",
+                        describe(&theirs.repository),
                         record.path,
-                        record.sequence
+                        record.sequence,
+                        theirs.commit
                     ));
                     continue;
                 }
@@ -177,30 +243,28 @@ pub fn plan(path: &PromotionPathName, writes: &BTreeMap<Item, Option<Commits>>, 
                     item: item.clone(),
                     path: record.path.clone(),
                     sequence: record.sequence,
-                    repository: repository.clone(),
-                    record: commit.clone(),
-                    checks,
+                    repository: theirs.repository.clone(),
+                    record: theirs.commit.clone(),
+                    checks: paired
+                        .into_iter()
+                        .map(|ours| Check {
+                            repository: theirs.repository.clone(),
+                            value: ours.commit.clone(),
+                            record: theirs.commit.clone(),
+                        })
+                        .collect(),
                 });
             }
         }
     }
-    plan.unchecked = unchecked
-        .into_iter()
-        .map(|message| {
-            Finding::new(
-                Code::PromoteUnchecked,
-                message,
-                "check by hand that the promotion keeps what the other path promoted, such as by its image's build inputs",
-            )
-        })
-        .collect();
+    plan.unchecked = messages.into_iter().map(unchecked).collect();
     plan
 }
 
 fn describe(repository: &SourceRepository) -> String {
     match repository {
         SourceRepository::This => "this repository".to_owned(),
-        SourceRepository::Url(url) => url.clone(),
+        SourceRepository::Url(url) => normalize_url(url),
     }
 }
 
@@ -264,9 +328,94 @@ fn unit_commits(
         ) else {
             continue;
         };
-        commits.insert((repository, commit));
+        commits.insert(SourceCommit {
+            field,
+            repository,
+            commit,
+        });
     }
     (!commits.is_empty()).then_some(commits)
+}
+
+/// A repository URL in the form names are matched and recorded by: without
+/// credentials, scheme, a trailing `.git` or `/`, with `git@host:org/r` as
+/// `host/org/r` and the host lowercased. `https://Git.example/org/r.git`,
+/// `ssh://git@git.example/org/r`, and `git@git.example:org/r` are all
+/// `git.example/org/r`. A local path keeps its form.
+pub fn normalize_url(url: &str) -> String {
+    let url = url.trim();
+    let (rest, scp) = match url.split_once("://") {
+        Some((_, rest)) => (rest, false),
+        None => (url, url.contains(':') && !url.starts_with('/') && !url.contains(":\\")),
+    };
+    let rest = match rest.split_once('@') {
+        Some((user, rest)) if !user.contains('/') => rest,
+        _ => rest,
+    };
+    let rest = if scp {
+        rest.replacen(':', "/", 1)
+    } else {
+        rest.to_owned()
+    };
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest).trim_end_matches('/');
+    match rest.split_once('/') {
+        Some((host, path)) if !host.is_empty() => format!("{}/{path}", host.to_ascii_lowercase()),
+        _ => rest.to_owned(),
+    }
+}
+
+/// How repositories are named in refusals, `--supersede` qualifiers, and
+/// the record's `superseded[].repository`: the name of the GitRepository
+/// whose URL matches (after [`normalize_url`]), else the normalized URL; the
+/// project's own repository matches by its `origin` URL, and without a
+/// GitRepository is its normalized `origin` URL, or `project` without one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepositoryNames {
+    /// Each GitRepository's name and normalized URL.
+    declared: Vec<(String, String)>,
+    /// The project's `origin` URL, normalized.
+    origin: Option<String>,
+}
+
+impl RepositoryNames {
+    /// From the project's GitRepositories (name, URL) and its `origin` URL.
+    pub fn new(declared: &[(String, String)], origin: Option<&str>) -> Self {
+        Self {
+            declared: declared
+                .iter()
+                .map(|(name, url)| (name.clone(), normalize_url(url)))
+                .collect(),
+            origin: origin.map(normalize_url),
+        }
+    }
+
+    fn url_of(&self, repository: &SourceRepository) -> Option<String> {
+        match repository {
+            SourceRepository::This => self.origin.clone(),
+            SourceRepository::Url(url) => Some(normalize_url(url)),
+        }
+    }
+
+    /// The name of `repository`.
+    pub fn name_of(&self, repository: &SourceRepository) -> String {
+        let Some(url) = self.url_of(repository) else {
+            return "project".to_owned();
+        };
+        self.declared
+            .iter()
+            .find(|(_, declared)| *declared == url)
+            .map_or(url, |(name, _)| name.clone())
+    }
+
+    /// Whether a `--supersede` qualifier names `repository`: by its name, or
+    /// by a URL that normalizes to its URL.
+    pub fn names(&self, repository: &SourceRepository, qualifier: &str) -> bool {
+        self.name_of(repository) == qualifier
+            || self
+                .url_of(repository)
+                .is_some_and(|url| url == normalize_url(qualifier))
+    }
 }
 
 /// `--supersede [<repository>:]<commit or range>[=<reason>]`, as given.
@@ -346,20 +495,18 @@ pub fn require_reasons(entries: &[SupersedeRequest], reason: Option<&str>) -> Re
 }
 
 /// The repository a qualified entry names, among `repositories` (the ones
-/// the obligations compare in) by their `names`.
+/// the obligations compare in).
 pub fn qualified(
     entry: &SupersedeRequest,
     repositories: &BTreeSet<SourceRepository>,
-    names: &BTreeMap<SourceRepository, String>,
+    names: &RepositoryNames,
 ) -> Result<Option<SourceRepository>, Finding> {
     let Some(wanted) = &entry.repository else {
         return Ok(None);
     };
     repositories
         .iter()
-        .find(|repository| {
-            names.get(*repository) == Some(wanted) || matches!(repository, SourceRepository::Url(url) if url == wanted)
-        })
+        .find(|repository| names.names(repository, wanted))
         .cloned()
         .map(Some)
         .ok_or_else(|| {
@@ -373,20 +520,12 @@ pub fn qualified(
                     "qualify the entry with one of: {}",
                     repositories
                         .iter()
-                        .map(|repository| name_of(repository, names))
+                        .map(|repository| names.name_of(repository))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
             )
         })
-}
-
-/// The name a refusal prints for a repository, which qualifies an entry.
-pub fn name_of(repository: &SourceRepository, names: &BTreeMap<SourceRepository, String>) -> String {
-    names.get(repository).cloned().unwrap_or_else(|| match repository {
-        SourceRepository::This => "project".to_owned(),
-        SourceRepository::Url(url) => url.clone(),
-    })
 }
 
 /// A `--supersede` entry resolved to the commits it names in its repository.
@@ -395,6 +534,72 @@ pub struct SupersedeEntry {
     pub repository: SourceRepository,
     pub commits: BTreeSet<CommitId>,
     pub reason: String,
+}
+
+/// The commits per repository a `--supersede` entry can cover: the missing
+/// commits of every check, and the commit of a record that cannot be fetched.
+pub fn wanted(plan: &Plan, answers: &BTreeMap<Check, Answer>) -> BTreeMap<SourceRepository, BTreeSet<CommitId>> {
+    let mut wanted: BTreeMap<SourceRepository, BTreeSet<CommitId>> = BTreeMap::new();
+    for check in plan.checks() {
+        let commits = wanted.entry(check.repository.clone()).or_default();
+        match answers.get(&check) {
+            Some(Answer::Missing(missing)) => commits.extend(missing.iter().map(|missing| missing.commit.clone())),
+            Some(Answer::Unavailable) => {
+                commits.insert(check.record.clone());
+            }
+            None => {}
+        }
+    }
+    wanted
+}
+
+/// The repository an entry belongs to, from the commits it names in each
+/// candidate repository (`resolved`; all repositories share one object
+/// database, so a commit ID resolves in each) and the commits each could
+/// cover (`wanted`): a qualified entry its own; an unqualified one the only
+/// repository where it names a commit to cover, and with several it must be
+/// qualified. `None` when it names nothing to cover, which is ignored.
+pub fn match_entry(
+    entry: &SupersedeRequest,
+    reason: String,
+    resolved: &BTreeMap<SourceRepository, Vec<CommitId>>,
+    wanted: &BTreeMap<SourceRepository, BTreeSet<CommitId>>,
+    names: &RepositoryNames,
+) -> Result<Option<SupersedeEntry>, Finding> {
+    let covering: Vec<(&SourceRepository, BTreeSet<CommitId>)> = resolved
+        .iter()
+        .map(|(repository, commits)| {
+            let wanted = wanted.get(repository);
+            let hit: BTreeSet<CommitId> = commits
+                .iter()
+                .filter(|commit| wanted.is_some_and(|wanted| wanted.contains(*commit)))
+                .cloned()
+                .collect();
+            (repository, hit)
+        })
+        .filter(|(_, hit)| !hit.is_empty())
+        .collect();
+    match covering.as_slice() {
+        [] => Ok(None),
+        [(repository, commits)] => Ok(Some(SupersedeEntry {
+            repository: (*repository).clone(),
+            commits: commits.clone(),
+            reason,
+        })),
+        several => Err(Finding::new(
+            Code::SourceUnavailable,
+            format!(
+                "--supersede {} names missing commits in several repositories: {}",
+                entry.text(),
+                several
+                    .iter()
+                    .map(|(repository, _)| names.name_of(repository))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "qualify the entry with its repository, `--supersede <repository>:<range>=<reason>`",
+        )),
+    }
 }
 
 /// An obligation no check satisfies, with the commits still missing.
@@ -411,6 +616,10 @@ pub struct Unsatisfied {
     pub items: Vec<Item>,
     /// Missing commits no entry covers, oldest first.
     pub missing: Vec<MissingCommit>,
+    /// The `--supersede` entries (without reason) that would cover them,
+    /// qualified when the refusal involves several repositories or another
+    /// repository than the project's.
+    pub supersede: Vec<String>,
 }
 
 /// Why the promotion is refused, with what is missing.
@@ -420,117 +629,230 @@ pub struct SupersedeRefusal {
     pub unsatisfied: Vec<Unsatisfied>,
 }
 
-/// What the check decided: the superseded commits the record lists, or the
-/// refusal. `answers` holds each check's missing commits; `entries` the
-/// resolved `--supersede` entries; `by` who gives them; `recorded` the
-/// repository string the record names each repository by.
+/// What the check accepted: the superseded commits the record lists, and
+/// records that could not be compared (`NYL-PROMOTE-UNCHECKED`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Accepted {
+    pub superseded: Vec<SupersededCommit>,
+    pub unchecked: Vec<Finding>,
+}
+
+/// What [`judge`] reads besides the answers.
 pub struct Judged<'a> {
     pub path: &'a PromotionPathName,
     pub source: &'a EnvironmentName,
     pub target: &'a EnvironmentName,
+    /// Who gives the `--supersede` entries.
     pub by: &'a str,
-    pub names: &'a BTreeMap<SourceRepository, String>,
-    pub recorded: &'a dyn Fn(&SourceRepository) -> String,
+    pub names: &'a RepositoryNames,
 }
 
-/// Decide the check: each obligation is satisfied by a check whose missing
-/// commits the entries cover entirely, and the record lists the covered
-/// ones; otherwise `NYL-PROMOTE-SUPERSEDES` (exit 2) lists every obligation
-/// still unsatisfied.
+/// Decide the check. An obligation is satisfied by a check that finds
+/// nothing missing, else by one whose missing commits the entries cover
+/// entirely, and the record lists the covered ones; a record whose commit
+/// cannot be fetched is unchecked, unless an entry names that commit, which
+/// supersedes it. Otherwise `NYL-PROMOTE-SUPERSEDES` (exit 2) lists every
+/// obligation still unsatisfied.
 pub fn judge(
     context: &Judged<'_>,
     plan: &Plan,
-    answers: &BTreeMap<Check, Vec<MissingCommit>>,
+    answers: &BTreeMap<Check, Answer>,
     entries: &[SupersedeEntry],
-) -> Result<Vec<SupersededCommit>, SupersedeRefusal> {
+) -> Result<Accepted, SupersedeRefusal> {
     let covering = |repository: &SourceRepository, commit: &CommitId| {
         entries
             .iter()
             .find(|entry| entry.repository == *repository && entry.commits.contains(commit))
     };
-    let mut superseded: Vec<SupersededCommit> = Vec::new();
+    let mut accepted = Accepted::default();
+    let mut unchecked = BTreeSet::new();
+    let supersede = |repository: &SourceRepository, commit: &CommitId, accepted: &mut Accepted| {
+        let entry = covering(repository, commit).expect("covered");
+        record_superseded(accepted, context, repository, commit, &entry.reason);
+    };
     let mut unsatisfied: Vec<Unsatisfied> = Vec::new();
     for obligation in &plan.obligations {
-        let mut best: Option<(&Check, Vec<MissingCommit>)> = None;
-        let mut satisfied = None;
-        for check in &obligation.checks {
-            let missing = answers.get(check).cloned().unwrap_or_default();
-            let uncovered: Vec<MissingCommit> = missing
-                .iter()
-                .filter(|commit| covering(&check.repository, &commit.commit).is_none())
-                .cloned()
-                .collect();
-            if uncovered.is_empty() {
-                satisfied = Some(missing);
-                break;
-            }
-            if best.as_ref().is_none_or(|(_, known)| uncovered.len() < known.len()) {
-                best = Some((check, uncovered));
-            }
+        let answered: Vec<(&Check, &Answer)> = obligation
+            .checks
+            .iter()
+            .filter_map(|check| answers.get(check).map(|answer| (check, answer)))
+            .collect();
+        let missing_of = |answer: &Answer| match answer {
+            Answer::Missing(missing) => Some(missing.clone()),
+            Answer::Unavailable => None,
+        };
+        // Nothing missing first, then everything missing covered.
+        if answered
+            .iter()
+            .any(|(_, answer)| missing_of(answer).is_some_and(|missing| missing.is_empty()))
+        {
+            continue;
         }
-        if let Some(missing) = satisfied {
-            for commit in missing {
-                let entry = covering(&obligation.repository, &commit.commit).expect("covered");
-                let repository = (context.recorded)(&obligation.repository);
-                if !superseded
+        let covered = answered.iter().find_map(|(check, answer)| {
+            missing_of(answer).filter(|missing| {
+                missing
                     .iter()
-                    .any(|known| known.commit == commit.commit && known.repository == repository)
-                {
-                    superseded.push(SupersededCommit {
-                        repository,
-                        commit: commit.commit,
-                        reason: entry.reason.clone(),
-                        by: context.by.to_owned(),
-                    });
-                }
-            }
-            continue;
-        }
-        let (check, missing) = best.expect("an obligation has a check");
-        if let Some(known) = unsatisfied.iter_mut().find(|known| {
-            known.path == obligation.path
-                && known.sequence == obligation.sequence
-                && known.repository == check.repository
-                && known.value == check.value
-                && known.record == check.record
-        }) {
-            if !known.items.contains(&obligation.item) {
-                known.items.push(obligation.item.clone());
-            }
-            continue;
-        }
-        unsatisfied.push(Unsatisfied {
-            path: obligation.path.clone(),
-            sequence: obligation.sequence,
-            repository: check.repository.clone(),
-            value: check.value.clone(),
-            record: check.record.clone(),
-            items: vec![obligation.item.clone()],
-            missing,
+                    .all(|commit| covering(&check.repository, &commit.commit).is_some())
+            })
         });
+        if let Some(missing) = covered {
+            for commit in &missing {
+                supersede(&obligation.repository, &commit.commit, &mut accepted);
+            }
+            continue;
+        }
+        if answered.iter().all(|(_, answer)| **answer == Answer::Unavailable) {
+            if covering(&obligation.repository, &obligation.record).is_some() {
+                supersede(&obligation.repository, &obligation.record, &mut accepted);
+            } else {
+                unchecked.insert(format!(
+                    "commit {} of record {} #{} ({}) cannot be fetched, so path {} cannot check that it keeps it; fetch it, or pass `--supersede {}=<reason>` to record that this promotion replaces it",
+                    obligation.record,
+                    obligation.path,
+                    obligation.sequence,
+                    obligation.item,
+                    context.path,
+                    obligation.record
+                ));
+            }
+            continue;
+        }
+        let Some((check, missing)) = answered
+            .iter()
+            .filter_map(|(check, answer)| {
+                missing_of(answer).map(|missing| {
+                    let uncovered: Vec<MissingCommit> = missing
+                        .into_iter()
+                        .filter(|commit| covering(&check.repository, &commit.commit).is_none())
+                        .collect();
+                    (*check, uncovered)
+                })
+            })
+            .min_by_key(|(_, uncovered)| uncovered.len())
+        else {
+            continue;
+        };
+        add_unsatisfied(&mut unsatisfied, obligation, check, missing);
     }
+    accepted.unchecked = unchecked.into_iter().map(unchecked_finding).collect();
     if unsatisfied.is_empty() {
-        return Ok(superseded);
+        return Ok(accepted);
     }
+    with_entries(context.names, &mut unsatisfied);
     Err(SupersedeRefusal {
         finding: refusal_finding(context, &unsatisfied),
         unsatisfied,
     })
 }
 
+/// Add an obligation no check satisfies, merged with one for the same
+/// record and commits that another item already listed.
+fn add_unsatisfied(
+    unsatisfied: &mut Vec<Unsatisfied>,
+    obligation: &Obligation,
+    check: &Check,
+    missing: Vec<MissingCommit>,
+) {
+    if let Some(known) = unsatisfied.iter_mut().find(|known| {
+        known.path == obligation.path
+            && known.sequence == obligation.sequence
+            && known.repository == check.repository
+            && known.value == check.value
+            && known.record == check.record
+    }) {
+        if !known.items.contains(&obligation.item) {
+            known.items.push(obligation.item.clone());
+        }
+        return;
+    }
+    unsatisfied.push(Unsatisfied {
+        path: obligation.path.clone(),
+        sequence: obligation.sequence,
+        repository: check.repository.clone(),
+        value: check.value.clone(),
+        record: check.record.clone(),
+        items: vec![obligation.item.clone()],
+        missing,
+        supersede: Vec::new(),
+    });
+}
+
+/// Fill each unsatisfied obligation's `--supersede` entries, qualified when
+/// the refusal involves several repositories or another repository than
+/// the project's.
+fn with_entries(names: &RepositoryNames, unsatisfied: &mut [Unsatisfied]) {
+    let qualify = unsatisfied
+        .iter()
+        .map(|unsatisfied| &unsatisfied.repository)
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1
+        || unsatisfied
+            .iter()
+            .any(|unsatisfied| unsatisfied.repository != SourceRepository::This);
+    for unsatisfied in unsatisfied.iter_mut() {
+        let qualifier = if qualify {
+            format!("{}:", names.name_of(&unsatisfied.repository))
+        } else {
+            String::new()
+        };
+        unsatisfied.supersede = entries_for(unsatisfied)
+            .into_iter()
+            .map(|entry| format!("{qualifier}{entry}"))
+            .collect();
+    }
+}
+
+/// Add a superseded commit to what the record lists, once per repository.
+fn record_superseded(
+    accepted: &mut Accepted,
+    context: &Judged<'_>,
+    repository: &SourceRepository,
+    commit: &CommitId,
+    reason: &str,
+) {
+    let recorded = context.names.name_of(repository);
+    if !accepted
+        .superseded
+        .iter()
+        .any(|known| known.commit == *commit && known.repository == recorded)
+    {
+        accepted.superseded.push(SupersededCommit {
+            repository: recorded,
+            commit: commit.clone(),
+            reason: reason.to_owned(),
+            by: context.by.to_owned(),
+        });
+    }
+}
+
+fn unchecked_finding(message: String) -> Finding {
+    Finding::new(
+        Code::PromoteUnchecked,
+        message,
+        "fetch the commit (the branch that carries it) and promote again, or record that this promotion replaces it with --supersede",
+    )
+}
+
+/// The `--supersede` entries that cover what is missing: the range from the
+/// parent of the oldest missing commit to the record's commit, with full
+/// commit IDs; when the oldest is a root commit, which has no parent, each
+/// missing commit on its own.
+pub fn entries_for(unsatisfied: &Unsatisfied) -> Vec<String> {
+    match unsatisfied.missing.first() {
+        Some(oldest) if oldest.root => unsatisfied
+            .missing
+            .iter()
+            .map(|commit| commit.commit.to_string())
+            .collect(),
+        Some(oldest) => vec![format!("{}^..{}", oldest.commit, unsatisfied.record)],
+        None => vec![unsatisfied.record.to_string()],
+    }
+}
+
 /// 12 characters of a commit, as messages abbreviate it.
 fn short(commit: &CommitId) -> &str {
     &commit.as_str()[..12]
-}
-
-/// The range a refusal offers to copy: from the parent of the oldest missing
-/// commit to the record's commit.
-pub fn range_of(unsatisfied: &Unsatisfied) -> String {
-    let oldest = unsatisfied
-        .missing
-        .first()
-        .map_or(&unsatisfied.record, |commit| &commit.commit);
-    format!("{}^..{}", short(oldest), short(&unsatisfied.record))
 }
 
 fn refusal_finding(context: &Judged<'_>, unsatisfied: &[Unsatisfied]) -> Finding {
@@ -540,16 +862,13 @@ fn refusal_finding(context: &Judged<'_>, unsatisfied: &[Unsatisfied]) -> Finding
         .collect::<BTreeSet<_>>()
         .len()
         > 1;
-    let qualified = |unsatisfied: &Unsatisfied| {
-        if several {
-            format!(
-                "{}:{}",
-                name_of(&unsatisfied.repository, context.names),
-                range_of(unsatisfied)
-            )
-        } else {
-            range_of(unsatisfied)
-        }
+    let options = |unsatisfied: &Unsatisfied| {
+        unsatisfied
+            .supersede
+            .iter()
+            .map(|entry| format!("--supersede {entry}=<reason>"))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     let parts: Vec<String> = unsatisfied
         .iter()
@@ -562,12 +881,12 @@ fn refusal_finding(context: &Judged<'_>, unsatisfied: &[Unsatisfied]) -> Finding
                 .collect::<Vec<_>>()
                 .join(", ");
             let repository = if several {
-                format!(" in {}", name_of(&unsatisfied.repository, context.names))
+                format!(" in {}", context.names.name_of(&unsatisfied.repository))
             } else {
                 String::new()
             };
             format!(
-                "{} is missing {count} commit{} from {} #{} ({}){repository}: {} ({commits})",
+                "{} is missing {count} commit{} from {} #{} ({}){repository}: {commits}",
                 short(&unsatisfied.value),
                 if count == 1 { "" } else { "s" },
                 unsatisfied.path,
@@ -578,24 +897,23 @@ fn refusal_finding(context: &Judged<'_>, unsatisfied: &[Unsatisfied]) -> Finding
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", "),
-                qualified(unsatisfied),
             )
         })
         .collect();
-    let first = &unsatisfied[0];
+    let all: Vec<String> = unsatisfied.iter().map(options).collect();
     Finding::new(
         Code::PromoteSupersedes,
         format!(
-            "path {} would replace what other paths promoted into {}: {}; merge them or pass --supersede {}=<reason>",
+            "path {} would replace what other paths promoted into {}: {}; merge them or pass {}",
             context.path,
             context.target,
             parts.join("; "),
-            qualified(first)
+            all.join(" ")
         ),
         format!(
-            "merge the missing commits into the source {} runs, reconcile it, and promote again; or record that this promotion replaces them with `--supersede {}=<reason>` (repeatable)",
+            "merge the missing commits into the source {} runs, reconcile it, and promote again; or record that this promotion replaces them with {}",
             context.source,
-            qualified(first)
+            all.join(" ")
         ),
     )
 }
@@ -607,6 +925,8 @@ mod tests {
     use super::*;
     use crate::rules::fixtures::{desired, name};
 
+    const WEB: &str = "https://git.example.invalid/web.git";
+
     fn commit(fill: char) -> CommitId {
         CommitId::new(fill.to_string().repeat(40)).unwrap()
     }
@@ -615,8 +935,16 @@ mod tests {
         PromotionPathName::new(name).unwrap()
     }
 
-    fn this(fill: char) -> Commits {
-        [(SourceRepository::This, commit(fill))].into()
+    fn web() -> SourceRepository {
+        SourceRepository::Url(WEB.to_owned())
+    }
+
+    fn at(field: &str, repository: &SourceRepository, fill: char) -> SourceCommit {
+        SourceCommit {
+            field: field.to_owned(),
+            repository: repository.clone(),
+            commit: commit(fill),
+        }
     }
 
     /// A record that carries the source commit and `webImage`, both built
@@ -626,8 +954,11 @@ mod tests {
             path: path(on),
             sequence,
             items: [
-                (Item::Source, Some(this(fill))),
-                (Item::Value("webImage".to_owned()), Some(this(fill))),
+                (Item::Source, Some(source_commits(&commit(fill)))),
+                (
+                    Item::Value("webImage".to_owned()),
+                    Some([at("/context", &SourceRepository::This, fill)].into()),
+                ),
             ]
             .into(),
         }
@@ -635,8 +966,11 @@ mod tests {
 
     fn writes(fill: char) -> BTreeMap<Item, Option<Commits>> {
         [
-            (Item::Source, Some(this(fill))),
-            (Item::Value("webImage".to_owned()), Some(this(fill))),
+            (Item::Source, Some(source_commits(&commit(fill)))),
+            (
+                Item::Value("webImage".to_owned()),
+                Some([at("/context", &SourceRepository::This, fill)].into()),
+            ),
         ]
         .into()
     }
@@ -645,31 +979,43 @@ mod tests {
         MissingCommit {
             commit: commit(fill),
             subject: subject.to_owned(),
+            root: false,
         }
+    }
+
+    fn names() -> RepositoryNames {
+        RepositoryNames::new(&[("web".to_owned(), WEB.to_owned())], None)
     }
 
     fn judge_with(
         plan: &Plan,
-        answers: &BTreeMap<Check, Vec<MissingCommit>>,
+        answers: &BTreeMap<Check, Answer>,
         entries: &[SupersedeEntry],
-    ) -> Result<Vec<SupersededCommit>, SupersedeRefusal> {
-        let names = BTreeMap::new();
-        let recorded = |_: &SourceRepository| "https://git.example.invalid/platform.git".to_owned();
+    ) -> Result<Accepted, SupersedeRefusal> {
+        let names = names();
         let context = Judged {
             path: &path("dev-to-prod"),
             source: &EnvironmentName::new("dev").unwrap(),
             target: &EnvironmentName::new("prod").unwrap(),
             by: "release-bot",
             names: &names,
-            recorded: &recorded,
         };
         judge(&context, plan, answers, entries)
     }
 
-    /// Only records of other paths written after this path's own record
-    /// count, each item for itself, and one check answers the source and a
-    /// value built from the same commit. Catches a check against this path's
-    /// own history, or against what this path already promoted past.
+    fn entry(repository: SourceRepository, commits: &[char], reason: &str) -> SupersedeEntry {
+        SupersedeEntry {
+            repository,
+            commits: commits.iter().map(|fill| commit(*fill)).collect(),
+            reason: reason.to_owned(),
+        }
+    }
+
+    /// Only records of other paths written after this path's newest record
+    /// count, each item for itself, this path's records from history
+    /// included; one check answers the source and a value built from the
+    /// same commit. Catches a check against what this path already promoted
+    /// past, or "since" taken from the current record alone.
     #[test]
     fn test_plan_checks_other_paths_since_this_path_last_promoted() {
         let records = vec![
@@ -690,6 +1036,7 @@ mod tests {
             .into()
         );
         assert!(plan.unchecked.is_empty());
+        assert_eq!(since(&path("dev-to-prod"), &Item::Source, &records), 2);
 
         // Without a record of its own, every other path's record counts.
         let plan = super::plan(&path("dev-to-prod"), &writes('d'), &records[..1]);
@@ -713,6 +1060,61 @@ mod tests {
         assert_eq!(plan.obligations.len(), 2);
     }
 
+    /// A record's commit is compared with the commit of the same source
+    /// field, and with any commit of its repository only when no field
+    /// matches. Catches an image's library context compared with its main
+    /// context, which would report the library's whole history as missing.
+    #[test]
+    fn test_plan_pairs_commits_by_source_field() {
+        let image = |main: char, lib: char| -> Commits {
+            [
+                at("/context", &SourceRepository::This, main),
+                at("/contexts/lib", &SourceRepository::This, lib),
+            ]
+            .into()
+        };
+        let theirs = RecordCommits {
+            path: path("hotfix-to-prod"),
+            sequence: 2,
+            items: [(Item::Value("webImage".to_owned()), Some(image('a', 'b')))].into(),
+        };
+        let ours: BTreeMap<Item, Option<Commits>> =
+            [(Item::Value("webImage".to_owned()), Some(image('c', 'd')))].into();
+        let plan = plan(&path("dev-to-prod"), &ours, std::slice::from_ref(&theirs));
+        let pairs: BTreeSet<(CommitId, CommitId)> = plan
+            .checks()
+            .into_iter()
+            .map(|check| (check.value, check.record))
+            .collect();
+        assert_eq!(pairs, [(commit('c'), commit('a')), (commit('d'), commit('b'))].into());
+
+        // A field the new value lacks falls back to every commit of the repository.
+        let ours: BTreeMap<Item, Option<Commits>> = [(
+            Item::Value("webImage".to_owned()),
+            Some([at("/context", &SourceRepository::This, 'c')].into()),
+        )]
+        .into();
+        let plan = super::plan(&path("dev-to-prod"), &ours, &[theirs]);
+        assert_eq!(plan.checks().len(), 2);
+        assert!(plan.checks().iter().all(|check| check.value == commit('c')));
+    }
+
+    /// A record whose commit a newer record of the same path descends from
+    /// needs no check of its own. Catches a promotion that compares every
+    /// hotfix of a long-lived branch one by one.
+    #[test]
+    fn test_prune_drops_records_a_newer_one_of_the_same_path_contains() {
+        let records = vec![
+            source_record("hotfix-to-prod", 2, 'a'),
+            source_record("hotfix-to-prod", 4, 'b'),
+        ];
+        let mut plan = plan(&path("dev-to-prod"), &writes('d'), &records);
+        assert_eq!(plan.obligations.len(), 4);
+        plan.prune(&|_, older, newer| *older == commit('a') && *newer == commit('b'));
+        assert_eq!(plan.obligations.len(), 2);
+        assert!(plan.obligations.iter().all(|obligation| obligation.sequence == 4));
+    }
+
     /// A value without a known source commit, or another record's value
     /// without one, is listed as unchecked instead of passing silently or
     /// refusing. Catches an image from outside Nyl blocking every promotion.
@@ -734,30 +1136,36 @@ mod tests {
             .contains("webImage has no known source commit"));
     }
 
-    /// Missing commits refuse with `NYL-PROMOTE-SUPERSEDES` (exit 2),
-    /// naming the other path, every missing commit by subject, and a range
-    /// to pass to `--supersede`; nothing missing passes with no superseded
-    /// commits. Catches a refusal a user cannot act on.
-    #[test]
-    fn test_judge_refuses_missing_commits_with_the_range_to_supersede() {
+    fn one_plan() -> (Plan, Check) {
         let plan = plan(
             &path("dev-to-prod"),
             &writes('d'),
             &[source_record("hotfix-to-prod", 2, 'c')],
         );
         let check = plan.checks().into_iter().next().unwrap();
+        (plan, check)
+    }
+
+    /// Missing commits refuse with `NYL-PROMOTE-SUPERSEDES` (exit 2),
+    /// naming the other path, every missing commit by subject, and a range
+    /// with full commit IDs to pass to `--supersede`; nothing missing passes
+    /// with no superseded commits. Catches a refusal a user cannot act on.
+    #[test]
+    fn test_judge_refuses_missing_commits_with_the_range_to_supersede() {
+        let (plan, check) = one_plan();
         let answers = BTreeMap::from([(
             check.clone(),
-            vec![missing('a', "Fix pool size"), missing('c', "Bump timeout")],
+            Answer::Missing(vec![missing('a', "Fix pool size"), missing('c', "Bump timeout")]),
         )]);
         let refusal = judge_with(&plan, &answers, &[]).unwrap_err();
         assert_eq!(refusal.finding.code, Code::PromoteSupersedes);
         assert_eq!(crate::run_report::ExitCategory::of_finding(&refusal.finding).code(), 2);
+        let range = format!("{}^..{}", commit('a'), commit('c'));
         for expected in [
             "hotfix-to-prod #2",
             "Fix pool size",
             "Bump timeout",
-            "--supersede aaaaaaaaaaaa^..cccccccccccc",
+            &format!("--supersede {range}=<reason>"),
         ] {
             assert!(
                 refusal.finding.message.contains(expected),
@@ -765,43 +1173,120 @@ mod tests {
                 refusal.finding.message
             );
         }
-        assert_eq!(refusal.unsatisfied.len(), 1);
+        assert_eq!(refusal.unsatisfied[0].supersede, [range]);
         assert_eq!(
             refusal.unsatisfied[0].items,
             [Item::Source, Item::Value("webImage".to_owned())]
         );
 
-        let none = BTreeMap::from([(check, Vec::new())]);
-        assert_eq!(judge_with(&plan, &none, &[]).unwrap(), Vec::new());
+        let none = BTreeMap::from([(check, Answer::Missing(Vec::new()))]);
+        assert_eq!(judge_with(&plan, &none, &[]).unwrap(), Accepted::default());
+    }
+
+    /// A root commit has no parent to start a range at, so each missing
+    /// commit is its own entry; in another repository than the project's,
+    /// every entry carries its qualifier. Catches a hint Git cannot resolve.
+    #[test]
+    fn test_judge_offers_entries_for_a_root_and_qualifies_other_repositories() {
+        let theirs = RecordCommits {
+            path: path("hotfix-to-prod"),
+            sequence: 2,
+            items: [(
+                Item::Value("webImage".to_owned()),
+                Some([at("/context", &web(), 'c')].into()),
+            )]
+            .into(),
+        };
+        let ours: BTreeMap<Item, Option<Commits>> = [(
+            Item::Value("webImage".to_owned()),
+            Some([at("/context", &web(), 'd')].into()),
+        )]
+        .into();
+        let plan = plan(&path("dev-to-prod"), &ours, &[theirs]);
+        let check = plan.checks().into_iter().next().unwrap();
+        let mut root = missing('a', "Initial");
+        root.root = true;
+        let answers = BTreeMap::from([(check, Answer::Missing(vec![root, missing('c', "Fix")]))]);
+        let refusal = judge_with(&plan, &answers, &[]).unwrap_err();
+        assert_eq!(
+            refusal.unsatisfied[0].supersede,
+            [format!("web:{}", commit('a')), format!("web:{}", commit('c'))]
+        );
+        assert!(refusal
+            .finding
+            .fix
+            .contains(&format!("--supersede web:{}=<reason>", commit('a'))));
+    }
+
+    /// A check that finds nothing missing satisfies the obligation before
+    /// one whose missing commits an entry covers, so no commit is recorded
+    /// as superseded that the promotion keeps. Catches a record listing
+    /// superseded commits the promoted image still contains.
+    #[test]
+    fn test_judge_prefers_a_check_with_nothing_missing() {
+        let theirs = RecordCommits {
+            path: path("hotfix-to-prod"),
+            sequence: 2,
+            items: [(
+                Item::Value("webImage".to_owned()),
+                Some([at("/lib", &SourceRepository::This, 'c')].into()),
+            )]
+            .into(),
+        };
+        let ours: BTreeMap<Item, Option<Commits>> = [(
+            Item::Value("webImage".to_owned()),
+            Some(
+                [
+                    at("/context", &SourceRepository::This, 'd'),
+                    at("/other", &SourceRepository::This, 'e'),
+                ]
+                .into(),
+            ),
+        )]
+        .into();
+        let plan = plan(&path("dev-to-prod"), &ours, &[theirs]);
+        let answers: BTreeMap<Check, Answer> = plan
+            .checks()
+            .into_iter()
+            .map(|check| {
+                let answer = if check.value == commit('d') {
+                    Answer::Missing(vec![missing('c', "Fix")])
+                } else {
+                    Answer::Missing(Vec::new())
+                };
+                (check, answer)
+            })
+            .collect();
+        let accepted = judge_with(&plan, &answers, &[entry(SourceRepository::This, &['c'], "x")]).unwrap();
+        assert!(accepted.superseded.is_empty());
     }
 
     /// An entry that covers only some missing commits keeps the promotion
     /// refused, naming only the rest; entries that cover all pass and the
-    /// record lists each missing commit with its reason and who gave it,
-    /// oldest first, never the range or commits that were not missing.
-    /// Catches a partial supersede passing, or a range recorded as given.
+    /// record lists each missing commit with its repository, reason, and
+    /// who gave it, oldest first, never the range or commits that were not
+    /// missing. Catches a partial supersede passing, or a range recorded.
     #[test]
     fn test_judge_records_each_superseded_commit() {
-        let plan = plan(
-            &path("dev-to-prod"),
-            &writes('d'),
-            &[source_record("hotfix-to-prod", 2, 'c')],
-        );
-        let check = plan.checks().into_iter().next().unwrap();
-        let answers = BTreeMap::from([(check, vec![missing('a', "Fix cache"), missing('c', "Raise cache size")])]);
-        let entry = |commits: &[char], reason: &str| SupersedeEntry {
-            repository: SourceRepository::This,
-            commits: commits.iter().map(|fill| commit(*fill)).collect(),
-            reason: reason.to_owned(),
-        };
-        let partial = judge_with(&plan, &answers, &[entry(&['a'], "squashed")]).unwrap_err();
+        let (plan, check) = one_plan();
+        let answers = BTreeMap::from([(
+            check,
+            Answer::Missing(vec![missing('a', "Fix cache"), missing('c', "Raise cache size")]),
+        )]);
+        let partial = judge_with(&plan, &answers, &[entry(SourceRepository::This, &['a'], "squashed")]).unwrap_err();
         assert!(partial.finding.message.contains("Raise cache size"));
-        assert!(!partial.finding.message.contains("Fix cache ("));
+        assert!(!partial.finding.message.contains("Fix cache,"));
         assert_eq!(partial.unsatisfied[0].missing, [missing('c', "Raise cache size")]);
 
-        let superseded = judge_with(&plan, &answers, &[entry(&['b', 'c', 'a'], "squashed")]).unwrap();
+        let accepted = judge_with(
+            &plan,
+            &answers,
+            &[entry(SourceRepository::This, &['b', 'c', 'a'], "squashed")],
+        )
+        .unwrap();
         assert_eq!(
-            superseded
+            accepted
+                .superseded
                 .iter()
                 .map(|commit| (commit.commit.clone(), commit.reason.as_str(), commit.by.as_str()))
                 .collect::<Vec<_>>(),
@@ -810,14 +1295,27 @@ mod tests {
                 (commit('c'), "squashed", "release-bot")
             ]
         );
-        assert_eq!(superseded[0].repository, "https://git.example.invalid/platform.git");
+        assert_eq!(accepted.superseded[0].repository, "project");
 
         // An entry in another repository covers nothing here.
-        let elsewhere = SupersedeEntry {
-            repository: SourceRepository::Url("https://git.example.invalid/web.git".to_owned()),
-            ..entry(&['a', 'c'], "other")
-        };
-        assert!(judge_with(&plan, &answers, &[elsewhere]).is_err());
+        assert!(judge_with(&plan, &answers, &[entry(web(), &['a', 'c'], "other")]).is_err());
+    }
+
+    /// A record whose commit cannot be fetched is unchecked, never a
+    /// refusal of every later promotion; an entry naming its commit
+    /// supersedes it. Catches a deleted hotfix branch blocking prod.
+    #[test]
+    fn test_judge_leaves_an_unfetchable_record_unchecked_unless_superseded() {
+        let (plan, check) = one_plan();
+        let answers = BTreeMap::from([(check, Answer::Unavailable)]);
+        let accepted = judge_with(&plan, &answers, &[]).unwrap();
+        assert!(accepted.superseded.is_empty());
+        assert_eq!(accepted.unchecked.len(), 2, "{:?}", accepted.unchecked);
+        assert!(accepted.unchecked[0].message.contains("hotfix-to-prod #2"));
+        let superseded = judge_with(&plan, &answers, &[entry(SourceRepository::This, &['c'], "gone")]).unwrap();
+        assert!(superseded.unchecked.is_empty());
+        assert_eq!(superseded.superseded.len(), 1);
+        assert_eq!(superseded.superseded[0].commit, commit('c'));
     }
 
     /// Entries parse with an optional repository qualifier and reason, and
@@ -833,12 +1331,15 @@ mod tests {
         let bare = SupersedeRequest::parse("a1b2..c3d4").unwrap();
         assert_eq!((bare.repository, bare.reason), (None, None));
         let url = SupersedeRequest::parse("https://git.example.invalid/web.git:a1b2").unwrap();
-        assert_eq!(url.repository.as_deref(), Some("https://git.example.invalid/web.git"));
+        assert_eq!(url.repository.as_deref(), Some(WEB));
         for malformed in ["", "a1b2=", ":a1b2", "a b", "--all=x"] {
             assert!(SupersedeRequest::parse(malformed).is_err(), "{malformed}");
         }
 
-        let entries = [bare_entry("a..b"), SupersedeRequest::parse("c=why").unwrap()];
+        let entries = [
+            SupersedeRequest::parse("a..b").unwrap(),
+            SupersedeRequest::parse("c=why").unwrap(),
+        ];
         let refused = require_reasons(&entries, None).unwrap_err();
         assert_eq!(refused.code, Code::PromoteSupersedeReason);
         assert_eq!(crate::run_report::ExitCategory::of_finding(&refused).code(), 1);
@@ -847,26 +1348,104 @@ mod tests {
         assert!(require_reasons(&entries[1..], None).is_ok());
     }
 
-    fn bare_entry(range: &str) -> SupersedeRequest {
-        SupersedeRequest::parse(range).unwrap()
+    /// URLs are compared after normalization, so a GitRepository names the
+    /// repository however its URL is spelled, and the project's own
+    /// repository takes the name of the GitRepository of its `origin`.
+    /// Catches a record naming one repository two ways.
+    #[test]
+    fn test_repository_names_match_normalized_urls() {
+        for url in [
+            "https://Git.Example.invalid/org/web.git",
+            "https://user:token@git.example.invalid/org/web/",
+            "ssh://git@git.example.invalid/org/web.git",
+            "git@git.example.invalid:org/web.git",
+        ] {
+            assert_eq!(normalize_url(url), "git.example.invalid/org/web", "{url}");
+        }
+        assert_eq!(normalize_url("/srv/git/web.git"), "/srv/git/web");
+        let declared = [("platform".to_owned(), "git@git.example.invalid:org/platform".to_owned())];
+        let names = RepositoryNames::new(&declared, Some("https://git.example.invalid/org/platform.git"));
+        assert_eq!(names.name_of(&SourceRepository::This), "platform");
+        assert_eq!(
+            names.name_of(&SourceRepository::Url(
+                "ssh://git@git.example.invalid/org/platform".to_owned()
+            )),
+            "platform"
+        );
+        assert_eq!(
+            names.name_of(&SourceRepository::Url(
+                "https://git.example.invalid/org/lib.git".to_owned()
+            )),
+            "git.example.invalid/org/lib"
+        );
+        let unnamed = RepositoryNames::new(&[], Some("https://git.example.invalid/org/app.git"));
+        assert_eq!(unnamed.name_of(&SourceRepository::This), "git.example.invalid/org/app");
+        assert_eq!(RepositoryNames::default().name_of(&SourceRepository::This), "project");
+        assert!(names.names(&SourceRepository::This, "https://git.example.invalid/org/platform"));
     }
 
     /// A qualifier names one of the repositories the check compares in, by
-    /// its project name or URL; another is refused with the names to use.
+    /// its name or URL; another is refused with the names to use.
     #[test]
     fn test_qualified_entries_name_a_compared_repository() {
-        let web = SourceRepository::Url("https://git.example.invalid/web.git".to_owned());
-        let repositories = BTreeSet::from([SourceRepository::This, web.clone()]);
-        let names = BTreeMap::from([(web.clone(), "web".to_owned())]);
+        let repositories = BTreeSet::from([SourceRepository::This, web()]);
+        let names = names();
         let resolve = |text: &str| qualified(&SupersedeRequest::parse(text).unwrap(), &repositories, &names);
-        assert_eq!(resolve("web:a1b2").unwrap(), Some(web.clone()));
-        assert_eq!(resolve("https://git.example.invalid/web.git:a1b2").unwrap(), Some(web));
+        assert_eq!(resolve("web:a1b2").unwrap(), Some(web()));
+        assert_eq!(resolve("https://git.example.invalid/web:a1b2").unwrap(), Some(web()));
         assert_eq!(resolve("a1b2").unwrap(), None);
         let unknown = resolve("api:a1b2").unwrap_err();
         assert!(
             unknown.fix.contains("project") && unknown.fix.contains("web"),
             "{}",
             unknown.fix
+        );
+    }
+
+    /// With two repositories, an entry belongs to the repository whose
+    /// missing commits it names: a qualified short range in its own, and an
+    /// unqualified full ID that resolves in both (they share one object
+    /// database) in the one it is missing from; one that names missing
+    /// commits in both must be qualified. Catches every unqualified ID
+    /// refused as ambiguous, or one applied to the wrong repository.
+    #[test]
+    fn test_match_entry_uses_each_repository_s_missing_commits() {
+        let wanted = BTreeMap::from([
+            (SourceRepository::This, BTreeSet::from([commit('a')])),
+            (web(), BTreeSet::from([commit('b'), commit('c')])),
+        ]);
+        let names = names();
+        let short = SupersedeRequest::parse("web:bbbbbbb^..ccccccc").unwrap();
+        let matched = match_entry(
+            &short,
+            "r".to_owned(),
+            &BTreeMap::from([(web(), vec![commit('c'), commit('b')])]),
+            &wanted,
+            &names,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matched.repository, web());
+        assert_eq!(matched.commits, BTreeSet::from([commit('b'), commit('c')]));
+
+        let full = SupersedeRequest::parse(commit('b').as_str()).unwrap();
+        let everywhere = BTreeMap::from([(SourceRepository::This, vec![commit('b')]), (web(), vec![commit('b')])]);
+        let matched = match_entry(&full, "r".to_owned(), &everywhere, &wanted, &names)
+            .unwrap()
+            .unwrap();
+        assert_eq!(matched.repository, web());
+
+        let both = BTreeMap::from([
+            (SourceRepository::This, vec![commit('a'), commit('b')]),
+            (web(), vec![commit('a'), commit('b')]),
+        ]);
+        let ambiguous = match_entry(&full, "r".to_owned(), &both, &wanted, &names).unwrap_err();
+        assert!(ambiguous.message.contains("project") && ambiguous.message.contains("web"));
+
+        let elsewhere = BTreeMap::from([(SourceRepository::This, vec![commit('e')])]);
+        assert_eq!(
+            match_entry(&full, "r".to_owned(), &elsewhere, &wanted, &names).unwrap(),
+            None
         );
     }
 
@@ -906,10 +1485,11 @@ mod tests {
             }
         };
         let expected: Commits = [
-            (SourceRepository::This, commit('a')),
-            (
-                SourceRepository::Url("https://git.example.invalid/lib.git".to_owned()),
-                commit('b'),
+            at("/context", &SourceRepository::This, 'a'),
+            at(
+                "/contexts/lib",
+                &SourceRepository::Url("https://git.example.invalid/lib.git".to_owned()),
+                'b',
             ),
         ]
         .into();

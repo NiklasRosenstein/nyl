@@ -22,28 +22,67 @@ pub struct MissingCommit {
     pub commit: String,
     /// The first line of its message.
     pub subject: String,
+    /// Whether it has no parent, so no `<commit>^` names the history before it.
+    pub root: bool,
 }
 
 /// The commits reachable from `record` and not from `value` that have no
-/// patch-equivalent commit in `value`'s history since their merge base,
-/// oldest first: the `+` lines of `git cherry <value> <record>`. Merge
-/// commits are skipped, as `git cherry` skips them. Empty means `value`
-/// contains `record`: an ancestor, clean cherry-picks, and a single-commit
-/// squash do; a squash of several commits is equivalent to none of them.
+/// patch-equivalent commit in `value`'s history since their merge base:
+/// the `+` lines of `git cherry <value> <record>`, in topological order,
+/// oldest first (`git rev-list --topo-order --reverse`). Merge commits are
+/// skipped, as `git cherry` skips them. Empty means `value` contains
+/// `record`: an ancestor, clean cherry-picks, and a single-commit squash do;
+/// a squash of several commits is equivalent to none of them.
 ///
-/// Both commits must be present in the repository at `git_dir`.
+/// Both commits must be present in the repository at `git_dir`. Two `git`
+/// processes, whatever the number of commits.
 pub fn missing_commits(git_dir: &Path, value: &str, record: &str) -> Result<Vec<MissingCommit>> {
-    let stdout = git(git_dir, &["cherry", "-v", "--abbrev=40", value, record], "git cherry")?;
-    let mut missing = Vec::new();
-    for line in stdout.lines() {
+    for commit in [value, record] {
+        if commit.starts_with('-') {
+            return Err(GitError::Command(format!("{commit:?} is not a commit")));
+        }
+    }
+    let cherry = git(
+        git_dir,
+        &["cherry", "-v", "--end-of-options", value, record],
+        "git cherry",
+    )?;
+    let mut subjects = std::collections::BTreeMap::new();
+    for line in cherry.lines() {
         let Some(rest) = line.strip_prefix("+ ") else {
             continue;
         };
         let (commit, subject) = rest.split_once(' ').unwrap_or((rest, ""));
-        missing.push(MissingCommit {
-            commit: commit.to_owned(),
-            subject: subject.to_owned(),
-        });
+        subjects.insert(commit.to_owned(), subject.to_owned());
+    }
+    if subjects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let order = git(
+        git_dir,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            "--parents",
+            "--end-of-options",
+            record,
+            &format!("^{value}"),
+            "--",
+        ],
+        "git rev-list",
+    )?;
+    let mut missing = Vec::new();
+    for line in order.lines() {
+        let mut ids = line.split_whitespace();
+        let Some(commit) = ids.next() else { continue };
+        if let Some(subject) = subjects.remove(commit) {
+            missing.push(MissingCommit {
+                commit: commit.to_owned(),
+                subject,
+                root: ids.next().is_none(),
+            });
+        }
     }
     Ok(missing)
 }
@@ -51,25 +90,34 @@ pub fn missing_commits(git_dir: &Path, value: &str, record: &str) -> Result<Vec<
 /// The commits a revision range names, newest first: `A..B` is every commit
 /// reachable from `B` and not from `A` (`git rev-list A..B`), and any other
 /// form names exactly one commit. An empty range is no commit; a revision
-/// that names no commit is an error.
+/// that names no commit, or an end that starts with `-`, is an error.
 pub fn commits_in(git_dir: &Path, range: &str) -> Result<Vec<String>> {
-    if range.starts_with('-') {
-        return Err(GitError::Command(format!("{range:?} is not a revision")));
-    }
+    let not_revision = || GitError::Command(format!("{range:?} is not a revision or a range <from>..<to>"));
     if let Some((from, to)) = range.split_once("..") {
-        if from.is_empty() || to.is_empty() || to.starts_with('.') {
-            return Err(GitError::Command(format!(
-                "{range:?} is not a range of two revisions, such as <from>..<to>"
-            )));
+        if from.is_empty() || to.is_empty() || to.starts_with('.') || from.starts_with('-') || to.starts_with('-') {
+            return Err(not_revision());
         }
-        let from = format!("{from}^{{commit}}");
+        let from = format!("^{from}^{{commit}}");
         let to = format!("{to}^{{commit}}");
-        let stdout = git(git_dir, &["rev-list", &to, &format!("^{from}"), "--"], "git rev-list")?;
+        let stdout = git(
+            git_dir,
+            &["rev-list", "--end-of-options", &to, &from, "--"],
+            "git rev-list",
+        )?;
         return Ok(stdout.lines().map(str::to_owned).collect());
+    }
+    if range.is_empty() || range.starts_with('-') {
+        return Err(not_revision());
     }
     let stdout = git(
         git_dir,
-        &["rev-parse", "--verify", "--quiet", &format!("{range}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{range}^{{commit}}"),
+        ],
         "git rev-parse",
     )?;
     Ok(stdout.lines().map(str::to_owned).collect())
@@ -205,11 +253,13 @@ mod tests {
             vec![
                 MissingCommit {
                     commit: pool.clone(),
-                    subject: "Fix pool size".to_owned()
+                    subject: "Fix pool size".to_owned(),
+                    root: false,
                 },
                 MissingCommit {
                     commit: timeout.clone(),
-                    subject: "Bump timeout".to_owned()
+                    subject: "Bump timeout".to_owned(),
+                    root: false,
                 },
             ]
         );
@@ -261,6 +311,22 @@ mod tests {
         assert_eq!(repo.missing("main", "release"), ["Fix pool size", "Bump timeout"]);
     }
 
+    /// Missing commits come in topological order, and the first commit of
+    /// a history says it is a root, so a refusal never offers `<root>^`.
+    /// Catches a copyable range that Git cannot resolve.
+    #[test]
+    fn test_missing_commits_mark_a_root_commit() {
+        let repo = Repo::new();
+        let root = repo.head();
+        repo.git(&["checkout", "-q", "--orphan", "other"]);
+        repo.git(&["rm", "-q", "-r", "--cached", "."]);
+        repo.commit_file("Other root", "other", "o\n");
+        let missing = missing_commits(&repo.git_dir(), "other", "main").unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].commit, root);
+        assert!(missing[0].root);
+    }
+
     /// A commit the repository does not hold is an error, never "nothing
     /// missing". Catches a refusal silently turned into a pass.
     #[test]
@@ -286,5 +352,7 @@ mod tests {
         assert!(commits_in(&repo.git_dir(), "no-such-branch").is_err());
         assert!(commits_in(&repo.git_dir(), "..release").is_err());
         assert!(commits_in(&repo.git_dir(), "--all").is_err());
+        assert!(commits_in(&repo.git_dir(), "--all..release").is_err());
+        assert!(commits_in(&repo.git_dir(), "main..--all").is_err());
     }
 }

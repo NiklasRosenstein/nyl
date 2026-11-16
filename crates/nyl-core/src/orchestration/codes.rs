@@ -187,6 +187,8 @@ codes! {
     PromoteSourceRejected => "NYL-PROMOTE-SOURCE-REJECTED",
     /// `nyl promote` would replace commits another PromotionPath promoted into the target since this path last promoted: the promoted source commit or value does not contain them (`git cherry` lists them, by their changes). Nothing was written; merge the missing commits or pass `--supersede`. Exit 2.
     PromoteSupersedes => "NYL-PROMOTE-SUPERSEDES",
+    /// The entry checkout is a shallow clone, so `nyl promote` cannot compare histories for the supersede check; fetch the full history (`git fetch --unshallow`, or `fetch-depth: 0`). Nothing was written. Exit 1.
+    PromoteShallowClone => "NYL-PROMOTE-SHALLOW-CLONE",
     /// A `nyl promote --supersede` entry has no reason of its own, and the promotion has no `--reason`. Exit 1.
     PromoteSupersedeReason => "NYL-PROMOTE-SUPERSEDE-REASON",
     /// The supersede check cannot check a promoted value: it, or another path's record of it, has no known source commit, such as an image from outside Nyl or a command output. A warning.

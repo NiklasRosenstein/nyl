@@ -1001,7 +1001,7 @@ fn promote_with(
             reason: None,
         },
         supersede: Vec::new(),
-        repository_names: std::collections::BTreeMap::new(),
+        repository_names: nyl_orchestration::rules::promotion::supersede::RepositoryNames::default(),
     };
     harness.shell.with_context(&job, |context, request| {
         promote(

@@ -211,11 +211,8 @@ pub fn promotions(
         sequence: record.sequence,
     };
     report.source = source_paths.as_ref().and_then(|paths| {
-        recorded
-            .values()
-            .filter(|record| paths.contains(record.path.as_str()) && record.source_commit.is_some())
-            .max_by_key(|record| record.sequence)
-            .map(as_applied)
+        let paths: Vec<&String> = paths.iter().collect();
+        crate::rules::sources::source_supplier(recorded.values(), &paths).map(as_applied)
     });
     for (unit, desired) in &snapshot.desired {
         for (pointer, binding) in crate::rules::promotion_paths::bindings_in(&desired.spec) {

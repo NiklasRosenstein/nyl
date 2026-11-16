@@ -196,8 +196,10 @@ pub struct PromoteMissing {
     pub commit: CommitId,
     /// The other record's commit.
     pub record_commit: CommitId,
-    /// A range that covers the missing commits, for `--supersede <range>=<reason>`.
-    pub range: String,
+    /// The `--supersede` entries that cover the missing commits, each
+    /// `[<repository>:]<range or commit>` with full commit IDs, to pass as
+    /// `--supersede <entry>=<reason>`.
+    pub supersede: Vec<String>,
     /// The missing commits, oldest first.
     pub commits: Vec<PromoteMissingCommit>,
 }
@@ -298,11 +300,16 @@ impl PromoteReport {
         for missing in &self.missing {
             let _ = writeln!(
                 text,
-                "  missing from {} #{} ({}), --supersede {}:",
+                "  missing from {} #{} ({}), {}:",
                 missing.path,
                 missing.sequence,
                 missing.items.join(", "),
-                missing.range
+                missing
+                    .supersede
+                    .iter()
+                    .map(|entry| format!("--supersede {entry}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             for commit in &missing.commits {
                 let _ = writeln!(text, "    {} {}", &commit.commit.as_str()[..12], commit.subject);

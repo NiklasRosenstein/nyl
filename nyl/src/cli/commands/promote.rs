@@ -25,7 +25,7 @@ use nyl_core::orchestration::promotion::PromotionRequest;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::promotion::PromotionPath;
 use nyl_orchestration::report::PromoteReport;
-use nyl_orchestration::rules::promotion::supersede::SupersedeRequest;
+use nyl_orchestration::rules::promotion::supersede::{RepositoryNames, SupersedeRequest};
 use nyl_orchestration::rules::promotion::{IgnoreRequest, Selection};
 use nyl_orchestration::shell::promote::{self, PromoteOptions};
 use nyl_orchestration::shell::run::{LifecycleOptions, RunMode};
@@ -309,10 +309,9 @@ fn prepare(
     ))
 }
 
-/// The project's names for repositories, by which `--supersede` entries are
-/// qualified: each GitRepository's name for its URL, and for the project's
-/// own repository the GitRepository whose URL is its `origin`.
-fn repository_names(session: &Session) -> BTreeMap<SourceRepository, String> {
+/// The project's names for repositories ([`RepositoryNames`]): its
+/// GitRepositories and the entry clone's `origin`.
+fn repository_names(session: &Session) -> RepositoryNames {
     let declared: Vec<(String, String)> = session
         .inventory
         .resources
@@ -328,14 +327,7 @@ fn repository_names(session: &Session) -> BTreeMap<SourceRepository, String> {
         .sources()
         .ok()
         .and_then(|sources| sources.repository_url(&SourceRepository::This));
-    let mut names = BTreeMap::new();
-    for (name, url) in declared {
-        if origin.as_deref() == Some(nyl_git::sanitize_url(&url).as_str()) {
-            names.entry(SourceRepository::This).or_insert_with(|| name.clone());
-        }
-        names.entry(SourceRepository::Url(url)).or_insert(name);
-    }
-    names
+    RepositoryNames::new(&declared, origin.as_deref())
 }
 
 /// `--revision` as a source commit: a full commit ID as is, anything else

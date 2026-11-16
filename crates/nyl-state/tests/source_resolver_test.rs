@@ -789,3 +789,53 @@ fn test_sparse_checkout_ignores_repository_selectors() {
     );
     assert_eq!(std::fs::read(repository.path().join("index")).unwrap(), index);
 }
+
+/// A second repository, named by URL, beside the project: the supersede
+/// check compares its commits in the entry clone, which fetches them. A
+/// qualified entry's range of abbreviated IDs with `^` resolves there, as
+/// a full ID does, and `git cherry` lists the commits one ID lacks of the
+/// other in topological order. Catches `--supersede` entries that a URL
+/// repository could never resolve, the form the refusal prints.
+#[cfg(unix)] // A `file://` URL of a temporary path.
+#[test]
+fn test_history_questions_of_a_url_repository() {
+    let world = World::new();
+    let lib_dir = world.root.path().join("lib.git");
+    let lib = Repository::init_bare(&lib_dir).unwrap();
+    let l1 = commit(&lib, None, &[("lib.txt", "one")], "l1");
+    let l2 = commit(&lib, Some(l1), &[("lib.txt", "two")], "Fix lib");
+    let l3 = commit(&lib, Some(l2), &[("lib.txt", "three")], "Raise lib");
+    lib.reference("refs/heads/main", l3, true, "main").unwrap();
+    let resolver = world.resolver();
+    let other = SourceRepository::Url(url(&lib_dir));
+    let short = |oid: Oid| oid.to_string()[..10].to_owned();
+
+    assert!(resolver.fetch_commit(&other, &id(l1)).unwrap());
+    assert!(!resolver
+        .fetch_commit(&other, &CommitId::new("0".repeat(40)).unwrap())
+        .unwrap());
+    assert!(resolver.is_ancestor(&other, &id(l1), &id(l3)).unwrap());
+    assert!(!resolver.is_ancestor(&other, &id(l3), &id(l1)).unwrap());
+
+    let missing = resolver.missing_commits(&other, &id(l1), &id(l3)).unwrap();
+    assert_eq!(
+        missing.iter().map(|commit| commit.subject.as_str()).collect::<Vec<_>>(),
+        ["Fix lib", "Raise lib"]
+    );
+    assert!(!missing[0].root);
+    let range = format!("{}^..{}", short(l2), short(l3));
+    assert_eq!(resolver.commits_in(&other, &range).unwrap(), [id(l3), id(l2)]);
+    assert_eq!(resolver.commits_in(&other, &l2.to_string()).unwrap(), [id(l2)]);
+    assert_eq!(
+        resolver.commits_in(&other, &format!("{}~1", short(l3))).unwrap(),
+        [id(l2)]
+    );
+    assert!(resolver.commits_in(&other, "no-such-branch").is_err());
+    // The project's own short IDs resolve too.
+    assert_eq!(
+        resolver
+            .commits_in(&SourceRepository::This, &format!("{}..main", short(world.c1)))
+            .unwrap(),
+        [id(world.c2)]
+    );
+}

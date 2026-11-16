@@ -824,7 +824,8 @@ environment-wide attestation `qa`; `dev-to-prod` is `evidence: attested` with
 `fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}` with `release/*` in
 `protectedRefs`; `prod-hotfix` follows `release/prod`, selects `web-image`
 and `kubernetes` (label `hotfix`), publishes to a target `hotfix` of its own
-on a Cluster of its own (so its Applications never share names with dev's),
+on a Cluster or Argo CD instance of its own (here a Cluster, so its
+Applications never share names with dev's),
 and declares `qa`; `hotfix-to-prod` promotes it at `attested`. The branch `s1`
 marks the commit prod first runs.
 
