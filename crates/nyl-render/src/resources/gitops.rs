@@ -2715,6 +2715,7 @@ mod tests {
                 "environment.schema.json",
                 "environment-group.schema.json",
                 "environment-template.schema.json",
+                "promotion-path.schema.json",
                 "release.schema.json"
             ]
         );
