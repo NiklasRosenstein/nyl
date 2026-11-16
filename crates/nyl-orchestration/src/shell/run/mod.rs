@@ -830,14 +830,14 @@ impl<'r, 'a> Session<'r, 'a> {
         )?;
         let commit = match &request {
             SourceRequest::Worktree(snapshot) => snapshot.commit.clone(),
-            SourceRequest::Entry(commit) | SourceRequest::Recorded(commit) => commit.clone(),
+            SourceRequest::Entry(commit)
+            | SourceRequest::Recorded(commit)
+            | SourceRequest::Promotion { commit, .. } => commit.clone(),
             SourceRequest::Revision(revision) | SourceRequest::Override(revision) => self.resolve_revision(revision)?,
             SourceRequest::Commit { revision, commit } => {
                 self.check_pin(commit, revision)?;
                 commit.clone()
             }
-            // A promoted commit is fetched like a recorded one: by its id from the origin.
-            SourceRequest::Promotion { commit, .. } => commit.clone(),
         };
         if self
             .context

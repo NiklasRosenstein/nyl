@@ -173,6 +173,8 @@ codes! {
     PromoteArtifactMissing => "NYL-PROMOTE-ARTIFACT-MISSING",
     /// A promoted artifact's kind cannot verify artifacts, so the record says `artifactsVerified: false`. A warning.
     PromoteArtifactUnverified => "NYL-PROMOTE-ARTIFACT-UNVERIFIED",
+    /// The target environment selects a unit whose result a promoted value replaces, so it rebuilds what its `fromPromotion` binding takes from the source. A warning.
+    PromoteRebuilt => "NYL-PROMOTE-REBUILT",
     /// An environment's `fromPromotion` source, or a `fromPromotion` binding, names a path with no record yet. Exit 2.
     PromotionMissing => "NYL-PROMOTION-MISSING",
     /// A unit's driver could not produce its attestations.

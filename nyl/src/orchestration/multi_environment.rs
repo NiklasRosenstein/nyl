@@ -367,6 +367,7 @@ fn snapshot(
 }
 
 /// Resolve one environment independently; failures do not skip other runs.
+#[allow(clippy::too_many_lines)] // The source's resolution in order: entry, resolver, commit, render.
 fn read_environment(
     inventory: &GitOpsInventory,
     name: &EnvironmentName,

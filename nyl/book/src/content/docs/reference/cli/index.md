@@ -35,6 +35,7 @@ closely related pair.
   - [`detect-drift and attest`](/nyl/reference/cli/detect-drift/) - Check current receipts for drift, or have their drivers attest them
   - [`observe`](/nyl/reference/cli/observe/) - Read and record the observed values of current receipts, for jobs that hold the read credentials
   - [`teardown`](/nyl/reference/cli/teardown/) - Tear units down, or every unit, and confirm a publication's removal
+  - [`promote`](/nyl/reference/cli/promote/) - Record what one environment proved as a promotion record in another
   - [`hold and resume`](/nyl/reference/cli/hold/) - Freeze a unit so reconcile changes nothing about it, and lift the hold
   - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result
   - [`exec`](/nyl/reference/cli/exec/) - Run a held unit's native tool with recorded repair context

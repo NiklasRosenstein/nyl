@@ -1162,6 +1162,91 @@ mod tests {
         });
         assert!(OciImageDriver.detect_drift(&ctx, &desired, &receipt).is_err());
     }
+    /// `verify_artifact` inspects the recorded digest reference with `docker
+    /// buildx imagetools inspect`: exit 0 is present, a failed inspection is
+    /// missing with the tool's first line of explanation, and a docker that
+    /// cannot start is a driver error, not a missing image. Catches a promotion
+    /// of an image the registry no longer holds, and one blocked as "missing"
+    /// only because docker is not installed.
+    #[test]
+    fn test_verify_artifact_inspects_the_digest_reference() {
+        fn verification<'a>(
+            tools: &'a dyn ToolRunner,
+            temp: &Path,
+            ctx: &ExecutionContext<'_>,
+        ) -> VerificationContext<'a> {
+            VerificationContext {
+                unit: UnitAddress::new(EnvironmentName::new("dev").unwrap(), UnitName::new("web").unwrap()),
+                env: BTreeMap::from([("PATH".into(), "/usr/bin".into())]),
+                secrets: BTreeMap::new(),
+                temp_dir: temp.into(),
+                now: ctx.now,
+                deadline: ctx.deadline,
+                tools,
+            }
+        }
+        struct Missing;
+        impl ToolRunner for Missing {
+            fn run(&self, _invocation: ToolInvocation) -> DriverResult<ToolExit> {
+                Ok(ToolExit::NotStarted {
+                    reason: "docker not installed".into(),
+                })
+            }
+        }
+        let root = fixture();
+        let temp = tempfile::TempDir::new().unwrap();
+        let docker = Docker::default();
+        let ctx = context(root.path(), temp.path(), &docker);
+        let desired =
+            unit(json!({"context":{"path":"/app"},"repository":"registry.invalid/web","platforms":["linux/amd64"]}));
+        let Supported::Supported(Outcome::Succeeded { artifacts, .. }) =
+            OciImageDriver.reconcile(&ctx, &desired).unwrap()
+        else {
+            panic!("build failed")
+        };
+        let image = artifacts[0].clone();
+        assert!(OciImageDriver.capabilities(&desired.spec).verify_artifact);
+        let present = OciImageDriver
+            .verify_artifact(&verification(&docker, temp.path(), &ctx), &desired, &image)
+            .unwrap();
+        assert_eq!(present, Supported::Supported(ArtifactStatus::Present));
+        let calls = docker.calls.lock().unwrap();
+        let inspected = calls.last().unwrap();
+        assert_eq!(
+            inspected
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            [
+                "buildx",
+                "imagetools",
+                "inspect",
+                image.spec["reference"].as_str().unwrap()
+            ]
+        );
+        drop(calls);
+        *docker.inspection.lock().unwrap() = Some(ToolExit::Exited {
+            code: 1,
+            stdout: Vec::new(),
+            stderr: b"manifest unknown\nsecond line".to_vec(),
+        });
+        let Supported::Supported(ArtifactStatus::Missing { reason }) = OciImageDriver
+            .verify_artifact(&verification(&docker, temp.path(), &ctx), &desired, &image)
+            .unwrap()
+        else {
+            panic!("a failed inspection is a missing image");
+        };
+        assert!(
+            reason.contains("manifest unknown") && !reason.contains("second line"),
+            "{reason}"
+        );
+        let error = OciImageDriver
+            .verify_artifact(&verification(&Missing, temp.path(), &ctx), &desired, &image)
+            .unwrap_err();
+        assert!(error.to_string().contains("docker not installed"));
+    }
+
     #[test]
     fn test_missing_docker_is_a_nonretryable_missing_tool_failure() {
         struct Missing;

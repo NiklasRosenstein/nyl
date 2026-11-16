@@ -562,6 +562,52 @@ mod tests {
         ));
     }
 
+    /// A scenario's `driver: {operation: verify-artifact, outcome: failed}`
+    /// step makes the fake image's next verification find the image gone,
+    /// once; success, or nothing scripted, finds it present. Catches the
+    /// scripted verdict never reaching the fake, which would hide every
+    /// missing-artifact scenario.
+    #[test]
+    fn test_scripted_verification_reaches_the_fake_image_once() {
+        use nyl_core::orchestration::driver::{ArtifactStatus, VerificationContext};
+        let directory = TempDir::new().unwrap();
+        let script = Script::new();
+        let unit = desired(
+            "web-image",
+            json!({"context": {"path": "web"}, "repository": "registry.test/web"}),
+        );
+        let driver = FakeImage::new(script.clone());
+        let artifact = match driver.reconcile(&context(&directory, &NoTools, None), &unit).unwrap() {
+            Supported::Supported(Outcome::Succeeded { mut artifacts, .. }) => artifacts.remove(0),
+            _ => panic!("the image builds"),
+        };
+        let verify = || {
+            let now = chrono::Utc::now();
+            let ctx = VerificationContext {
+                unit: "dev/web-image".parse::<UnitAddress>().unwrap(),
+                env: BTreeMap::new(),
+                secrets: BTreeMap::new(),
+                temp_dir: directory.path().to_path_buf(),
+                now,
+                deadline: now,
+                tools: &NoTools,
+            };
+            driver.verify_artifact(&ctx, &unit, &artifact).unwrap()
+        };
+        assert_eq!(verify(), Supported::Supported(ArtifactStatus::Present));
+        script.push(
+            unit.unit.name.clone(),
+            DriverOperation::VerifyArtifact,
+            &Scripted::Failed {
+                category: FailureCategory::ToolError,
+                retryable: false,
+            },
+            1,
+        );
+        assert!(matches!(verify(), Supported::Supported(ArtifactStatus::Missing { .. })));
+        assert_eq!(verify(), Supported::Supported(ArtifactStatus::Present));
+    }
+
     #[test]
     fn test_script_overrides_the_next_calls_only() {
         let directory = TempDir::new().unwrap();

@@ -50,6 +50,8 @@ pub const HISTORY_COMMITS: usize = 500;
 pub const HISTORY_STATES: usize = 100;
 
 /// What one `nyl promote` asks.
+// Independent switches of the command line, as its options list them.
+#[allow(clippy::struct_excessive_bools)]
 pub struct PromoteOptions {
     /// The validated path, from the source to the request's environment.
     pub path: PromotionPath,
@@ -239,6 +241,24 @@ fn body(
         ));
     }
     let mut record = promotion.record;
+    // A target that also selects a unit a value reads builds that unit itself:
+    // the value then replaces a result the target would produce anyway.
+    for (name, value) in &record.values {
+        if let Some(unit) = value
+            .unit
+            .as_ref()
+            .filter(|unit| options.target_units.contains(&unit.name))
+        {
+            report.warnings.push(Finding::new(
+                Code::PromoteRebuilt,
+                format!(
+                    "{target} selects unit {}, which value {name:?} reads from {source}: {target} builds its own result, and a binding to value {name:?} replaces it with {source}'s",
+                    unit.name
+                ),
+                format!("remove unit {} from {target}'s unitSelector, or drop the binding, so one result is used", unit.name),
+            ));
+        }
+    }
 
     // Artifacts still exist where their receipts say they do.
     if options.verify_artifacts {
@@ -618,4 +638,26 @@ pub fn recorded_sequence(message: &str) -> Option<u64> {
     }
     let line = message.lines().find_map(|line| line.strip_prefix("promotion: "))?;
     serde_json::from_str::<Value>(line).ok()?.get("sequence")?.as_u64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(operation: &str, extra: &str) -> String {
+        format!("nyl: {operation} prod\n\nunits: {{}}\n{extra}\n\nNyl-Operation: {operation}\nNyl-Run-Id: r\n")
+    }
+
+    /// The sequence comes from the summary of `promote` commits only: a
+    /// reconcile cannot carry one, and a message that merely resembles a
+    /// summary does not count. Catches a sequence that restarts after a
+    /// restore, or one that reads another operation's line.
+    #[test]
+    fn test_recorded_sequence_reads_promote_summaries_only() {
+        let summary = "promotion: {\"path\":\"dev-to-prod\",\"sequence\":7}";
+        assert_eq!(recorded_sequence(&message("promote", summary)), Some(7));
+        assert_eq!(recorded_sequence(&message("reconcile", summary)), None);
+        assert_eq!(recorded_sequence(&message("promote", "promotion: nonsense")), None);
+        assert_eq!(recorded_sequence(&message("promote", "")), None);
+    }
 }
