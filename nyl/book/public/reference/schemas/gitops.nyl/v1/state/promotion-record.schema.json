@@ -1,0 +1,517 @@
+{
+  "$defs": {
+    "ApprovalIdentity": {
+      "description": "How Nyl learned an approver's identity. An audit record, not authorization.",
+      "oneOf": [
+        {
+          "const": "verified",
+          "description": "Read from the CI system, by a built-in lookup or the project's hook.",
+          "type": "string"
+        },
+        {
+          "const": "asserted",
+          "description": "Passed with `--approved-by`.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The Git user of a workstation run.",
+          "type": "string"
+        }
+      ]
+    },
+    "AttestationResult": {
+      "enum": [
+        "pass",
+        "fail"
+      ],
+      "type": "string"
+    },
+    "CommitId": {
+      "description": "A full, lowercase, 40-character Git commit ID.",
+      "type": "string"
+    },
+    "EnvironmentName": {
+      "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "EvidenceAttestation": {
+      "additionalProperties": false,
+      "description": "An attestation a promotion relied on.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "details": {
+          "description": "The driver's details, such as each Application's running publication and health."
+        },
+        "name": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/$defs/AttestationResult"
+        },
+        "scope": {
+          "description": "The unit name, or `environment`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "result",
+        "at"
+      ],
+      "type": "object"
+    },
+    "EvidenceLevel": {
+      "description": "The level a promotion's evidence reached.",
+      "enum": [
+        "published",
+        "attested"
+      ],
+      "type": "string"
+    },
+    "EvidenceOverride": {
+      "additionalProperties": false,
+      "description": "Why a promotion went ahead below the path's evidence level.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ExecutionKey": {
+      "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "IgnoredAttestation": {
+      "additionalProperties": false,
+      "description": "An attestation `--ignore-attestation` set aside.",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "reason",
+        "by"
+      ],
+      "type": "object"
+    },
+    "PromotedState": {
+      "additionalProperties": false,
+      "description": "The state a value-only path took one value from, when that is not the\nrecord's `from`.",
+      "properties": {
+        "desiredCommit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "observedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "run",
+        "desiredCommit"
+      ],
+      "type": "object"
+    },
+    "PromotedUnit": {
+      "additionalProperties": false,
+      "description": "The identity of the source unit a value came from.",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/UnitName"
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The incarnation; absent when the unit had none in the recorded state."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "PromotedValue": {
+      "additionalProperties": false,
+      "description": "One promoted value with its lineage.",
+      "properties": {
+        "executionKey": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The receipt the value came from, for an output or artifact selector."
+        },
+        "inputDigest": {
+          "description": "The digest of the unit's resolved input, for an `input` selector.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "select": {
+          "$ref": "#/$defs/PromotionSelect"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotedState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present when a value-only path took the value from another state than `from`."
+        },
+        "unit": {
+          "$ref": "#/$defs/PromotedUnit"
+        },
+        "value": true
+      },
+      "required": [
+        "value",
+        "select",
+        "unit"
+      ],
+      "type": "object"
+    },
+    "PromotionEvidence": {
+      "additionalProperties": false,
+      "description": "The evidence a promotion rested on.",
+      "properties": {
+        "attestations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceAttestation"
+          },
+          "type": "array"
+        },
+        "level": {
+          "$ref": "#/$defs/EvidenceLevel"
+        },
+        "override": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Written as `null` when the promotion needed no override."
+        }
+      },
+      "required": [
+        "level"
+      ],
+      "type": "object"
+    },
+    "PromotionFrom": {
+      "additionalProperties": false,
+      "description": "The source state a record promotes: one transition commit pair of the\nsource environment, pushed together with one `Nyl-Run-Id`.",
+      "properties": {
+        "desiredCommit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentName"
+        },
+        "observedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when the state has no observed commit of its own."
+        },
+        "run": {
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "environment",
+        "run",
+        "desiredCommit"
+      ],
+      "type": "object"
+    },
+    "PromotionPathName": {
+      "description": "A PromotionPath's `metadata.name`, which names its record file\n`desired/promotions/<path>.yaml`. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "PromotionRecordKind": {
+      "const": "PromotionRecord"
+    },
+    "PromotionRequest": {
+      "additionalProperties": false,
+      "description": "Who asked for the promotion, recorded like an approval.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "by": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/ApprovalIdentity"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "by",
+        "identity",
+        "at"
+      ],
+      "type": "object"
+    },
+    "PromotionSelect": {
+      "additionalProperties": false,
+      "description": "Which field of the source a promoted value reads: the same selectors, with\nthe same JSON Pointer semantics and resolver, as `fromUnit` references and\n`nyl get`.\n\nSet exactly one of the four forms:\n`{unit, input}` reads the source unit's resolved spec;\n`{unit, output, pointer?}` a declared, non-sensitive output of its receipt;\n`{unit, artifact, kind?, pointer}` a field of an artifact its receipt lists,\nrelative to the artifact's `spec`; and `{input}` (a target source, M11)\na Release input of the target.",
+      "properties": {
+        "artifact": {
+          "description": "An artifact the unit's receipt lists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "description": "JSON Pointer into the source unit's resolved spec, such as `/source` or `/releases/platform~1web/image`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The artifact kind the artifact must have.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "A declared, non-sensitive output of the unit's receipt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pointer": {
+          "description": "JSON Pointer inside the output, or inside the artifact's `spec`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnitName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source unit's name."
+        }
+      },
+      "type": "object"
+    },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
+    "StateV1": {
+      "const": "gitops.nyl/v1"
+    },
+    "SupersededCommit": {
+      "additionalProperties": false,
+      "description": "A commit `--supersede` accepted as replaced.",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "repository": {
+          "description": "The repository of the commit, such as a unit's source repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "commit",
+        "reason",
+        "by"
+      ],
+      "type": "object"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What `nyl promote` records about one promotion on one path.\n\nEach promotion replaces the path's record; Git history keeps earlier ones.\n`apiVersion` and `kind` are written in `desired/promotions/<path>.yaml`\nand left out of the `promoted` block of an Environment's source.",
+  "properties": {
+    "apiVersion": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StateV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "artifactsVerified": {
+      "description": "Whether the artifact check ran.",
+      "type": "boolean"
+    },
+    "evidence": {
+      "$ref": "#/$defs/PromotionEvidence"
+    },
+    "excludedApplications": {
+      "default": [],
+      "description": "The path's `coverage.excludeApplications` at promotion time.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "from": {
+      "$ref": "#/$defs/PromotionFrom",
+      "description": "The source state; for a path that promotes only values, the newest state any value came from."
+    },
+    "ignoredAttestations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/IgnoredAttestation"
+      },
+      "type": "array"
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PromotionRecordKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "path": {
+      "$ref": "#/$defs/PromotionPathName",
+      "description": "The PromotionPath that wrote the record."
+    },
+    "requested": {
+      "$ref": "#/$defs/PromotionRequest"
+    },
+    "sequence": {
+      "description": "Increases with every promotion into the target environment, on any path; the highest is the newest.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sourceCommit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The source commit of that state, present when the path promotes the target's source or a value's lineage includes one."
+    },
+    "superseded": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SupersededCommit"
+      },
+      "type": "array"
+    },
+    "values": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PromotedValue"
+      },
+      "default": {},
+      "description": "The promoted values by name.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "path",
+    "sequence",
+    "from",
+    "evidence",
+    "artifactsVerified",
+    "requested"
+  ],
+  "title": "PromotionRecord",
+  "type": "object"
+}

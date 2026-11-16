@@ -79,6 +79,26 @@ for) instead of as text under `reason`.
 - The `gitops.nyl/v1/state/` JSON Schemas of the desired and observed
   documents describe the typed form.
 
+### Promotion records
+
+`desired/promotions/<path>.yaml`, one `PromotionRecord` per
+[PromotionPath](/nyl/orchestration/resource-guides/promotion-path/) that
+promoted into the environment, is a file the state layout always listed. It
+joins format `v1` without a version change, so an older Nyl neither refuses nor
+migrates it.
+
+- A Nyl older than this release keeps the file through its transitions, `hold`,
+  `resume`, and `state forget`, but cannot act on it: it refuses an environment
+  whose `source` is `fromPromotion`, and it must not run `reconcile` in an
+  environment whose bindings read promotions, because it cannot resolve them.
+  Upgrade every Nyl that shares the state before an environment uses promotion.
+- This release's snapshots, `state move`, and `state restore` include the
+  records. An older Nyl's `state move`, when it copies documents instead of
+  history, does not carry them, and its `state restore` leaves them as they are,
+  so the current record would sit next to a restored
+  `appliedPromotionSequence`.
+- The `gitops.nyl/v1/state/promotion-record` JSON Schema describes the record.
+
 ## Preview environments
 
 An [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)

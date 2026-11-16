@@ -16,6 +16,7 @@ nyl get app-projects
 nyl get application-groups
 nyl get environments
 nyl get environment-templates
+nyl get promotion-paths
 nyl get units
 nyl get cluster primary
 ```
@@ -50,6 +51,8 @@ deleted is not listed. This is the one `get` form that reads state; it contacts
 the state repositories of declared templates only. A template whose refs depend
 on the environment name has no location to list, so its instances are not shown.
 
+
+`nyl get promotion-paths` lists each [PromotionPath](/nyl/orchestration/resource-guides/promotion-path/) with its source (`FROM`) and target (`TO`), its `EVIDENCE` level, and the names of its promoted `VALUES`.
 
 `CONTEXT` is the Cluster's `spec.live.context`, `PUBLICATION` the target's
 repository and revision, and `PROJECT` the ApplicationGroup's AppProject, marked

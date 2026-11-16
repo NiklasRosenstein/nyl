@@ -15,3 +15,15 @@ id = "64ea32f9-6556-4764-9e17-b141ef8f4310"
 type = "breaking"
 description = "HelmChart `spec.lookup` is a boolean: write `spec.lookup: true` (or `false` to opt out). The object form `spec.lookup: {}` from 0.7.0 is removed and fails with `NYL-HELM-LOOKUP-OBJECT-REMOVED`"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "11b756bf-dca5-42d1-854e-dc92b7e342c5"
+type = "feature"
+description = "The `PromotionPath` resource (`gitops.nyl/v1`) declares how an environment's source commit and selected values move into another environment: `from`, `to`, `evidence`, `attestations`, `maxAttestationAge`, `verifyArtifacts`, `coverage`, and named `values` with `select` forms. `nyl validate` and `nyl plan` check every path against the environments' units with stable codes and fixes (`NYL-PROMOTE-ENVIRONMENT-UNKNOWN`, `NYL-PROMOTE-SELECTOR-UNIT`, `NYL-PROMOTE-SELECTOR-INVALID`, `NYL-PROMOTE-VALUE-TYPE`, `NYL-PROMOTE-BINDING-UNKNOWN`, `NYL-ATTESTATION-UNDECLARED`), and reject `changeGate: pullRequest` and a DeploymentTarget in `from` or `to` with `NYL-PROMOTE-UNSUPPORTED`, which names M11. `nyl get promotion-paths` lists them. `nyl promote` follows in a later change"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "3df60286-ffad-476d-a4d4-03fc7983e5a5"
+type = "feature"
+description = "State gains the `PromotionRecord` kind at `desired/promotions/<path>.yaml`, added to format `v1` without a version bump: snapshots read it, and `nyl state move` (when it copies documents) and `nyl state restore` carry and roll it back. A Nyl older than this release keeps the file but cannot act on it, so it must not run `reconcile` in an environment that uses promotion, and its copying `state move` drops the file while its `state restore` leaves it as it is. An Environment's `source.fromPromotion.promoted` block is typed as the same record"
+author = "@NiklasRosenstein"

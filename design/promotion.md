@@ -55,6 +55,19 @@ selected by the source environment, pointers resolve against the source's
 current documents or the kind's schema, and each value's type fits every
 binding that reads it. `plan` reports the same findings for an existing path.
 
+Each failure has a stable code and a fix: `NYL-PROMOTE-ENVIRONMENT-UNKNOWN` (the
+source or target is not a declared Environment, an instance of a template
+included), `NYL-PROMOTE-SELECTOR-UNIT` (a selector or an `attestations` scope
+names a unit the source does not select, or the path does not cover),
+`NYL-PROMOTE-SELECTOR-INVALID` (a pointer that resolves neither in the unit's
+rendered spec nor in its kind's schema, an undeclared or `sensitive` output, or a
+malformed selector), `NYL-PROMOTE-VALUE-TYPE` (a value's type does not fit a unit
+field that reads it; a Release input's declared type is not compared yet),
+`NYL-PROMOTE-BINDING-UNKNOWN` (a `fromPromotion` binding names a path or value no
+path declares), `NYL-ATTESTATION-UNDECLARED` (a required attestation its scope
+does not declare), and `NYL-PROMOTE-UNSUPPORTED`. A pointer into an optional
+field the rendered spec omits resolves through the kind's schema.
+
 ### PromotionRecord
 
 `nyl promote` writes one `gitops.nyl/v1` `PromotionRecord` per path into the
@@ -62,7 +75,8 @@ target environment's desired state, `desired/promotions/<path>.yaml`, or, with
 `record: source`, into the Environment's `source.fromPromotion.promoted` block
 (see [Promoting an environment's source](#promoting-an-environments-source)).
 Each promotion replaces the path's record; Git history keeps earlier ones.
-The record has one shape wherever it is kept: in desired state, in an
+The record has one shape wherever it is kept (`apiVersion` and `kind` are
+written in the state file and left out of a block that sits in a resource): in desired state, in an
 Environment's `promoted` block, and (M11) in a target's `spec.promotions`.
 
 | Field | Meaning |

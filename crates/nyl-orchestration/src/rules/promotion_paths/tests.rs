@@ -49,6 +49,7 @@ fn source(name: &str, attestations: &[&str], units: Vec<(&str, RenderedUnit)>) -
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // Builders take the literal under test.
 fn path(spec: Value) -> PromotionPath {
     let path: PromotionPath = serde_json::from_value(json!({
         "apiVersion": "gitops.nyl/v1", "kind": "PromotionPath",
@@ -114,6 +115,7 @@ fn run(world: &World, paths: &[PromotionPath], readers: &[ValueReader]) -> Vec<F
     })
 }
 
+#[allow(clippy::needless_pass_by_value)] // Builders take the literal under test.
 fn base(values: Value) -> Value {
     json!({"from": {"environment": "dev"}, "to": {"environment": "prod"}, "values": values})
 }

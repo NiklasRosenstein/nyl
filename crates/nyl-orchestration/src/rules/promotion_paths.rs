@@ -135,25 +135,21 @@ fn check_path(inputs: &PathChecks<'_>, path: &PromotionPath) -> Vec<Finding> {
         let known = EnvironmentName::new(wanted.as_str())
             .ok()
             .filter(|environment| inputs.declared.contains(environment));
-        match known {
-            Some(environment) => {
-                endpoints.insert(role, environment);
-            }
-            None => {
-                let instance = EnvironmentName::new(wanted.as_str())
-                    .ok()
-                    .is_some_and(|environment| inputs.sources.contains_key(&environment));
-                findings.push(Finding::new(
-                    Code::PromoteEnvironmentUnknown,
-                    if instance {
-                        format!("PromotionPath {name} names {wanted:?} in `{role}`, an instance of an EnvironmentTemplate; a path connects declared Environments")
-                    } else {
-                        format!("PromotionPath {name} names Environment {wanted:?} in `{role}`, which the project does not declare")
-                    },
-                    format!("declare an Environment named {wanted}, or point `spec.{role}.environment` at a declared one (`nyl get environments` lists them)"),
-                ));
-            }
+        if let Some(environment) = known {
+            endpoints.insert(role, environment);
+            continue;
         }
+        let instance =
+            EnvironmentName::new(wanted.as_str()).is_ok_and(|environment| inputs.sources.contains_key(&environment));
+        findings.push(Finding::new(
+            Code::PromoteEnvironmentUnknown,
+            if instance {
+                format!("PromotionPath {name} names {wanted:?} in `{role}`, an instance of an EnvironmentTemplate; a path connects declared Environments")
+            } else {
+                format!("PromotionPath {name} names Environment {wanted:?} in `{role}`, which the project does not declare")
+            },
+            format!("declare an Environment named {wanted}, or point `spec.{role}.environment` at a declared one (`nyl get environments` lists them)"),
+        ));
     }
 
     let mut value_types: BTreeMap<&str, Option<ValueType>> = BTreeMap::new();
@@ -237,8 +233,9 @@ fn select_type(
             }
             let Some(driver) = driver else { return Ok(None) };
             match schema_type_at(driver, pointer) {
-                Some(found) => Ok(found),
-                None => Err(invalid(
+                SchemaType::Known(found) => Ok(Some(found)),
+                SchemaType::Unknown => Ok(None),
+                SchemaType::Missing => Err(invalid(
                     format!("the pointer {pointer:?} resolves neither in unit {unit_name}'s spec nor in the schema of kind {}", unit.envelope.kind),
                     "point at a field the unit's spec has or its kind defines; `nyl get unit -e <env> <unit>` shows the resolved spec",
                 )),
@@ -446,7 +443,10 @@ pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers
                     location: format!("unit {unit} of Environment {environment} at {pointer:?}"),
                     environment: Some(environment.clone()),
                     binding,
-                    expected: driver.and_then(|driver| schema_type_at(driver, pointer)).flatten(),
+                    expected: driver.and_then(|driver| match schema_type_at(driver, pointer) {
+                        SchemaType::Known(found) => Some(found),
+                        _ => None,
+                    }),
                 });
             });
         }
@@ -484,10 +484,20 @@ enum Walked {
     Missing,
 }
 
-/// The type of the field `pointer` names in the driver's schema: `None` when
-/// the schema has no such field, `Some(None)` when it has one of no single type.
-fn schema_type_at(driver: &dyn Driver, pointer: &str) -> Option<Option<ValueType>> {
-    let root = serde_json::to_value(driver.spec_schema()).ok()?;
+/// What a kind's schema says about the field a pointer names.
+enum SchemaType {
+    /// The schema has no such field.
+    Missing,
+    /// The field may exist, with no single type to check against.
+    Unknown,
+    Known(ValueType),
+}
+
+/// The type of the field `pointer` names in the driver's schema.
+fn schema_type_at(driver: &dyn Driver, pointer: &str) -> SchemaType {
+    let Ok(root) = serde_json::to_value(driver.spec_schema()) else {
+        return SchemaType::Unknown;
+    };
     let segments = pointer
         .split('/')
         .skip(1)
@@ -497,7 +507,7 @@ fn schema_type_at(driver: &dyn Driver, pointer: &str) -> Option<Option<ValueType
         .first()
         .is_some_and(|first| COMMON_UNIT_FIELDS.contains(&first.as_str()))
     {
-        return Some(None);
+        return SchemaType::Unknown;
     }
     let mut nodes = vec![root.clone()];
     for segment in &segments {
@@ -511,7 +521,7 @@ fn schema_type_at(driver: &dyn Driver, pointer: &str) -> Option<Option<ValueType
             }
         }
         if next.is_empty() {
-            return if free { Some(None) } else { None };
+            return if free { SchemaType::Unknown } else { SchemaType::Missing };
         }
         nodes = next;
     }
@@ -520,10 +530,10 @@ fn schema_type_at(driver: &dyn Driver, pointer: &str) -> Option<Option<ValueType
         .flat_map(|node| types_of(&root, node))
         .collect::<BTreeSet<_>>();
     let mut types = types.into_iter();
-    Some(match (types.next(), types.next()) {
-        (Some(only), None) => Some(only),
-        _ => None,
-    })
+    match (types.next(), types.next()) {
+        (Some(only), None) => SchemaType::Known(only),
+        _ => SchemaType::Unknown,
+    }
 }
 
 /// The alternatives of a node: itself, or its `anyOf`, `oneOf`, and `allOf` branches.

@@ -979,29 +979,31 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
             selector(&template.spec.unit_selector.match_labels),
             file,
         ],
-        Some(GitOpsResource::PromotionPath(path)) => {
-            let endpoint = |endpoint: &nyl_core::resources::promotion::PromotionEndpoint| {
-                endpoint
-                    .environment
-                    .clone()
-                    .or_else(|| endpoint.target.as_ref().map(|target| format!("target/{target}")))
-                    .unwrap_or_else(|| "-".to_owned())
-            };
-            let evidence = match path.spec.evidence {
-                nyl_core::resources::promotion::PathEvidence::Published => "published",
-                nyl_core::resources::promotion::PathEvidence::Attested => "attested",
-            };
-            vec![
-                name.clone(),
-                endpoint(&path.spec.from),
-                endpoint(&path.spec.to),
-                evidence.to_owned(),
-                path.spec.values.keys().cloned().collect::<Vec<_>>().join(","),
-                file,
-            ]
-        }
+        Some(GitOpsResource::PromotionPath(path)) => promotion_path_row(name, path, file),
         None => templated_resource_row(kind, name, file),
     }
+}
+
+fn promotion_path_row(name: &str, path: &nyl_core::resources::promotion::PromotionPath, file: String) -> Vec<String> {
+    let endpoint = |endpoint: &nyl_core::resources::promotion::PromotionEndpoint| {
+        endpoint
+            .environment
+            .clone()
+            .or_else(|| endpoint.target.as_ref().map(|target| format!("target/{target}")))
+            .unwrap_or_else(|| "-".to_owned())
+    };
+    let evidence = match path.spec.evidence {
+        nyl_core::resources::promotion::PathEvidence::Published => "published",
+        nyl_core::resources::promotion::PathEvidence::Attested => "attested",
+    };
+    vec![
+        name.to_owned(),
+        endpoint(&path.spec.from),
+        endpoint(&path.spec.to),
+        evidence.to_owned(),
+        path.spec.values.keys().cloned().collect::<Vec<_>>().join(","),
+        file,
+    ]
 }
 
 fn environment_row(
