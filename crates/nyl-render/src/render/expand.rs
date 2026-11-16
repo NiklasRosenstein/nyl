@@ -8,7 +8,9 @@ use super::cache::RenderCache;
 use super::RenderResource;
 use crate::components::value_imports::{apply_value_imports, ComponentContract, ImportScope};
 use crate::config::ProjectConfig;
-use crate::helm::lookup::{component_lookup, helm_chart_lookup, warn_if_undeclared, LookupOwner};
+use crate::helm::lookup::{
+    check_annotation_type, component_lookup, helm_chart_lookup, warn_if_undeclared, LookupOwner,
+};
 use crate::helm::{HelmChartResolver, HelmTemplateExecutor};
 use crate::resources::{
     component_kind_to_chart_ref, is_nyl_component, is_remote_helm_chart_shortcut, parse_component_kind, ChartRef,
@@ -164,12 +166,14 @@ pub(crate) fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     matrix[len1][len2]
 }
 
-/// Check if a resource is a known Nyl resource type
 /// Whether a HelmChart or Component resource turns Helm `lookup` on. A resource
 /// whose setting cannot be read is not one: rendering it reports why.
 pub(crate) fn enables_lookup(resource: &serde_json::Value, config: &ProjectConfig) -> bool {
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
+    if check_annotation_type(resource).is_err() {
+        return false;
+    }
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         return matches!(
             nyl_core::resources::parse_resource::<HelmChart>(resource, "HelmChart"),
@@ -204,6 +208,7 @@ pub(crate) fn enables_lookup(resource: &serde_json::Value, config: &ProjectConfi
     .unwrap_or(false)
 }
 
+/// Check if a resource is a known Nyl resource type
 pub(crate) fn is_known_nyl_resource(resource: &serde_json::Value) -> bool {
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
@@ -363,10 +368,19 @@ async fn expand_resource(
     gitops_cache: Option<&RenderCache>,
     artifact_resolver: &crate::render::artifact::ArtifactResolver,
 ) -> Result<Vec<serde_json::Value>> {
-    nyl_core::resources::schema::validate_resource_api_with_catalog(resource, &config.resource_catalogue.0)?;
-    // Check if it's a HelmChart resource
     let kind = resource.get("kind").and_then(|k| k.as_str());
     let api_version = resource.get("apiVersion").and_then(|a| a.as_str());
+    if (kind == Some("HelmChart") && api_version == Some(API_VERSION))
+        || is_nyl_component(resource)
+        || api_version
+            .zip(kind)
+            .and_then(|(av, k)| config.get_alias_target_for_kind(av, k))
+            .is_some()
+    {
+        check_annotation_type(resource)?;
+    }
+    nyl_core::resources::schema::validate_resource_api_with_catalog(resource, &config.resource_catalogue.0)?;
+    // Check if it's a HelmChart resource
 
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {
         // Parse as HelmChart and render

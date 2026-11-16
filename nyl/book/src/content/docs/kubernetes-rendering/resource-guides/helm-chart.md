@@ -303,8 +303,8 @@ spec:
 
 `lookup` is opt-in. A chart without it renders exactly as before. `spec.lookup: false` is the
 explicit opt-out: it renders the same way, and tells Nyl you know the chart calls `lookup`
-(see [Undeclared `lookup`](#undeclared-lookup)). The object form `spec.lookup: {}` is
-deprecated: it still means `true` and warns with `NYL-HELM-LOOKUP-OBJECT-DEPRECATED`.
+(see [Undeclared `lookup`](#undeclared-lookup)). The object form `spec.lookup: {}` from 0.7.0 is
+no longer accepted: it fails with `NYL-HELM-LOOKUP-OBJECT-REMOVED`, so write `spec.lookup: true`.
 
 [Components](/nyl/kubernetes-rendering/components/overview/) pass `spec` as chart values, so
 they opt in elsewhere: the `k8s.nyl/helm-lookup: "true"` annotation on the Component, or
@@ -402,7 +402,7 @@ Requirements:
 | `NYL-HELM-LOOKUP-ANNOTATION-INVALID` | A Component's `k8s.nyl/helm-lookup` annotation is not `"true"` or `"false"`. Quote the value. |
 | `NYL-HELM-LOOKUP-ANNOTATION-MISPLACED` | A HelmChart carries `k8s.nyl/helm-lookup`. Set `spec.lookup: true` or `false` and remove the annotation. |
 | `NYL-HELM-LOOKUP-UNDECLARED` | Warning: a chart calls `lookup` but lookup is not enabled or disabled. Opt in or out as above. |
-| `NYL-HELM-LOOKUP-OBJECT-DEPRECATED` | Warning: `spec.lookup: {}`. Write `spec.lookup: true`. |
+| `NYL-HELM-LOOKUP-OBJECT-REMOVED` | `spec.lookup` is an object such as `{}`. It is a boolean now: write `spec.lookup: true`. |
 | `NYL-HELM-LOOKUP-FAILED` | The lookup API couldn't answer a request Helm made. The message names the request. |
 
 ## Sync waves and phases

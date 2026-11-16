@@ -12,6 +12,6 @@ author = "@NiklasRosenstein"
 
 [[entries]]
 id = "64ea32f9-6556-4764-9e17-b141ef8f4310"
-type = "deprecation"
-description = "HelmChart `spec.lookup` is a boolean: write `spec.lookup: true` (or `false` to opt out). The object form `spec.lookup: {}` from 0.7.0 still means `true` and warns with `NYL-HELM-LOOKUP-OBJECT-DEPRECATED`"
+type = "breaking"
+description = "HelmChart `spec.lookup` is a boolean: write `spec.lookup: true` (or `false` to opt out). The object form `spec.lookup: {}` from 0.7.0 is removed and fails with `NYL-HELM-LOOKUP-OBJECT-REMOVED`"
 author = "@NiklasRosenstein"

@@ -8623,17 +8623,313 @@ fn test_a_chart_calling_lookup_without_opting_in_warns_until_declared() {
     }
 }
 
-/// Catches the deprecated `spec.lookup: {}` going unnoticed while it keeps working.
+/// An HTTP server for the files of a directory, on 127.0.0.1, until dropped.
+struct StaticServer {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StaticServer {
+    fn start(directory: PathBuf) -> Self {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head);
+                let path = head.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/');
+                let response = match fs::read(directory.join(path)) {
+                    Ok(body) => [
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes(),
+                        body,
+                    ]
+                    .concat(),
+                    Err(_) => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                };
+                let _ = stream.write_all(&response);
+            }
+        });
+        Self {
+            port,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+}
+
+impl Drop for StaticServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// A Helm repository (`index.yaml` and `ca-chart-0.1.0.tgz`) of the fixture's `ca-chart`, so
+/// the chart is pulled as a packaged `.tgz`, as a repository or OCI chart is.
+fn ca_chart_repository(fixture: &TempDir) -> (TempDir, StaticServer) {
+    let repository = TempDir::new().unwrap();
+    let status = std::process::Command::new("helm")
+        .arg("package")
+        .arg(fixture.path().join("charts/ca-chart"))
+        .arg("-d")
+        .arg(repository.path())
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    fs::write(
+        repository.path().join("index.yaml"),
+        "apiVersion: v1\nentries:\n  ca-chart:\n    - apiVersion: v2\n      name: ca-chart\n      version: 0.1.0\n      urls:\n        - ca-chart-0.1.0.tgz\ngenerated: \"2024-01-01T00:00:00Z\"\n",
+    )
+    .unwrap();
+    let server = StaticServer::start(repository.path().to_path_buf());
+    (repository, server)
+}
+
+fn write_release_file(fixture: &TempDir, release: &str, resource: &str) {
+    fs::write(
+        fixture.path().join(format!("applications/workloads/{release}.yaml")),
+        format!(
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: {release}\n  namespace: {release}\n---\n{resource}"
+        ),
+    )
+    .unwrap();
+}
+
+/// Catches the undeclared warning being blind to charts a repository or registry provides, which
+/// Nyl holds as a packaged `.tgz` named by a hash, and an annotation not reaching a remote
+/// shortcut Component.
 #[test]
-fn test_the_object_form_of_spec_lookup_is_deprecated_but_enables_lookup() {
+fn test_a_repository_chart_calling_lookup_warns_by_its_chart_name_and_a_shortcut_opts_in() {
     let (fixture, destination, _seed) = lookup_fixture();
+    let (_repository, server) = ca_chart_repository(&fixture);
+    let url = server.url();
+    let repo_chart = |lookup: &str| {
+        format!(
+            "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: repo\n  namespace: repo\nspec:\n  chart:\n    repository: {url}\n    name: ca-chart\n    version: 0.1.0\n{lookup}"
+        )
+    };
+    let shortcut = |annotation: &str| {
+        format!(
+            "apiVersion: components.k8s.nyl/v1\nkind: \"{url}#ca-chart@0.1.0\"\nmetadata:\n  name: shortcut\n  namespace: shortcut\n{annotation}"
+        )
+    };
+    write_release_file(&fixture, "repo", &repo_chart(""));
+    write_release_file(&fixture, "shortcut", &shortcut(""));
+    commit_all(
+        &Repository::open(fixture.path()).unwrap(),
+        "Add the repository releases",
+    );
+
+    let stderr = render_stderr(&fixture, "repo");
+    assert!(
+        stderr.contains("NYL-HELM-LOOKUP-UNDECLARED: HelmChart 'repo' renders chart 'ca-chart'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ca-chart/templates/ca.yaml"), "{stderr}");
+    assert!(
+        stderr.contains("NYL-HELM-LOOKUP-UNDECLARED: Component 'shortcut' (")
+            && stderr.contains("renders chart 'ca-chart'"),
+        "{stderr}"
+    );
+
+    write_release_file(&fixture, "repo", &repo_chart("  lookup: false\n"));
+    assert!(
+        !render_stderr(&fixture, "repo").contains("NYL-HELM-LOOKUP-UNDECLARED: HelmChart 'repo'"),
+        "declaring lookup: false silences it for a repository chart too"
+    );
+
+    write_release_file(
+        &fixture,
+        "shortcut",
+        &shortcut("  annotations:\n    k8s.nyl/helm-lookup: \"true\"\n"),
+    );
+    assert!(!render_stderr(&fixture, "repo").contains("NYL-HELM-LOOKUP-UNDECLARED: Component 'shortcut'"));
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Declare lookup");
     publish_with_cache(&fixture, &TempDir::new().unwrap());
-    let ca = published_ca(&destination, "lookup");
+    let ca = published_ca(&destination, "shortcut");
+    assert_eq!(
+        rendered_ca(&fixture, &TempDir::new().unwrap(), "shortcut", &[]),
+        ca,
+        "the annotation turned lookup on for the remote shortcut"
+    );
+}
+
+/// Catches an unquoted `k8s.nyl/helm-lookup: true` failing in the generic annotation parse
+/// without the code or the fix.
+#[test]
+fn test_an_unquoted_helm_lookup_annotation_fails_with_its_code() {
+    let (fixture, _destination, _seed) = component_lookup_fixture(None, Some("true"));
+    nyl_with_cache(&fixture, &TempDir::new().unwrap())
+        .args(["render", "applications/workloads/comp.yaml", "--target", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-HELM-LOOKUP-ANNOTATION-INVALID"))
+        .stderr(predicate::str::contains("quoted"));
+}
+
+/// An alias `aliases.example/v1/CaAlias` for the fixture's component, invoked by an `alias`
+/// Release with the given `k8s.nyl/helm-lookup` annotation.
+fn add_alias_release(fixture: &TempDir, annotation: Option<&str>) {
+    let config = fixture.path().join("nyl.toml");
+    let existing = fs::read_to_string(&config).unwrap();
+    if !existing.contains("aliases") {
+        fs::write(
+            &config,
+            format!("{existing}\n[project.aliases]\n\"aliases.example/v1/CaAlias\" = \"example/v1/CaChart\"\n"),
+        )
+        .unwrap();
+    }
+    let annotations = annotation.map_or(String::new(), |value| {
+        format!("  annotations:\n    k8s.nyl/helm-lookup: {value}\n")
+    });
+    write_release_file(
+        fixture,
+        "alias",
+        &format!(
+            "apiVersion: aliases.example/v1\nkind: CaAlias\nmetadata:\n  name: alias\n  namespace: alias\n{annotations}"
+        ),
+    );
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Add the alias release");
+}
+
+/// Catches the annotation (and the undeclared warning) not applying to an aliased kind.
+#[test]
+fn test_the_annotation_applies_to_an_aliased_component() {
+    let (fixture, destination, _seed) = component_lookup_fixture(None, None);
+    add_alias_release(&fixture, None);
+    assert!(
+        render_stderr(&fixture, "alias").contains("NYL-HELM-LOOKUP-UNDECLARED: Component 'alias'"),
+        "an aliased component that calls lookup undeclared warns"
+    );
+    add_alias_release(&fixture, Some("\"true\""));
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let ca = published_ca(&destination, "alias");
+    assert_eq!(rendered_ca(&fixture, &TempDir::new().unwrap(), "alias", &[]), ca);
+
+    add_alias_release(&fixture, Some("\"false\""));
+    assert_ne!(rendered_ca(&fixture, &TempDir::new().unwrap(), "alias", &[]), ca);
+}
+
+/// Flipping `lookup` in a component's nyl-component.yaml from `false` to `true` under a warm
+/// cache must not reuse the render made without lookup.
+fn assert_contract_flip_invalidates_a_warm_cache(release: &str) {
+    let (fixture, destination, _seed) = component_lookup_fixture(Some("lookup: false\n"), None);
+    add_alias_release(&fixture, None);
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let published = published_ca(&destination, release);
+    let warm = TempDir::new().unwrap();
+    assert_ne!(
+        rendered_ca(&fixture, &warm, release, &[]),
+        published,
+        "with lookup off the CA is generated, not read back"
+    );
+    fs::write(
+        fixture.path().join("components/example/v1/CaChart/nyl-component.yaml"),
+        "apiVersion: components.nyl/v1alpha1\nlookup: true\n",
+    )
+    .unwrap();
+    assert_eq!(
+        rendered_ca(&fixture, &warm, release, &[]),
+        published,
+        "the warm cache holds a render made before nyl-component.yaml turned lookup on"
+    );
+}
+
+#[test]
+fn test_flipping_lookup_in_nyl_component_yaml_invalidates_a_warm_cache() {
+    assert_contract_flip_invalidates_a_warm_cache("comp");
+}
+
+/// Catches the Release cache recording the directory of a component but not of an aliased one.
+#[test]
+fn test_flipping_lookup_in_an_aliased_components_contract_invalidates_a_warm_cache() {
+    assert_contract_flip_invalidates_a_warm_cache("alias");
+}
+
+/// Catches a Component emitted by a chart (depth 2) not reading the Release's objects, or its
+/// cached render not being revalidated against the publication.
+#[test]
+fn test_a_nested_component_with_lookup_reads_the_release_and_is_revalidated() {
+    let (fixture, destination, _seed) = component_lookup_fixture(None, None);
+    let outer = fixture.path().join("components/example/v1/Outer");
+    fs::create_dir_all(outer.join("templates")).unwrap();
+    fs::write(
+        outer.join("Chart.yaml"),
+        "apiVersion: v2\nname: outer\nversion: 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        outer.join("templates/inner.yaml"),
+        "apiVersion: components.k8s.nyl/v1\nkind: example/v1/CaChart\nmetadata:\n  name: {{ .Release.Name }}\n  namespace: {{ .Release.Namespace }}\n  annotations:\n    k8s.nyl/helm-lookup: \"true\"\n",
+    )
+    .unwrap();
+    write_release_file(
+        &fixture,
+        "nested",
+        "apiVersion: components.k8s.nyl/v1\nkind: example/v1/Outer\nmetadata:\n  name: nested\n  namespace: nested\n",
+    );
+    commit_all(&Repository::open(fixture.path()).unwrap(), "Add the nested component");
+
+    let warm = TempDir::new().unwrap();
+    let before_publication = rendered_ca(&fixture, &warm, "nested", &[]);
+    publish_with_cache(&fixture, &TempDir::new().unwrap());
+    let published = published_ca(&destination, "nested");
+    assert_ne!(published, before_publication);
+    assert_eq!(
+        rendered_ca(&fixture, &warm, "nested", &[]),
+        published,
+        "the nested chart's lookups are recorded, so the warm cache is revalidated"
+    );
+    assert_eq!(
+        rendered_ca(&fixture, &TempDir::new().unwrap(), "nested", &[]),
+        published
+    );
+}
+
+/// Catches the removed object form `spec.lookup: {}` still rendering, or failing without its
+/// code and the fix.
+#[test]
+fn test_the_object_form_of_spec_lookup_is_removed() {
+    let (fixture, _destination, _seed) = lookup_fixture();
     let file = fixture.path().join("applications/workloads/lookup.yaml");
-    let object_form = fs::read_to_string(&file).unwrap().replace("lookup: true", "lookup: {}");
-    fs::write(&file, object_form).unwrap();
-    assert!(render_stderr(&fixture, "lookup").contains("NYL-HELM-LOOKUP-OBJECT-DEPRECATED"));
-    assert_eq!(rendered_ca(&fixture, &TempDir::new().unwrap(), "lookup", &[]), ca);
+    let original = fs::read_to_string(&file).unwrap();
+    for object in ["{}", "{source: live}"] {
+        fs::write(&file, original.replace("lookup: true", &format!("lookup: {object}"))).unwrap();
+        nyl_with_cache(&fixture, &TempDir::new().unwrap())
+            .args(["render", "applications/workloads/lookup.yaml", "--target", "production"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("NYL-HELM-LOOKUP-OBJECT-REMOVED"))
+            .stderr(predicate::str::contains("lookup: true"));
+    }
 }
 
 /// Catches a HelmChart accepting the Component annotation, which would give it two homes.
