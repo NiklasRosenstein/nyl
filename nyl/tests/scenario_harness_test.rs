@@ -1354,7 +1354,7 @@ fn test_a_promote_step_counts_the_target_environments_refs() {
     let path = promotion_target(&documents, &promote);
     let target = path.as_ref().unwrap();
     assert_eq!((target.from.as_deref(), target.to.as_str()), (Some("dev"), "prod"));
-    assert_eq!(counted_environment(&promote, Some(&path)), "prod");
+    assert_eq!(counted_environment(&promote, Some(&path)).as_deref(), Some("prod"));
     // The path may follow its options.
     let dry = promotion_target(&documents, &words("promote --dry-run dev-to-prod")).unwrap();
     assert_eq!(dry.to, "prod");
@@ -1369,15 +1369,36 @@ fn test_a_promote_step_counts_the_target_environments_refs() {
         (Some("prod-hotfix"), "prod")
     );
     // Not a promote step: its `-e`, or dev.
-    assert_eq!(counted_environment(&words("reconcile -e prod"), None), "prod");
-    assert_eq!(counted_environment(&words("reconcile"), None), "dev");
-    // A path that cannot be read is an error, not a silent count of dev's refs.
+    assert_eq!(
+        counted_environment(&words("reconcile -e prod"), None).as_deref(),
+        Some("prod")
+    );
+    assert_eq!(counted_environment(&words("reconcile"), None).as_deref(), Some("dev"));
+    // A path that cannot be read counts nothing, and is no silent count of dev's refs.
     let missing = promotion_target(&documents, &words("promote no-such-path"));
-    assert!(missing.as_ref().unwrap_err().contains("0 of the"), "{missing:?}");
+    assert!(
+        missing.as_ref().unwrap_err().contains("no PromotionPath no-such-path"),
+        "{missing:?}"
+    );
     assert_eq!(
         counted_environment(&words("promote no-such-path"), Some(&missing)),
-        "dev"
+        None
     );
+    // The first positional argument names the path, not any argument that equals a path's name.
+    let reason_is_a_name = promotion_target(&documents, &words("promote --reason dev-to-prod hotfix-nope"));
+    assert!(reason_is_a_name.unwrap_err().contains("hotfix-nope"));
+    assert_eq!(
+        promotion_target(&documents, &words("promote dev-to-prod --reason hotfix-nope"))
+            .unwrap()
+            .to,
+        "prod"
+    );
+    // record: source is read from the target Environment.
+    assert!(!target.record_source);
+    let source = "kind: Environment\nmetadata: {name: prod}\nspec: {source: {fromPromotion: {path: dev-to-prod, record: source}}}\n";
+    let mut with_source = documents.clone();
+    with_source.push(serde_saphyr::from_str(source).unwrap());
+    assert!(promotion_target(&with_source, &promote).unwrap().record_source);
 }
 
 /// Every state ref but the target's own must be unchanged after a `promote`
@@ -1385,7 +1406,7 @@ fn test_a_promote_step_counts_the_target_environments_refs() {
 /// leases. A moved, added, or removed ref is reported by name.
 #[test]
 fn test_a_promote_step_leaves_every_other_state_ref_unchanged() {
-    use scenario::runner::unchanged_violations;
+    use scenario::runner::{excused_refs, unchanged_violations};
     let refs = |entries: &[(&str, &str)]| {
         entries
             .iter()
@@ -1409,12 +1430,15 @@ fn test_a_promote_step_leaves_every_other_state_ref_unchanged() {
         ("refs/nyl/dev/lease", "l2"),
         ("refs/heads/nyl/staging/desired", "s1"),
     ]);
-    assert_eq!(unchanged_violations(&before, &promoted, "prod"), Vec::<String>::new());
+    assert_eq!(
+        unchanged_violations(&before, &promoted, &excused_refs("prod", None)),
+        Vec::<String>::new()
+    );
     // The source moved: a promotion that wrote to dev.
     let mut moved = promoted.clone();
     moved.insert("refs/heads/nyl/dev/desired".to_owned(), "a2".to_owned());
     assert_eq!(
-        unchanged_violations(&before, &moved, "prod"),
+        unchanged_violations(&before, &moved, &excused_refs("prod", None)),
         ["refs/heads/nyl/dev/desired"]
     );
     // A ref that appeared, and one that disappeared, outside the target.
@@ -1422,16 +1446,175 @@ fn test_a_promote_step_leaves_every_other_state_ref_unchanged() {
     added.insert("refs/heads/nyl/dev/extra".to_owned(), "x".to_owned());
     added.remove("refs/nyl/dev/lease");
     assert_eq!(
-        unchanged_violations(&before, &added, "prod"),
+        unchanged_violations(&before, &added, &excused_refs("prod", None)),
         ["refs/heads/nyl/dev/extra", "refs/nyl/dev/lease"]
     );
     // Counting dev as the target would have excused exactly the source's change.
-    assert!(!unchanged_violations(&before, &moved, "dev").contains(&"refs/heads/nyl/dev/desired".to_owned()));
+    assert!(!unchanged_violations(&before, &moved, &excused_refs("dev", None))
+        .contains(&"refs/heads/nyl/dev/desired".to_owned()));
     // A target whose name prefixes another environment's does not excuse it.
     let mut prefixed = promoted;
     prefixed.insert("refs/heads/nyl/prod-hotfix/desired".to_owned(), "h".to_owned());
     assert_eq!(
-        unchanged_violations(&before, &prefixed, "prod"),
+        unchanged_violations(&before, &prefixed, &excused_refs("prod", None)),
         ["refs/heads/nyl/prod-hotfix/desired"]
     );
+}
+
+/// A dry run excuses no ref, the target's included; `record: source` also
+/// excuses the branch it commits to, and only that branch; project branches
+/// and keep refs are part of what a promotion may not move.
+#[test]
+fn test_promote_excuses_only_the_refs_it_writes() {
+    use scenario::runner::{excused_refs, unchanged_violations};
+    let refs = |entries: &[(&str, &str)]| {
+        entries
+            .iter()
+            .map(|(name, commit)| ((*name).to_owned(), (*commit).to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = refs(&[
+        ("refs/heads/main", "m1"),
+        ("refs/heads/main-2", "n1"),
+        ("refs/heads/nyl/prod/desired", "c1"),
+        ("refs/nyl-keep/pr-1/abc", "k1"),
+    ]);
+    let wrote_target = refs(&[
+        ("refs/heads/main", "m1"),
+        ("refs/heads/main-2", "n1"),
+        ("refs/heads/nyl/prod/desired", "c2"),
+        ("refs/nyl-keep/pr-1/abc", "k1"),
+    ]);
+    // With no excuse at all, as for a dry run, the target's write is a violation.
+    assert_eq!(
+        unchanged_violations(&before, &wrote_target, &[]),
+        ["refs/heads/nyl/prod/desired"]
+    );
+    assert!(unchanged_violations(&before, &wrote_target, &excused_refs("prod", None)).is_empty());
+    // `record: state` that also commits to main is caught; `record: source` excuses main alone.
+    let mut committed = wrote_target.clone();
+    committed.insert("refs/heads/main".to_owned(), "m2".to_owned());
+    assert_eq!(
+        unchanged_violations(&before, &committed, &excused_refs("prod", None)),
+        ["refs/heads/main"]
+    );
+    assert!(unchanged_violations(&before, &committed, &excused_refs("prod", Some("main"))).is_empty());
+    committed.insert("refs/heads/main-2".to_owned(), "n2".to_owned());
+    assert_eq!(
+        unchanged_violations(&before, &committed, &excused_refs("prod", Some("main"))),
+        ["refs/heads/main-2"]
+    );
+    let mut kept = wrote_target;
+    kept.remove("refs/nyl-keep/pr-1/abc");
+    assert_eq!(
+        unchanged_violations(&before, &kept, &excused_refs("prod", None)),
+        ["refs/nyl-keep/pr-1/abc"]
+    );
+}
+
+/// The guard sits where scenarios execute: a runner refuses a pending scenario
+/// and one above the reached milestone, whatever selected it. Catches a runner
+/// test reverted to filter on the milestone alone.
+#[test]
+fn test_every_runner_refuses_pending_and_unreached_scenarios() {
+    let (loaded, _) = scenario::load_all();
+    for (name, _) in PENDING {
+        let pending = loaded.iter().find(|loaded| loaded.name == name).unwrap();
+        for result in [
+            scenario::runner::run(pending),
+            scenario::runner::run_real_publication(pending),
+            #[cfg(feature = "tier2")]
+            scenario::runner::run_binary(pending),
+        ] {
+            let error = result.expect_err(name);
+            assert!(error.contains("is pending and runs in no runner"), "{name}: {error}");
+        }
+    }
+    let above = inline_scenario(
+        "inline/above",
+        "contract: design/reference-scenarios.md#tiers\nmilestone: M99\nsteps: []\n",
+    );
+    let error = scenario::runner::run(&above).unwrap_err();
+    assert!(error.contains("above the reached milestone"), "{error}");
+}
+
+/// `%STATE(<id>)%` of a step that wrote only an observed commit is that
+/// commit, and `%OBSERVED%` agrees; a desired commit wins when there is one.
+#[test]
+fn test_state_placeholder_falls_back_to_the_observed_commit() {
+    use scenario::runner::StepWrite;
+    let observed_only = StepWrite {
+        desired: None,
+        observed: Some("o1".to_owned()),
+        run: None,
+    };
+    assert_eq!(observed_only.state().map(String::as_str), Some("o1"));
+    let both = StepWrite {
+        desired: Some("d1".to_owned()),
+        observed: Some("o1".to_owned()),
+        run: None,
+    };
+    assert_eq!(both.state().map(String::as_str), Some("d1"));
+    assert_eq!(StepWrite::default().state(), None);
+    // In a real run: `attest` writes only an observed commit, and its id still names a state.
+    let text = "contract: design/orchestration-core.md#attestations\nmilestone: M6\ntiers: [1]\nsteps:\n  - nyl: [state, init, -e, dev]\n    exit: 0\n  - nyl: [reconcile, -e, dev]\n    exit: 2\n  - file: {path: health.json, content: '{\"healthy\": \"fail\"}'}\n  - nyl: [attest, -e, dev]\n    id: a1\n    exit: 3\n    expect:\n      commits: {desired: 0, observed: 1}\n  - nyl: [get, units, -e, dev, --state-revision, '%STATE(a1)%']\n    exit: 0\n  - nyl: [get, units, -e, dev, --state-revision, '%OBSERVED(a1)%']\n    exit: 0\n";
+    run_inline("walkthroughs/attested-evidence", "inline/observed-only", text).unwrap();
+}
+
+/// A `%PLAN-DIGEST%` would consume a `plan` script meant for the step, so the
+/// format rejects the combination.
+#[test]
+fn test_plan_digest_after_a_plan_script_is_rejected() {
+    let steps = |between: &str| {
+        format!(
+            "contract: design/reference-scenarios.md#scenario-1-platform-environment\nmilestone: M6\ntiers: [1]\nsteps:\n  - nyl: [state, init, -e, dev]\n    exit: 0\n  - driver: {{unit: network, operation: plan, outcome: succeeded}}\n{between}  - nyl: [reconcile, -e, dev, --approve, 'network=%PLAN-DIGEST(dev/network)%']\n    exit: 0\n"
+        )
+    };
+    let loaded = |text: &str| scenario::Loaded {
+        name: "inline/plan-script".to_owned(),
+        directory: scenario::scenarios_root().join("reference/platform"),
+        scenario: serde_saphyr::from_str(text).unwrap(),
+    };
+    let rejected = loaded(&steps(""));
+    let error =
+        scenario::format::validate(&rejected.scenario, &rejected.directory, &scenario::repository_root()).unwrap_err();
+    assert!(error.contains("PLAN-DIGEST") && error.contains("plan"), "{error}");
+    // A `nyl` step in between consumes the script first.
+    let accepted = loaded(&steps("  - nyl: [plan, -e, dev]\n    exit: 0\n"));
+    scenario::format::validate(&accepted.scenario, &accepted.directory, &scenario::repository_root()).unwrap();
+}
+
+/// An empty list the expectation names is a key the record must write, and a
+/// superseded commit's repository is checked when given.
+#[test]
+fn test_promotion_expectation_requires_empty_lists_and_checks_repositories() {
+    use serde_json::json;
+    let expectation = "path: dev-to-prod\nfrom: {run: r1}\nsuperseded: []\nignoredAttestations: []\nevidence: {level: attested, attestations: []}\n";
+    let mut record = promotion_record();
+    record["superseded"] = json!([]);
+    record["ignoredAttestations"] = json!([]);
+    record["evidence"]["attestations"] = json!([]);
+    check_promotion(expectation, &record, None).unwrap();
+    for (pointer, name) in [
+        ("superseded", "superseded"),
+        ("ignoredAttestations", "ignoredAttestations"),
+    ] {
+        let mut missing = record.clone();
+        missing.as_object_mut().unwrap().remove(pointer);
+        let error = check_promotion(expectation, &missing, None).unwrap_err();
+        assert!(error.contains(&format!("{name} is absent")), "{error}");
+    }
+    record["evidence"].as_object_mut().unwrap().remove("attestations");
+    assert!(check_promotion(expectation, &record, None)
+        .unwrap_err()
+        .contains("evidence.attestations is absent"));
+
+    let with_repository = "path: dev-to-prod\nfrom: {run: r1}\nsuperseded:\n  - {repository: platform, commit: main~1, reason: Fix merged}\n";
+    let mut record = promotion_record();
+    record["superseded"][0]["repository"] = json!("platform");
+    check_promotion(with_repository, &record, None).unwrap();
+    record["superseded"][0]["repository"] = json!("other");
+    assert!(check_promotion(with_repository, &record, None)
+        .unwrap_err()
+        .contains("superseded[0].repository"));
 }
