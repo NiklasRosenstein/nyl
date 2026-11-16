@@ -28,9 +28,11 @@
 //!   running-scoped ([`Driver::running_attestations`]: read from the system
 //!   that runs the unit's result, such as a publication's `accepted` and
 //!   `healthy`) counts only for the unit's current receipt, the one of the
-//!   newest recorded state ([`Context::current`]). In an older state whose
-//!   receipt of that unit is another one, it neither passes nor fails: a
-//!   required one is [`GapKind::NotRunning`], so the newest state decides,
+//!   newest recorded state's observed receipt ([`Context::current`]), current
+//!   there or left from a run that did not finish the unit. In an older
+//!   state whose receipt of that unit is another one, or when the newest
+//!   state has no receipt of it (removed or torn down), it neither passes nor
+//!   fails: a required one is [`GapKind::NotRunning`], so the newest state decides,
 //!   and a failing newest one blocks without a fallback to an older state
 //!   that once passed. An explicitly chosen state (`--state-revision`,
 //!   `--revision`) is judged on the attestations recorded for it
@@ -44,7 +46,15 @@
 //!   deployments a whole-source judgement counts (`applicationGroups`,
 //!   `excludeApplications`) and adds deployments that must meet the required
 //!   attestations at whatever they run (`requireApplications`). Without
-//!   verdicts the attestation is judged as a whole.
+//!   verdicts the attestation is judged as a whole. Which state a consumer
+//!   runs is the value-only selection rule, not an evidence requirement, so
+//!   it applies at every level. A deployment's publication matches a
+//!   state whose receipt published either the matched commit or the
+//!   revision it runs.
+//! - **Coverage never fails open.** A named group no Application of the
+//!   attestation belongs to, a coverage that leaves no Application to judge
+//!   while the attestation fails, and a `requireApplications` name no
+//!   running-scoped attestation lists are each a [`GapKind::Coverage`] gap.
 //!
 //! The core never reads the driver's `details`: the shell asks the driver
 //! for the typed verdicts ([`super::running`]).
@@ -86,6 +96,11 @@ pub enum GapKind {
     /// has a newer receipt, whose attestations say what runs (D8), or the
     /// deployment that consumes a value runs another state's result.
     NotRunning,
+    /// The path's `coverage` cannot be judged as written: it names an
+    /// Application or ApplicationGroup no running-scoped attestation of the
+    /// current receipts lists, or leaves no Application to judge while the
+    /// attestation fails.
+    Coverage,
 }
 
 /// One reason a state does not reach a level.
@@ -150,6 +165,9 @@ pub(super) struct Context<'a> {
     /// running-scoped attestations count for (D8); `None` for an explicitly
     /// chosen state, which is judged on what was recorded for it.
     pub current: Option<&'a RecordedState>,
+    /// Every recorded state read, newest first: where a deployment's
+    /// publication is looked for.
+    pub history: &'a [RecordedState],
 }
 
 impl Context<'_> {
@@ -201,17 +219,61 @@ impl Context<'_> {
     }
 
     /// Whether `state`'s receipt of `unit` is the current one (always, for
-    /// an explicitly chosen state).
+    /// an explicitly chosen state): the newest state's observed receipt.
+    /// When the newest state has no receipt of the unit (removed or torn
+    /// down), no older receipt is current: nothing of it runs as recorded.
     fn is_current(&self, state: &RecordedState, unit: &UnitName) -> bool {
         let Some(current) = self.current else {
             return true;
         };
         match (receipt_key(current, unit), receipt_key(state, unit)) {
             (Some(newest), Some(own)) => newest == own,
-            // The newest state has no receipt of the unit: none is newer.
-            (None, _) => true,
-            (Some(_), None) => false,
+            _ => false,
         }
+    }
+
+    /// Why `state`'s running-scoped attestation `name` of `unit` no longer
+    /// counts.
+    fn not_current(&self, unit: &UnitName, name: &str) -> String {
+        match self.current.and_then(|current| receipt_key(current, unit)) {
+            Some(_) => format!(
+                "attestation {unit}/{name} of this state no longer says what runs: unit {unit} has a newer receipt, whose {name} decides"
+            ),
+            None => format!(
+                "attestation {unit}/{name} of this state no longer says what runs: the newest state has no receipt of unit {unit} (it was removed or torn down)"
+            ),
+        }
+    }
+
+    /// The running-scoped attestation `name` of `unit`'s current receipt (the
+    /// newest state's observed receipt, current there or not), as recorded,
+    /// for judging `state`.
+    fn current_attestation<'s>(
+        &'s self,
+        state: &'s RecordedState,
+        unit: &UnitName,
+        name: &str,
+    ) -> Option<&'s Attestation> {
+        let source = self.running_source(state);
+        let key = receipt_key(source, unit)?;
+        source
+            .attestations
+            .units
+            .get(unit)
+            .or_else(|| source.attestations.stale_receipts.get(unit))
+            .and_then(|recorded| recorded.get(name))
+            .filter(|attestation| attestation.execution_key == key)
+    }
+
+    /// The newest recorded state whose receipt of `unit` published `commit`.
+    fn published(&self, unit: &UnitName, commits: &[&str]) -> Option<&RecordedState> {
+        self.history.iter().find(|state| {
+            state
+                .running
+                .get(unit)
+                .and_then(|running| running.publication.as_deref())
+                .is_some_and(|publication| commits.contains(&publication))
+        })
     }
 
     fn coverage_narrows(&self) -> bool {
@@ -246,7 +308,7 @@ fn receipt_key<'s>(state: &'s RecordedState, unit: &UnitName) -> Option<&'s str>
 }
 
 /// The verdicts the driver gave for `unit`'s attestation `name` recorded
-/// for `state`.
+/// for `state`'s receipt of it.
 fn verdicts<'s>(state: &'s RecordedState, unit: &UnitName, name: &str) -> Option<&'s [DeploymentVerdict]> {
     state
         .running
@@ -385,7 +447,7 @@ pub(super) fn judge(
     // A failing attestation of any unit blocks the state.
     for unit in desired.keys() {
         let running = match subject {
-            Subject::Source if ctx.coverage_narrows() => Running::Coverage,
+            Subject::Source | Subject::Units(_) if ctx.coverage_narrows() => Running::Coverage,
             Subject::Source | Subject::Units(_) => Running::Whole,
             Subject::Value {
                 unit: consumer,
@@ -396,9 +458,7 @@ pub(super) fn judge(
         judge_unit(ctx, state, level, (unit, covered.contains(unit)), running, &mut verdict);
     }
     judge_environment(ctx, state, level, &mut verdict);
-    if !matches!(subject, Subject::Units(_)) {
-        require_applications(ctx, state, level, &mut verdict);
-    }
+    require_applications(ctx, state, level, &mut verdict);
     verdict
         .gaps
         .sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
@@ -462,30 +522,39 @@ fn judge_unit(
     } else {
         BTreeSet::new()
     };
-    let names: BTreeSet<&str> = recorded
+    let mut names: BTreeSet<&str> = recorded
         .into_iter()
         .flat_map(|set| set.keys())
         .map(String::as_str)
         .chain(required.iter().map(String::as_str))
         .collect();
+    if let Running::Consumer(deployment) = running {
+        // Which state the consumer runs is read from the current receipt's
+        // running-scoped attestations, whatever this state recorded and at
+        // every evidence level (D6, D7).
+        let declared: BTreeSet<&str> = [Some(state), ctx.current]
+            .into_iter()
+            .flatten()
+            .filter_map(|state| state.running.get(unit))
+            .flat_map(|running| running.names.iter().map(String::as_str))
+            .collect();
+        for name in declared {
+            judge_consumer(ctx, state, (unit, name, deployment), required.contains(name), verdict);
+            names.remove(name);
+        }
+    }
     for name in names {
         let required = required.contains(name);
         if ctx.running(state, unit, name) {
             match running {
-                Running::Ignored => continue,
-                Running::Consumer(deployment) => {
-                    judge_consumer(ctx, state, (unit, name, deployment), required, verdict);
-                    continue;
-                }
+                Running::Ignored | Running::Consumer(_) => continue,
                 Running::Whole | Running::Coverage if !ctx.is_current(state, unit) => {
                     if required {
                         verdict.gap(
                             unit.as_str(),
                             Some(name),
                             GapKind::NotRunning,
-                            format!(
-                                "attestation {unit}/{name} of this state no longer says what runs: unit {unit} has a newer receipt, whose {name} decides"
-                            ),
+                            ctx.not_current(unit, name),
                         );
                     }
                     continue;
@@ -519,9 +588,38 @@ fn judge_coverage(
         verdict.classify(ctx, unit.as_str(), name, None, required);
         return;
     };
-    let short: Vec<String> = verdicts
-        .iter()
-        .filter(|deployment| ctx.counts(deployment))
+    // Every group the path names must be one of these Applications', so a
+    // misspelt group never leaves the attestation unjudged.
+    for group in &ctx.spec.coverage.application_groups {
+        if !verdicts
+            .iter()
+            .any(|deployment| deployment.group.as_ref() == Some(group))
+        {
+            verdict.gap(
+                unit.as_str(),
+                Some(name),
+                GapKind::Coverage,
+                format!(
+                    "the path's coverage.applicationGroups names {group}, but no Application that attestation {unit}/{name} lists belongs to it"
+                ),
+            );
+        }
+    }
+    let counted: Vec<&DeploymentVerdict> = verdicts.iter().filter(|deployment| ctx.counts(deployment)).collect();
+    if counted.is_empty() && attestation.result == AttestationResult::Fail {
+        verdict.gap(
+            unit.as_str(),
+            Some(name),
+            GapKind::Coverage,
+            format!(
+                "the path's coverage (applicationGroups, excludeApplications) leaves no Application of attestation {unit}/{name} to judge, and it fails{}",
+                attestation.reason.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
+            ),
+        );
+        return;
+    }
+    let short: Vec<String> = counted
+        .into_iter()
         .filter(|deployment| !(deployment.meets && deployment.runs == DeploymentRuns::Receipt))
         .map(|deployment| {
             deployment
@@ -554,7 +652,9 @@ fn judge_coverage(
 
 /// A running-scoped attestation judged for the one deployment that consumes
 /// a value: from the current receipt's attestation, the deployment must
-/// meet it, and what it runs must be what `state`'s receipt produced.
+/// meet it, and what it runs must be what `state`'s receipt produced. That
+/// last part is the value-only selection rule (D6, D7), not an evidence
+/// requirement, so it holds at every level and under `--evidence published`.
 fn judge_consumer(
     ctx: &Context<'_>,
     state: &RecordedState,
@@ -562,11 +662,7 @@ fn judge_consumer(
     required: bool,
     verdict: &mut Judgement,
 ) {
-    let source = ctx.running_source(state);
-    let attestation = current_receipt(source, unit).and_then(|(desired, receipt)| {
-        evidence::recorded_for(name, desired, receipt, source.attestations.units.get(unit))
-    });
-    let Some(attestation) = attestation else {
+    let Some(attestation) = ctx.current_attestation(state, unit, name) else {
         if required {
             verdict.gap(
                 unit.as_str(),
@@ -577,6 +673,7 @@ fn judge_consumer(
         }
         return;
     };
+    let source = ctx.running_source(state);
     let Some(verdicts) = verdicts(source, unit, name) else {
         // The driver cannot tell deployments apart: the attestation as a
         // whole, for the current receipt only.
@@ -587,9 +684,7 @@ fn judge_consumer(
                 unit.as_str(),
                 Some(name),
                 GapKind::NotRunning,
-                format!(
-                    "attestation {unit}/{name} of this state no longer says what runs: unit {unit} has a newer receipt, whose {name} decides"
-                ),
+                ctx.not_current(unit, name),
             );
         }
         return;
@@ -625,31 +720,7 @@ fn judge_consumer(
             return;
         }
     }
-    let here = match &found.runs {
-        DeploymentRuns::Receipt => {
-            receipt_key(state, unit) == current_receipt(source, unit).map(|(_, receipt)| receipt.execution_key.as_str())
-        }
-        DeploymentRuns::Publication(publication) => {
-            state
-                .running
-                .get(unit)
-                .and_then(|running| running.publication.as_deref())
-                == Some(publication.as_str())
-        }
-        DeploymentRuns::Unproven => false,
-    };
-    if !here {
-        let runs = match &found.runs {
-            DeploymentRuns::Receipt => format!("what unit {unit}'s current receipt published"),
-            DeploymentRuns::Publication(publication) => format!("publication {publication}"),
-            DeploymentRuns::Unproven => "nothing a receipt of the unit explains".to_owned(),
-        };
-        verdict.gap(
-            unit.as_str(),
-            Some(name),
-            GapKind::NotRunning,
-            format!("{deployment}, which consumes the value, runs {runs}, not what this state's {unit} published"),
-        );
+    if !consumer_runs_state(ctx, (state, source), (unit, name, deployment), &found.runs, verdict) {
         return;
     }
     if found.meets || excused {
@@ -666,26 +737,93 @@ fn judge_consumer(
     }
 }
 
-/// `coverage.requireApplications`: each named deployment meets every
-/// required running-scoped attestation of the current receipts, at whatever
-/// it runs.
+/// The value-only selection rule (D6, D7): whether `state`'s receipt of
+/// `unit` published what the consuming `deployment` runs, as the current
+/// receipt's (`source`'s) attestation `name` shows it. When it did not, the
+/// gap says which state the consumer runs instead, or that no recorded
+/// state published it.
+fn consumer_runs_state(
+    ctx: &Context<'_>,
+    (state, source): (&RecordedState, &RecordedState),
+    (unit, name, deployment): (&UnitName, &str, &str),
+    runs: &DeploymentRuns,
+    verdict: &mut Judgement,
+) -> bool {
+    let rule = "a path that promotes only values takes each value from the state whose receipt published what its consumer runs";
+    let here = match runs {
+        DeploymentRuns::Receipt => receipt_key(state, unit) == receipt_key(source, unit),
+        DeploymentRuns::Publication {
+            publication,
+            running,
+            truncated,
+        } => {
+            let commits: Vec<&str> = std::iter::once(publication.as_str())
+                .chain(running.as_deref())
+                .collect();
+            let own = state
+                .running
+                .get(unit)
+                .and_then(|running| running.publication.as_deref());
+            if own.is_some_and(|own| commits.contains(&own)) {
+                true
+            } else {
+                if ctx.published(unit, &commits).is_none() {
+                    let truncated = if *truncated {
+                        "; the driver's matching stopped at its limit, so an older publication may have introduced it"
+                    } else {
+                        ""
+                    };
+                    verdict.gap(
+                        unit.as_str(),
+                        Some(name),
+                        GapKind::NotRunning,
+                        format!(
+                            "no recorded state published what {deployment} runs ({publication}){truncated}, and {rule}: promote a state explicitly with `--state-revision`, or have the source publish again so a recorded state holds it"
+                        ),
+                    );
+                    return false;
+                }
+                false
+            }
+        }
+        DeploymentRuns::Unproven => false,
+    };
+    if !here {
+        let runs = match runs {
+            DeploymentRuns::Receipt => format!("what unit {unit}'s current receipt published"),
+            DeploymentRuns::Publication { publication, .. } => format!("publication {publication}"),
+            DeploymentRuns::Unproven => "nothing a receipt of the unit explains".to_owned(),
+        };
+        verdict.gap(
+            unit.as_str(),
+            Some(name),
+            GapKind::NotRunning,
+            format!("{deployment}, which consumes the value, runs {runs}, not what this state's {unit} published, and {rule}"),
+        );
+        return false;
+    }
+    true
+}
+
+/// `coverage.requireApplications`: each named deployment must appear in a
+/// running-scoped attestation of the current receipts, and meet every
+/// required one at whatever it runs. A name no attestation lists, such as
+/// a misspelt one or one of a publication that does not observe, is a
+/// [`GapKind::Coverage`] gap, whatever the path requires.
 fn require_applications(ctx: &Context<'_>, state: &RecordedState, level: EvidenceLevel, verdict: &mut Judgement) {
     let names = &ctx.spec.coverage.require_applications;
     if names.is_empty() {
         return;
     }
     let source = ctx.running_source(state);
-    let mut first_scope: Option<&UnitName> = None;
     for application in names {
         let mut listed = false;
         for (unit, running) in &source.running {
-            let Some((desired, receipt)) = current_receipt(source, unit) else {
+            let Some(desired) = source.snapshot.desired.get(unit) else {
                 continue;
             };
-            let recorded = source.attestations.units.get(unit);
             let required = unit_required(ctx, desired, unit, level);
-            for name in required.iter().filter(|name| running.names.contains(*name)) {
-                first_scope.get_or_insert(unit);
+            for name in &running.names {
                 let Some(found) = running
                     .verdicts
                     .get(name)
@@ -693,10 +831,13 @@ fn require_applications(ctx: &Context<'_>, state: &RecordedState, level: Evidenc
                 else {
                     continue;
                 };
-                let Some(attestation) = evidence::recorded_for(name, desired, receipt, recorded) else {
+                let Some(attestation) = ctx.current_attestation(state, unit, name) else {
                     continue;
                 };
                 listed = true;
+                if !required.contains(name) {
+                    continue;
+                }
                 let duplicate = verdict.used.iter().any(|known| {
                     known.scope == unit.as_str()
                         && known.name == *name
@@ -723,13 +864,13 @@ fn require_applications(ctx: &Context<'_>, state: &RecordedState, level: Evidenc
                 }
             }
         }
-        if let (false, Some(scope)) = (listed, first_scope) {
+        if !listed {
             verdict.gap(
-                scope.as_str(),
+                ENVIRONMENT_SCOPE,
                 None,
-                GapKind::Pending,
+                GapKind::Coverage,
                 format!(
-                    "the path's coverage.requireApplications names {application}, which no required attestation of the current receipts lists"
+                    "the path's coverage.requireApplications names {application}, which no running-scoped attestation of the source's current receipts lists"
                 ),
             );
         }

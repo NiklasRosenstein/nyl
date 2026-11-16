@@ -14,7 +14,9 @@
 //!   receipt's publication or another publication of the target is
 //!   accepted at what it runs, and healthy when, besides, it is `Healthy`;
 //!   every other state (`unmatched`, `mixed`, `missing`, ...) runs nothing a
-//!   receipt explains.
+//!   receipt explains. Another publication carries both the matched commit
+//!   and the running revision, and whether the match stopped at its walk
+//!   limit (`publicationTruncated`).
 //! - [`receipt_publication`] names a receipt's publication by its
 //!   `PublishedTree` commit, the commit the details name a deployment's
 //!   matched publication by.
@@ -58,9 +60,13 @@ pub(crate) fn deployment_verdicts(attestation: &Attestation) -> Option<Vec<Deplo
             let health = text("health");
             let runs = match state {
                 "accepted" => DeploymentRuns::Receipt,
-                "other-publication" => text("publication").map_or(DeploymentRuns::Unproven, |commit| {
-                    DeploymentRuns::Publication(commit.to_owned())
-                }),
+                "other-publication" => {
+                    text("publication").map_or(DeploymentRuns::Unproven, |commit| DeploymentRuns::Publication {
+                        publication: commit.to_owned(),
+                        running: text("running").map(str::to_owned),
+                        truncated: entry.get("publicationTruncated").and_then(Value::as_bool) == Some(true),
+                    })
+                }
                 _ => DeploymentRuns::Unproven,
             };
             let healthy = health == Some("Healthy");
@@ -71,7 +77,9 @@ pub(crate) fn deployment_verdicts(attestation: &Attestation) -> Option<Vec<Deplo
                     text("reason").map(|reason| format!(": {reason}")).unwrap_or_default()
                 )),
                 _ if !meets => Some(format!("{name} is {}", health.unwrap_or("not reporting health"))),
-                DeploymentRuns::Publication(commit) => Some(format!("{name} runs another publication ({commit})")),
+                DeploymentRuns::Publication { publication, .. } => {
+                    Some(format!("{name} runs another publication ({publication})"))
+                }
                 DeploymentRuns::Receipt => None,
             };
             Some(DeploymentVerdict {
@@ -142,7 +150,7 @@ mod tests {
     fn test_verdicts_read_what_each_deployment_runs() {
         let deployments = json!([
             {"id": "web", "release": "web/web", "state": "accepted", "health": "Degraded"},
-            {"id": "api", "release": "web/api", "state": "other-publication", "health": "Healthy", "publication": "p1"},
+            {"id": "api", "release": "web/api", "state": "other-publication", "health": "Healthy", "publication": "p1", "running": "r1", "publicationTruncated": true},
             {"id": "worker", "release": "jobs/worker", "state": "unmatched", "health": "Healthy", "reason": "edited"},
             {"id": "catalog", "state": "accepted", "health": "Healthy"},
         ]);
@@ -151,7 +159,14 @@ mod tests {
             accepted.iter().map(|verdict| verdict.meets).collect::<Vec<_>>(),
             [true, true, false, true]
         );
-        assert_eq!(accepted[1].runs, DeploymentRuns::Publication("p1".to_owned()));
+        assert_eq!(
+            accepted[1].runs,
+            DeploymentRuns::Publication {
+                publication: "p1".to_owned(),
+                running: Some("r1".to_owned()),
+                truncated: true,
+            }
+        );
         assert_eq!(accepted[1].group.as_deref(), Some("web"));
         assert_eq!(accepted[2].runs, DeploymentRuns::Unproven);
         assert_eq!(accepted[2].reason.as_deref(), Some("worker is unmatched: edited"));
@@ -177,5 +192,30 @@ mod tests {
         );
         assert_eq!(input_consumer(&spec, "/releases/web~1web/image"), None);
         assert_eq!(input_consumer(&spec, "/target"), None);
+    }
+
+    /// A receipt's publication is its `PublishedTree`'s commit, the commit
+    /// a deployment's matched publication is compared with; a receipt
+    /// without one names none. Catches a value-only path that can never
+    /// find the state a deployment runs.
+    #[test]
+    fn test_receipt_publication_is_the_published_tree_commit() {
+        let tree = |spec: Value| -> ArtifactDocument {
+            serde_json::from_value(json!({
+                "apiVersion": "artifacts.gitops.nyl/v1",
+                "kind": "PublishedTree",
+                "metadata": {"name": "tree", "unit": {
+                    "environment": "dev", "name": "kubernetes", "uid": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90"
+                }},
+                "executionKey": format!("sha256:{}", "a".repeat(64)),
+                "spec": spec,
+            }))
+            .unwrap()
+        };
+        let artifacts = BTreeMap::from([("tree".to_owned(), tree(json!({"commit": "c0ffee", "branch": "deploy"})))]);
+        assert_eq!(receipt_publication(&artifacts).as_deref(), Some("c0ffee"));
+        assert_eq!(receipt_publication(&BTreeMap::new()), None);
+        let without = BTreeMap::from([("tree".to_owned(), tree(json!({"branch": "deploy"})))]);
+        assert_eq!(receipt_publication(&without), None);
     }
 }

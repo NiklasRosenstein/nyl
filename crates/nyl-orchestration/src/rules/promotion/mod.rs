@@ -318,6 +318,7 @@ fn context<'a>(input: &'a PromotionInput<'_>, value_units: &'a BTreeSet<UnitName
         } else {
             input.history.first()
         },
+        history: input.history,
     }
 }
 
@@ -656,8 +657,14 @@ fn fix_for(source: &EnvironmentName, gaps: &[Gap], level: &str) -> String {
     }
     if has(GapKind::NotRunning) {
         fixes.push(format!(
-            "what runs decides: wait until it runs the newest receipt and record that with `nyl attest -e {source}`, or promote an explicitly chosen state with `--state-revision <desired commit>`, which is judged on the attestations recorded for it"
+            "what runs decides: a publication's attestations count only for its current receipt, and a value-only path takes each value from the state its consumer runs; wait until what runs is attested (`nyl attest -e {source}`), or promote an explicitly chosen state with `--state-revision <desired commit>`, which is judged on the attestations recorded for it"
         ));
+    }
+    if has(GapKind::Coverage) {
+        fixes.push(
+            "correct the PromotionPath's `coverage`: name Applications and ApplicationGroups as the publication's attestations list them (`nyl get states -e <source> -o yaml` shows their details)"
+                .to_owned(),
+        );
     }
     if has(GapKind::Failing) {
         fixes.push(

@@ -95,7 +95,8 @@ with `run`, `desiredCommit`, `observedCommit`, `sourceCommit`, `level`,
 `eligible`, `selected`, `promoted`, `running`, `values`, `byValue` (`level`
 and `eligible` per value, for a value-only path), and `missing[]`: each with
 `unit` (absent for an environment-wide attestation), `attestation`, `reason`
-(`no-receipt`, `pending`, `aged`, `failing`, or `not-running`), and
+(`no-receipt`, `pending`, `aged`, `failing`, `not-running`, or `coverage`
+for a `coverage` name no attestation lists), and
 `message`.
 
 A path `nyl promote` refuses before it reads state, such as an unknown path

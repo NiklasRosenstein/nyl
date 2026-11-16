@@ -248,7 +248,9 @@ spec:
     [Promoting an environment's source](#promoting-an-environments-source)). At
     `published`, that is the newest state at which every selected unit has a
     matching receipt or, for a target source, the newest publication commit;
-    at `attested`, the state the source ran when it was attested. Mixed
+    at `attested`, the newest state whose current receipt's running-scoped
+    attestations pass, together with every other required attestation
+    recorded for that state (see Choosing the state below). Mixed
     revisions block.
   - A path that promotes only values takes each value from the state its own
     consuming Application or unit runs, which may differ between values when
@@ -258,7 +260,18 @@ spec:
     `{unit: <publication>, input: /releases/<group>~1<release>/…}`, is
     consumed by that Release's Application; any other selector is consumed
     by the producing unit itself, so its value comes from that unit's newest
-    receipt that meets the level.
+    receipt that meets the level. Following the consumer is the value-only
+    selection rule, not an evidence requirement: it holds at `published`
+    and under `--evidence published` too, whenever the publication's
+    current receipt has a recorded `accepted` or `healthy` that lists the
+    consumer. A deployment's publication matches a state whose receipt
+    published either the commit the driver matched or the revision the
+    deployment runs; when the driver's matching stopped at its walk limit
+    (`publicationTruncated`), the matched commit may be newer than the one
+    that introduced what runs. When no recorded state published it, the
+    promotion is refused with `NYL-PROMOTE-NO-EVIDENCE`, "no recorded state
+    published what <Application> runs (<commit>)", and the fix names
+    `--state-revision` or publishing again.
   - `--state-revision <desired commit>` selects an exact state and
     `--revision <source commit>` the newest with that source commit, for all
     values of the promotion. An explicitly chosen state reaches `attested`
@@ -351,7 +364,10 @@ spec:
     such as one that shows Applications on different publications, refuses
     the promotion with the driver's reason, without falling back to an
     older state whose attestations once passed, because they no longer
-    describe what runs. Which attestation names are running-scoped is the
+    describe what runs. The current receipt is the one the newest recorded
+    state observes, even when that run did not finish the unit; when the
+    newest state has no receipt of the unit (removed or torn down), no
+    older state qualifies through its publication attestations. Which attestation names are running-scoped is the
     driver's declaration (`Driver::running_attestations`; a
     KubernetesPublication that declares `observe` names `accepted` and
     `healthy`), so the engine reads no driver details. Without a reader (a
@@ -530,9 +546,13 @@ decided when `nyl promote` writes, by the supersede check:
   known source commit, such as an image from outside Nyl or a command output,
   is listed as unchecked (`NYL-PROMOTE-UNCHECKED`) by `nyl promote`, and by
   `plan` of the target for every value that two or more paths into it
-  promote, judged from the source environment's rendered units (an artifact
-  or output of a unit with no Git source field, or an input that neither
-  lies in one nor is filled by a `fromUnit` reference to such a unit). A
+  promote, paired by value name (the names path-less bindings read). That
+  listing is static, judged from the source environment's rendered units
+  rather than a recorded state: an artifact or output of a unit with no
+  Git source field, or an input that neither lies in one nor is filled by
+  a `fromUnit` reference to such a unit. It can therefore differ from what
+  `nyl promote` finds in a state, such as a reference to another
+  environment's unit, which it lists as unchecked. A
   subset promotion checks only the values it writes. Commits are paired by
   the source field they came from (an image's main context with the other
   image's main context), and with any commit of the repository only when no
@@ -986,7 +1006,17 @@ nothing itself, so there is one evidence path.
   `coverage.applicationGroups` narrows it to the Applications of those
   ApplicationGroups (the catalog Application belongs to none), and
   `coverage.excludeApplications` leaves the named Applications out, so a
-  failing aggregate that only they explain does not block. On a value-only
+  failing aggregate that only they explain does not block.
+  `applicationGroups` applies only to source paths; a value-only path
+  judges each value for its own consumer and ignores it (validation does
+  not warn about it yet). Coverage never fails open: a named group no
+  Application of the attestation belongs to, a coverage that leaves no
+  Application to judge while the attestation fails, and a
+  `requireApplications` name that no running-scoped attestation of the
+  current receipts lists (also without `observe`, and whatever the path
+  requires) refuse the promotion with `NYL-PROMOTE-NO-EVIDENCE`, naming the
+  field. Nothing checks the names earlier: validating them against the
+  Applications a target generates needs a driver contract that lists them. On a value-only
   path, an excluded consumer must still run a publication of the source,
   which decides the value's state, but need not meet the attestation there.
   The per-Application judgement reads a typed verdict the driver derives
@@ -1009,9 +1039,12 @@ nothing itself, so there is one evidence path.
   whose receipt produced that publication. Promotion blocks only
   when a covered Application runs a revision that matches no source
   publication (`unmatched`), or another per-Application finding fails it
-  (`mixed`, `missing`, `other-source`, not Healthy when `healthy` is
-  required). A path that promotes the target's source also
-  blocks on mixed revisions.
+  (`mixed`, `missing`, `other-source`), or it is not Healthy: a recorded
+  `healthy` failing for the consumer blocks its value even when the path
+  requires only `accepted`, as any failing attestation blocks its state,
+  until `--ignore-attestation` sets it aside or the consumer is in
+  `coverage.excludeApplications`. A path that promotes the target's source
+  also blocks on mixed revisions.
 - **Decision evidence is always recorded.** The attestations behind every
   promotion, with their details (time, Application, running revision,
   health), are stored in the PromotionRecord, including one kept in a

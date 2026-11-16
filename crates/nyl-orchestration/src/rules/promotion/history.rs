@@ -115,6 +115,12 @@ pub struct StateAttestations {
     /// Per unit, the attestations keyed by the execution key of the unit's
     /// receipt in the state.
     pub units: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    /// Per unit whose receipt is not current in the state (its desired
+    /// document changed and did not execute, such as a failed run), the
+    /// attestations of the receipt it still has: what it published last, so
+    /// what runs. Promotion reads them only to judge what runs now (D8);
+    /// they never prove the state itself.
+    pub stale_receipts: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
     /// The environment-wide attestations keyed by the state's desired commit.
     pub environment: BTreeMap<String, Attestation>,
 }

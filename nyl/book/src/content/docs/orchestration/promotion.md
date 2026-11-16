@@ -83,9 +83,21 @@ state whose receipt published what that Application runs, so Applications
 that were synced to different publications by hand do not block, and the
 record names a value's own `state` when it differs from `from`. Only the
 consuming Application's own findings block its value: it runs a revision no
-publication explains (`unmatched`), a mix of revisions, nothing, or is not
-`Healthy` when `healthy` is required. A path that promotes the target's
-source still needs one state behind every value, so the same mix refuses it.
+publication explains (`unmatched`), a mix of revisions, nothing, or a recorded
+`healthy` fails for it (even when the path requires only `accepted`, as any
+failing attestation blocks). A path that promotes the target's source still
+needs one state behind every value, so the same mix refuses it.
+
+Following the consumer is how a value-only path picks a state, not an
+evidence requirement: it applies at `evidence: published` and under
+`--evidence published` too, whenever the publication's current receipt has a
+recorded `accepted` or `healthy`. A state is matched by the publication commit
+it published, which may be the commit the reading matched or the revision
+the Application reports running. When no recorded state published what an
+Application runs, such as after the history was cut short or a publication
+outside orchestration, the promotion is refused with "no recorded state
+published what <Application> runs (<commit>)": promote a state explicitly
+with `--state-revision`, or reconcile the source so it publishes again.
 
 ## Coverage
 
@@ -103,11 +115,18 @@ spec:
 - `applicationGroups` and `excludeApplications` narrow a source path's
   judgement: a failing `accepted` or `healthy` that only Applications outside
   them explain does not block. The catalog Application belongs to no group.
+  `applicationGroups` applies only to source paths; a value-only path ignores
+  it, because it judges each value for its own consumer.
+- Coverage never fails open: a group no Application belongs to, or a
+  coverage that leaves no Application to judge while the attestation fails,
+  refuses the promotion and names the field. Names are checked when a
+  promotion runs; `nyl validate` does not check them yet.
 - On a value-only path, an excluded consumer must still run a publication of
   the source, which decides its value's state, but need not be healthy.
 - `requireApplications` adds Applications that contribute no value but must
   meet the required attestations at whatever publication they run. A name no
-  attestation lists blocks the promotion.
+  attestation lists blocks the promotion, also for a publication without
+  `observe` and on a path that requires none of its attestations.
 
 ## Reading what was promoted
 

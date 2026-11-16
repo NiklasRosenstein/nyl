@@ -46,6 +46,9 @@ enum Receipt {
     Current,
     /// The desired document names this image's key, but nothing finished.
     Missing,
+    /// The desired document names this image's key, and the receipt is still
+    /// the one for this other image: the run did not finish this unit.
+    Stale(&'static str),
 }
 
 /// A recorded state of dev: run `number`, desired commit `number` as a
@@ -195,7 +198,7 @@ impl StateBuilder {
                 json!({"digest": image}),
                 vec![listed(&image_artifact)],
             )),
-            Receipt::Missing => None,
+            Receipt::Missing | Receipt::Stale(_) => None,
         };
         if matches!(self.web_image, Receipt::Current) {
             snapshot.artifacts.insert(
@@ -208,6 +211,7 @@ impl StateBuilder {
             .insert(name("web-image"), observed("web-image", "Command", web_receipt));
         let kubernetes_receipt = match self.kubernetes {
             Receipt::Current => Some(finished(&kubernetes_seed(&image), json!({}), Vec::new())),
+            Receipt::Stale(old) => Some(finished(&kubernetes_seed(old), json!({}), Vec::new())),
             Receipt::Missing => None,
         };
         snapshot.observed.insert(
@@ -674,7 +678,11 @@ fn runs_other(deployment: &str, publication: &str) -> DeploymentVerdict {
     verdict(
         deployment,
         "web",
-        DeploymentRuns::Publication(publication.to_owned()),
+        DeploymentRuns::Publication {
+            publication: publication.to_owned(),
+            running: None,
+            truncated: false,
+        },
         true,
         Some(&format!("{deployment} runs another publication ({publication})")),
     )
@@ -866,7 +874,11 @@ fn test_coverage_narrows_and_extends_the_source_judgement() {
     let jobs = verdict(
         "worker",
         "jobs",
-        DeploymentRuns::Publication("p0".to_owned()),
+        DeploymentRuns::Publication {
+            publication: "p0".to_owned(),
+            running: None,
+            truncated: false,
+        },
         true,
         Some("worker runs another publication (p0)"),
     );
@@ -1462,4 +1474,290 @@ fn test_a_source_block_must_match_the_state_it_names() {
         let finding = check_block(tampered, &case.path, state).unwrap_err();
         assert_eq!(finding.code, Code::PromotionRecordInvalid, "{}", finding.message);
     }
+}
+
+fn runs_running(deployment: &str, publication: &str, running: &str) -> DeploymentVerdict {
+    verdict(
+        deployment,
+        "web",
+        DeploymentRuns::Publication {
+            publication: publication.to_owned(),
+            running: Some(running.to_owned()),
+            truncated: false,
+        },
+        true,
+        Some(&format!("{deployment} runs another publication ({publication})")),
+    )
+}
+
+fn without_unit(mut state: RecordedState, unit: &str) -> RecordedState {
+    state.snapshot.desired.remove(&name(unit));
+    state.snapshot.observed.remove(&name(unit));
+    state.attestations.units.remove(&name(unit));
+    state.running.remove(&name(unit));
+    state
+}
+
+/// B1: `coverage.applicationGroups` never fails open. A group no
+/// Application of the attestation belongs to (a typo) is a coverage gap
+/// naming the field, and so is a coverage that leaves no Application to
+/// judge while the attestation fails. Catches a misspelt group turning a
+/// failing `accepted` into a pass.
+#[test]
+fn test_coverage_application_groups_never_fail_open() {
+    let broken = verdict("api", "web", DeploymentRuns::Unproven, false, Some("api is unmatched"));
+    let history = vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH).observed(
+        Fail,
+        "p1",
+        &[runs_receipt("web"), broken],
+    )];
+    let mut source = case(attested(), history);
+    source.path.spec.coverage.application_groups = vec!["wbe".to_owned()];
+    let refusal = source.refused();
+    assert!(refusal
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("coverage.applicationGroups names wbe")));
+    assert!(refusal.finding.fix.contains("coverage"), "{}", refusal.finding.fix);
+    // A real group whose every Application is excluded leaves nothing to judge.
+    source.path.spec.coverage.application_groups = vec!["web".to_owned()];
+    source.path.spec.coverage.exclude_applications = vec!["web".to_owned(), "api".to_owned()];
+    let refusal = source.refused();
+    assert!(refusal
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("leaves no Application")));
+    // Excluding only the failing Application passes.
+    source.path.spec.coverage.exclude_applications = vec!["api".to_owned()];
+    source.promoted();
+}
+
+/// S1: a `requireApplications` name no running-scoped attestation lists is
+/// a coverage gap whatever the path requires: with no reader at all, and
+/// with a path that requires only the environment's `qa`. A listed name
+/// passes there, because nothing of it is required.
+#[test]
+fn test_require_applications_needs_a_listed_application() {
+    let qa_only = path(json!({"evidence": "attested", "attestations": {"units": {"kubernetes": [], "web-image": []}}}));
+    let mut unobserved = case(
+        qa_only.clone(),
+        vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH)],
+    );
+    unobserved.path.spec.coverage.require_applications = vec!["web".to_owned()];
+    let refusal = unobserved.refused();
+    assert!(refusal
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("coverage.requireApplications names web")));
+    let mut observed = case(
+        qa_only,
+        vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH).observed(
+            Pass,
+            "p1",
+            &[runs_receipt("web")],
+        )],
+    );
+    observed.path.spec.coverage.require_applications = vec!["web".to_owned()];
+    observed.promoted();
+    observed.path.spec.coverage.require_applications = vec!["gateway".to_owned()];
+    assert!(observed.refused().gaps.iter().any(|gap| gap.kind == GapKind::Coverage));
+}
+
+/// S5: an explicitly chosen state on a value-only path honours
+/// `excludeApplications`: the excluded, Degraded Application leaves the
+/// judgement of the publication's attestations.
+#[test]
+fn test_an_explicit_value_only_state_honours_excluded_applications() {
+    let (path, consumers) = per_release();
+    let degraded = verdict("web", "web", DeploymentRuns::Receipt, false, Some("web is Degraded"));
+    let history = vec![state(1, 'a', "sha256:one").observed(Fail, "p1", &[degraded, runs_receipt("api")])];
+    let mut values = case(path, history);
+    values.promotes_source = false;
+    values.consumers = consumers;
+    values.request.select = Selection::StateRevision(desired_commit_of(1));
+    assert!(values
+        .refused()
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == GapKind::Failing && gap.scope == "kubernetes"));
+    values.path.spec.coverage.exclude_applications = vec!["web".to_owned()];
+    assert_eq!(from_run(&values.promoted().record), run_id(1).to_string());
+}
+
+/// S2: the current receipt is the newest state's observed receipt. The
+/// newest run changed the publication but did not finish it, so the
+/// publication still has state 1's receipt, and its attestations (recorded
+/// for that receipt) say what runs: both values come from state 1, on a
+/// value-only path and judged per Application.
+#[test]
+fn test_a_failed_newest_run_keeps_the_observed_receipt_current() {
+    let (path, consumers) = per_release();
+    let older = state(1, 'a', "sha256:one").observed(Pass, "p1", &[runs_receipt("web"), runs_receipt("api")]);
+    let older = older.build();
+    let mut newest = state(2, 'b', "sha256:two");
+    newest.kubernetes = Receipt::Stale("sha256:one");
+    let mut newest = newest.build();
+    newest.attestations.stale_receipts.insert(
+        name("kubernetes"),
+        older.attestations.units[&name("kubernetes")].clone(),
+    );
+    newest
+        .running
+        .insert(name("kubernetes"), older.running[&name("kubernetes")].clone());
+    let mut values = case(path, Vec::new());
+    values.history = vec![newest, older];
+    values.promotes_source = false;
+    values.consumers = consumers;
+    let promotion = values.promoted();
+    assert_eq!(from_run(&promotion.record), run_id(1).to_string());
+    assert_eq!(promotion.record.values["apiImage"].value, json!("sha256:one"));
+    // The whole source: state 1's receipt is still the current one, so its
+    // publication attestations count for it.
+    let mut source = case(path_without_values(), Vec::new());
+    source.history = values.history.clone();
+    let targets = BTreeSet::from([name("kubernetes")]);
+    let dev = dev();
+    let mut input = source.input(&targets, &dev);
+    input.path = &source.path;
+    let evaluations = evaluate(&input);
+    assert!(
+        evaluations[1].gaps.iter().all(|gap| gap.kind != GapKind::NotRunning),
+        "{:?}",
+        evaluations[1].gaps
+    );
+}
+
+fn path_without_values() -> PromotionPath {
+    let mut path = path(json!({"evidence": "attested", "attestations": {"environment": []}}));
+    path.spec.values.clear();
+    path
+}
+
+/// S3/U3: values follow what their consumer runs at every evidence level:
+/// at `published` with an observing publication, and under `--evidence
+/// published`, apiImage still comes from the state whose publication its
+/// Application runs. The gap on the newer state says so.
+#[test]
+fn test_values_follow_their_consumer_at_published_too() {
+    let (mut path, consumers) = per_release();
+    path.spec.evidence = nyl_core::resources::promotion::PathEvidence::Published;
+    let history = || {
+        vec![
+            state(2, 'b', "sha256:two").observed(Fail, "p2", &[runs_receipt("web"), runs_other("api", "p1")]),
+            state(1, 'a', "sha256:one").observed(Pass, "p1", &[runs_receipt("web"), runs_receipt("api")]),
+        ]
+    };
+    let mut published = case(path, history());
+    published.promotes_source = false;
+    published.consumers = consumers.clone();
+    let record = published.promoted().record;
+    assert_eq!(record.values["apiImage"].value, json!("sha256:one"));
+    assert_eq!(record.values["webImage"].value, json!("sha256:two"));
+    let gaps = &published.evaluations()[0].gaps;
+    assert!(gaps.iter().any(|gap| gap.kind == GapKind::NotRunning
+        && gap
+            .message
+            .contains("takes each value from the state whose receipt published what its consumer runs")));
+
+    let (attested, _) = per_release();
+    let mut relaxed = case(attested, history());
+    relaxed.promotes_source = false;
+    relaxed.consumers = consumers;
+    relaxed.request.evidence_published = true;
+    assert_eq!(relaxed.promoted().record.values["apiImage"].value, json!("sha256:one"));
+}
+
+/// S4: a deployment's publication matches a state by the matched commit or
+/// by the revision it runs; one no recorded state published refuses with a
+/// message that says so and names `--state-revision`.
+#[test]
+fn test_a_publication_no_state_published_is_named() {
+    let (path, consumers) = per_release();
+    let history = |api: DeploymentVerdict| {
+        vec![
+            state(2, 'b', "sha256:two").observed(Fail, "p2", &[runs_receipt("web"), api]),
+            state(1, 'a', "sha256:one").observed(Pass, "p1", &[runs_receipt("web"), runs_receipt("api")]),
+        ]
+    };
+    let mut values = case(path.clone(), history(runs_running("api", "p0", "p1")));
+    values.promotes_source = false;
+    values.consumers = consumers.clone();
+    assert_eq!(values.promoted().record.values["apiImage"].value, json!("sha256:one"));
+
+    let mut unknown = case(path, history(runs_other("api", "p9")));
+    unknown.promotes_source = false;
+    unknown.consumers = consumers;
+    let refusal = unknown.refused();
+    assert!(
+        refusal
+            .finding
+            .message
+            .contains("no recorded state published what api runs (p9)"),
+        "{}",
+        refusal.finding.message
+    );
+    assert!(refusal.finding.message.contains("--state-revision"));
+}
+
+/// The refusal names an older state and `--state-revision` only when what
+/// runs now is all that holds it back: an older state that also fails
+/// another attestation is not offered.
+#[test]
+fn test_the_state_revision_hint_needs_only_not_running_gaps() {
+    let history = vec![
+        state(2, 'b', "sha256:two").env_attestation("qa", Pass, FRESH).observed(
+            Fail,
+            "p2",
+            &[runs_other("web", "p1"), runs_other("api", "p1")],
+        ),
+        state(1, 'a', "sha256:one").env_attestation("qa", Fail, FRESH).observed(
+            Pass,
+            "p1",
+            &[runs_receipt("web"), runs_receipt("api")],
+        ),
+    ];
+    let refusal = case(attested(), history).refused();
+    assert!(
+        !refusal.finding.fix.contains("--state-revision"),
+        "{}",
+        refusal.finding.fix
+    );
+}
+
+/// U1: when the newest state has no receipt of the publication (it was
+/// removed or torn down), an older state does not qualify through that
+/// unit's publication attestations; explicitly chosen, it still does.
+#[test]
+fn test_a_removed_publication_leaves_no_current_receipt() {
+    let both = [runs_receipt("web"), runs_receipt("api")];
+    let mut removed = case(
+        path(json!({"evidence": "attested", "attestations": {"units": {"web-image": []}}})),
+        Vec::new(),
+    );
+    removed.history = vec![
+        // The newest state falls short on its own (qa fails), so only the
+        // older one could be taken.
+        without_unit(
+            state(2, 'b', "sha256:two").env_attestation("qa", Fail, FRESH).build(),
+            "kubernetes",
+        ),
+        state(1, 'a', "sha256:one")
+            .env_attestation("qa", Pass, FRESH)
+            .observed(Pass, "p1", &both)
+            .build(),
+    ];
+    let targets = BTreeSet::from([name("web-image"), name("kubernetes")]);
+    let dev = dev();
+    let evaluations = evaluate(&removed.input(&targets, &dev));
+    assert!(
+        evaluations[1]
+            .gaps
+            .iter()
+            .any(|gap| gap.kind == GapKind::NotRunning && gap.message.contains("no receipt of unit kubernetes")),
+        "{:?}",
+        evaluations[1].gaps
+    );
+    assert_eq!(removed.refused().finding.code, Code::PromoteNoEvidence);
+    removed.request.select = Selection::StateRevision(desired_commit_of(1));
+    assert_eq!(from_run(&removed.promoted().record), run_id(1).to_string());
 }

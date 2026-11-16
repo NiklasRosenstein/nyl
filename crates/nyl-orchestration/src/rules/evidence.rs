@@ -315,15 +315,18 @@ pub fn failing(
     environment: (&str, &BTreeMap<String, Attestation>, Option<&str>),
 ) -> (BTreeMap<UnitName, Vec<Finding>>, Vec<Finding>) {
     let (environment_name, environment_recorded, state_commit) = environment;
-    let finding = |scope: &str, attestation: &Attestation, unit: Option<&UnitName>| {
+    // How a passing attestation is recorded: by the driver (`nyl attest`)
+    // for a name it reports, by `--name` for an external one.
+    let finding = |scope: &str, attestation: &Attestation, unit: Option<(&UnitName, bool)>| {
         let mut message = format!("attestation {scope}/{} fails", attestation.name);
         if let Some(reason) = attestation.reason.as_deref().filter(|reason| !reason.is_empty()) {
             message.push_str(": ");
             message.push_str(reason);
         }
         let record = match unit {
-            Some(unit) => format!(
-                "`nyl attest -e {environment_name} --unit {unit}` (or `--name {} --result pass` for an external one)",
+            Some((unit, false)) => format!("`nyl attest -e {environment_name} --unit {unit}`"),
+            Some((unit, true)) => format!(
+                "`nyl attest -e {environment_name} --unit {unit} --name {} --result pass`",
                 attestation.name
             ),
             None => format!(
@@ -335,7 +338,7 @@ pub fn failing(
             Code::AttestationFailed,
             message,
             format!(
-                "fix what failed and record a passing attestation with {record}; until then it blocks promotion of this state and dependents that require it"
+                "fix what failed and record a passing attestation with {record}; until then it blocks dependents that require it and promotion of this state (on a path that promotes only values, of the values whose consuming Application it fails for)"
             ),
         )
     };
@@ -353,10 +356,11 @@ pub fn failing(
             if let Some(attestation) = recorded_for(name, producer, receipt, recorded)
                 .filter(|attestation| attestation.result == AttestationResult::Fail)
             {
-                units
-                    .entry(unit.clone())
-                    .or_default()
-                    .push(finding(unit.as_str(), attestation, Some(unit)));
+                units.entry(unit.clone()).or_default().push(finding(
+                    unit.as_str(),
+                    attestation,
+                    Some((unit, external_only(producer).contains(name))),
+                ));
             }
         }
     }

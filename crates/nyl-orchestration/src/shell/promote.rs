@@ -1329,6 +1329,7 @@ pub fn read_running(drivers: &DriverSet, states: &mut [RecordedState]) {
                 .attestations
                 .units
                 .get(unit)
+                .or_else(|| state.attestations.stale_receipts.get(unit))
                 .into_iter()
                 .flatten()
                 .filter(|(name, _)| names.contains(*name))
@@ -1414,12 +1415,11 @@ fn attestations_of(
     let mut found = StateAttestations::default();
     for (unit, desired) in &state.desired {
         let observed = state.observed.get(unit);
-        if !receipt_is_current(desired, observed) {
-            continue;
-        }
         let Some(receipt) = observed.and_then(|observed| observed.receipt.as_ref()) else {
             continue;
         };
+        // A receipt that is not current still says what was published last.
+        let current = receipt_is_current(desired, observed);
         for snapshot in newer {
             for (name, attestation) in snapshot.attestations.get(unit).into_iter().flatten() {
                 let names = attestation.execution_key == receipt.execution_key.as_str()
@@ -1428,9 +1428,12 @@ fn attestations_of(
                         .as_ref()
                         .is_none_or(|subject| Some(&subject.uid) == desired.unit.uid.as_ref());
                 if names {
-                    found
-                        .units
-                        .entry(unit.clone())
+                    let into = if current {
+                        &mut found.units
+                    } else {
+                        &mut found.stale_receipts
+                    };
+                    into.entry(unit.clone())
                         .or_default()
                         .entry(name.clone())
                         .or_insert_with(|| attestation.clone());

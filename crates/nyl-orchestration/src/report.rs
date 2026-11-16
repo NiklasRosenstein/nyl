@@ -708,6 +708,9 @@ pub enum MissingReason {
     /// has a newer receipt, or the deployment that consumes a value runs
     /// another state's result.
     NotRunning,
+    /// The path's `coverage` names an Application or ApplicationGroup no
+    /// attestation lists, or leaves nothing to judge while it fails.
+    Coverage,
 }
 
 /// One reason a candidate falls short.
@@ -736,6 +739,7 @@ impl MissingEvidence {
                 GapKind::Aged => MissingReason::Aged,
                 GapKind::Failing => MissingReason::Failing,
                 GapKind::NotRunning => MissingReason::NotRunning,
+                GapKind::Coverage => MissingReason::Coverage,
             },
             message: gap.message.clone(),
         }

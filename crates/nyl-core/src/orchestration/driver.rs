@@ -285,9 +285,20 @@ pub struct DeploymentVerdict {
 pub enum DeploymentRuns {
     /// What the receipt the attestation names produced.
     Receipt,
-    /// What another receipt of the unit produced, by the identity
-    /// [`Driver::receipt_publication`] gives that receipt.
-    Publication(String),
+    /// What another receipt of the unit produced. A state whose receipt's
+    /// identity ([`Driver::receipt_publication`]) is `publication` or
+    /// `running` produced it.
+    Publication {
+        /// The publication the deployment matched, as the driver names it:
+        /// the commit that introduced what it runs.
+        publication: String,
+        /// The revision the deployment reports running, when the driver
+        /// knows it; a receipt may name that one instead.
+        running: Option<String>,
+        /// Whether the driver's matching stopped at a limit, so
+        /// `publication` may be newer than the one that introduced what runs.
+        truncated: bool,
+    },
     /// Nothing a receipt of the unit explains: a revision no publication
     /// matches, a mix of revisions, nothing at all, or what could not be read.
     Unproven,
