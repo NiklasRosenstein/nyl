@@ -9,6 +9,7 @@ use super::environment::{
     Environment, EnvironmentGroup, EnvironmentTemplate, KIND_ENVIRONMENT, KIND_ENVIRONMENT_GROUP,
     KIND_ENVIRONMENT_TEMPLATE,
 };
+use super::promotion::{PromotionPath, KIND_PROMOTION_PATH};
 use super::{GitRepository, KIND_GIT_REPOSITORY};
 use crate::constants::{legacy, API_VERSION, API_VERSION_COMPONENTS, API_VERSION_GITOPS, API_VERSION_K8S_GITOPS};
 use crate::{CoreError, Result};
@@ -101,6 +102,20 @@ pub fn resource_descriptors() -> Vec<ResourceDescriptor> {
                 )
             },
         },
+        ResourceDescriptor {
+            name: KIND_PROMOTION_PATH,
+            api_version: API_VERSION_GITOPS,
+            slug: "promotion-path",
+            aliases: &[],
+            dynamic_kind: false,
+            schema: || {
+                gitops_schema(
+                    KIND_PROMOTION_PATH,
+                    json!(schema_for!(PromotionPath)),
+                    promotion_path_example(),
+                )
+            },
+        },
     ]
 }
 
@@ -132,6 +147,11 @@ pub fn environment_group_example() -> Value {
 /// Minimal authored EnvironmentTemplate, shared by its schema and the documentation.
 pub fn environment_template_example() -> Value {
     json!({"apiVersion": API_VERSION_GITOPS, "kind": KIND_ENVIRONMENT_TEMPLATE, "metadata": {"name": "preview"}, "spec": {"parameters": {"pr": {"type": "integer"}}, "unitSelector": {"matchLabels": {"preview": "true"}}, "values": {"hostname": "pr-{{ params.pr }}.preview.example.com"}, "state": {"repositoryRef": {"name": "platform-state"}, "desiredRef": "nyl/previews", "observedRef": "nyl/previews", "path": "{{ environment.name }}"}, "allowUnprotectedSource": true, "deletionPolicy": "Teardown", "allowTeardown": true, "ttl": "7d", "maxInstances": 20}})
+}
+
+/// Minimal authored PromotionPath, shared by its schema and the documentation.
+pub fn promotion_path_example() -> Value {
+    json!({"apiVersion": API_VERSION_GITOPS, "kind": KIND_PROMOTION_PATH, "metadata": {"name": "dev-to-prod"}, "spec": {"from": {"environment": "dev"}, "to": {"environment": "prod"}, "evidence": "attested", "maxAttestationAge": "1h", "values": {"webImage": {"select": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}}}}})
 }
 
 /// Add discriminators without discarding descriptions from Rust documentation.
@@ -317,6 +337,10 @@ mod tests {
                     .validate()
                     .unwrap(),
                 KIND_ENVIRONMENT_TEMPLATE => serde_json::from_value::<EnvironmentTemplate>(example)
+                    .unwrap()
+                    .validate()
+                    .unwrap(),
+                KIND_PROMOTION_PATH => serde_json::from_value::<PromotionPath>(example)
                     .unwrap()
                     .validate()
                     .unwrap(),

@@ -45,5 +45,6 @@ pub mod ids;
 pub mod instance;
 pub mod ports;
 pub mod progress;
+pub mod promotion;
 pub mod state;
 pub mod time;

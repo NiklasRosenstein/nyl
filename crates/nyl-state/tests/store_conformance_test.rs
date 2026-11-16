@@ -840,6 +840,123 @@ fn test_drift_records_observations_and_attestations_round_trip_on_the_observed_r
     }
 }
 
+fn promotion_record(path: &str, sequence: u64) -> nyl_core::orchestration::promotion::PromotionRecord {
+    serde_json::from_value(json!({
+        "path": path, "sequence": sequence,
+        "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90",
+                 "desiredCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a"},
+        "sourceCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a",
+        "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
+        "artifactsVerified": true,
+        "requested": {"by": "alice", "identity": "local", "at": "2026-09-24T10:00:00Z"}
+    }))
+    .unwrap()
+}
+
+/// `desired/promotions/<path>.yaml` (decision F1): records are written and
+/// read on the desired ref only, survive transitions that change other
+/// documents, are part of earlier snapshots, and are removed by `clear`.
+/// Catches a store that drops the records on an unrelated transition or
+/// keeps them after the environment's state is deleted.
+#[test]
+fn test_promotion_records_round_trip_on_the_desired_ref_and_survive_other_transitions() {
+    use nyl_core::orchestration::ids::PromotionPathName;
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let prod = environment("prod");
+        let committed = initialized(store, &location, &prod);
+        let path = PromotionPathName::new("dev-to-prod").unwrap();
+        let before = store.snapshot(&location).unwrap().tips;
+        let written = store
+            .commit(
+                &location,
+                &prod,
+                &before,
+                &transition(TransitionChanges {
+                    promotions: BTreeMap::from([(path.clone(), Some(promotion_record("dev-to-prod", 1)))]),
+                    ..TransitionChanges::default()
+                }),
+                &committed.lease_version,
+            )
+            .unwrap();
+        assert!(written.desired.is_some(), "{}", subject.name);
+        assert_eq!(
+            written.observed, None,
+            "{}: the observed ref is untouched",
+            subject.name
+        );
+        let snapshot = store.snapshot(&location).unwrap();
+        let record = &snapshot.promotions[&path];
+        assert!(record.is_document(), "{}: written as a state document", subject.name);
+        assert_eq!(record.sequence, 1, "{}", subject.name);
+
+        // A transition of a unit leaves the record alone.
+        let (desired, observed) = unit("seed");
+        let seed = UnitName::new("seed").unwrap();
+        let after_unit = store
+            .commit(
+                &location,
+                &prod,
+                &snapshot.tips,
+                &transition(TransitionChanges {
+                    desired: BTreeMap::from([(seed.clone(), Some(desired))]),
+                    observed: BTreeMap::from([(seed, Some(observed))]),
+                    ..TransitionChanges::default()
+                }),
+                &written.lease_version,
+            )
+            .unwrap();
+        let current = store.snapshot(&location).unwrap();
+        assert_eq!(current.promotions, snapshot.promotions, "{}", subject.name);
+        // A later promotion replaces the path's record; the earlier one is in history.
+        let replaced = store
+            .commit(
+                &location,
+                &prod,
+                &current.tips,
+                &transition(TransitionChanges {
+                    promotions: BTreeMap::from([(path.clone(), Some(promotion_record("dev-to-prod", 2)))]),
+                    ..TransitionChanges::default()
+                }),
+                &after_unit.lease_version,
+            )
+            .unwrap();
+        assert_eq!(
+            store.snapshot(&location).unwrap().promotions[&path].sequence,
+            2,
+            "{}",
+            subject.name
+        );
+        assert_eq!(
+            store.snapshot_at(&location, &snapshot.tips).unwrap().promotions[&path].sequence,
+            1,
+            "{}: history keeps the earlier record",
+            subject.name
+        );
+        // `clear` removes the records with the rest of the environment's files.
+        let tips = store.snapshot(&location).unwrap().tips;
+        store
+            .commit(
+                &location,
+                &prod,
+                &tips,
+                &transition(TransitionChanges {
+                    clear: true,
+                    record: Some(deleted_record(&location, "prod")),
+                    ..TransitionChanges::default()
+                }),
+                &replaced.lease_version,
+            )
+            .unwrap();
+        assert!(
+            store.snapshot(&location).unwrap().promotions.is_empty(),
+            "{}",
+            subject.name
+        );
+    }
+}
+
 /// A checkpoint carries the attestations and observed values its run
 /// recorded for the receipt, and a run ref retired to evidence keeps them,
 /// whichever store holds them. Catches evidence that survives only in one

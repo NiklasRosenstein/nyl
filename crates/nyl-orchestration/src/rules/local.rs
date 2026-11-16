@@ -127,10 +127,10 @@ pub fn check_discard(
 
 /// The changes of one per-unit document map: put what differs, remove what
 /// `target` lacks.
-fn replace<T: Clone + PartialEq>(
-    current: &BTreeMap<UnitName, T>,
-    target: &BTreeMap<UnitName, T>,
-) -> BTreeMap<UnitName, Option<T>> {
+fn replace<K: Clone + Ord, T: Clone + PartialEq>(
+    current: &BTreeMap<K, T>,
+    target: &BTreeMap<K, T>,
+) -> BTreeMap<K, Option<T>> {
     let mut changes = BTreeMap::new();
     for (unit, document) in target {
         if current.get(unit) != Some(document) {
@@ -147,7 +147,7 @@ fn replace<T: Clone + PartialEq>(
 
 /// The changes that make `current` hold `target`'s content: every document
 /// of `target` put, every document absent from it removed, including
-/// artifacts, drift records, observed values, and attestations. `state.yaml` is carried
+/// artifacts, drift records, observed values, attestations, and promotion records. `state.yaml` is carried
 /// forward, never restored: the caller appends the `state-restored` event.
 /// Admission is not part of a snapshot, so it is never restored.
 pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapshot) -> TransitionChanges {
@@ -164,6 +164,7 @@ pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapsh
         drift: replace(&current.drift, &target.drift),
         observations: replace(&current.observations, &target.observations),
         attestations: replace(&current.attestations, &target.attestations),
+        promotions: replace(&current.promotions, &target.promotions),
         ..TransitionChanges::default()
     }
 }
@@ -579,6 +580,34 @@ mod tests {
         );
         assert_eq!(changes.artifacts[&unit("added-locally")], None);
         assert_eq!(changes.artifacts[&unit("changed")], Some(BTreeMap::new()));
+        assert!(restore_changes(&target, &target).is_empty());
+    }
+
+    /// Decision F1: a restore rolls the promotion records back with the rest
+    /// of the documents, instead of leaving the current record next to a
+    /// restored `appliedPromotionSequence`.
+    #[test]
+    fn test_restore_changes_replace_promotion_records() {
+        let record = |sequence: u64| -> nyl_core::orchestration::promotion::PromotionRecord {
+            serde_json::from_value(json!({
+                "path": "dev-to-prod", "sequence": sequence,
+                "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90",
+                         "desiredCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a"},
+                "evidence": {"level": "published", "override": null}, "artifactsVerified": true,
+                "requested": {"by": "a", "identity": "local", "at": "2026-09-24T10:00:00Z"}
+            }))
+            .unwrap()
+        };
+        let path = nyl_core::orchestration::ids::PromotionPathName::new("dev-to-prod").unwrap();
+        let other = nyl_core::orchestration::ids::PromotionPathName::new("hotfix-to-prod").unwrap();
+        let mut current = EnvironmentSnapshot::default();
+        current.promotions.insert(path.clone(), record(2));
+        current.promotions.insert(other.clone(), record(3));
+        let mut target = EnvironmentSnapshot::default();
+        target.promotions.insert(path.clone(), record(1));
+        let changes = restore_changes(&current, &target);
+        assert_eq!(changes.promotions[&path].as_ref().map(|r| r.sequence), Some(1));
+        assert_eq!(changes.promotions[&other], None, "a record the target lacks is removed");
         assert!(restore_changes(&target, &target).is_empty());
     }
 

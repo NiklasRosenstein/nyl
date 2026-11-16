@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::ids::{ChangeDigest, CommitId, EnvironmentName, ExecutionKey, JsonPointer, RunId, Uid, UnitName};
@@ -42,15 +42,15 @@ macro_rules! constant_marker {
         #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
         pub struct $name;
 
-        impl Serialize for $name {
+        impl serde::Serialize for $name {
             fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
                 serializer.serialize_str($value)
             }
         }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-                let $got = String::deserialize(deserializer)?;
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+                let $got = <String as serde::Deserialize>::deserialize(deserializer)?;
                 if $got == $value {
                     Ok(Self)
                 } else {
@@ -89,6 +89,9 @@ constant_marker!(
         "unsupported state format {version:?}; this Nyl reads {API_VERSION_GITOPS}, so upgrade Nyl to read newer state"
     )
 );
+
+pub(super) use constant_marker;
+pub(super) use document_kind;
 
 document_kind!(StateRecordKind, "StateRecord");
 document_kind!(EnvironmentRecordKind, "EnvironmentRecord");
@@ -1212,6 +1215,11 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
             API_VERSION_GITOPS,
             "attestation-record",
             schema::<AttestationRecord>("AttestationRecord"),
+        ),
+        (
+            API_VERSION_GITOPS,
+            "promotion-record",
+            schema::<super::promotion::PromotionRecord>("PromotionRecord"),
         ),
         (API_VERSION_GITOPS, "lease", schema::<Lease>("Lease")),
         (API_VERSION_GITOPS, "run", schema::<Run>("Run")),

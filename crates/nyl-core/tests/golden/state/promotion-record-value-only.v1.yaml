@@ -1,0 +1,46 @@
+apiVersion: gitops.nyl/v1
+kind: PromotionRecord
+path: dev-to-staging
+sequence: 2
+from:
+  environment: dev
+  run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90
+  desiredCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+values:
+  apiImage:
+    value: >-
+      registry.example.com/api@sha256:7a11000000000000000000000000000000000000000000000000000000000002
+    select:
+      unit: kubernetes
+      input: /releases/web~1api/image
+    unit:
+      name: kubernetes
+      uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+    inputDigest: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+    state:
+      run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91
+      desiredCommit: 77aa9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+      observedCommit: 41f09c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+  webImage:
+    value: >-
+      registry.example.com/web@sha256:4f0c000000000000000000000000000000000000000000000000000000000001
+    select:
+      unit: kubernetes
+      input: /releases/web~1web/image
+    unit:
+      name: kubernetes
+      uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+    inputDigest: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+evidence:
+  level: published
+  attestations: []
+  override:
+    reason: rollback after incident 4711
+ignoredAttestations: []
+excludedApplications: []
+superseded: []
+artifactsVerified: false
+requested:
+  by: ci
+  identity: asserted
+  at: "2026-09-26T08:00:00Z"

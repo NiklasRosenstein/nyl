@@ -73,6 +73,13 @@ string_id!(
 );
 
 string_id!(
+    /// A PromotionPath's `metadata.name`, which names its record file
+    /// `desired/promotions/<path>.yaml`. A Kubernetes DNS label.
+    PromotionPathName,
+    |value| validate_dns_label("promotion path name", value)
+);
+
+string_id!(
     /// A unit's literal `metadata.name`, unique per environment across all
     /// unit kinds. A Kubernetes DNS label.
     UnitName,

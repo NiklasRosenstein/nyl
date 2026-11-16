@@ -23,12 +23,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use git2::{Oid, Repository};
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, PromotionPathName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, Clock, CommitIdentity, Committed, Coordination, Divergence, EnvironmentSnapshot, HeldLease,
     LocalDivergence, LogEntry, RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition,
     TransitionChanges,
 };
+use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::{
     Attestation, AttestationRecord, DesiredUnit, Lease, ObservationRecord, ObservedUnit, Run, Signal, StateLocation,
     StateRecord,
@@ -44,6 +45,8 @@ use tree::Files;
 
 const STATE_FILE: &str = "state.yaml";
 const ENVIRONMENT_FILE: &str = "desired/environment.yaml";
+/// The directory of PromotionRecords on the desired side, one file per path.
+const PROMOTIONS_DIR: &str = "desired/promotions/";
 const LEASE_FILE: &str = "lease.yaml";
 const RUN_FILE: &str = "run.yaml";
 /// How often a transition is rebuilt on tips that other environments moved.
@@ -528,6 +531,29 @@ fn attestations(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<String
         .collect())
 }
 
+/// The PromotionRecord of each path, from `desired/promotions/<path>.yaml`.
+fn promotions(files: &Files) -> StateResult<BTreeMap<PromotionPathName, PromotionRecord>> {
+    let mut records = BTreeMap::new();
+    for (path, bytes) in files {
+        let Some(name) = path
+            .strip_prefix(PROMOTIONS_DIR)
+            .and_then(|file| file.strip_suffix(".yaml"))
+            .filter(|name| !name.contains('/'))
+        else {
+            continue;
+        };
+        let name = PromotionPathName::new(name).map_err(|error| StateError::Corrupt(format!("{path}: {error}")))?;
+        let record: PromotionRecord = from_yaml(path, bytes)?;
+        if !record.is_document() || record.path != name {
+            return Err(StateError::Corrupt(format!(
+                "{path}: a promotion record is a PromotionRecord document of the path its file names"
+            )));
+        }
+        records.insert(name, record);
+    }
+    Ok(records)
+}
+
 /// Put or remove a unit's document at `observed/units/<unit><file>`.
 fn put_unit_file<T: Serialize>(
     files: &mut Files,
@@ -576,6 +602,13 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
             files.insert(ENVIRONMENT_FILE.to_owned(), to_yaml(environment)?);
         }
         put_units(files, "desired", &changes.desired)?;
+        for (path, record) in &changes.promotions {
+            let file = format!("{PROMOTIONS_DIR}{path}.yaml");
+            match record {
+                Some(record) => files.insert(file, to_yaml(&record.clone().into_document())?),
+                None => files.remove(&file),
+            };
+        }
     }
     if observed {
         put_units(files, "observed", &changes.observed)?;
@@ -646,6 +679,7 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         drift: unit_files(observed, DRIFT_FILE)?,
         observations: unit_files(observed, OBSERVATIONS_FILE)?,
         attestations: attestations(observed)?,
+        promotions: promotions(desired)?,
     })
 }
 
