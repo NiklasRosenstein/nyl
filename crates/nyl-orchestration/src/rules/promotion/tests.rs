@@ -1091,11 +1091,13 @@ fn test_evaluate_judges_each_value_of_a_value_only_path_on_its_own() {
     assert!(evaluations[1].gaps.iter().any(|gap| gap.scope == "web-image"));
 }
 
-/// A `record: source` block matches the state it names exactly when it is
-/// the record `nyl promote` wrote for that state: another value, another
-/// source commit, or another state is `NYL-PROMOTION-RECORD-INVALID`.
-/// Catches a block edited by hand, or copied from another promotion, being
-/// run on trust.
+/// A `record: source` block matches its path and the state it names exactly
+/// when it is the record `nyl promote` wrote for that state: another value,
+/// source commit, or state, a value naming a state of its own, a state of
+/// another environment than the path's source, a value the path does not
+/// declare, or another selector is `NYL-PROMOTION-RECORD-INVALID`. Catches
+/// a block edited by hand, or copied from another promotion, being run on
+/// trust.
 #[test]
 fn test_a_source_block_must_match_the_state_it_names() {
     let case = case(
@@ -1104,14 +1106,42 @@ fn test_a_source_block_must_match_the_state_it_names() {
     );
     let record = case.promoted().record;
     let named = &case.history[0];
-    check_block(&record, &dev(), named).unwrap();
+    check_block(&record, &case.path, named).unwrap();
 
-    let mut value = record.clone();
-    value.values.get_mut("webImage").unwrap().value = json!("sha256:other");
-    let mut source = record.clone();
-    source.source_commit = Some(commit('a'));
-    for (tampered, state) in [(&value, named), (&source, named), (&record, &case.history[1])] {
-        let finding = check_block(tampered, &dev(), state).unwrap_err();
+    let tamper = |change: &dyn Fn(&mut PromotionRecord)| {
+        let mut tampered = record.clone();
+        change(&mut tampered);
+        tampered
+    };
+    let value = tamper(&|r| r.values.get_mut("webImage").unwrap().value = json!("sha256:other"));
+    let source = tamper(&|r| r.source_commit = Some(commit('a')));
+    let own_state = tamper(&|r| {
+        r.values.get_mut("webImage").unwrap().state = Some(nyl_core::orchestration::promotion::PromotedState {
+            run: run_id(1),
+            desired_commit: desired_commit_of(1),
+            observed_commit: None,
+        });
+    });
+    let other_environment = tamper(&|r| {
+        if let PromotionFrom::Environment(from) = &mut r.from {
+            from.environment = EnvironmentName::new("qa").unwrap();
+        }
+    });
+    let undeclared = tamper(&|r| {
+        let extra = r.values["webImage"].clone();
+        r.values.insert("extra".to_owned(), extra);
+    });
+    let selector = tamper(&|r| r.values.get_mut("webImage").unwrap().select.pointer = Some("/digest".to_owned()));
+    for (tampered, state) in [
+        (&value, named),
+        (&source, named),
+        (&record, &case.history[1]),
+        (&own_state, named),
+        (&other_environment, named),
+        (&undeclared, named),
+        (&selector, named),
+    ] {
+        let finding = check_block(tampered, &case.path, state).unwrap_err();
         assert_eq!(finding.code, Code::PromotionRecordInvalid, "{}", finding.message);
     }
 }

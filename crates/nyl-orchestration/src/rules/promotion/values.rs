@@ -128,6 +128,9 @@ pub(super) fn read(
         run: None,
         produced_in_run: &produced,
         previous: &snapshot.desired,
+        // A past state of the source, read with the records it held then.
+        // Deliberately not the environment's current records
+        // (`shell::promote::environment_promotions`), which runs read.
         promotions: &snapshot.promotions,
         source_paths: None,
     };

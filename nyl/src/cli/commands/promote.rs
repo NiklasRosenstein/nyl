@@ -138,27 +138,27 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     }
     match prepare(args, wiring, &session, &path) {
         Ok((options, store_identity)) => {
-            // With `record: source` the record is a commit in the project's source.
-            let writer = match (&store_identity, options.records_in_source()) {
-                (Some(identity), true) => {
-                    match crate::orchestration::record_source::writer_for(
-                        &session,
-                        identity.clone(),
-                        wiring.clock.clone(),
-                    ) {
-                        Ok(writer) => Some(writer),
-                        Err(message) => {
-                            return Ok(report_for(promote::writer_finding(
-                                &nyl_core::orchestration::ports::RecordWriteError::Unwritable(message),
-                                &session.resolved.name,
-                                &path
-                                    .name()
-                                    .map_err(|error| nyl_render::NylError::config(error.to_string()))?,
-                            )))
-                        }
+            // With `record: source` the record is a commit in the project's
+            // source; a dry run only checks that it could be written.
+            let writer = if options.records_in_source() {
+                match crate::orchestration::record_source::writer_for(
+                    &session,
+                    store_identity.clone(),
+                    wiring.clock.clone(),
+                ) {
+                    Ok(writer) => Some(writer),
+                    Err(error) => {
+                        return Ok(report_for(promote::writer_finding(
+                            &error,
+                            &session.resolved.name,
+                            &path
+                                .name()
+                                .map_err(|error| nyl_render::NylError::config(error.to_string()))?,
+                        )))
                     }
                 }
-                _ => None,
+            } else {
+                None
             };
             let author = store_identity.map(|identity| CommitAuthor {
                 identity,

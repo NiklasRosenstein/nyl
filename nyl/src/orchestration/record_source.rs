@@ -4,23 +4,31 @@
 //! Contract: [Promoting an environment's source](../../../design/promotion.md#promoting-an-environments-source)
 //! and decision D3 of the [M6 plan](../../../design/m6-plan.md#open-decisions):
 //! without a change gate the block is one commit on the branch the entry
-//! worktree has checked out, pushed to that branch's upstream fast-forward
-//! only. This module performs those effects for the shell's
-//! [`PromotionRecordWriter`]; what to write and when is the shell's.
+//! worktree has checked out, pushed to that branch's upstream (its
+//! `branch.<name>.remote` and `branch.<name>.merge`) fast-forward only. This
+//! module performs those effects for the shell's [`PromotionRecordWriter`];
+//! what to write and when is the shell's.
 //!
-//! - A detached HEAD is refused: there is no branch to commit to.
-//! - The Environment's file must have no uncommitted change, so the commit
-//!   carries the block and nothing else; other staged or changed files stay
-//!   as they are and out of the commit.
+//! - Before anything is written, and for `--dry-run` alone
+//!   ([`PromotionRecordWriter::check`]): a branch is checked out (a detached
+//!   HEAD is refused), it has an upstream and no commits the upstream lacks
+//!   (the push would publish them with the record), the Environment's file is
+//!   tracked and has no uncommitted change, and the block can be placed.
+//! - The commit carries the Environment's file and nothing else; other staged
+//!   or changed files stay as they are. Its author and committer are the
+//!   invocation's identity, set explicitly; the user's Git configuration
+//!   otherwise applies, so a configured signature still signs it.
 //! - The block is placed in the Environment's document in block style,
-//!   replacing an earlier block, and every other line is kept as written.
-//!   The edited document must read back as exactly the record.
-//! - The push never forces. When the remote refuses it, such as because the
-//!   branch moved since the checkout, the commit is undone in the entry
-//!   worktree, so nothing was written and the job can update and retry.
+//!   replacing an earlier block, keeping every other line and the file's line
+//!   endings. The edited document must read back as exactly the record.
+//! - The push never forces. When the remote refuses it, the commit is undone
+//!   only while the branch still points at it, and the file is restored only
+//!   while it still holds what was written; an undo that cannot finish is
+//!   reported. A push that fails without a refusal, such as a network error,
+//!   may have reached the remote, so the commit is kept and reported.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::Arc;
 
 use nyl_core::orchestration::ids::CommitId;
@@ -40,90 +48,90 @@ pub struct GitRecordWriter {
     pub document_index: usize,
     /// The Environment's document as discovery read it.
     pub document: String,
-    pub identity: CommitIdentity,
+    /// The commit's author and committer; `None` only checks (a dry run).
+    pub identity: Option<CommitIdentity>,
     pub clock: Arc<dyn Clock>,
     pub auth: GitAuth,
+    /// Extra environment of every local `git` the writer runs, such as an
+    /// isolated configuration in tests; empty in production.
+    pub git_env: Vec<(String, String)>,
+}
+
+/// What a write starts from, found without writing anything.
+struct Ready {
+    /// The checked-out branch, such as `refs/heads/main`.
+    branch: String,
+    /// The upstream's push URL and its branch on the remote.
+    url: String,
+    merge: String,
+    /// The local ref tracking the upstream, as Git derives it from the
+    /// remote's fetch refspec.
+    tracking: String,
+    /// The Environment's file as a literal pathspec, and as it is named.
+    pathspec: String,
+    relative: String,
+    head: String,
+    contents: String,
+    edited: String,
 }
 
 impl PromotionRecordWriter for GitRecordWriter {
-    fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError> {
-        let unwritable = RecordWriteError::Unwritable;
-        let Ok(branch) = self.git(&["symbolic-ref", "--quiet", "HEAD"]) else {
-            return Err(RecordWriteError::Detached);
-        };
-        let name = branch.strip_prefix("refs/heads/").ok_or(RecordWriteError::Detached)?;
-        let (remote, merge) = self.upstream(name)?;
-        let url = self
-            .git(&["remote", "get-url", "--push", &remote])
-            .map_err(|error| unwritable(format!("remote {remote} of branch {name} has no URL: {error}")))?;
-        let file = std::fs::canonicalize(&self.file)
-            .map_err(|error| unwritable(format!("cannot read {}: {error}", self.file.display())))?;
-        let relative = file
-            .strip_prefix(&self.worktree)
-            .map_err(|_| unwritable(format!("{} is outside the worktree", self.file.display())))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let changed = self
-            .git(&["status", "--porcelain", "--", &relative])
-            .map_err(unwritable)?;
-        if !changed.is_empty() {
-            return Err(unwritable(format!(
-                "{relative} has uncommitted changes; commit or discard them, so the promotion commit carries only its record"
-            )));
-        }
-        let before = self.git(&["rev-parse", "--verify", "HEAD"]).map_err(unwritable)?;
+    fn check(&self, record: &PromotionRecord) -> Result<(), RecordWriteError> {
+        self.ready(record).map(drop)
+    }
 
-        let contents = std::fs::read_to_string(&self.file)
-            .map_err(|error| unwritable(format!("cannot read {relative}: {error}")))?;
-        let document = place_block(&self.document, record).map_err(unwritable)?;
-        let edited =
-            crate::cli::resource_file::replace_document(&contents, self.document_index, &self.document, &document)
-                .map_err(|error| unwritable(error.to_string()))?;
-        crate::cli::resource_file::atomic_replace(&self.file, &contents, &edited)
-            .map_err(|error| unwritable(error.to_string()))?;
+    fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| RecordWriteError::Failed("no commit identity to write the record with".to_owned()))?;
+        let ready = self.ready(record)?;
+        crate::cli::resource_file::atomic_replace(&self.file, &ready.contents, &ready.edited)
+            .map_err(|error| RecordWriteError::Failed(error.to_string()))?;
 
         let date = format!("@{} +0000", self.clock.now().timestamp());
         let committed = self
             .command()
+            .env("GIT_AUTHOR_NAME", &identity.name)
+            .env("GIT_AUTHOR_EMAIL", &identity.email)
+            .env("GIT_COMMITTER_NAME", &identity.name)
+            .env("GIT_COMMITTER_EMAIL", &identity.email)
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date)
-            .args(["-c", &format!("user.name={}", self.identity.name)])
-            .args(["-c", &format!("user.email={}", self.identity.email)])
             .args([
                 "commit",
                 "--quiet",
                 "--no-verify",
                 "--only",
+                "--cleanup=verbatim",
                 "--message",
                 message,
                 "--",
-                &relative,
+                &ready.pathspec,
             ])
             .output();
-        let restore = || {
-            let _ = self.git(&["reset", "--quiet", "--soft", &before]);
-            let _ = self.git(&["checkout", &before, "--", &relative]);
+        let failure = match committed {
+            Ok(output) if output.status.success() => None,
+            Ok(output) => Some(format!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => Some(format!("cannot run git: {error}")),
         };
-        match committed {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                restore();
-                return Err(unwritable(format!(
-                    "git commit failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
-            Err(error) => {
-                restore();
-                return Err(unwritable(format!("cannot run git: {error}")));
-            }
+        if let Some(failure) = failure {
+            return Err(RecordWriteError::Failed(match self.restore_file(&ready) {
+                Ok(()) => failure,
+                Err(restore) => format!("{failure}; {restore}"),
+            }));
         }
-        let commit = self.git(&["rev-parse", "--verify", "HEAD"]).map_err(unwritable)?;
+        let commit = self
+            .git(&["rev-parse", "--verify", "HEAD"])
+            .map_err(RecordWriteError::Failed)?;
         let pushed = nyl_git::push_atomic(
             &self.git_dir,
-            &url,
+            &ready.url,
             &[RefUpdate {
-                remote: merge.clone(),
+                remote: ready.merge.clone(),
                 new: Some(commit.clone()),
                 expected: Expect::FastForward,
             }],
@@ -131,56 +139,178 @@ impl PromotionRecordWriter for GitRecordWriter {
         );
         match pushed {
             Ok(()) => {
-                // The upstream's tracking ref follows, as a `git push` to the remote would move it.
-                if let Some(tracked) = merge.strip_prefix("refs/heads/") {
-                    let _ = self.git(&["update-ref", &format!("refs/remotes/{remote}/{tracked}"), &commit]);
-                }
-                CommitId::new(commit).map_err(|error| unwritable(error.to_string()))
+                // The tracking ref follows, as a `git push` to the remote would move it.
+                let _ = self.git(&["update-ref", &ready.tracking, &commit, &ready.head]);
+                CommitId::new(commit).map_err(|error| RecordWriteError::Failed(error.to_string()))
             }
-            Err(error) => {
-                restore();
-                match error {
-                    nyl_git::GitError::Rejected { .. } => Err(RecordWriteError::Rejected(error.to_string())),
-                    other => Err(unwritable(other.to_string())),
+            Err(nyl_git::GitError::Rejected { rejections, url }) => {
+                let message = nyl_git::GitError::Rejected {
+                    rejections: rejections.clone(),
+                    url,
                 }
+                .to_string();
+                if let Err(undo) = self.undo(&ready, &commit) {
+                    return Err(RecordWriteError::UndoFailed {
+                        commit,
+                        message: format!("{message}; {undo}"),
+                    });
+                }
+                let moved = rejections.iter().any(|rejection| {
+                    rejection.reason.starts_with("non-fast-forward") || rejection.reason == "fetch first"
+                });
+                Err(if moved {
+                    RecordWriteError::Rejected(message)
+                } else {
+                    RecordWriteError::RemoteRejected(message)
+                })
             }
+            Err(error) => Err(RecordWriteError::PushUnknown {
+                commit,
+                message: error.to_string(),
+            }),
         }
     }
 }
 
 impl GitRecordWriter {
+    /// Everything a write needs, checked without writing.
+    fn ready(&self, record: &PromotionRecord) -> Result<Ready, RecordWriteError> {
+        let failed = RecordWriteError::Failed;
+        let head_ref = self.run(&["symbolic-ref", "--quiet", "HEAD"]).map_err(failed)?;
+        let branch = match head_ref.status.code() {
+            Some(0) => String::from_utf8_lossy(&head_ref.stdout).trim().to_owned(),
+            // `--quiet` exits 1, silently, when HEAD is not a symbolic ref.
+            Some(1) => return Err(RecordWriteError::Detached),
+            _ => {
+                return Err(failed(format!(
+                    "cannot read the checked-out branch: {}",
+                    String::from_utf8_lossy(&head_ref.stderr).trim()
+                )))
+            }
+        };
+        let name = branch
+            .strip_prefix("refs/heads/")
+            .ok_or(RecordWriteError::Detached)?
+            .to_owned();
+        let config = |key: &str| self.git(&["config", "--get", &format!("branch.{name}.{key}")]).ok();
+        let (remote, merge) = match (config("remote"), config("merge")) {
+            (Some(remote), Some(merge)) if !remote.is_empty() && remote != "." => (remote, merge),
+            _ => return Err(RecordWriteError::NoUpstream { branch: name }),
+        };
+        let tracking = self
+            .git(&["rev-parse", "--symbolic-full-name", &format!("{name}@{{upstream}}")])
+            .ok()
+            .filter(|tracking| !tracking.is_empty())
+            .ok_or_else(|| RecordWriteError::NoUpstream { branch: name.clone() })?;
+        let url = self
+            .git(&["remote", "get-url", "--push", &remote])
+            .map_err(|error| failed(format!("remote {remote} of branch {name} has no URL: {error}")))?;
+        let file = std::fs::canonicalize(&self.file)
+            .map_err(|error| failed(format!("cannot read {}: {error}", self.file.display())))?;
+        let relative = file
+            .strip_prefix(&self.worktree)
+            .map_err(|_| failed(format!("{} is outside the worktree", self.file.display())))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let pathspec = format!(":(literal){relative}");
+        if self.git(&["ls-files", "--error-unmatch", "--", &pathspec]).is_err() {
+            return Err(RecordWriteError::Untracked { file: relative });
+        }
+        let changed = self.git(&["status", "--porcelain", "--", &pathspec]).map_err(failed)?;
+        if !changed.is_empty() {
+            return Err(RecordWriteError::Dirty { file: relative });
+        }
+        let ahead = self
+            .git(&["rev-list", "--count", &format!("{tracking}..HEAD")])
+            .map_err(failed)?;
+        let commits: u64 = ahead.parse().unwrap_or(0);
+        if commits > 0 {
+            return Err(RecordWriteError::Ahead {
+                branch: name,
+                upstream: tracking,
+                commits,
+            });
+        }
+        let head = self.git(&["rev-parse", "--verify", "HEAD"]).map_err(failed)?;
+        let contents =
+            std::fs::read_to_string(&self.file).map_err(|error| failed(format!("cannot read {relative}: {error}")))?;
+        let document = place_block(&self.document, record).map_err(RecordWriteError::Unplaceable)?;
+        let edited =
+            crate::cli::resource_file::replace_document(&contents, self.document_index, &self.document, &document)
+                .map_err(|error| RecordWriteError::Unplaceable(error.to_string()))?;
+        Ok(Ready {
+            branch,
+            url,
+            merge,
+            tracking,
+            pathspec,
+            relative,
+            head,
+            contents,
+            edited,
+        })
+    }
+
+    /// Undo the promotion commit after a refused push: the branch moves back
+    /// only while it still points at `commit`, and the index entry and the
+    /// file are restored only while that branch is checked out and the file
+    /// holds what was written.
+    fn undo(&self, ready: &Ready, commit: &str) -> Result<(), String> {
+        self.git(&[
+            "update-ref",
+            "-m",
+            "nyl: undo a promotion commit whose push was refused",
+            &ready.branch,
+            &ready.head,
+            commit,
+        ])
+        .map_err(|error| format!("the branch no longer points at the promotion commit: {error}"))?;
+        if self.git(&["symbolic-ref", "--quiet", "HEAD"]).ok().as_deref() != Some(ready.branch.as_str()) {
+            return Ok(());
+        }
+        self.git(&["reset", "--quiet", &ready.head, "--", &ready.pathspec])
+            .map_err(|error| format!("cannot restore the index entry of {}: {error}", ready.relative))?;
+        self.restore_file(ready)
+    }
+
+    /// Put the Environment's file back while it holds what was written.
+    fn restore_file(&self, ready: &Ready) -> Result<(), String> {
+        let current = std::fs::read_to_string(&self.file).map_err(|error| error.to_string())?;
+        if current != ready.edited {
+            return Err(format!(
+                "{} changed after the record was written, so it was left as it is",
+                ready.relative
+            ));
+        }
+        crate::cli::resource_file::atomic_replace(&self.file, &ready.edited, &ready.contents)
+            .map_err(|error| format!("cannot restore {}: {error}", ready.relative))
+    }
+
     /// `git` bound to the entry clone and its worktree, without the user's hooks.
     fn command(&self) -> Command {
         let mut command = nyl_git::repository_command(&self.git_dir);
         command
             .arg("--work-tree")
             .arg(&self.worktree)
-            .current_dir(&self.worktree);
+            .current_dir(&self.worktree)
+            .envs(self.git_env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
         command
+    }
+
+    fn run(&self, args: &[&str]) -> Result<Output, String> {
+        self.command()
+            .args(args)
+            .output()
+            .map_err(|error| format!("cannot run git: {error}"))
     }
 
     /// Run `git` and return its trimmed stdout, or its stderr as the error.
     fn git(&self, args: &[&str]) -> Result<String, String> {
-        let output = self
-            .command()
-            .args(args)
-            .output()
-            .map_err(|error| format!("cannot run git: {error}"))?;
+        let output = self.run(args)?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
             Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-        }
-    }
-
-    /// The remote and the remote ref `branch` pushes to: its configured upstream.
-    fn upstream(&self, branch: &str) -> Result<(String, String), RecordWriteError> {
-        let config = |key: &str| self.git(&["config", "--get", &format!("branch.{branch}.{key}")]).ok();
-        match (config("remote"), config("merge")) {
-            (Some(remote), Some(merge)) if !remote.is_empty() && remote != "." => Ok((remote, merge)),
-            _ => Err(RecordWriteError::Unwritable(format!(
-                "branch {branch} has no upstream on a remote to push the record to; set one with `git branch --set-upstream-to`"
-            ))),
         }
     }
 }
@@ -190,6 +320,15 @@ impl GitRecordWriter {
 /// keeping every other line as written. The result must read back as exactly
 /// `record`.
 pub fn place_block(document: &str, record: &PromotionRecord) -> Result<String, String> {
+    let declared = nyl_render::yaml::parse_yaml_value_k8s_compatible(document)
+        .map_err(|error| format!("the Environment does not parse: {error}"))?;
+    if declared.pointer("/spec/source/fromPromotion").is_none() {
+        return Err(
+            "the Environment's document does not declare `spec.source.fromPromotion`: it is inherited, such as from its EnvironmentGroup, and the block belongs in the Environment's own document"
+                .to_owned(),
+        );
+    }
+    let newline = if document.contains("\r\n") { "\r\n" } else { "\n" };
     let lines: Vec<&str> = document.split_inclusive('\n').collect();
     let (from_promotion, parent) = from_promotion_line(&lines)?;
     // The children of `fromPromotion`: where they end, their indentation, and an earlier block.
@@ -230,17 +369,15 @@ pub fn place_block(document: &str, record: &PromotionRecord) -> Result<String, S
         .map_err(|error| format!("cannot write the record as YAML: {error}"))?;
     let pad = " ".repeat(child + 2);
     let mut block = format!(
-        "{}promoted: # written by nyl promote, never by hand\n",
+        "{}promoted: # written by nyl promote, never by hand{newline}",
         " ".repeat(child)
     );
     for line in yaml.lines().filter(|line| *line != "---") {
-        if line.is_empty() {
-            block.push('\n');
-        } else {
+        if !line.is_empty() {
             block.push_str(&pad);
             block.push_str(line);
-            block.push('\n');
         }
+        block.push_str(newline);
     }
     let mut output = String::with_capacity(document.len() + block.len());
     let (cut_start, cut_end) = promoted.unwrap_or((end, end));
@@ -248,7 +385,7 @@ pub fn place_block(document: &str, record: &PromotionRecord) -> Result<String, S
         output.push_str(line);
     }
     if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
+        output.push_str(newline);
     }
     output.push_str(&block);
     for line in &lines[cut_end..] {
@@ -342,20 +479,25 @@ fn block_key(line: &str) -> Option<&str> {
 }
 
 /// The writer for the Environment `session` works on, committing as
-/// `identity`, or why it cannot have one: an Environment no file of the
-/// project declares, such as a template's instance, has no block to write.
+/// `identity` (`None` for a dry run, which only checks), or why it cannot
+/// have one: an Environment no file of the project declares, such as a
+/// template's instance, has no block to write.
 pub fn writer_for(
     session: &super::session::Session,
-    identity: CommitIdentity,
+    identity: Option<CommitIdentity>,
     clock: Arc<dyn Clock>,
-) -> Result<GitRecordWriter, String> {
+) -> Result<GitRecordWriter, RecordWriteError> {
     let name = session.resolved.name.as_str();
     let resource = session
         .inventory
         .get(nyl_render::resources::GitOpsResourceKind::Environment, name)
-        .ok_or_else(|| format!("Environment {name} is not declared in a file of this project, such as an instance of a template; declare it to keep its record in source"))?;
+        .ok_or_else(|| {
+            RecordWriteError::Undeclared(format!(
+                "Environment {name} is not declared in a file of this project, such as an instance of an EnvironmentTemplate, so there is no document to keep its record in"
+            ))
+        })?;
     let auth = crate::cli::git_auth::project_git_auth(&session.inventory.project_config.config)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RecordWriteError::Failed(error.to_string()))?;
     Ok(GitRecordWriter {
         git_dir: session.resolved.git_dir.clone(),
         worktree: session.inventory.worktree_root.clone(),
@@ -365,6 +507,7 @@ pub fn writer_for(
         identity,
         clock,
         auth,
+        git_env: Vec::new(),
     })
 }
 
@@ -450,11 +593,46 @@ spec:
         assert!(error.contains("block style"), "{error}");
     }
 
+    /// A file with CRLF line endings keeps them in the lines it gains.
+    #[test]
+    fn test_place_block_keeps_crlf_line_endings() {
+        let crlf = ENVIRONMENT.replace('\n', "\r\n");
+        let placed = place_block(&crlf, &record(1)).unwrap();
+        assert_eq!(promoted(&placed), record(1));
+        assert_eq!(
+            placed.matches('\n').count(),
+            placed.matches("\r\n").count(),
+            "{placed:?}"
+        );
+    }
+
+    /// A `fromPromotion` the Environment inherits, such as from its group,
+    /// has no place in the Environment's own document: refused with a
+    /// precise reason, not the block-style one.
+    #[test]
+    fn test_place_block_refuses_an_inherited_from_promotion() {
+        let inherited =
+            "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: prod\nspec:\n  values: {target: prod}\n";
+        let error = place_block(inherited, &record(1)).unwrap_err();
+        assert!(error.contains("inherited"), "{error}");
+    }
+
+    /// Git's environment for every call of these tests, the writer's
+    /// included: no global or system configuration, so a developer's
+    /// signing or identity settings never decide a result.
+    fn isolated() -> Vec<(String, String)> {
+        vec![
+            ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+        ]
+    }
+
     fn git(directory: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .current_dir(directory)
+            .envs(isolated())
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid"])
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args(["-c", "init.defaultBranch=main"])
             .args(args)
             .output()
             .unwrap();
@@ -499,49 +677,105 @@ spec:
             file: world.clone.join("prod.yaml"),
             document_index: 1,
             document: ENVIRONMENT.to_owned(),
-            identity: "Nyl Test <test@example.invalid>".parse().unwrap(),
+            identity: Some("Nyl Test <test@example.invalid>".parse().unwrap()),
             clock: Arc::new(FrozenClock("2026-09-25T16:41:00Z".parse().unwrap())),
             auth: GitAuth::none(),
+            git_env: isolated(),
         }
     }
 
-    /// One commit on the checked-out branch, by the given author, carrying
-    /// only the Environment's file, pushed to the branch's upstream. Catches
-    /// a record committed with the user's other changes, under the wrong
-    /// identity (CI has none), or left unpushed.
+    fn write(world: &World) -> Result<CommitId, RecordWriteError> {
+        writer(world).commit_record(&record(1), "nyl: promote prod\n\n# kept as written\n")
+    }
+
+    /// Nothing changed in the clone or on the remote.
+    fn untouched(world: &World, remote: &str, head: &str) {
+        assert_eq!(git(&world.remote, &["rev-parse", "main"]), remote);
+        assert_eq!(git(&world.clone, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            std::fs::read_to_string(world.clone.join("prod.yaml")).unwrap(),
+            ENVIRONMENT
+        );
+    }
+
+    /// One commit on the checked-out branch, by the given identity (with no
+    /// Git configuration of its own), carrying only the Environment's file
+    /// and the message as written, pushed to the branch's upstream, whose
+    /// tracking ref follows. Catches a record committed with the user's
+    /// other changes, under the wrong identity (CI has none), a message
+    /// Git cleaned up, or one left unpushed.
     #[test]
     fn test_commit_record_is_one_pushed_commit_with_only_the_block() {
         let world = world();
         std::fs::write(world.clone.join("other.yaml"), "a: 2\n").unwrap();
         git(&world.clone, &["add", "other.yaml"]);
-        let commit = writer(&world).commit_record(&record(1), "nyl: promote prod\n").unwrap();
+        let commit = write(&world).unwrap();
         let remote = |args: &[&str]| git(&world.remote, args);
         assert_eq!(remote(&["rev-parse", "main"]), commit.as_str());
         assert_eq!(
-            remote(&["log", "-1", "--format=%an <%ae>|%s", "main"]),
-            "Nyl Test <test@example.invalid>|nyl: promote prod"
+            remote(&["log", "-1", "--format=%an <%ae>|%cn <%ce>", "main"]),
+            "Nyl Test <test@example.invalid>|Nyl Test <test@example.invalid>"
+        );
+        assert_eq!(
+            remote(&["log", "-1", "--format=%B", "main"]),
+            "nyl: promote prod\n\n# kept as written"
         );
         assert_eq!(remote(&["diff", "--name-only", "main~1", "main"]), "prod.yaml");
         assert_eq!(promoted(&remote(&["show", "main:prod.yaml"])), record(1));
+        assert_eq!(git(&world.clone, &["rev-parse", "origin/main"]), commit.as_str());
         // The user's staged change is still staged, and still theirs.
         assert_eq!(git(&world.clone, &["diff", "--cached", "--name-only"]), "other.yaml");
+    }
+
+    /// `check`, what a dry run asks, writes nothing, and refuses what a
+    /// write would refuse. Catches a dry run that commits, or one that
+    /// passes a promotion the write then refuses.
+    #[test]
+    fn test_check_writes_nothing_and_refuses_what_a_write_refuses() {
+        let world = world();
+        let (remote, head) = (
+            git(&world.remote, &["rev-parse", "main"]),
+            git(&world.clone, &["rev-parse", "HEAD"]),
+        );
+        let mut checking = writer(&world);
+        checking.identity = None;
+        checking.check(&record(1)).unwrap();
+        untouched(&world, &remote, &head);
+        git(&world.clone, &["checkout", "--quiet", "--detach"]);
+        assert_eq!(checking.check(&record(1)), Err(RecordWriteError::Detached));
     }
 
     /// A detached HEAD has no branch to commit to: refused, nothing written.
     #[test]
     fn test_commit_record_refuses_a_detached_head() {
         let world = world();
-        git(&world.clone, &["checkout", "--quiet", "--detach"]);
-        let before = git(&world.remote, &["rev-parse", "main"]);
-        let error = writer(&world)
-            .commit_record(&record(1), "nyl: promote prod\n")
-            .unwrap_err();
-        assert_eq!(error, RecordWriteError::Detached);
-        assert_eq!(git(&world.remote, &["rev-parse", "main"]), before);
-        assert_eq!(
-            std::fs::read_to_string(world.clone.join("prod.yaml")).unwrap(),
-            ENVIRONMENT
+        let (remote, head) = (
+            git(&world.remote, &["rev-parse", "main"]),
+            git(&world.clone, &["rev-parse", "HEAD"]),
         );
+        git(&world.clone, &["checkout", "--quiet", "--detach"]);
+        assert_eq!(write(&world).unwrap_err(), RecordWriteError::Detached);
+        untouched(&world, &remote, &head);
+    }
+
+    /// A branch with commits its upstream lacks would publish them with the
+    /// record: refused, nothing written. So is a branch without an upstream.
+    #[test]
+    fn test_commit_record_refuses_a_branch_ahead_of_or_without_its_upstream() {
+        let world = world();
+        std::fs::write(world.clone.join("other.yaml"), "a: 2\n").unwrap();
+        git(&world.clone, &["commit", "--quiet", "-am", "Unpushed"]);
+        let remote = git(&world.remote, &["rev-parse", "main"]);
+        assert!(matches!(
+            write(&world).unwrap_err(),
+            RecordWriteError::Ahead { commits: 1, .. }
+        ));
+        assert_eq!(git(&world.remote, &["rev-parse", "main"]), remote);
+        git(&world.clone, &["checkout", "--quiet", "-b", "local"]);
+        assert!(matches!(
+            write(&world).unwrap_err(),
+            RecordWriteError::NoUpstream { .. }
+        ));
     }
 
     /// A branch that moved on the remote refuses the fast-forward push: the
@@ -562,31 +796,60 @@ spec:
         let concurrent = git(&other, &["rev-parse", "HEAD"]);
         let head = git(&world.clone, &["rev-parse", "HEAD"]);
 
-        let error = writer(&world)
-            .commit_record(&record(1), "nyl: promote prod\n")
-            .unwrap_err();
+        let error = write(&world).unwrap_err();
         assert!(matches!(error, RecordWriteError::Rejected(_)), "{error:?}");
-        assert_eq!(git(&world.remote, &["rev-parse", "main"]), concurrent);
-        assert_eq!(git(&world.clone, &["rev-parse", "HEAD"]), head);
-        assert_eq!(
-            std::fs::read_to_string(world.clone.join("prod.yaml")).unwrap(),
-            ENVIRONMENT
-        );
+        untouched(&world, &concurrent, &head);
         assert_eq!(git(&world.clone, &["status", "--porcelain"]), "");
     }
 
-    /// An uncommitted change to the Environment's file would ride along in
-    /// the promotion commit: refused.
+    /// The remote refusing the push itself, such as a protected branch or a
+    /// hook, is not a moved branch to retry: its own error, the commit undone.
     #[test]
-    fn test_commit_record_refuses_a_changed_environment_file() {
+    fn test_a_push_the_remote_rejects_is_not_a_retry() {
+        let world = world();
+        let hook = world.remote.join("hooks/pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\necho protected >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (remote, head) = (
+            git(&world.remote, &["rev-parse", "main"]),
+            git(&world.clone, &["rev-parse", "HEAD"]),
+        );
+        let error = write(&world).unwrap_err();
+        assert!(matches!(error, RecordWriteError::RemoteRejected(_)), "{error:?}");
+        untouched(&world, &remote, &head);
+    }
+
+    /// A push that fails without a refusal may have reached the remote: the
+    /// commit is kept and reported, never undone.
+    #[test]
+    fn test_a_push_that_fails_otherwise_keeps_the_commit() {
+        let world = world();
+        let remote = git(&world.remote, &["rev-parse", "main"]);
+        let gone = world.remote.with_extension("moved");
+        std::fs::rename(&world.remote, &gone).unwrap();
+        let error = write(&world).unwrap_err();
+        let RecordWriteError::PushUnknown { commit, .. } = &error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(&git(&world.clone, &["rev-parse", "HEAD"]), commit);
+        assert_eq!(git(&gone, &["rev-parse", "main"]), remote);
+    }
+
+    /// An uncommitted change to the Environment's file would ride along in
+    /// the promotion commit, and an untracked file is no part of the branch:
+    /// both refused.
+    #[test]
+    fn test_commit_record_refuses_a_changed_or_untracked_environment_file() {
         let world = world();
         std::fs::write(world.clone.join("prod.yaml"), format!("{ENVIRONMENT}# local edit\n")).unwrap();
-        let error = writer(&world)
-            .commit_record(&record(1), "nyl: promote prod\n")
-            .unwrap_err();
-        assert!(
-            matches!(&error, RecordWriteError::Unwritable(message) if message.contains("uncommitted")),
-            "{error:?}"
-        );
+        assert!(matches!(write(&world).unwrap_err(), RecordWriteError::Dirty { .. }));
+        git(&world.clone, &["rm", "--quiet", "--cached", "prod.yaml"]);
+        git(&world.clone, &["commit", "--quiet", "-m", "Untrack"]);
+        git(&world.clone, &["push", "--quiet"]);
+        assert!(matches!(write(&world).unwrap_err(), RecordWriteError::Untracked { .. }));
     }
 }

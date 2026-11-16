@@ -743,10 +743,7 @@ fn test_get_promotions_and_status_show_lineage() {
 /// run that ignores the block, and inspection blind to it.
 #[test]
 fn test_record_source_promotion_is_a_source_commit_that_runs_read() {
-    let environments = ENVIRONMENTS.replace(
-        "  source: {fromPromotion: {path: dev-to-prod}}\n",
-        "  source:\n    fromPromotion:\n      path: dev-to-prod\n      record: source\n",
-    );
+    let environments = record_source_environments();
     let harness = Promote::of(&environments, &format!("{UNITS}{BINDER}"), true);
     let (prod_desired, main) = (harness.shell.tip(PROD_DESIRED), harness.shell.tip("refs/heads/main"));
 
@@ -837,10 +834,7 @@ fn test_record_source_promotion_is_a_source_commit_that_runs_read() {
 /// Catches a block in source taken on trust.
 #[test]
 fn test_a_record_source_block_that_does_not_match_its_state_is_refused() {
-    let environments = ENVIRONMENTS.replace(
-        "  source: {fromPromotion: {path: dev-to-prod}}\n",
-        "  source:\n    fromPromotion:\n      path: dev-to-prod\n      record: source\n",
-    );
+    let environments = record_source_environments();
     let harness = Promote::of(&environments, &format!("{UNITS}{BINDER}"), true);
     let promoted = harness.promote(&["dev-to-prod"]);
     assert_eq!(promoted.exit, 0, "{}", promoted.stderr);
@@ -902,4 +896,229 @@ fn test_environments_sharing_a_ref_keep_their_own_promotions() {
     assert_eq!(history[0]["path"], "dev-to-prod");
     let staging = harness.get(&["promotions", "-e", "staging"]);
     assert_eq!(staging.report["history"].as_array().unwrap().len(), 2);
+}
+
+/// prod with `record: source`, its `fromPromotion` in block style.
+fn record_source_environments() -> String {
+    ENVIRONMENTS.replace(
+        "  source: {fromPromotion: {path: dev-to-prod}}\n",
+        "  source:\n    fromPromotion:\n      path: dev-to-prod\n      record: source\n",
+    )
+}
+
+/// A writer that answers what it is told, and counts what it was asked.
+struct FakeWriter {
+    error: Option<nyl_core::orchestration::ports::RecordWriteError>,
+    calls: std::sync::Mutex<Vec<&'static str>>,
+}
+
+impl FakeWriter {
+    fn answering(error: Option<nyl_core::orchestration::ports::RecordWriteError>) -> Self {
+        Self {
+            error,
+            calls: std::sync::Mutex::default(),
+        }
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl nyl_core::orchestration::ports::PromotionRecordWriter for FakeWriter {
+    fn check(
+        &self,
+        _record: &nyl_core::orchestration::promotion::PromotionRecord,
+    ) -> Result<(), nyl_core::orchestration::ports::RecordWriteError> {
+        self.calls.lock().unwrap().push("check");
+        self.error.clone().map_or(Ok(()), Err)
+    }
+
+    fn commit_record(
+        &self,
+        _record: &nyl_core::orchestration::promotion::PromotionRecord,
+        _message: &str,
+    ) -> Result<nyl_core::orchestration::ids::CommitId, nyl_core::orchestration::ports::RecordWriteError> {
+        self.calls.lock().unwrap().push("commit");
+        match &self.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(nyl_core::orchestration::ids::CommitId::new("c".repeat(40)).unwrap()),
+        }
+    }
+}
+
+/// `nyl promote` of a `record: source` target through the shell, with `writer`.
+fn promote_with(
+    harness: &Promote,
+    writer: Option<&FakeWriter>,
+    dry_run: bool,
+) -> nyl_orchestration::report::PromoteReport {
+    use nyl_orchestration::shell::promote::{promote, PromoteOptions};
+    let prod = EnvironmentName::new("prod").unwrap();
+    let mut job = harness.shell.job_for(
+        &prod,
+        location(&harness.shell, "prod"),
+        &[],
+        nyl_orchestration::shell::run::Cancellation::default(),
+    );
+    for environment in ["dev", "prod"] {
+        job.request.environments.insert(
+            EnvironmentName::new(environment).unwrap(),
+            location(&harness.shell, environment),
+        );
+    }
+    let path: nyl_core::resources::promotion::PromotionPath = ENVIRONMENTS
+        .split("---\n")
+        .find(|document| document.contains("name: dev-to-prod"))
+        .map(|document| serde_saphyr::from_str(document).unwrap())
+        .unwrap();
+    let options = PromoteOptions {
+        path,
+        select: nyl_orchestration::rules::promotion::Selection::Newest,
+        evidence_published: false,
+        ignore: Vec::new(),
+        values: std::collections::BTreeSet::new(),
+        verify_artifacts: false,
+        dry_run,
+        target_units: ["svc", "binder"]
+            .into_iter()
+            .map(|unit| nyl_core::orchestration::ids::UnitName::new(unit).unwrap())
+            .collect(),
+        rebuilt: Vec::new(),
+        promotes_source: true,
+        promoted: job
+            .request
+            .entry
+            .spec
+            .source
+            .as_ref()
+            .and_then(|source| source.from_promotion.clone()),
+        requested: nyl_core::orchestration::promotion::PromotionRequest {
+            by: "test".to_owned(),
+            identity: nyl_core::orchestration::state::ApprovalIdentity::Asserted,
+            source: None,
+            at: harness.shell.clock.now(),
+            reason: None,
+        },
+    };
+    harness.shell.with_context(&job, |context, request| {
+        promote(
+            context,
+            request,
+            &options,
+            writer.map(|writer| writer as &dyn nyl_core::orchestration::ports::PromotionRecordWriter),
+        )
+    })
+}
+
+/// The shell maps each writer error to its code and exit: a moved branch is
+/// exit 2 to retry, every other refusal exit 1 with its own fix; a refusal
+/// carries no record, releases the target's lease, and writes no state; a
+/// dry run only checks; a successful write is the commit the writer made.
+/// Catches a refused push reported as written, a retryable refusal that
+/// fails the pipeline, a lease left held, and a dry run that commits.
+#[test]
+fn test_writer_outcomes_map_to_codes_and_exits() {
+    use nyl_core::orchestration::codes::Code;
+    use nyl_core::orchestration::ports::RecordWriteError;
+    let harness = Promote::of(&record_source_environments(), &format!("{UNITS}{BINDER}"), true);
+    let prod_desired = harness.shell.tip(PROD_DESIRED);
+    let cases = [
+        (
+            RecordWriteError::Detached,
+            1,
+            Code::PromoteSourceUnwritable,
+            "check out the branch",
+        ),
+        (
+            RecordWriteError::Rejected("non-fast-forward".to_owned()),
+            2,
+            Code::PromoteSourceRejected,
+            "git pull --ff-only",
+        ),
+        (
+            RecordWriteError::RemoteRejected("protected branch".to_owned()),
+            1,
+            Code::PromoteSourceUnwritable,
+            "changeGate: pullRequest",
+        ),
+        (
+            RecordWriteError::Ahead {
+                branch: "main".to_owned(),
+                upstream: "refs/remotes/origin/main".to_owned(),
+                commits: 2,
+            },
+            1,
+            Code::PromoteSourceUnwritable,
+            "push those commits",
+        ),
+        (
+            RecordWriteError::Dirty {
+                file: "nyl/environments.yaml".to_owned(),
+            },
+            1,
+            Code::PromoteSourceUnwritable,
+            "commit or discard",
+        ),
+    ];
+    for (error, exit, code, fix) in cases {
+        let writer = FakeWriter::answering(Some(error.clone()));
+        let report = promote_with(&harness, Some(&writer), false);
+        assert_eq!(report.exit, exit, "{error:?}: {report:?}");
+        assert_eq!(report.errors[0].code, code, "{error:?}");
+        assert!(
+            report.errors[0].fix.contains(fix),
+            "{error:?}: {}",
+            report.errors[0].fix
+        );
+        assert!(report.record.is_none(), "a refusal carries no record");
+        assert!(harness.prod_lease_released(), "{error:?}");
+        assert_eq!(writer.calls(), ["commit"]);
+        assert_eq!(harness.shell.tip(PROD_DESIRED), prod_desired);
+    }
+
+    // A dry run checks, and commits nothing.
+    let writer = FakeWriter::answering(Some(RecordWriteError::Detached));
+    let dry = promote_with(&harness, Some(&writer), true);
+    assert_eq!(dry.exit, 1);
+    assert_eq!(dry.errors[0].code, Code::PromoteSourceUnwritable);
+    assert_eq!(writer.calls(), ["check"]);
+    let writer = FakeWriter::answering(None);
+    let dry = promote_with(&harness, Some(&writer), true);
+    assert_eq!(dry.exit, 0, "{dry:?}");
+    assert_eq!(writer.calls(), ["check"]);
+
+    // No writer for a record kept in source: nothing can be written.
+    let none = promote_with(&harness, None, false);
+    assert_eq!(none.exit, 1);
+    assert!(harness.prod_lease_released());
+
+    let writer = FakeWriter::answering(None);
+    let written = promote_with(&harness, Some(&writer), false);
+    assert_eq!(written.exit, 0, "{written:?}");
+    assert_eq!(written.commits["source"].as_str(), "c".repeat(40));
+    assert_eq!(harness.shell.tip(PROD_DESIRED), prod_desired, "no state is written");
+}
+
+/// After switching prod from `record: state` to `record: source`, the
+/// state's record is no record of the path: the first promotion writes the
+/// block instead of finding the state's record `unchanged`. Catches a
+/// switched environment that can never be promoted into its source.
+#[test]
+fn test_switching_to_record_source_writes_the_first_block() {
+    let harness = Promote::new();
+    let first = harness.promote(&["dev-to-prod"]);
+    assert_eq!(first.exit, 0, "{}", first.stderr);
+    let applied = harness.shell.invoke(&["reconcile", "-e", "prod"]);
+    assert_eq!(applied.exit, 0, "{}", applied.stderr);
+    harness.shell.world.commit_files(
+        "main",
+        "Keep prod's record in source",
+        &[("nyl/environments.yaml", &record_source_environments())],
+    );
+    let switched = harness.promote(&["dev-to-prod"]);
+    assert_eq!(switched.exit, 0, "{}", switched.stderr);
+    assert_eq!(switched.report["outcome"], "done");
+    assert_eq!(switched.report["record"]["sequence"], 2);
+    assert!(switched.report["commits"]["source"].is_string());
 }

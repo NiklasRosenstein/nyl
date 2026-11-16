@@ -238,6 +238,9 @@ pub fn get_value(
         .environment
         .as_ref()
         .and_then(|record| crate::rules::sources::promoted_source_paths(&record.spec));
+    // `nyl get` shows what is recorded and runs nothing, so it reads the
+    // records without refusing or checking a block, as other readers of
+    // state do; runs read them through `shell::promote::environment_promotions`.
     let promotions = crate::rules::sources::recorded_promotions(snapshot, None);
     let resolve = |desired: &BTreeMap<UnitName, DesiredUnit>| {
         resolve_reference(

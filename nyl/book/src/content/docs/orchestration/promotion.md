@@ -131,23 +131,31 @@ spec:
   fields as a record in state, as one commit on the branch the entry
   worktree has checked out, and pushes it to that branch's upstream
   fast-forward only. It writes nothing to prod's state. Write
-  `fromPromotion` in block style, one key per line; the rest of the file
-  stays as written. A detached HEAD, or uncommitted changes to the
-  Environment's file, are refused with `NYL-PROMOTE-SOURCE-UNWRITABLE`. A
-  push the remote refuses, because the branch moved since the checkout,
-  writes nothing and exits 2 with `NYL-PROMOTE-SOURCE-REJECTED`: update the
-  checkout and promote again. A promotion is never forced.
-- **Reading.** Every command that reads promotions (`plan`, `reconcile`,
-  `build`, `status`, `nyl get`) reads the block as the entry worktree
-  declares it, like the rest of `source`. A run checks the block against the
-  state of dev it names (its run, source commit, and every value read again
-  from that state) and refuses a block that does not match with
-  `NYL-PROMOTION-RECORD-INVALID`. `source-locks` never touches the block.
+  `fromPromotion` in the Environment itself, in block style, one key per
+  line; the rest of the file stays as written. A detached HEAD, a branch
+  ahead of its upstream, uncommitted changes to the Environment's file, or a
+  push the remote refuses for branch protection exit 1 with
+  `NYL-PROMOTE-SOURCE-UNWRITABLE`, each with its own fix. A push refused
+  because the branch moved since the checkout writes nothing and exits 2
+  with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout and promote again.
+  A promotion is never forced. The [command
+  page](/nyl/reference/cli/promote/#record-source) lists every case.
+- **Reading.** Every command that resolves prod (`plan`, `reconcile`,
+  `build`, and the multi-environment runs) reads the block as the entry
+  worktree declares it, like the rest of `source`, and checks a block no run
+  applied yet against its PromotionPath (its source environment, values, and
+  selectors) and the state of dev it names (its run, source commit, and
+  every value read again from that state). A block that does not match, or
+  names a state dev's history does not hold, is refused with
+  `NYL-PROMOTION-RECORD-INVALID`. `status` and `nyl get` show the block and
+  refuse nothing. `source-locks` never touches the block.
 - **Sequence.** The block's `sequence` rises with every promotion into prod,
   and prod's state records the highest one a run applied. A run from an
   older checkout, such as a re-run of an old CI job, or after the promotion
   commit was reverted, finds a lower sequence and exits 1 with
-  `NYL-PROMOTION-SEQUENCE-OLDER`, writing nothing. Rolling back is a new
+  `NYL-PROMOTION-SEQUENCE-OLDER`, writing nothing. A block with the
+  sequence prod applied must be the block prod applied: a sequence is never
+  reused, such as by a promotion on another branch. Rolling back is a new
   promotion of the older state, with a higher sequence:
   `nyl promote dev-to-prod --revision <source commit> --reason "…"`.
 - **Inspecting.** `status`, `nyl get promotions`, and

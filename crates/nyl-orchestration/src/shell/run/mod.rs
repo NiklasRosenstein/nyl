@@ -63,7 +63,7 @@ use nyl_core::orchestration::ports::{
     Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository,
     SourceResolver, StateError, TransitionChanges,
 };
-use nyl_core::orchestration::promotion::{PromotionFrom, PromotionRecord};
+use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, BlockedReason, Condition, DesiredUnit, Lifecycle,
     ObservedUnit, Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
@@ -321,6 +321,9 @@ pub struct RunRequest {
     /// `state delete` removes with the instance's state; `None` for a
     /// declared environment and unless the template sets `keepSource: true`.
     pub keep_prefix: Option<String>,
+    /// The PromotionPaths the project declares: a `record: source` block is
+    /// checked against the path it names.
+    pub promotion_paths: Vec<nyl_core::resources::promotion::PromotionPath>,
 }
 
 impl RunRequest {
@@ -868,62 +871,28 @@ impl<'r, 'a> Session<'r, 'a> {
         Ok((request, commit))
     }
 
-    /// The records the run reads ([`crate::rules::sources::promotion_records`]):
-    /// with `record: source`, the entry worktree's block, refused below the
-    /// sequence a run applied and checked against the source state it names,
-    /// which is read from the source environment's history by its desired
-    /// commit ([`crate::rules::promotion::check_block`]).
+    /// The records the run reads, through the one function every entry
+    /// point that resolves an environment shares
+    /// ([`crate::shell::promote::environment_promotions`]).
     fn promotions(
         &self,
         snapshot: &EnvironmentSnapshot,
     ) -> Result<BTreeMap<PromotionPathName, PromotionRecord>, Finding> {
-        let entry = &self.request.entry;
-        let promoted = entry
-            .spec
-            .source
-            .as_ref()
-            .and_then(|source| source.from_promotion.as_ref());
-        let records = crate::rules::sources::promotion_records(
-            &entry.metadata.name,
-            promoted,
-            &snapshot.promotions,
-            snapshot
-                .environment
-                .as_ref()
-                .and_then(|record| record.applied_promotion_sequence),
-        )?;
-        let Some(block) =
-            crate::rules::sources::record_in_source(promoted).and_then(|promoted| promoted.promoted.as_ref())
-        else {
-            return Ok(records);
-        };
-        let PromotionFrom::Environment(from) = &block.from else {
-            return Ok(records);
-        };
-        let location = crate::shell::promote::source_location(
-            &self.request.environments,
-            &self.request.environment_errors,
-            &from.environment,
-            block.path.as_str(),
-        )?;
-        let states = crate::shell::promote::read_history(
+        crate::shell::promote::environment_promotions(
             self.base().store,
-            location,
-            &from.environment,
-            &crate::rules::promotion::Selection::StateRevision(from.desired_commit.clone()),
-        )?;
-        let Some(state) = states.first() else {
-            return Err(Finding::new(
-                Code::PromotionRecordInvalid,
-                format!(
-                    "the promoted block of path {} names state {} of {}, which its history does not hold",
-                    block.path, from.desired_commit, from.environment
-                ),
-                "restore the block `nyl promote` wrote, or promote again; the block is written by `nyl promote`, never by hand",
-            ));
-        };
-        crate::rules::promotion::check_block(block, &from.environment, state)?;
-        Ok(records)
+            &|environment, path| {
+                crate::shell::promote::source_location(
+                    &self.request.environments,
+                    &self.request.environment_errors,
+                    environment,
+                    path,
+                )
+                .cloned()
+            },
+            &self.request.promotion_paths,
+            &self.request.entry,
+            snapshot,
+        )
     }
 
     /// Choose S, render it, and build the desired documents and graph.

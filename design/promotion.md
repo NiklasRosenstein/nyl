@@ -115,8 +115,8 @@ the file, and its `state restore` leaves the file as it is.
 | Exit | When |
 | --- | --- |
 | 0 | The record was written, or (M11) the pull request opened or updated; or the path's record already names the chosen state and values and supplies every value of the target, so nothing was written (`outcome: unchanged`) |
-| 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), or a form M6 does not support yet (`NYL-PROMOTE-UNSUPPORTED`) |
-| 2 | Nothing was written because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), or the target's lease is held |
+| 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a form M6 does not support yet (`NYL-PROMOTE-UNSUPPORTED`), or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`) |
+| 2 | Nothing was written because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), the target's lease is held, or the push of a `record: source` commit was refused because the branch moved (`NYL-PROMOTE-SOURCE-REJECTED`) |
 
 Other codes of the promotion rules: `NYL-PROMOTION-MISSING` (exit 2 of a
 `reconcile` or `plan`: an environment's `fromPromotion` source, or a
@@ -125,12 +125,16 @@ promote <path>`); `NYL-PROMOTION-SEQUENCE-OLDER` (exit 1: a `record: source`
 block, or (M11) a target's record, with a lower `sequence` than the one
 applied; the fix names `nyl promote <path> --revision`);
 `NYL-PROMOTION-RECORD-INVALID` (exit 1: a `record: source` block that does
-not match the source state it names, or names a path the Environment is not
-promoted along); `NYL-PROMOTE-SOURCE-UNWRITABLE` (exit 1: `nyl promote`
-cannot commit a `record: source` block, such as from a detached HEAD, whose
-fix is to check out a branch); `NYL-PROMOTE-SOURCE-REJECTED` (exit 2: the
-remote refused the fast-forward push of that commit, which is undone; the
-fix is to update the checkout and promote again);
+not match its path (the path's source environment, its values and their
+selectors) or the source state it names, names a state the source's
+history does not hold, names a path the Environment is not promoted along,
+or reuses the applied sequence with another record);
+`NYL-PROMOTE-SOURCE-UNWRITABLE` (exit 1: `nyl promote` cannot commit or push
+a `record: source` block, such as from a detached HEAD, a branch ahead of its
+upstream, or a push the remote refuses for branch protection; each cause
+has its own fix); `NYL-PROMOTE-SOURCE-REJECTED` (exit 2: the remote refused
+the fast-forward push because the branch moved, and the commit is undone;
+the fix is to update the checkout and promote again);
 `NYL-PROMOTE-EVIDENCE-OVERRIDE` (a warning: `--evidence published` below the
 path's level, recorded as an override); and `NYL-PROMOTE-UNCHECKED` (a
 warning: a value without a known source commit, which the supersede check

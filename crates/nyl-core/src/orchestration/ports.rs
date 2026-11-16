@@ -845,24 +845,73 @@ pub struct WorktreeSnapshot {
 }
 
 /// Why a `record: source` PromotionRecord could not be committed. Nothing
-/// was written in any case: a commit whose push the remote refused is undone
-/// in the entry worktree.
+/// was written unless the variant says otherwise ([`Self::PushUnknown`],
+/// [`Self::UndoFailed`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordWriteError {
     /// The entry worktree has no branch checked out.
     Detached,
-    /// The remote refused the fast-forward push: the branch moved since the checkout.
+    /// The checked-out branch has no upstream branch on a remote.
+    NoUpstream { branch: String },
+    /// The checked-out branch has commits its upstream lacks, which the push
+    /// would publish with the record.
+    Ahead {
+        branch: String,
+        upstream: String,
+        commits: u64,
+    },
+    /// The Environment's file is not tracked by Git.
+    Untracked { file: String },
+    /// The Environment's file has uncommitted changes.
+    Dirty { file: String },
+    /// The block cannot be placed in the Environment's document, such as a
+    /// `fromPromotion` in flow style or one the Environment inherits.
+    Unplaceable(String),
+    /// The Environment is not declared in a file of the project, such as an
+    /// instance of an EnvironmentTemplate.
+    Undeclared(String),
+    /// The remote refused the fast-forward: the branch moved since the
+    /// checkout. The commit was undone.
     Rejected(String),
-    /// Anything else, such as an uncommitted change to the Environment's
-    /// file, a block that cannot be placed, or a failing `git`.
-    Unwritable(String),
+    /// The remote refused the push for another reason, such as branch
+    /// protection or a hook. The commit was undone.
+    RemoteRejected(String),
+    /// The push failed without saying whether the remote took it, such as a
+    /// network error after the upload. The commit is kept on the branch.
+    PushUnknown { commit: String, message: String },
+    /// The push was refused, and the commit could not be undone.
+    UndoFailed { commit: String, message: String },
+    /// `git` failed otherwise.
+    Failed(String),
 }
 
 impl std::fmt::Display for RecordWriteError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Detached => formatter.write_str("the entry worktree has no branch checked out (detached HEAD)"),
-            Self::Rejected(message) | Self::Unwritable(message) => formatter.write_str(message),
+            Self::NoUpstream { branch } => write!(formatter, "branch {branch} has no upstream branch on a remote"),
+            Self::Ahead {
+                branch,
+                upstream,
+                commits,
+            } => write!(
+                formatter,
+                "branch {branch} is {commits} commit(s) ahead of {upstream}, which the push would publish with the record"
+            ),
+            Self::Untracked { file } => write!(formatter, "{file} is not tracked by Git"),
+            Self::Dirty { file } => write!(formatter, "{file} has uncommitted changes"),
+            Self::Unplaceable(message)
+            | Self::Undeclared(message)
+            | Self::Rejected(message)
+            | Self::RemoteRejected(message)
+            | Self::Failed(message) => formatter.write_str(message),
+            Self::PushUnknown { commit, message } => {
+                write!(formatter, "the push of commit {commit} failed, and may have reached the remote: {message}")
+            }
+            Self::UndoFailed { commit, message } => write!(
+                formatter,
+                "the push was refused, and commit {commit} could not be undone in the entry worktree: {message}"
+            ),
         }
     }
 }
@@ -872,6 +921,9 @@ impl std::fmt::Display for RecordWriteError {
 /// entry worktree has checked out, pushed to that branch's upstream
 /// fast-forward only, never forced (decision D3 of the M6 plan).
 pub trait PromotionRecordWriter: Send + Sync {
+    /// Whether `record` could be committed and pushed now, without writing:
+    /// what `nyl promote --dry-run` checks.
+    fn check(&self, record: &PromotionRecord) -> Result<(), RecordWriteError>;
     /// Commit `record` as the block with `message`, push it, and return the commit.
     fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError>;
 }

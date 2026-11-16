@@ -122,12 +122,23 @@ pub fn prepare(
         .ok_or_else(|| config(format!("no driver serves {} {}", envelope.api_version, envelope.kind)))?;
     driver.validate_spec(&spec).map_err(config)?;
     let mut snapshot = EnvironmentSnapshot::default();
+    let mut promotions = BTreeMap::new();
     let mut environments = BTreeMap::new();
     if let Some(environment) = selected.as_ref() {
         let resolved = selected_environment.as_ref().expect("selected");
-        snapshot = open_store(&entry, resolved, None)?
-            .snapshot(&resolved.location)
-            .map_err(config)?;
+        let store = open_store(&entry, resolved, None)?;
+        snapshot = store.snapshot(&resolved.location).map_err(config)?;
+        // The records a run would read, refused and checked the same way.
+        if let Some(effective) = &effective {
+            promotions = super::promotion::environment_promotions(
+                &entry,
+                &super::project::InstanceRequest::default(),
+                &store,
+                &effective.environment,
+                &snapshot,
+            )
+            .map_err(|finding| config(finding.to_string()))?;
+        }
         for name in nyl_orchestration::rules::multi_environment::dependencies(&spec) {
             if name == *environment {
                 continue;
@@ -190,14 +201,7 @@ pub fn prepare(
             run: None,
             produced_in_run: &BTreeSet::new(),
             previous: &snapshot.desired,
-            // The current records, with `record: source` the block as the entry worktree declares it.
-            promotions: &nyl_orchestration::rules::sources::recorded_promotions(
-                &snapshot,
-                effective
-                    .as_ref()
-                    .and_then(|effective| effective.environment.spec.source.as_ref())
-                    .and_then(|source| source.from_promotion.as_ref()),
-            ),
+            promotions: &promotions,
             source_paths: source_paths.as_ref(),
         },
         &unit,

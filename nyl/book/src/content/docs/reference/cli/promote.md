@@ -40,22 +40,42 @@ When the path promotes the source of a target whose Environment says
 `record: source`, the record is written into that Environment's
 `source.fromPromotion.promoted` block instead, as one commit on the branch
 the entry worktree has checked out, with the same message a state commit
-would carry and `--author` as its author. The commit carries only the
-Environment's file and is pushed to the branch's upstream fast-forward only;
-the report lists it under `commits.source`, and nothing is written to the
-target's state. The block in the checkout is the path's current record for
-[Unchanged](#unchanged), and its sequence counts for the next one. The
+would carry (kept verbatim) and `--author` as its author and committer. Your
+Git configuration otherwise applies, so a configured commit signature signs
+it. The commit carries only the Environment's file and is pushed to the
+branch's upstream (`branch.<name>.remote` and `branch.<name>.merge`)
+fast-forward only; the push is never forced. The report lists the commit
+under `commits.source`, and nothing is written to the target's state. The
+block in the checkout is the path's current record for
+[Unchanged](#unchanged) only when a run would take it (it is valid and not
+older than what prod applied); records in state on that path never count.
+`--dry-run` checks everything below without committing. The
 [promotion guide](/nyl/orchestration/promotion/#keeping-the-record-in-source)
 explains how runs read the block.
 
-- A detached HEAD has no branch to commit to: exit 1 with
-  `NYL-PROMOTE-SOURCE-UNWRITABLE`, whose fix is to check out the branch. The
-  same code refuses uncommitted changes to the Environment's file and a
-  `fromPromotion` that is not in block style.
-- A push the remote refuses, because the branch moved since the checkout,
-  undoes the local commit and exits 2 with `NYL-PROMOTE-SOURCE-REJECTED`:
-  update the checkout (`git pull --ff-only`) and run `nyl promote` again. The
-  push is never forced.
+Each refusal exits 1 with `NYL-PROMOTE-SOURCE-UNWRITABLE` and its own fix,
+except a moved branch:
+
+- a detached HEAD: check out the branch the record belongs on;
+- a branch without an upstream: set one with `git branch --set-upstream-to`;
+- a branch with commits its upstream lacks, which the push would publish
+  with the record: push or drop them first;
+- an untracked Environment file, or uncommitted changes to it;
+- a `fromPromotion` the Environment inherits (such as from its group), or
+  one not in block style: declare it in the Environment, one key per line;
+- an Environment no file declares, such as a template's instance;
+- a push the remote refuses for another reason, such as branch protection or
+  a hook: the commit is undone; promoting through a pull request
+  (`changeGate: pullRequest`) comes in a later milestone;
+- a push that fails without a refusal, such as a network error: the record
+  may have reached the remote, so the commit is kept; fetch and check.
+
+A push refused because the branch moved since the checkout undoes the local
+commit and exits 2 with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout
+(`git pull --ff-only`) and run `nyl promote` again. The undo moves the branch
+back only while it still points at the promotion commit, and restores the
+file only while it holds what was written; an undo that cannot finish is
+reported with the commit to drop.
 
 ## Options
 
@@ -113,7 +133,7 @@ false`.
 | Exit | When |
 | --- | --- |
 | 0 | The record was written, or the path's record already names the chosen state (`unchanged`), or the dry run found a promotion to make. |
-| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), an unreadable commit, or a `record: source` block that cannot be committed (`NYL-PROMOTE-SOURCE-UNWRITABLE`: a detached HEAD, uncommitted changes to the Environment's file). |
+| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), an unreadable commit, or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
 | 2 | Nothing was written because evidence is missing, stale, or failing (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
 
 Run [`nyl reconcile`](/nyl/reference/cli/reconcile/) on the target afterwards:

@@ -242,3 +242,30 @@ pub fn target_view(
         rebuilt,
     })
 }
+
+/// The PromotionRecords of `entry`'s environment, read from `snapshot` as a
+/// run reads them ([`nyl_orchestration::shell::promote::environment_promotions`]):
+/// with `record: source` the block is refused below the applied sequence and
+/// checked against its path and the source state it names, which is read
+/// through `store` at the source environment's location in `inventory`.
+pub fn environment_promotions(
+    inventory: &GitOpsInventory,
+    request: &super::project::InstanceRequest,
+    store: &dyn nyl_core::orchestration::ports::StateStore,
+    entry: &nyl_core::resources::environment::Environment,
+    snapshot: &nyl_core::orchestration::ports::EnvironmentSnapshot,
+) -> std::result::Result<
+    BTreeMap<nyl_core::orchestration::ids::PromotionPathName, nyl_core::orchestration::promotion::PromotionRecord>,
+    Finding,
+> {
+    nyl_orchestration::shell::promote::environment_promotions(
+        store,
+        &|environment, _path| {
+            super::project::resolve_environment_with(inventory, environment.as_str(), request)
+                .map(|resolved| resolved.location)
+        },
+        &declared_paths(inventory),
+        entry,
+        snapshot,
+    )
+}
