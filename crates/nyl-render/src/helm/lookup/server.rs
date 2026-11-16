@@ -306,12 +306,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_finishing_reports_what_was_answered_and_stops_the_server() {
+    #[tokio::test]
+    async fn test_finishing_reports_what_was_answered_and_stops_the_server() {
         let server = server();
-        let address = server.address();
+        let url = format!("https://{}", server.address());
+        let trusting = client(Some(server.certificate_pem()));
         let report = server.finish();
         assert_eq!(report, ServerReport::default());
-        assert!(std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500)).is_err());
+        // Probing the bare port would race: tests run in parallel and bind
+        // their own servers to ephemeral ports, so the freed port can be handed
+        // to another one. A request that trusts only this server's certificate
+        // can be answered by no other server, so it fails exactly when this one
+        // has stopped.
+        assert!(trusting
+            .get(format!("{url}/version"))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .is_err());
     }
 }
