@@ -429,9 +429,23 @@ fn read_environment(
         .filter(|_| request.template.is_none())
         .and_then(|instance| instance.record.as_ref()?.source_commit.clone());
     let commit = recorded.as_ref().unwrap_or(commit);
-    let source_commit = match source_request(&entry, commit, source_override, recorded.is_some()) {
+    // A promoted source takes its commit from the records in the environment's state.
+    let promotions = if entry
+        .spec
+        .source
+        .as_ref()
+        .is_some_and(|source| source.from_promotion.is_some())
+    {
+        snapshot(inventory, name, request)?.promotions
+    } else {
+        BTreeMap::new()
+    };
+    let source_commit = match source_request(&entry, commit, source_override, recorded.is_some(), &promotions)? {
         SourceRequest::Worktree(snapshot) => snapshot.commit,
-        SourceRequest::Entry(commit) | SourceRequest::Recorded(commit) | SourceRequest::Commit { commit, .. } => commit,
+        SourceRequest::Entry(commit)
+        | SourceRequest::Recorded(commit)
+        | SourceRequest::Commit { commit, .. }
+        | SourceRequest::Promotion { commit, .. } => commit,
         SourceRequest::Revision(revision) | SourceRequest::Override(revision) => sources
             .resolve_revision(&SourceRepository::This, &revision)
             .map_err(|error| {

@@ -37,11 +37,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::{
-    resolve_document, BindingIssue, Coded, Origin, Provided, Providers, Provision, Resolved, UnitInputSource,
+    resolve_document, BindingIssue, Coded, Origin, PromotionInputSource, Provided, Providers, Provision, Resolved,
+    UnitInputSource,
 };
 use nyl_core::orchestration::blocked::{Blocker, ProducerRef};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, RunId, UnitName};
+use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::{
     ArtifactDocument, Attestation, BlockedReason, DesiredUnit, ObservationRecord, ObservedUnit, Provenance, Readiness,
     Receipt, ReceiptProvenance,
@@ -149,6 +151,16 @@ pub struct ReferenceView<'a> {
     /// The snapshot's stored desired documents, whose provenance
     /// [`resolve_unit`] keeps where it still cites the same receipt.
     pub previous: &'a BTreeMap<UnitName, DesiredUnit>,
+    /// The PromotionRecords of the environment's desired state, which
+    /// `fromPromotion` bindings read.
+    pub promotions: &'a BTreeMap<
+        nyl_core::orchestration::ids::PromotionPathName,
+        nyl_core::orchestration::promotion::PromotionRecord,
+    >,
+    /// When the environment's source is promoted, the paths that supply it:
+    /// a binding without `path` reads only records on these, so the source
+    /// commit and the values proven with it move together.
+    pub source_paths: Option<&'a BTreeSet<String>>,
 }
 
 /// What one reference found.
@@ -395,6 +407,8 @@ pub fn resolve_foreign(
             run: None,
             produced_in_run: &none,
             previous: &nothing,
+            promotions: &BTreeMap::new(),
+            source_paths: None,
         },
         source,
     )
@@ -444,6 +458,8 @@ fn resolve_external(
         run: None,
         produced_in_run: &BTreeSet::new(),
         previous: &snapshot.desired,
+        promotions: &BTreeMap::new(),
+        source_paths: None,
     };
     let mut source = source.clone();
     source.environment = None;
@@ -612,6 +628,28 @@ struct ViewProviders<'a, 'v> {
 impl Providers for ViewProviders<'_, '_> {
     type Origin = Cited;
 
+    fn promotion(&self, _field: &str, source: &PromotionInputSource) -> Provided<Cited> {
+        match self.promoted(source) {
+            Some(record) => Ok(Provision::Value(Resolved {
+                value: record.values[&source.value].value.clone(),
+                origin: Cited::Literal,
+            })),
+            None => {
+                // Nothing was promoted yet (`NYL-PROMOTION-MISSING`): the consumer waits.
+                let fix_path = source.path.clone().unwrap_or_else(|| "<path>".to_owned());
+                Ok(Provision::Blocked(Blocker::other(format!(
+                    "no PromotionRecord carries value {:?}{} yet (NYL-PROMOTION-MISSING); run `nyl promote {fix_path}`",
+                    source.value,
+                    source
+                        .path
+                        .as_ref()
+                        .map(|path| format!(" on path {path}"))
+                        .unwrap_or_default(),
+                ))))
+            }
+        }
+    }
+
     fn unit(&self, field: &str, source: &UnitInputSource) -> Provided<Cited> {
         match resolve_reference(self.view, source) {
             Ok(ReferenceValue::Value { value, provenance }) => Ok(Provision::Value(Resolved {
@@ -621,6 +659,33 @@ impl Providers for ViewProviders<'_, '_> {
             Ok(ReferenceValue::Blocked { reason, .. }) => Ok(Provision::Blocked(reason)),
             Err(error) => Err(error.at(field).into()),
         }
+    }
+}
+
+impl ViewProviders<'_, '_> {
+    /// The record a `fromPromotion` binding reads, or why none exists yet.
+    ///
+    /// With `path`, only that path's record. Without it, the newest record
+    /// (highest `sequence`) that carries the value; in an environment whose
+    /// source is promoted, only records on its source paths count, so the
+    /// source commit and the values proven with it always move together.
+    fn promoted(&self, source: &PromotionInputSource) -> Option<&PromotionRecord> {
+        let view = self.view;
+        let records: Box<dyn Iterator<Item = &PromotionRecord>> = match &source.path {
+            Some(path) => Box::new(
+                view.promotions
+                    .values()
+                    .filter(move |record| record.path.as_str() == path),
+            ),
+            None => Box::new(view.promotions.values().filter(|record| {
+                view.source_paths
+                    .is_none_or(|paths| paths.contains(record.path.as_str()))
+            })),
+        };
+        records
+            .filter(|record| record.values.contains_key(&source.value))
+            .max_by_key(|record| record.sequence)
+            .map(|record| &*record)
     }
 }
 
@@ -887,6 +952,10 @@ mod tests {
         observations: BTreeMap<UnitName, ObservationRecord>,
         now: Timestamp,
         previous: BTreeMap<UnitName, DesiredUnit>,
+        promotions: BTreeMap<
+            nyl_core::orchestration::ids::PromotionPathName,
+            nyl_core::orchestration::promotion::PromotionRecord,
+        >,
         produced_in_run: BTreeSet<UnitName>,
         observed_commit: CommitId,
         run: RunId,
@@ -913,6 +982,7 @@ mod tests {
                 observations: BTreeMap::new(),
                 now: "2026-09-24T10:00:00Z".parse().unwrap(),
                 previous: BTreeMap::new(),
+                promotions: BTreeMap::new(),
                 produced_in_run: BTreeSet::new(),
                 observed_commit: commit(COMMIT),
                 run: run(RUN_1),
@@ -958,6 +1028,8 @@ mod tests {
                 run: Some(&self.run),
                 produced_in_run: &self.produced_in_run,
                 previous: &self.previous,
+                promotions: &self.promotions,
+                source_paths: None,
             }
         }
 

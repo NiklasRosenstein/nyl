@@ -213,6 +213,24 @@ impl Script {
         })
     }
 
+    /// What the fake's next `verify-artifact` of `unit` finds: a scripted
+    /// success or nothing scripted means the artifact exists, a scripted
+    /// failure that it is gone, and a scripted driver error is one.
+    fn verified(&self, unit: &UnitName) -> DriverResult<nyl_core::orchestration::driver::ArtifactStatus> {
+        use nyl_core::orchestration::driver::ArtifactStatus;
+        match self.take(unit, DriverOperation::VerifyArtifact) {
+            None | Some(Scripted::Succeeded { .. } | Scripted::Drifted | Scripted::Pending) => {
+                Ok(ArtifactStatus::Present)
+            }
+            Some(Scripted::Failed { .. }) => Ok(ArtifactStatus::Missing {
+                reason: "scripted: the artifact is gone".to_owned(),
+            }),
+            Some(Scripted::Uncertain | Scripted::RetryRequired { .. }) => {
+                Err(DriverError::before_effects("scripted artifact verification failure"))
+            }
+        }
+    }
+
     /// The scripted outcome of a reconcile or teardown, when one is queued.
     /// A scripted success falls through to the fake's own behavior with
     /// replaced outputs, reported through `outputs`; a `drifted` script

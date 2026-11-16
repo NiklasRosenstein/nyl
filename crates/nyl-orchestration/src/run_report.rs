@@ -149,7 +149,9 @@ impl ExitCategory {
             | Code::LeaseBroken
             | Code::InstanceLimit
             | Code::InstanceRenewed
-            | Code::InstanceRemovalPending => Self::Incomplete,
+            | Code::InstanceRemovalPending
+            | Code::PromotionMissing
+            | Code::PromoteNoEvidence => Self::Incomplete,
             Code::LeaseLost | Code::RunCancelled | Code::RunUnimported => Self::Uncertain,
             _ => Self::Error,
         }

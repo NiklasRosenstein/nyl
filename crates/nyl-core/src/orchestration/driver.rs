@@ -98,6 +98,10 @@ pub struct Capabilities {
     /// This kind requires committed inputs rather than a worktree snapshot.
     #[serde(default, rename = "requiresCommittedSource")]
     pub requires_committed_source: bool,
+    /// `nyl promote` asks the driver whether an artifact of one of its
+    /// receipts still exists ([`Driver::verify_artifact`]).
+    #[serde(default, rename = "verifyArtifact")]
+    pub verify_artifact: bool,
 }
 
 /// Whether an operator tool takes the terminal.
@@ -384,6 +388,7 @@ pub enum DriverOperation {
     Fingerprint,
     Build,
     Exec,
+    VerifyArtifact,
 }
 
 impl DriverOperation {
@@ -399,6 +404,7 @@ impl DriverOperation {
             Self::Fingerprint => "fingerprint",
             Self::Build => "build",
             Self::Exec => "exec",
+            Self::VerifyArtifact => "verify-artifact",
         }
     }
 }
@@ -532,6 +538,30 @@ pub struct ExecutionContext<'a> {
     /// never reads the system clock: `now` is when the call started, and this
     /// is what has passed since, and how to wait.
     pub clock: &'a dyn super::ports::Clock,
+}
+
+/// What one [`Driver::verify_artifact`] call may use: no checkout, because
+/// the artifact is checked where its receipt says it lives.
+pub struct VerificationContext<'a> {
+    pub unit: UnitAddress,
+    /// Admitted variables and secrets, by name, as for an execution.
+    pub env: BTreeMap<String, String>,
+    pub secrets: BTreeMap<String, String>,
+    /// This call's own directory for tool state.
+    pub temp_dir: PathBuf,
+    pub now: Timestamp,
+    pub deadline: Timestamp,
+    pub tools: &'a dyn ToolRunner,
+}
+
+/// Whether an artifact of a receipt still exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactStatus {
+    Present,
+    /// Gone, with the driver's reason, shown unchanged.
+    Missing {
+        reason: String,
+    },
 }
 
 /// How a driver's teardown wait after phase 1 ends
@@ -811,6 +841,19 @@ pub trait Driver: Send + Sync {
         receipt: &Receipt,
     ) -> DriverResult<Supported<ObservedValues>> {
         let _ = (ctx, unit, receipt);
+        Ok(Supported::Unsupported)
+    }
+    /// Whether `artifact`, one of the unit's receipt's artifacts, still
+    /// exists: `nyl promote` asks before it records a promotion. A driver
+    /// that cannot tell fails the call; one that can says present or
+    /// missing. Unsupported by default.
+    fn verify_artifact(
+        &self,
+        ctx: &VerificationContext<'_>,
+        unit: &DesiredUnit,
+        artifact: &ArtifactDocument,
+    ) -> DriverResult<Supported<ArtifactStatus>> {
+        let _ = (ctx, unit, artifact);
         Ok(Supported::Unsupported)
     }
     /// The `inspect` recovery policy's check; unsupported by default.

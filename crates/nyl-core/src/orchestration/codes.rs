@@ -169,6 +169,12 @@ codes! {
     PromoteNoEvidence => "NYL-PROMOTE-NO-EVIDENCE",
     /// `--evidence published` promoted a state whose evidence is below the path's level; the record says so. A warning.
     PromoteEvidenceOverride => "NYL-PROMOTE-EVIDENCE-OVERRIDE",
+    /// A promoted artifact no longer exists where its receipt says it is (`verifyArtifacts`). Nothing was written. Exit 1.
+    PromoteArtifactMissing => "NYL-PROMOTE-ARTIFACT-MISSING",
+    /// A promoted artifact's kind cannot verify artifacts, so the record says `artifactsVerified: false`. A warning.
+    PromoteArtifactUnverified => "NYL-PROMOTE-ARTIFACT-UNVERIFIED",
+    /// An environment's `fromPromotion` source, or a `fromPromotion` binding, names a path with no record yet. Exit 2.
+    PromotionMissing => "NYL-PROMOTION-MISSING",
     /// A unit's driver could not produce its attestations.
     AttestUnknown => "NYL-ATTEST-UNKNOWN",
     /// A unit declares `observations`, but its kind cannot read observed values.

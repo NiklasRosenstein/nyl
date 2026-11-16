@@ -244,6 +244,8 @@ pub fn get_value(
                 run: None,
                 produced_in_run: &produced,
                 previous: &snapshot.desired,
+                promotions: &snapshot.promotions,
+                source_paths: None,
             },
             source,
         )

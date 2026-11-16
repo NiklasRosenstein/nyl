@@ -139,6 +139,9 @@ enum Commands {
     /// Tear units down, replacing a unit that is still selected
     Teardown(commands::teardown::TeardownArgs),
 
+    /// Promote a proven state of one environment into another along a PromotionPath
+    Promote(commands::promote::PromoteArgs),
+
     /// Freeze a unit: reconcile changes nothing about it until resumed
     Hold(commands::hold::HoldArgs),
 
@@ -182,6 +185,7 @@ impl Cli {
             | Commands::Observe(_)
             | Commands::Recover(_)
             | Commands::Teardown(_)
+            | Commands::Promote(_)
             | Commands::Hold(_)
             | Commands::Resume(_) => {
                 #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
@@ -247,6 +251,7 @@ impl Cli {
             | Commands::Observe(_)
             | Commands::Recover(_)
             | Commands::Teardown(_)
+            | Commands::Promote(_)
             | Commands::Hold(_)
             | Commands::Resume(_) => true,
             Commands::Comment(_)
@@ -286,6 +291,7 @@ impl Cli {
                 | Commands::Recover(_)
                 | Commands::State(_)
                 | Commands::Teardown(_)
+                | Commands::Promote(_)
                 | Commands::Hold(_)
                 | Commands::Resume(_)
         )
@@ -315,11 +321,12 @@ impl Cli {
             Commands::Observe(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Observe, wiring),
             Commands::Recover(args) => commands::recover::run(&args, wiring),
             Commands::Teardown(args) => commands::teardown::run(&args, wiring),
+            Commands::Promote(args) => commands::promote::run(&args, wiring),
             Commands::Hold(args) => commands::hold::run_hold(&args, wiring),
             Commands::Resume(args) => commands::hold::run_resume(&args, wiring),
             _ => {
                 return Err(nyl_render::NylError::config(
-                    "only plan, reconcile, status, detect-drift, attest, observe, recover, teardown, hold, resume, get, state, and lease run in-process",
+                    "only plan, reconcile, status, detect-drift, attest, observe, recover, teardown, promote, hold, resume, get, state, and lease run in-process",
                 ))
             }
         };

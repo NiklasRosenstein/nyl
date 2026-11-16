@@ -171,8 +171,10 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
     let units = nyl_render::gitops::units::discover_units(&inventory)?;
     // Target bindings first: their findings name the DeploymentTarget field a
     // publication unit's reference comes from.
-    validate_targets(&inventory).await?;
+    // The units and paths first: a target that no environment places any more (a removed
+    // Environment) fails its own check, but the path that lost its source is the cause to report.
     validate_environment_units(&inventory)?;
+    validate_targets(&inventory).await?;
     report.gitops = Some(GitOpsSummary {
         resources: inventory.resources.len(),
         units: units.len(),

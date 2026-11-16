@@ -7,8 +7,11 @@
 //! - S is the entry worktree's commit when the Environment's `source` is
 //!   omitted, the tip of `source.revision`, or `source.commit` when both are
 //!   set; `--source` overrides it for one invocation, recorded as `override`.
-//!   (`fromPromotion` is M6: [`source_request`] cannot express it, and the
-//!   shell rejects it first with [`unsupported_source`].)
+//!   A `source.fromPromotion` Environment takes S from the newest
+//!   PromotionRecord on its path or paths ([`promoted_record`]), recorded as
+//!   `sourceChosenBy: promotion` with the record's `sequence`; a path with no
+//!   record yet is `NYL-PROMOTION-MISSING`. `record: source` is not
+//!   supported yet ([`unsupported_source`]).
 //! - S must be reachable from `protectedRefs` (default: the repository's
 //!   default branch) unless `allowUnprotectedSource`; an override follows the
 //!   same rule ([`run_source_refs`]). A locked commit (a unit source's or the
@@ -29,8 +32,9 @@ use std::collections::BTreeMap;
 use nyl_core::local_path::validate_local_path;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::LocalPathField;
-use nyl_core::orchestration::ids::CommitId;
+use nyl_core::orchestration::ids::{CommitId, PromotionPathName};
 use nyl_core::orchestration::ports::SourceRepository;
+use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::SourceChoice;
 use nyl_core::resources::environment::Environment;
 use nyl_core::resources::GitSource;
@@ -51,6 +55,13 @@ pub enum SourceRequest {
     Commit { revision: String, commit: CommitId },
     /// `--source <rev>`: a revision or commit for this invocation only.
     Override(String),
+    /// The source commit of the newest PromotionRecord on the Environment's
+    /// promotion path or paths.
+    Promotion {
+        path: PromotionPathName,
+        sequence: u64,
+        commit: CommitId,
+    },
 }
 
 impl SourceRequest {
@@ -71,25 +82,29 @@ impl SourceRequest {
             Self::Override(revision) => SourceChoice::Override {
                 revision: revision.clone(),
             },
+            Self::Promotion { path, sequence, .. } => SourceChoice::Promotion {
+                path: path.to_string(),
+                sequence: *sequence,
+            },
         }
     }
 }
 
 /// The request for S from the entry worktree's Environment, its commit (an
-/// instance's recorded commit when `recorded`), and an optional `--source`
-/// override.
+/// instance's recorded commit when `recorded`), an optional `--source`
+/// override, and the PromotionRecords of the environment's desired state.
 ///
-/// `source.fromPromotion` is M6: it yields a revision only where one is set
-/// (validation excludes that), and otherwise the entry commit, so the shell
-/// must reject it beforehand with [`unsupported_source`].
+/// A `source.fromPromotion` Environment takes S from [`promoted_record`]; the
+/// override still wins for one invocation.
 pub fn source_request(
     entry: &Environment,
     entry_commit: &CommitId,
     override_revision: Option<&str>,
     recorded: bool,
-) -> SourceRequest {
+    promotions: &BTreeMap<PromotionPathName, PromotionRecord>,
+) -> Result<SourceRequest, Finding> {
     if let Some(revision) = override_revision {
-        return SourceRequest::Override(revision.to_owned());
+        return Ok(SourceRequest::Override(revision.to_owned()));
     }
     // Without a source of its own, an instance not entered from its own
     // checkout renders at the commit its record names.
@@ -101,19 +116,63 @@ pub fn source_request(
         }
     };
     let Some(source) = &entry.spec.source else {
-        return without_source();
+        return Ok(without_source());
     };
+    if let Some(promoted) = &source.from_promotion {
+        let record = promoted_record(&entry.metadata.name, promoted, promotions)?;
+        return Ok(SourceRequest::Promotion {
+            path: record.path.clone(),
+            sequence: record.sequence,
+            commit: record
+                .source_commit
+                .clone()
+                .expect("promoted_record returns records with a source commit"),
+        });
+    }
     let Some(revision) = &source.git.revision else {
-        return without_source();
+        return Ok(without_source());
     };
-    match source.git.commit.as_deref().map(CommitId::new) {
+    Ok(match source.git.commit.as_deref().map(CommitId::new) {
         Some(Ok(commit)) => SourceRequest::Commit {
             revision: revision.clone(),
             commit,
         },
         // Environment validation rejects a malformed lock; without one the revision's tip is S.
         Some(Err(_)) | None => SourceRequest::Revision(revision.clone()),
-    }
+    })
+}
+
+/// The newest record, by `sequence`, on the paths `promoted` names that
+/// carries a source commit. None is `NYL-PROMOTION-MISSING`, whose fix names
+/// `nyl promote <path>`.
+pub fn promoted_record<'a>(
+    environment: &str,
+    promoted: &nyl_core::resources::environment::PromotedSource,
+    promotions: &'a BTreeMap<PromotionPathName, PromotionRecord>,
+) -> Result<&'a PromotionRecord, Finding> {
+    let paths: Vec<&str> = promoted
+        .path
+        .iter()
+        .map(String::as_str)
+        .chain(promoted.paths.iter().map(String::as_str))
+        .collect();
+    promotions
+        .values()
+        .filter(|record| paths.contains(&record.path.as_str()) && record.source_commit.is_some())
+        .max_by_key(|record| record.sequence)
+        .ok_or_else(|| {
+            Finding::new(
+                Code::PromotionMissing,
+                format!(
+                    "Environment {environment} takes its source from promotion path {}, which has no record yet",
+                    paths.join(", ")
+                ),
+                format!(
+                    "promote a state into it with `nyl promote {}`",
+                    paths.first().copied().unwrap_or_default()
+                ),
+            )
+        })
 }
 
 /// Refuse source forms the entry-repository resolver cannot represent.
@@ -129,12 +188,17 @@ pub fn unsupported_source(entry: &Environment) -> Option<Finding> {
             "remove spec.source.repository and repositoryRef, and use a revision or commit from the entry repository",
         ));
     }
-    source.from_promotion.as_ref()?;
-    Some(Finding::new(
-        Code::SourceUnavailable,
-        format!("Environment {} takes its source from a promotion, which is not supported yet", entry.metadata.name),
-        "set spec.source.revision (optionally with commit), or omit spec.source to run from the entry worktree's commit",
-    ))
+    let promoted = source.from_promotion.as_ref()?;
+    (promoted.record.as_deref() == Some("source")).then(|| {
+        Finding::new(
+            Code::PromoteUnsupported,
+            format!(
+                "Environment {} keeps its promotion record in its source (`record: source`), which is not supported yet",
+                entry.metadata.name
+            ),
+            "remove `record: source`: the record then lives in the environment's state",
+        )
+    })
 }
 
 /// The effective `protectedRefs`, defaulting to the repository's default branch.
@@ -579,7 +643,8 @@ mod tests {
             ),
         ];
         for (spec, override_revision, request, choice) in cases {
-            let actual = source_request(&environment(&spec), &entry, override_revision, false);
+            let actual =
+                source_request(&environment(&spec), &entry, override_revision, false, &BTreeMap::new()).unwrap();
             assert_eq!(actual, request, "{spec}");
             assert_eq!(actual.choice(), choice, "{spec}");
         }
@@ -592,7 +657,7 @@ mod tests {
     fn test_a_recorded_source_is_used_only_without_a_source_of_its_own() {
         let recorded = commit('e');
         let request = |spec: &Value, override_revision: Option<&str>| {
-            source_request(&environment(spec), &recorded, override_revision, true)
+            source_request(&environment(spec), &recorded, override_revision, true, &BTreeMap::new()).unwrap()
         };
         let plain = request(&json!({}), None);
         assert_eq!(plain, SourceRequest::Recorded(recorded.clone()));
@@ -607,11 +672,76 @@ mod tests {
         );
     }
 
-    /// Catches a promoted source silently running from the entry commit.
+    fn record(path: &str, sequence: u64, source: Option<char>) -> PromotionRecord {
+        serde_json::from_value(json!({
+            "path": path, "sequence": sequence,
+            "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "desiredCommit": "3".repeat(40)},
+            "sourceCommit": source.map(|c| c.to_string().repeat(40)),
+            "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
+            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "artifactsVerified": true,
+            "requested": {"by": "a", "identity": "local", "at": "2026-09-25T16:41:00Z"}
+        }))
+        .unwrap()
+    }
+
+    fn records(list: &[PromotionRecord]) -> BTreeMap<PromotionPathName, PromotionRecord> {
+        list.iter().map(|r| (r.path.clone(), r.clone())).collect()
+    }
+
+    /// Catches a promoted source running from the entry commit instead of the
+    /// newest record's source commit, or an environment without a record
+    /// running at all: it is `NYL-PROMOTION-MISSING`, naming `nyl promote`.
     #[test]
-    fn test_promoted_source_is_reported_unsupported() {
-        let promoted = environment(&json!({"source": {"fromPromotion": {"path": "dev-to-prod"}}}));
-        assert_eq!(unsupported_source(&promoted).unwrap().code, Code::SourceUnavailable);
+    fn test_promoted_source_is_the_newest_records_commit_or_missing() {
+        let promoted = environment(&json!({"source": {"fromPromotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}}));
+        let entry = commit('e');
+        let missing = source_request(&promoted, &entry, None, false, &BTreeMap::new()).unwrap_err();
+        assert_eq!(missing.code, Code::PromotionMissing);
+        assert!(missing.fix.contains("nyl promote dev-to-prod"));
+        let all = records(&[
+            record("dev-to-prod", 1, Some('a')),
+            record("hotfix-to-prod", 2, Some('b')),
+            record("other", 9, Some('c')),
+        ]);
+        let request = source_request(&promoted, &entry, None, false, &all).unwrap();
+        assert_eq!(
+            request,
+            SourceRequest::Promotion {
+                path: PromotionPathName::new("hotfix-to-prod").unwrap(),
+                sequence: 2,
+                commit: commit('b')
+            }
+        );
+        assert_eq!(
+            request.choice(),
+            SourceChoice::Promotion {
+                path: "hotfix-to-prod".to_owned(),
+                sequence: 2
+            }
+        );
+        // A record of a values-only path carries no source commit and never supplies one.
+        let values_only = records(&[record("dev-to-prod", 1, None)]);
+        assert_eq!(
+            source_request(&promoted, &entry, None, false, &values_only)
+                .unwrap_err()
+                .code,
+            Code::PromotionMissing
+        );
+        // --source still wins for one invocation.
+        assert_eq!(
+            source_request(&promoted, &entry, Some("main"), false, &all).unwrap(),
+            SourceRequest::Override("main".to_owned())
+        );
+    }
+
+    /// Catches `record: source` silently ignored while its block is not read.
+    #[test]
+    fn test_record_source_is_refused_with_its_code() {
+        let source = environment(&json!({"source": {"fromPromotion": {"path": "p", "record": "source"}}}));
+        assert_eq!(unsupported_source(&source).unwrap().code, Code::PromoteUnsupported);
+        let state = environment(&json!({"source": {"fromPromotion": {"path": "p"}}}));
+        assert!(unsupported_source(&state).is_none());
         assert!(unsupported_source(&environment(&json!({"source": {"revision": "main"}}))).is_none());
     }
 

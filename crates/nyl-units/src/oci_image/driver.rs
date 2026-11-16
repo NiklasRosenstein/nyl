@@ -8,9 +8,9 @@ use super::spec::{ImageContext, OciImageSpec};
 use base64::Engine;
 use nyl_core::constants::{API_VERSION_ARTIFACTS, API_VERSION_UNITS};
 use nyl_core::orchestration::driver::{
-    Capabilities, Change, DriftDetection, Driver, DriverError, DriverResult, ExecutionContext, KeyInputs, Outcome,
-    OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported, ToolExit,
-    ToolInvocation,
+    ArtifactStatus, Capabilities, Change, DriftDetection, Driver, DriverError, DriverResult, ExecutionContext,
+    KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy, ResolutionContext, Supported,
+    ToolExit, ToolInvocation, ToolRunner, VerificationContext,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, Uid};
 use nyl_core::orchestration::state::{
@@ -122,12 +122,62 @@ fn sha256(value: &str) -> bool {
         .strip_prefix("sha256:")
         .is_some_and(|hex| hex.len() == 64 && hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)))
 }
-fn masked(ctx: &ExecutionContext<'_>) -> Vec<String> {
-    ctx.env
+/// What a docker call needs of the context it runs in: execution and
+/// artifact verification share the environment, credential, and tool code.
+trait Call {
+    fn env(&self) -> &BTreeMap<String, String>;
+    fn secrets(&self) -> &BTreeMap<String, String>;
+    fn temp_dir(&self) -> &Path;
+    fn tools(&self) -> &dyn ToolRunner;
+    fn working_dir(&self) -> &Path;
+    fn timeout(&self) -> std::time::Duration;
+}
+impl Call for ExecutionContext<'_> {
+    fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+    fn secrets(&self) -> &BTreeMap<String, String> {
+        &self.secrets
+    }
+    fn temp_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+    fn tools(&self) -> &dyn ToolRunner {
+        self.tools
+    }
+    fn working_dir(&self) -> &Path {
+        &self.project_dir
+    }
+    fn timeout(&self) -> std::time::Duration {
+        (self.deadline - self.now).to_std().unwrap_or_default()
+    }
+}
+impl Call for VerificationContext<'_> {
+    fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+    fn secrets(&self) -> &BTreeMap<String, String> {
+        &self.secrets
+    }
+    fn temp_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+    fn tools(&self) -> &dyn ToolRunner {
+        self.tools
+    }
+    fn working_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+    fn timeout(&self) -> std::time::Duration {
+        (self.deadline - self.now).to_std().unwrap_or_default()
+    }
+}
+fn masked(ctx: &impl Call) -> Vec<String> {
+    ctx.env()
         .iter()
         .filter(|(name, _)| name.as_str() != "PATH" && name.as_str() != "DOCKER_CONFIG")
         .map(|(_, value)| value.clone())
-        .chain(ctx.secrets.values().cloned())
+        .chain(ctx.secrets().values().cloned())
         .filter(|value| !value.is_empty())
         .collect()
 }
@@ -174,14 +224,14 @@ impl Drop for DockerEnv {
         }
     }
 }
-fn docker_env(ctx: &ExecutionContext<'_>, spec: &OciImageSpec) -> DriverResult<DockerEnv> {
-    let mut values = ctx.env.clone();
+fn docker_env(ctx: &impl Call, spec: &OciImageSpec) -> DriverResult<DockerEnv> {
+    let mut values = ctx.env().clone();
     let mut masks = masked(ctx);
-    let home = ctx.temp_dir.join("home");
+    let home = ctx.temp_dir().join("home");
     std::fs::create_dir_all(&home).map_err(fail_io)?;
     values.insert("HOME".into(), home.display().to_string());
     if !spec.registry_auth.is_empty() {
-        let directory = ctx.temp_dir.join("docker-config");
+        let directory = ctx.temp_dir().join("docker-config");
         std::fs::create_dir_all(&directory).map_err(fail_io)?;
         #[cfg(unix)]
         {
@@ -189,7 +239,7 @@ fn docker_env(ctx: &ExecutionContext<'_>, spec: &OciImageSpec) -> DriverResult<D
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).map_err(fail_io)?;
         }
         let mut config = json!({"auths": {}});
-        if let Some(original) = ctx.env.get("DOCKER_CONFIG") {
+        if let Some(original) = ctx.env().get("DOCKER_CONFIG") {
             let original = Path::new(original);
             for name in ["buildx", "contexts"] {
                 copy_tree(&original.join(name), &directory.join(name))?;
@@ -207,13 +257,13 @@ fn docker_env(ctx: &ExecutionContext<'_>, spec: &OciImageSpec) -> DriverResult<D
             }
         }
         for (registry, auth) in &spec.registry_auth {
-            let username = ctx.secrets.get(&auth.username_secret).ok_or_else(|| {
+            let username = ctx.secrets().get(&auth.username_secret).ok_or_else(|| {
                 DriverError::before_effects(format!(
                     "registry username secret {:?} was not admitted",
                     auth.username_secret
                 ))
             })?;
-            let password = ctx.secrets.get(&auth.password_secret).ok_or_else(|| {
+            let password = ctx.secrets().get(&auth.password_secret).ok_or_else(|| {
                 DriverError::before_effects(format!(
                     "registry password secret {:?} was not admitted",
                     auth.password_secret
@@ -236,22 +286,17 @@ fn docker_env(ctx: &ExecutionContext<'_>, spec: &OciImageSpec) -> DriverResult<D
     Ok(DockerEnv {
         values,
         masks,
-        temporary: (!spec.registry_auth.is_empty()).then(|| ctx.temp_dir.join("docker-config")),
+        temporary: (!spec.registry_auth.is_empty()).then(|| ctx.temp_dir().join("docker-config")),
     })
 }
-fn tool(
-    ctx: &ExecutionContext<'_>,
-    env: &DockerEnv,
-    args: Vec<String>,
-    private_stdout: bool,
-) -> DriverResult<ToolExit> {
-    ctx.tools.run(ToolInvocation {
+fn tool(ctx: &impl Call, env: &DockerEnv, args: Vec<String>, private_stdout: bool) -> DriverResult<ToolExit> {
+    ctx.tools().run(ToolInvocation {
         program: "docker".into(),
         args: args.into_iter().map(OsString::from).collect(),
-        working_dir: ctx.project_dir.clone(),
+        working_dir: ctx.working_dir().to_path_buf(),
         env: env.values.clone(),
         stdin: None,
-        timeout: Some((ctx.deadline - ctx.now).to_std().unwrap_or_default()),
+        timeout: Some(ctx.timeout()),
         masked: env.masks.clone(),
         private_stdout,
         forward_stdout: false,
@@ -505,6 +550,7 @@ impl Driver for OciImageDriver {
             reconcile: true,
             detect_drift: true,
             build: true,
+            verify_artifact: true,
             ..Capabilities::default()
         }
     }
@@ -711,6 +757,44 @@ impl Driver for OciImageDriver {
             }
         };
         Ok(Supported::Supported(drift.into()))
+    }
+    fn verify_artifact(
+        &self,
+        ctx: &VerificationContext<'_>,
+        unit: &DesiredUnit,
+        artifact: &ArtifactDocument,
+    ) -> DriverResult<Supported<ArtifactStatus>> {
+        let spec = parse(resolved(unit)?)?;
+        let reference = artifact
+            .spec
+            .get("reference")
+            .and_then(Value::as_str)
+            .ok_or_else(|| DriverError::before_effects("the image artifact has no digest reference"))?;
+        let env = docker_env(ctx, &spec)?;
+        let result = tool(
+            ctx,
+            &env,
+            vec!["buildx".into(), "imagetools".into(), "inspect".into(), reference.into()],
+            true,
+        )?;
+        Ok(Supported::Supported(match result {
+            ToolExit::Exited { code: 0, .. } => ArtifactStatus::Present,
+            ToolExit::Exited { stderr, .. } => {
+                let text = String::from_utf8_lossy(&stderr);
+                let first = text.lines().next().unwrap_or("").trim();
+                ArtifactStatus::Missing {
+                    reason: format!("docker buildx imagetools inspect {reference} failed: {first}"),
+                }
+            }
+            ToolExit::NotStarted { reason } => {
+                return Err(DriverError::before_effects(format!("cannot run docker: {reason}")))
+            }
+            _ => {
+                return Err(DriverError::before_effects(
+                    "docker buildx imagetools inspect was interrupted",
+                ))
+            }
+        }))
     }
     fn build(
         &self,

@@ -391,13 +391,10 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     StepOperation::DetectDrift => DriverOperation::DetectDrift,
                     StepOperation::Teardown => DriverOperation::Teardown,
                     StepOperation::Observe => DriverOperation::Observe,
-                    StepOperation::VerifyArtifact => {
-                        return Err(
-                            "tier 1 does not script verify-artifact yet: it arrives with PR 6 (m6/promote)".to_owned(),
-                        );
-                    }
+                    StepOperation::VerifyArtifact => DriverOperation::VerifyArtifact,
                 };
-                let observe = step.operation == StepOperation::Observe;
+                // An observation that could not be read, or an artifact that is gone, has a reason, not a category.
+                let uncategorized = matches!(step.operation, StepOperation::Observe | StepOperation::VerifyArtifact);
                 let result = match step.outcome {
                     DriverOutcome::Succeeded => Scripted::Succeeded {
                         outputs: step.outputs.clone(),
@@ -406,7 +403,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     DriverOutcome::Drifted => Scripted::Drifted,
                     DriverOutcome::Pending => Scripted::Pending,
                     // An observation that could not be read has a reason, not a category.
-                    DriverOutcome::Failed if observe => Scripted::Failed {
+                    DriverOutcome::Failed if uncategorized => Scripted::Failed {
                         category: FailureCategory::ToolError,
                         retryable: false,
                     },

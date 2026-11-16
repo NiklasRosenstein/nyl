@@ -639,7 +639,16 @@ pub fn desire(inputs: &DesireInputs<'_>, new_uid: &mut dyn FnMut() -> Uid) -> De
             spec: inputs.environment_spec.clone(),
             source_commit: source.source_commit.clone(),
             source_chosen_by: inputs.source_choice.clone(),
-            applied_promotion_sequence: None,
+            // The highest sequence a run applied: a promoted source records its
+            // record's; any other choice leaves what earlier runs recorded.
+            applied_promotion_sequence: match &inputs.source_choice {
+                SourceChoice::Promotion { sequence, .. } => Some(*sequence),
+                _ => inputs
+                    .snapshot
+                    .environment
+                    .as_ref()
+                    .and_then(|record| record.applied_promotion_sequence),
+            },
             ownership,
         },
         units,

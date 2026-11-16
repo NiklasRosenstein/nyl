@@ -639,6 +639,28 @@ pub fn state_tips_at(
             })
             .and_then(|found| CommitId::new(found.to_string()).ok())
     };
+    // The transition that wrote this commit wrote the other ref's commit under
+    // the same `Nyl-Run-Id`; that pairing is exact where commit times are not
+    // (a run's commits can share one second).
+    let run = target.message().ok().and_then(|message| {
+        nyl_orchestration::transition::trailer(message, "Nyl-Run-Id").map(|run| run.trim().to_owned())
+    });
+    let same_run = |tip: Option<git2::Oid>| -> Option<CommitId> {
+        let run = run.as_deref()?;
+        let mut walk = repository.revwalk().ok()?;
+        walk.push(tip?).ok()?;
+        walk.filter_map(std::result::Result::ok)
+            .find(|candidate| {
+                repository.find_commit(*candidate).is_ok_and(|commit| {
+                    commit
+                        .message()
+                        .ok()
+                        .and_then(|message| nyl_orchestration::transition::trailer(message, "Nyl-Run-Id"))
+                        .is_some_and(|found| found.trim() == run)
+                })
+            })
+            .and_then(|found| CommitId::new(found.to_string()).ok())
+    };
     let (desired, observed) = (oid(&current.desired), oid(&current.observed));
     let (in_desired, in_observed) = (holds(desired), holds(observed));
     if !in_desired && !in_observed {
@@ -651,12 +673,12 @@ pub fn state_tips_at(
         desired: if in_desired {
             Some(named.clone())
         } else {
-            at_or_before(desired)
+            same_run(desired).or_else(|| at_or_before(desired))
         },
         observed: if in_observed {
             Some(named)
         } else {
-            at_or_before(observed)
+            same_run(observed).or_else(|| at_or_before(observed))
         },
     })
 }

@@ -5,9 +5,9 @@ use std::ffi::OsString;
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
 use nyl_core::orchestration::driver::{
-    Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
-    ExecutionContext, Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
-    ResolutionContext, Supported,
+    ArtifactStatus, Capabilities, Change, DriftDetection, Driver, DriverError, DriverOperation, DriverResult,
+    ExecStatus, ExecutionContext, Inspection, KeyInputs, Outcome, OwnershipScope, PlanReport, RecoveryPolicies,
+    RecoveryPolicy, ResolutionContext, Supported, VerificationContext,
 };
 use nyl_core::orchestration::ids::{EnvironmentName, ExecutionKey};
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit, Drift, Receipt};
@@ -90,8 +90,18 @@ impl Driver for FakeImage {
             reconcile: true,
             detect_drift: true,
             build: true,
+            verify_artifact: true,
             ..Capabilities::default()
         }
+    }
+
+    fn verify_artifact(
+        &self,
+        _ctx: &VerificationContext<'_>,
+        unit: &DesiredUnit,
+        _artifact: &ArtifactDocument,
+    ) -> DriverResult<Supported<ArtifactStatus>> {
+        Ok(Supported::Supported(self.script.verified(&unit.unit.name)?))
     }
 
     fn recovery(&self, _spec: &Value) -> RecoveryPolicies {

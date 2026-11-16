@@ -186,6 +186,8 @@ pub fn prepare(
             run: None,
             produced_in_run: &BTreeSet::new(),
             previous: &snapshot.desired,
+            promotions: &snapshot.promotions,
+            source_paths: None,
         },
         &unit,
     );
