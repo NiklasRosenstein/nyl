@@ -223,7 +223,7 @@ and to the harness's validation, together with the first scenario using them.
 | `clock: {advance: <duration>}` or `{set: <timestamp>}` | Moves the injected clock |
 | `nyl: [args…]` | Runs one `nyl` invocation in a fresh clone at the tip of `main`, or of `at: <branch>`; `exit` and `expect` check its result. The orchestration commands run in-process in tier 1; any other command, such as `publish-tree`, runs as the binary in both tiers, and `expect` then reads its files and output, not a report |
 | `driver: {unit, operation, outcome, category, retryable, outputs, times}` | Tier 1: scripts the fake kind standing in for `unit` for its next `times` (default 1) calls of `operation` (`plan`, `reconcile`, `detect-drift`, `teardown`, and from M5 `observe`), returning `outcome` (`succeeded`, `failed`, `uncertain`, and for `detect-drift` also `drifted`); `observe` returns `succeeded` with the observed values in `outputs`, `pending`, or `failed` without a category; from M6, `verify-artifact` answers `nyl promote`'s check that an artifact of the unit's receipt still exists: `succeeded`, or `failed` (gone) without a category |
-| `argocd: {target, all: {runs, health}, releases: {<group>/<release>: {runs, health}}}` | Tier 1, from M6: what the fake Argo CD reports for the target's generated Applications from now on, until the next `argocd` step for it. `all` covers every Application, the catalog Application included, that `releases` does not name. `runs` is the `id` of an earlier `nyl` step whose run published what the Application runs (the publication commit that run's receipt for the target records), or `unmatched`, a revision no publication of the target matches; `health` is `Healthy` (default), `Progressing`, `Degraded`, or `Unknown`. The fake publication's `attest` turns the report into a reading and attests through the shared matching, so `accepted`, `healthy`, and their per-Application details are the real rules' |
+| `argocd: {target, all: {runs, health}, releases: {<group>/<release>: {runs, health}}}` | Tier 1, from M6: what the fake Argo CD reports for the target's generated Applications from now on, until the next `argocd` step for it. `all` covers every Application, the catalog Application included, that `releases` does not name. `runs` is the `id` of an earlier `nyl` step whose run published what the Application runs (the publication commit that run's receipt for the target records), or `unmatched`, a revision no publication of the target matches; `health` is `Healthy` (default), `Progressing`, `Degraded`, or `Unknown`. The fake publication's `attest` turns the report into a reading and attests through the shared matching, so `accepted`, `healthy`, and their per-Application details are the real rules'. A scenario with `argocd` steps sets `publication: fake`, because the built-in driver reads a real Argo CD |
 | `file: {path, content}` | Changes a file beneath the scenario's temporary directory, standing in for a change made outside Nyl, such as drift; Command units reach that directory through `env.passthrough: [SCENARIO_TMP]` |
 | `fault: {point, unit}` | Tier 1: the next `nyl` step dies at `point`, as a forced kill would: `after-effect` or `before-checkpoint` of `unit` (required); `before-lease-update`, where `unit` is optional and names the phase that starts that unit's batch, and without it the first phase; or `before-push` (no `unit`). That step has `killed: true` instead of `exit`, and fails when its fault never fired |
 | `nyl` with `id` and `pause: {point, unit}` | Starts the invocation and returns once it reaches `point` (`executing` a unit, `waiting-lease` before a `--wait-lease` poll, or a fault point), leaving it running; the commits other steps write meanwhile do not count toward its `commits` |
@@ -248,11 +248,14 @@ and to the harness's validation, together with the first scenario using them.
 | `deploy` | Files on a deploy branch after the step: `contains` (patterns that match a file), `unchanged` (the files that match are the ones the step started with), `absent` (patterns that match no file), and `mentions` (per file pattern, texts that appear in at least one matching file: a literal, or the arguments of a `nyl get` invocation, whose value must appear) |
 | `keep-refs` | The keep refs of preview instances in `project.git` (`refs/nyl-keep/`): `count`, how many exist, and `kept`, revisions such as `pr-124` whose commit has one |
 | `source` | The commit a reconcile ran its environment at, as a Git revision of `project.git` |
-| `promotion` | The PromotionRecord a `promote` step wrote, read where its path keeps it (`record`: `state`, the default, reads the target environment's `desired/promotions/<path>.yaml`; `source` reads the Environment's `source.fromPromotion.promoted` block at the tip of the branch the step ran at), or for `--dry-run` the record the report shows it would write. Keys not given are not checked: `path`; `sequence`; `sourceCommit` as a Git revision of `project.git` such as `main~1`, or `null` for a path that promotes only values; `from.run` as the `id` of the `nyl` step whose run recorded the promoted state and `from.environment`; `values`, exactly these names, each `equals` a literal or the value a `nyl get` invocation prints, and `state`, the `id` of the step whose run wrote the value's own state (not given: the record names none, so the value came from `from`); `evidence` with `level`, `override`, and exactly the `attestations` used as `<unit>/<name>` or `environment/<name>`; `superseded`, exactly these commits in commit order, each a revision of `project.git` with its `reason`; and `artifactsVerified` |
+| `promotion` | The PromotionRecord a `promote` step wrote, read where its path keeps it (`record`: `state`, the default, reads the target environment's `desired/promotions/<path>.yaml`; `source` reads the Environment's `source.fromPromotion.promoted` block at the tip of the branch the step ran at), or for `--dry-run` the record the report shows it would write. Keys not given are not checked: `path`; `sequence`; `sourceCommit` as a Git revision of `project.git` such as `main~1`, or `null` for a path that promotes only values; `from.run` as the `id` of the `nyl` step whose run recorded the promoted state, `from.environment`, and `from.desiredCommit` and `from.observedCommit` (usually `%STATE(<id>)%` and `%OBSERVED(<id>)%`); `values`, exactly these names, each `equals` a literal or the value a `nyl get` invocation prints, and `state`, the `id` of the step whose run wrote the value's own state (not given: the record names none, so the value came from `from`); `evidence` with `level`, `override`, and exactly the `attestations` used as `<unit>/<name>` or `environment/<name>`; `superseded`, exactly these commits in commit order, each a revision of `project.git` with its `reason`; `artifactsVerified`; `requested.reason`; and `ignoredAttestations`, exactly these entries, each `{attestation: <unit>/<name> or environment/<name>, reason}` |
 
 A `promote` step's `commits` count the refs of the environment its path
 promotes into, which the harness reads from the PromotionPath at the step's
 checkout; every other step's count those of its `-e` environment, or dev's.
+For a `promote` step that gives `commits`, the harness also checks that no
+other state ref of `project.git` changed, the source environment's
+included, since promotion only reads its source.
 
 #### Argument placeholders
 
@@ -265,12 +268,14 @@ in advance:
 | Placeholder | Replaced by |
 | --- | --- |
 | `%STATE(<id>)%` | The desired-state commit the `nyl` step with that `id` wrote, or its observed-state commit when it wrote no desired one; `nyl get --state-revision` and `nyl promote --state-revision` accept either |
+| `%OBSERVED(<id>)%` | The observed-state commit the `nyl` step with that `id` wrote |
 | `%COMMIT(<revision>)%` | The full commit ID of a revision of `project.git`, such as `main~1` or `release/prod`, resolved when the step runs |
-| `%PLAN-DIGEST(<environment>/<unit>)%` | The `changeDigest` that `nyl plan -e <environment> --unit <unit> -o json` reports for the unit at the step's checkout, for `--approve <unit>=<digest>` under `requireDigest` |
+| `%PLAN-DIGEST(<environment>/<unit>)%` | The `changeDigest` that `nyl plan -e <environment> --unit <unit> -o json` reports for the unit at the step's checkout, for `--approve <unit>=<digest>` under `requireDigest`; in tier 2 that `plan` runs through the binary, like every step there |
 
-Validation rejects an unknown placeholder, a `%STATE(…)%` that names no
-earlier `nyl` step, and placeholders in a scenario whose milestone is before
-M6.
+Validation rejects an unknown placeholder, a `%STATE(…)%` or
+`%OBSERVED(…)%` that names no earlier `nyl` step, and placeholders in a
+scenario whose milestone is before M6. The same applies to the string
+values `get.value` and `get.json` compare and to `promotion.from`'s commits.
 
 Tier 2 also checks the registry's manifests and `tofu output`. Both tiers read
 the same file. `driver`, `fault`, `argocd`, and `pause` steps are tier 1 by kind, and a
@@ -768,6 +773,11 @@ environment that exists and 1 for one that does not.
 
 ## Scenario 4: promotion to prod
 
+Scenarios 4 and 5 use the codes and behaviours the
+[M6 plan](m6-plan.md#open-decisions) recommends where the promotion contract
+leaves a choice open (decisions D1, D2, D5, D13, D14). They change with
+those decisions.
+
 `reference/promotion` runs a project of its own: scenario 1's dev units
 (`network`, `database`, `web-image`, `kubernetes`), and prod, whose source is
 `fromPromotion: {path: dev-to-prod}`, selecting `network`, `database`, and
@@ -782,16 +792,17 @@ environment-wide attestation `qa`; `dev-to-prod` is `evidence: attested` with
 | 1 | `nyl validate` → 0; `state init` dev and prod | The path validates against the declarations |
 | 2 | `reconcile -e prod` → 2 (`NYL-PROMOTION-MISSING`, names `nyl promote dev-to-prod`); `promote dev-to-prod` → 2 (`NYL-PROMOTE-NO-EVIDENCE`) | Before the first promotion prod has no source commit; with no recorded dev state, evidence is missing; neither writes anything |
 | 3 | `reconcile -e dev` (R1 at S1) → 0; `promote` → 2 naming `qa` | Receipts alone do not reach `attested` |
-| 4 | `attest -e dev --name qa --result pass` → 0 | An external attestation of dev's current state: one observed commit |
+| 4 | `attest -e dev --name qa --result pass` → 0; `get states -e dev` | An external attestation of dev's current state: one observed commit; the state lists its desired, observed, and source commits and `qa` |
 | 5 | `promote --dry-run` → 0; `get promotion-candidates dev-to-prod` | The dry run writes nothing and shows the record; the candidate is R1's state at `attested`, not yet promoted |
-| 6 | `promote --reason …` → 0 | One desired commit on prod with record 1: S1, R1's state, the image digest R1 recorded, `qa` as evidence, nothing superseded, artifacts verified; `get promotions -e prod` lists it |
+| 6 | `promote --reason …` → 0 | One desired commit on prod and no other state commit, with record 1: S1, R1's desired and observed commits, the image digest R1 recorded, `qa` as evidence, nothing superseded, artifacts verified, the reason; `get promotions -e prod` lists it |
 | 7 | `reconcile -e prod` → 2, then `--approve-all` → 2, then `--approve database=<digest>` → 0 | prod runs S1 (`sourceChosenBy: promotion`); `network` applies, `database` waits for a reviewed plan, `--approve-all` cannot replace the digest; then prod publishes R1's image and its own database host, and `status` shows the lineage |
 | 8 | Commit S2; `reconcile -e dev` (R2); `promote` → 0, unchanged | The newest state that reaches `attested` is the one prod runs: nothing is written |
 | 9 | Attest R2's `qa`; clock +2h; `promote` → 2 naming `maxAttestationAge`; attest again | Aged attestations no longer count, for any state |
 | 10 | `promote` → 0; `reconcile -e prod` → 0 | Record 2 (S2, R2's image); only `kubernetes` runs, without approval, because prod's infrastructure did not change |
 | 11 | `promote --revision S1` → 2; with `--evidence published` → 0 (`NYL-PROMOTE-EVIDENCE-OVERRIDE`); `reconcile -e prod` → 0 | Rollback is promoting an older state: its `qa` is too old, so it takes the recorded override; no `--supersede` on the same path; prod runs S1 and R1's image again |
-| 12 | Commit S3; R3; attest; tier 1: the image is gone (`verify-artifact` fails); `promote` → 1 (`NYL-PROMOTE-ARTIFACT-MISSING`); `--no-verify-artifacts` → 0 | Artifact verification refuses a missing image; an explicit skip records `artifactsVerified: false` |
-| 13 | Tier 1: remove dev's Environment; `nyl validate` → 1 naming `dev-to-prod` | Scenario 1's step 21 |
+| 12 | Commit S3; R3; `attest --result fail` → 3; `promote --revision S3` → 2; with `--ignore-attestation environment/qa=<reason>` → 0 | A failing attestation blocks its state; the override is recorded with its reason |
+| 13 | Commit S4; R4; attest; tier 1: the image is gone (`verify-artifact` fails); `promote` → 1 (`NYL-PROMOTE-ARTIFACT-MISSING`); `--no-verify-artifacts` → 0 | Artifact verification refuses a missing image; an explicit skip records `artifactsVerified: false` |
+| 14 | Tier 1: remove dev's Environment; `nyl validate` → 1 naming `dev-to-prod` | Scenario 1's step 21 |
 
 ## Scenario 5: hotfix
 
@@ -810,12 +821,14 @@ marks the commit prod first runs.
 | 3 | Branch `release/prod` from S1; commits "Fix pool size" and "Bump timeout"; `reconcile -e prod-hotfix` → 0; attest | The fix is built and deployed on the hotfix target from `release/prod` |
 | 4 | `promote hotfix-to-prod` → 0; `reconcile -e prod` → 0 | Record 2 on the hotfix path, containing S1, supersedes nothing; prod runs the fix commit and image, with path-less bindings following the record that supplied the source |
 | 5 | `promote dev-to-prod` → 2 (`NYL-PROMOTE-SUPERSEDES`), also with `--dry-run` | The refusal names `hotfix-to-prod`, both missing commits by subject, and `--supersede`; nothing is written |
-| 6 | Squash-merge `release/prod` into `main`; dev runs it; `promote dev-to-prod` → 2 | A squash of two commits is patch-equivalent to neither, so both are still missing |
-| 7 | `--supersede <one commit>=…` → 2; `--supersede S1..fix` without a reason → 1 (`NYL-PROMOTE-SUPERSEDE-REASON`); with a reason → 0; `reconcile -e prod` → 0 | An entry that leaves a commit uncovered keeps the refusal; a range with a reason covers both, and the record lists each commit with the reason, never the range |
-| 8 | Delete `release/prod`; `reconcile -e prod` → 0, nothing runs; cut `release/prod` again from S3; `main` moves on ("Start release 3"); fix "Fix cache headers"; promote it → 0 | Clean-up once prod runs a commit reachable from `main`; a branch cut from what prod runs passes the check |
-| 9 | Merge `release/prod` into `main` with a merge commit; dev runs it; `promote dev-to-prod` → 0 | An ancestor fix passes without `--supersede` |
-| 10 | `promote hotfix-to-prod` → 2 (`NYL-PROMOTE-SUPERSEDES`, naming "Start release 3") | The rule is symmetric: the hotfix state was cut before a later dev promotion |
-| 11 | Delete `release/prod`; `reconcile -e prod` → 0, nothing runs | The merge keeps prod's source fetchable |
+| 6 | Commit "Bump timeout" on `main` with the same changes (a cherry-pick); dev runs it; `promote dev-to-prod` → 2 naming "Fix pool size" | A patch-equivalent commit counts as contained; the other fix is still missing |
+| 7 | Cherry-pick "Fix pool size" too; `promote dev-to-prod` → 0, nothing superseded; `reconcile -e prod` → 0 | Both fixes contained by their changes, neither by ancestry |
+| 8 | Delete `release/prod`; `reconcile -e prod` → 0, nothing runs; cut `release/prod` again from S3; `main` moves on ("Start release 3"); two fixes "Fix cache headers" and "Raise cache size"; promote them → 0 | Clean-up once prod runs a commit reachable from `main`; a branch cut from what prod runs passes the check |
+| 9 | Squash-merge `release/prod` into `main`; dev runs it; `promote dev-to-prod` → 2 | A squash of two commits is patch-equivalent to neither |
+| 10 | `--supersede <one commit>=…` → 2; `--supersede S3..fix` without a reason → 1 (`NYL-PROMOTE-SUPERSEDE-REASON`); with a reason → 0; `reconcile -e prod` → 0 | An entry that leaves a commit uncovered keeps the refusal; a range with a reason covers both, and the record lists each commit with the reason, never the range |
+| 11 | `promote hotfix-to-prod` → 2 (`NYL-PROMOTE-SUPERSEDES`, naming "Start release 3") | The rule is symmetric: the hotfix state was cut before a later dev promotion |
+| 12 | Delete and cut `release/prod` again; fix "Lower log level"; promote it; merge `release/prod` into `main` with a merge commit; dev runs it; `promote dev-to-prod` → 0 | An ancestor fix passes without `--supersede` |
+| 13 | Delete `release/prod`; `reconcile -e prod` → 0, nothing runs | The merge keeps prod's source fetchable |
 
 ## Coverage by milestone
 
@@ -824,7 +837,7 @@ marks the commit prod first runs.
 | M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, a multi-environment run of dev and prod with repeated `-e`, crash, cancellation, and lease variants; the [crash-injection scenarios](#crash-injection) at every killable fault point |
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
 | M5 | All three scenarios in both tiers, with the real `KubernetesPublication`: `reference/platform` (scenario 1, with the exit criterion's published values and static render), `reference/preview-closed` (scenario 2), and `reference/preview` (scenario 3), plus the tier-1 variants `preview-manual-wait`, `preview-not-ready`, `preview-no-keep-ref`, and `preview-name-collision`; the `attested-evidence` and `observed-value` walkthroughs also run with the real driver |
-| M6 | Scenario 4, `reference/promotion`, in both tiers: dev's source commit and image digest promoted to prod, prod's reviewed-plan approvals with `requireDigest`, missing and aged evidence, a rollback, and artifact verification; scenario 5, `reference/hotfix`, in both tiers: `prod-hotfix` and `hotfix-to-prod`, a fix promoted from `release/prod`, the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, `--supersede` with a range, and the symmetric refusal; the `stale-promotion-evidence`, `value-only-promotion` (each value from what its consuming Application runs, and mixed revisions blocking a source path), and `promotion-record-source` walkthroughs |
+| M6 | Scenario 4, `reference/promotion`, in both tiers: dev's source commit and image digest promoted to prod, prod's reviewed-plan approvals with `requireDigest`, missing and aged evidence, a rollback, and artifact verification; scenario 5, `reference/hotfix`, in both tiers: `prod-hotfix` and `hotfix-to-prod`, a fix promoted from `release/prod`, the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, patch-equivalent cherry-picks passing, `--supersede` with a range, a merge commit, and the symmetric refusal; the `stale-promotion-evidence`, `value-only-promotion` (each value from what its consuming Application runs, and mixed revisions blocking a source path), and `promotion-record-source` walkthroughs |
 | M10 | The `nyl-e2e` crate runs the platform scenario's Kubernetes publication three ways against Kind with a local registry, changing only the target's reconciler: direct apply, Argo CD read through the Kubernetes API, and Argo CD read through its API server ([direct reconciler](orchestration-core.md#end-to-end-harness)); tier 1 gains a `FakePublication` mode that mimics a direct target's attestation and teardown wait |
 
 The reference project grows with the milestones. A milestone's fixture omits

@@ -5273,7 +5273,9 @@ recorded receipts for every unit. A later run R2 at S2 changed `web-image`,
 whose build failed, so the state R2 wrote has a new `web-image` desired
 document without a receipt for its execution key, and `kubernetes` blocked.
 Prod's source is `fromPromotion`, so before the first promotion
-`reconcile -e prod` exits 2 and names `nyl promote`.
+`reconcile -e prod` exits 2 and names `nyl promote`, and `nyl promote
+dev-to-prod` exits 2 with `NYL-PROMOTE-NO-EVIDENCE`, because dev has
+recorded no state: missing evidence.
 `nyl promote dev-to-prod`, with `evidence: published`, considers dev's
 recorded states, the transition commit pairs, newest first. The state R2 wrote
 fails: `web-image`, whose artifact the path selects, has no receipt for its
@@ -5281,14 +5283,16 @@ new execution key, and `kubernetes`, which prod also selects, is blocked
 without a current receipt, so the whole-source rule rejects it. The state R1
 wrote passes. The PromotionRecord
 therefore carries S1 and R1's image digest, names R1's desired and observed
-commits as `from`, and the command exits 0; `reconcile -e prod` then
-publishes prod with R1's image, exit 0. `nyl get promotion-candidates
-dev-to-prod` shows R2's state as not reaching `published` and names
-`web-image` and `kubernetes`. With `evidence: attested`, a state must also
+commits as `from`, records `published` evidence, and is one desired commit
+on prod's state; the command exits 0. `nyl get promotion-candidates
+dev-to-prod` lists R2's state first, at no level, naming `kubernetes` and
+`web-image`, and R1's state at `published`, as what prod now runs.
+`reconcile -e prod` then runs at S1 and publishes prod with R1's image,
+exit 0. With `evidence: attested`, a state must also
 have every required attestation passing for it, such as dev's
 environment-wide `qa`; when no recorded state reaches the level, `nyl
-promote` writes nothing, names what lacks evidence in the newest state, and
-exits 2 with `NYL-PROMOTE-NO-EVIDENCE`. The walkthrough runs from M6.
+promote` writes nothing, names what lacks evidence in the newest state
+(`qa`), and exits 2 with `NYL-PROMOTE-NO-EVIDENCE`. The walkthrough runs from M6.
 ([`stale-promotion-evidence`](../nyl/tests/scenarios/walkthroughs/stale-promotion-evidence/scenario.yaml))
 
 **Value-only promotion (M6).** Dev publishes two Releases, `web` and `api`,
@@ -5305,7 +5309,9 @@ source commit must fit every value and what runs is mixed; with
 `--state-revision` naming R1's state it promotes R1 on the attestations
 recorded for it. Once `api` runs R2 too, both paths promote R2. An
 Application that runs no publication of dev (`unmatched`) or is `Degraded`
-blocks the value-only path as well. The walkthrough runs from M6.
+blocks the value-only path as well. The walkthrough runs from M6. It
+assumes the recommended answers to decisions D6–D8 and D11 of the
+[M6 plan](m6-plan.md#open-decisions), which are not settled yet.
 ([`value-only-promotion`](../nyl/tests/scenarios/walkthroughs/value-only-promotion/scenario.yaml))
 
 **A promotion recorded in source (M6).** Prod's `source.fromPromotion` sets
@@ -5316,7 +5322,9 @@ sequence it applied. After a second promotion, a reconcile from a checkout
 made before it reads the sequence-1 block, refuses with
 `NYL-PROMOTION-SEQUENCE-OLDER`, writes nothing, and names `nyl promote
 dev-to-prod --revision`; the rollback is that new promotion, with sequence 3.
-The walkthrough runs from M6.
+The walkthrough runs from M6. Its code and the branch it commits to assume
+the recommended answers to decisions D1 and D3 of the
+[M6 plan](m6-plan.md#open-decisions), which are not settled yet.
 ([`promotion-record-source`](../nyl/tests/scenarios/walkthroughs/promotion-record-source/scenario.yaml))
 
 **Deletion.** `cache` and its only consumer `worker` are removed from source;

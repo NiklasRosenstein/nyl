@@ -1,9 +1,11 @@
 # Reference scenario 5, a hotfix (design/reference-scenarios.md, and
 # design/promotion.md#hotfixes): a fix that cannot wait for dev's unreleased
 # work reaches prod through its own path; the next dev promotion is refused
-# until main contains the fix or the promotion supersedes it; and the rule is
-# symmetric, so a hotfix state cut before a later dev promotion is refused
-# too. Branch `s1` only marks the commit prod first runs.
+# until main contains the fix, by patch-equivalent commits or by ancestry, or
+# the promotion supersedes it; and the rule is symmetric, so a hotfix state
+# cut before a later dev promotion is refused too. Three hotfixes: the first
+# is cherry-picked back, the second squash-merged and superseded, the third
+# merged. Branches `s1`, `s3`, and `s5` only mark commits.
 contract: design/reference-scenarios.md#scenario-5-hotfix
 milestone: M6
 steps:
@@ -115,38 +117,37 @@ steps:
       codes: [NYL-PROMOTE-SUPERSEDES]
       commits: {desired: 0, observed: 0}
 
-  # 6. Merge back as a squash: one commit with both changes is not patch-
-  #    equivalent to either fix commit, so the promotion is still refused.
-  - squash-merge: {branch: release/prod, into: main}
+  # 6. Patch-equivalence: "Bump timeout" is cherry-picked onto main as a
+  #    fresh commit with the same changes. It counts as contained, so only
+  #    "Fix pool size" is missing and the promotion stays refused.
+  - commit: {branch: main, message: "Bump timeout", apply: patches/bump-timeout}
   - nyl: [reconcile, -e, dev]
     id: d3
     exit: 0
     expect:
-      executed: [web-image, kubernetes]
+      executed: [kubernetes]
   - nyl: [attest, -e, dev, --name, qa, --result, pass]
     exit: 0
   - nyl: [promote, dev-to-prod]
     exit: 2
     expect:
       codes: [NYL-PROMOTE-SUPERSEDES]
-      messages: [Fix pool size, Bump timeout]
+      messages: [Fix pool size]
       commits: {desired: 0, observed: 0}
 
-  # 7. --supersede: an entry for one commit leaves the other missing; an
-  #    entry without a reason (and no --reason) is rejected; a range with its
-  #    reason covers both, and the record lists each commit, never the range.
-  - nyl: [promote, dev-to-prod, --supersede, '%COMMIT(release/prod~1)%=Squash-merged into main']
-    exit: 2
+  # 7. "Fix pool size" is cherry-picked too, after it (order does not
+  #    matter): main contains both fix commits by their changes, though
+  #    neither is an ancestor of main, and the promotion passes without
+  #    --supersede.
+  - commit: {branch: main, message: "Fix pool size", apply: patches/fix-pool-size}
+  - nyl: [reconcile, -e, dev]
+    id: d4
+    exit: 0
     expect:
-      codes: [NYL-PROMOTE-SUPERSEDES]
-      messages: [Bump timeout]
-      commits: {desired: 0, observed: 0}
-  - nyl: [promote, dev-to-prod, --supersede, '%COMMIT(s1)%..%COMMIT(release/prod)%']
-    exit: 1
-    expect:
-      codes: [NYL-PROMOTE-SUPERSEDE-REASON]
-      commits: {desired: 0, observed: 0}
-  - nyl: [promote, dev-to-prod, --supersede, '%COMMIT(s1)%..%COMMIT(release/prod)%=Squash-merged into main as one commit']
+      executed: [web-image, kubernetes]
+  - nyl: [attest, -e, dev, --name, qa, --result, pass]
+    exit: 0
+  - nyl: [promote, dev-to-prod, --reason, "Release 2 with the pool fix"]
     exit: 0
     expect:
       commits: {desired: 1, observed: 0}
@@ -154,10 +155,8 @@ steps:
         path: dev-to-prod
         sequence: 3
         sourceCommit: main
-        from: {environment: dev, run: d3}
-        superseded:
-          - {commit: release/prod~1, reason: Squash-merged into main as one commit}
-          - {commit: release/prod, reason: Squash-merged into main as one commit}
+        from: {environment: dev, run: d4}
+        superseded: []
   - nyl: [reconcile, -e, prod]
     exit: 0
     expect:
@@ -167,7 +166,8 @@ steps:
       current: [network, database]
 
   # 8. Clean up: prod runs a commit reachable from main, so release/prod can
-  #    go. The next hotfix cuts it again from what prod runs by then.
+  #    go. The next hotfix cuts it again from what prod runs by then, and
+  #    main moves on after the cut.
   - delete-branch: release/prod
   - nyl: [reconcile, -e, prod]
     exit: 0
@@ -178,6 +178,7 @@ steps:
   - branch: {name: release/prod, from: s3}
   - commit: {branch: main, message: "Start release 3", apply: patches/dev-work-2}
   - commit: {branch: release/prod, message: "Fix cache headers", apply: patches/fix-cache}
+  - commit: {branch: release/prod, message: "Raise cache size", apply: patches/fix-cache-size}
   - nyl: [reconcile, -e, prod-hotfix]
     id: h2
     exit: 0
@@ -202,34 +203,61 @@ steps:
       source-chosen-by: {by: promotion, path: hotfix-to-prod, sequence: 4}
       executed: [kubernetes]
 
-  # 9. Merge back with a merge commit: the fix is an ancestor of main, so
-  #    dev's promotion passes without --supersede.
-  - merge: {branch: release/prod, into: main}
+  # 9. Merge back as a squash: one commit with both changes is patch-
+  #    equivalent to neither fix commit, so the promotion is still refused.
+  - squash-merge: {branch: release/prod, into: main}
   - nyl: [reconcile, -e, dev]
-    id: d4
+    id: d5
     exit: 0
     expect:
       executed: [web-image, kubernetes]
   - nyl: [attest, -e, dev, --name, qa, --result, pass]
     exit: 0
-  - nyl: [promote, dev-to-prod, --reason, "Release 3"]
+  - nyl: [promote, dev-to-prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-SUPERSEDES]
+      messages: [Fix cache headers, Raise cache size]
+      commits: {desired: 0, observed: 0}
+
+  # 10. --supersede: an entry for one commit leaves the other missing; an
+  #     entry without a reason (and no --reason) is rejected; a range with
+  #     its reason covers both, and the record lists each commit, never the
+  #     range.
+  - nyl: [promote, dev-to-prod, --supersede, '%COMMIT(release/prod~1)%=Squash-merged into main']
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-SUPERSEDES]
+      messages: [Raise cache size]
+      commits: {desired: 0, observed: 0}
+  - nyl: [promote, dev-to-prod, --supersede, '%COMMIT(s3)%..%COMMIT(release/prod)%']
+    exit: 1
+    expect:
+      codes: [NYL-PROMOTE-SUPERSEDE-REASON]
+      commits: {desired: 0, observed: 0}
+  - nyl: [promote, dev-to-prod, --supersede, '%COMMIT(s3)%..%COMMIT(release/prod)%=Squash-merged into main as one commit', --reason, "Release 3"]
     exit: 0
     expect:
+      commits: {desired: 1, observed: 0}
       promotion:
         path: dev-to-prod
         sequence: 5
         sourceCommit: main
-        from: {environment: dev, run: d4}
-        superseded: []
+        from: {environment: dev, run: d5, desiredCommit: '%STATE(d5)%', observedCommit: '%OBSERVED(d5)%'}
+        requested: {reason: Release 3}
+        superseded:
+          - {commit: release/prod~1, reason: Squash-merged into main as one commit}
+          - {commit: release/prod, reason: Squash-merged into main as one commit}
   - nyl: [reconcile, -e, prod]
     exit: 0
     expect:
       source: main
       source-chosen-by: {by: promotion, path: dev-to-prod, sequence: 5}
       executed: [kubernetes]
+      current: [network, database]
 
-  # 10. Symmetric: prod-hotfix's state was cut before release 3 reached prod,
-  #     so promoting it again would drop "Start release 3".
+  # 11. Symmetric: prod-hotfix's state was cut before release 3 reached
+  #     prod, so promoting it again would drop "Start release 3".
   - nyl: [promote, hotfix-to-prod]
     exit: 2
     expect:
@@ -237,7 +265,53 @@ steps:
       messages: [dev-to-prod, Start release 3]
       commits: {desired: 0, observed: 0}
 
-  # 11. Clean up again: prod's source commit is reachable from main through
+  # 12. Merge back with a merge commit: the fix is an ancestor of main, so
+  #     dev's promotion passes without --supersede.
+  - delete-branch: release/prod
+  - branch: {name: s5, from: main}
+  - branch: {name: release/prod, from: s5}
+  - commit: {branch: release/prod, message: "Lower log level", apply: patches/fix-log-level}
+  - nyl: [reconcile, -e, prod-hotfix]
+    id: h3
+    exit: 0
+    expect:
+      source: release/prod
+  - nyl: [attest, -e, prod-hotfix, --name, qa, --result, pass]
+    exit: 0
+  - nyl: [promote, hotfix-to-prod, --reason, "Noisy logs in prod"]
+    exit: 0
+    expect:
+      promotion:
+        path: hotfix-to-prod
+        sequence: 6
+        sourceCommit: release/prod
+        from: {environment: prod-hotfix, run: h3}
+        superseded: []
+  - merge: {branch: release/prod, into: main}
+  - nyl: [reconcile, -e, dev]
+    id: d6
+    exit: 0
+    expect:
+      executed: [web-image, kubernetes]
+  - nyl: [attest, -e, dev, --name, qa, --result, pass]
+    exit: 0
+  - nyl: [promote, dev-to-prod, --reason, "Release 3 with the log fix"]
+    exit: 0
+    expect:
+      promotion:
+        path: dev-to-prod
+        sequence: 7
+        sourceCommit: main
+        from: {environment: dev, run: d6}
+        superseded: []
+  - nyl: [reconcile, -e, prod]
+    exit: 0
+    expect:
+      source: main
+      source-chosen-by: {by: promotion, path: dev-to-prod, sequence: 7}
+      executed: [kubernetes]
+
+  # 13. Clean up again: prod's source commit is reachable from main through
   #     the merge, so it stays fetchable once release/prod is gone.
   - delete-branch: release/prod
   - nyl: [reconcile, -e, prod]

@@ -113,13 +113,14 @@ steps:
     exit: 0
     expect:
       executed: [kubernetes]
+      # web moves to R2's image; api's files stay byte for byte what R1's
+      # value rendered, so the api value did not move.
       deploy:
         branch: deploy
+        unchanged: ['staging/web/api/**']
         mentions:
           'staging/web/web/**':
             - [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r2)%']
-          'staging/web/api/**':
-            - [get, artifact, api-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r1)%']
 
   # The source path needs one dev state behind every value: what the newest
   # attestations show running is mixed, so it is refused and writes nothing.

@@ -322,7 +322,7 @@ fn test_validate_m6_steps_and_placeholders() {
     use scenario::format::{placeholders, Placeholder};
     let at_m6 = |steps: &str| {
         let text = format!(
-            "contract: design/promotion.md#promotion-paths\nmilestone: M6\ntiers: [1]\nproject: ../_project\nsteps:\n{steps}"
+            "contract: design/promotion.md#promotion-paths\nmilestone: M6\ntiers: [1]\npublication: fake\nproject: ../_project\nsteps:\n{steps}"
         );
         let loaded = inline_scenario("inline/m6", &text);
         scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())
@@ -351,6 +351,37 @@ fn test_validate_m6_steps_and_placeholders() {
         at_m6("  - driver: {unit: web-image, operation: verify-artifact, outcome: failed}\n"),
         Ok(())
     );
+    // The promotion expectation's commits, requester, and ignored
+    // attestations; placeholders in them and in a get value are validated.
+    let promote = |expect: &str| {
+        at_m6(&format!(
+            "{reconcile}  - nyl: [promote, p]\n    exit: 0\n    expect:\n      promotion: {{path: p, from: {{run: r1, desiredCommit: '%STATE(r1)%', observedCommit: '%OBSERVED(r1)%'}}, {expect}}}\n"
+        ))
+    };
+    assert_eq!(
+        promote("requested: {reason: Release 1}, ignoredAttestations: [{attestation: environment/qa, reason: flaky}]"),
+        Ok(())
+    );
+    let ignored = promote("ignoredAttestations: [{attestation: qa, reason: flaky}]").unwrap_err();
+    assert!(ignored.contains("environment/<name>"), "{ignored}");
+    let observed = at_m6("  - nyl: [promote, p]\n    exit: 0\n    expect:\n      promotion: {path: p, from: {run: r0, observedCommit: '%OBSERVED(r9)%'}}\n    id: r0\n").unwrap_err();
+    assert!(observed.contains("Observed(\"r9\")"), "{observed}");
+    let value =
+        at_m6("  - nyl: [get, x]\n    exit: 0\n    expect:\n      get: {args: [get, x], value: '%STATE(r9)%'}\n")
+            .unwrap_err();
+    assert!(value.contains("no earlier nyl step has that id"), "{value}");
+    // Only the test publication reads the scripted Argo CD.
+    let both = scenario::format::validate(
+        &inline_scenario(
+            "inline/argocd-both",
+            &format!("contract: design/promotion.md#promotion-paths\nmilestone: M6\ntiers: [1]\nproject: ../_project\nsteps:\n{reconcile}  - argocd: {{target: dev, all: {{runs: r1}}}}\n"),
+        )
+        .scenario,
+        &scenario::scenarios_root().join("walkthroughs/dependency-wave"),
+        &scenario::repository_root(),
+    )
+    .unwrap_err();
+    assert!(both.contains("publication: fake"), "{both}");
     let state = validation_error(&format!("{reconcile}  - nyl: [get, x, '%STATE(r1)%']\n    exit: 0\n"));
     assert!(state.contains("placeholders run from M6"), "{state}");
     let merge = validation_error("  - merge: {branch: a, into: main}\n");

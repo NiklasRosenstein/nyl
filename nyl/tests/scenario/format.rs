@@ -613,6 +613,10 @@ pub struct PromotionExpectation {
     pub superseded: Option<Vec<SupersededExpectation>>,
     #[serde(rename = "artifactsVerified")]
     pub artifacts_verified: Option<bool>,
+    pub requested: Option<RequestedExpectation>,
+    /// Exactly these entries of `ignoredAttestations`.
+    #[serde(rename = "ignoredAttestations")]
+    pub ignored_attestations: Option<Vec<IgnoredAttestationExpectation>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -630,6 +634,28 @@ pub struct PromotionFrom {
     pub environment: Option<String>,
     /// The `id` of the `nyl` step whose run recorded the promoted state.
     pub run: String,
+    /// The record's `from.desiredCommit`, usually `%STATE(<id>)%`.
+    #[serde(rename = "desiredCommit")]
+    pub desired_commit: Option<String>,
+    /// The record's `from.observedCommit`, usually `%OBSERVED(<id>)%`.
+    #[serde(rename = "observedCommit")]
+    pub observed_commit: Option<String>,
+}
+
+/// The record's `requested` block, compared on the fields given.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestedExpectation {
+    pub reason: String,
+}
+
+/// One entry of the record's `ignoredAttestations`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IgnoredAttestationExpectation {
+    /// `<unit>/<name>` or `environment/<name>`.
+    pub attestation: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -762,6 +788,12 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
         }
         scripted |= kind.tier_one_only() || step.pause.is_some();
     }
+    // Only the test kind reads the scripted Argo CD in tier 1.
+    if scenario.publication != PublicationDrivers::Fake && scenario.steps.iter().any(|step| step.argocd.is_some()) {
+        return Err(
+            "a scenario with argocd steps runs with publication: fake, the only driver that reads them".to_owned(),
+        );
+    }
     // `ids` maps each id to whether its paused invocation still awaits a resume.
     if let Some((id, _)) = ids.iter().find(|(_, awaiting)| **awaiting) {
         return Err(format!("{id} is paused and never resumed"));
@@ -791,6 +823,9 @@ pub enum Placeholder {
     /// `%STATE(<id>)%`: the desired-state commit the `nyl` step with that id
     /// wrote (its observed-state commit when it wrote no desired one).
     State(String),
+    /// `%OBSERVED(<id>)%`: the observed-state commit the `nyl` step with that
+    /// id wrote.
+    Observed(String),
     /// `%COMMIT(<revision>)%`: the full commit ID of a revision of `project.git`.
     Commit(String),
     /// `%PLAN-DIGEST(<environment>/<unit>)%`: the `changeDigest` that
@@ -824,6 +859,7 @@ pub fn placeholders(text: &str) -> Result<Vec<Placeholder>, String> {
         }
         found.push(match name {
             "STATE" => Placeholder::State(argument.to_owned()),
+            "OBSERVED" => Placeholder::Observed(argument.to_owned()),
             "COMMIT" => Placeholder::Commit(argument.to_owned()),
             "PLAN-DIGEST" => {
                 let (environment, unit) = argument
@@ -874,14 +910,22 @@ fn substituted_arguments(step: &Step) -> Vec<&String> {
 /// (`from.run`, a value's `state`) and `argocd` readings must be earlier
 /// steps' too, or the step itself for `from.run`.
 fn validate_placeholders(step: &Step, milestone: Milestone, ids: &BTreeMap<String, bool>) -> Result<(), String> {
-    // The string values a `get` expectation compares are substituted too.
-    let compared = step
-        .expect
-        .iter()
-        .flat_map(|expect| expect.get.iter())
-        .flat_map(|get| get.json.iter().flatten())
-        .filter_map(|(_, value)| value.as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
+    // The string values a `get` expectation compares, and the commits a
+    // `promotion` expectation names, are substituted too.
+    let mut compared = Vec::new();
+    for get in step.expect.iter().flat_map(|expect| expect.get.iter()) {
+        compared.extend(get.value.iter().filter_map(Value::as_str).map(str::to_owned));
+        compared.extend(
+            get.json
+                .iter()
+                .flatten()
+                .filter_map(|(_, value)| value.as_str().map(str::to_owned)),
+        );
+    }
+    if let Some(promotion) = step.expect.as_ref().and_then(|expect| expect.promotion.as_ref()) {
+        compared.extend(promotion.from.desired_commit.iter().cloned());
+        compared.extend(promotion.from.observed_commit.iter().cloned());
+    }
     for argument in substituted_arguments(step).into_iter().chain(&compared) {
         let found = placeholders(argument)?;
         if !found.is_empty() && milestone < PLACEHOLDERS_FROM {
@@ -890,9 +934,9 @@ fn validate_placeholders(step: &Step, milestone: Milestone, ids: &BTreeMap<Strin
             ));
         }
         for placeholder in found {
-            if let Placeholder::State(id) = &placeholder {
+            if let Placeholder::State(id) | Placeholder::Observed(id) = &placeholder {
                 if !ids.contains_key(id) {
-                    return Err(format!("%STATE({id})%: no earlier nyl step has that id"));
+                    return Err(format!("{placeholder:?}: no earlier nyl step has that id"));
                 }
             }
         }
@@ -904,6 +948,14 @@ fn validate_placeholders(step: &Step, milestone: Milestone, ids: &BTreeMap<Strin
                 "promotion from.run {:?}: no nyl step has that id",
                 promotion.from.run
             ));
+        }
+        for ignored in promotion.ignored_attestations.iter().flatten() {
+            if ignored.attestation.split('/').count() != 2 {
+                return Err(format!(
+                    "ignoredAttestations {:?} must be <unit>/<name> or environment/<name>",
+                    ignored.attestation
+                ));
+            }
         }
         for (name, value) in promotion.values.iter().flatten() {
             if let Some(state) = &value.state {
