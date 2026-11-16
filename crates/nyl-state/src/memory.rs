@@ -39,6 +39,7 @@ struct Directory {
     drift: BTreeMap<UnitName, DriftRecord>,
     observations: BTreeMap<UnitName, ObservationRecord>,
     attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    environment_attestations: BTreeMap<String, Attestation>,
     promotions: BTreeMap<PromotionPathName, PromotionRecord>,
 }
 
@@ -196,6 +197,9 @@ fn apply_side(
         apply_map(&mut directory.drift, &changes.drift);
         apply_map(&mut directory.observations, &changes.observations);
         apply_map(&mut directory.attestations, &changes.attestations);
+        if let Some(set) = &changes.environment_attestations {
+            directory.environment_attestations = set.clone();
+        }
     }
     if directory == before && !(changes.commit_unchanged && observed_side) {
         return None;
@@ -801,6 +805,9 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
             .unwrap_or_default(),
         attestations: observed
             .map(|directory| directory.attestations.clone())
+            .unwrap_or_default(),
+        environment_attestations: observed
+            .map(|directory| directory.environment_attestations.clone())
             .unwrap_or_default(),
     }
 }

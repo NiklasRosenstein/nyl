@@ -759,7 +759,7 @@ so every source writes the same record:
   non-orchestrated target's `_nyl/attestations.yaml`. Without `--name`,
   `nyl attest` asks the drivers instead (see the orchestration core
   contract's [Attestations](orchestration-core.md#attestations)); that form
-  is implemented, the external form (M6) and `--target` (M11) are not yet.
+  is implemented, and so is the external form (M6); `--target` (M11) is not yet.
   Environment-wide attestations live in `observed/attestations.yaml`, a file
   the observed layout of format `v1` always listed, added without a version
   change; a Nyl older than the release that writes it keeps it but cannot

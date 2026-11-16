@@ -52,38 +52,14 @@ impl ApprovalArgs {
         if units.is_empty() && !self.approve_all {
             return Ok(Approvals::default());
         }
-        let record = if !self.approved_by.is_empty() || self.approval_source.is_some() {
-            if self.approved_by.iter().any(|name| name.trim().is_empty()) {
-                return Err(failure("--approved-by must name an approver"));
-            }
-            ApprovalRecord {
-                by: self.approved_by.clone(),
-                identity: ApprovalIdentity::Asserted,
-                source: self.approval_source.clone(),
-                digest: None,
-                reviewed: false,
-            }
-        } else if !session.inventory.project_config.config.approval.lookup.is_empty() {
-            hook(session, wiring, &units)?
-        } else if let Some(record) = github(&wiring.process_env, session.resolved.name.as_str())? {
-            record
-        } else if is_ci(&wiring.process_env) {
-            ApprovalRecord {
-                by: Vec::new(),
-                identity: ApprovalIdentity::Asserted,
-                source: Some(wiring.runner.clone()),
-                digest: None,
-                reviewed: false,
-            }
-        } else {
-            ApprovalRecord {
-                by: vec![identity.to_string()],
-                identity: ApprovalIdentity::Local,
-                source: Some("local".into()),
-                digest: None,
-                reviewed: false,
-            }
-        };
+        let record = attester(
+            session,
+            wiring,
+            &identity.to_string(),
+            (&self.approved_by, self.approval_source.as_deref()),
+            "--approved-by",
+            &units,
+        )?;
         Ok(Approvals {
             units,
             all: self.approve_all,
@@ -117,6 +93,54 @@ impl ApprovalArgs {
         }
         Ok(units)
     }
+}
+
+/// Who stands behind an invocation, and how Nyl knows: the identity of an
+/// approval and of an external attestation, resolved the same way. Asserted
+/// names (`asserted`) win, then the project's lookup hook, GitHub's
+/// environment approvals, and a CI run (`verified`/`asserted`), and last the
+/// workstation's Git user (`local`). `flag` names the option that asserts
+/// `by` in messages; `units` reach the hook as the approval's units.
+pub fn attester(
+    session: &Session,
+    wiring: &Wiring<'_>,
+    local: &str,
+    (by, source): (&[String], Option<&str>),
+    flag: &str,
+    units: &BTreeMap<UnitName, Option<ChangeDigest>>,
+) -> Result<ApprovalRecord, Finding> {
+    Ok(if !by.is_empty() || source.is_some() {
+        if by.iter().any(|name| name.trim().is_empty()) {
+            return Err(failure(format!("{flag} must name a person")));
+        }
+        ApprovalRecord {
+            by: by.to_vec(),
+            identity: ApprovalIdentity::Asserted,
+            source: source.map(str::to_owned),
+            digest: None,
+            reviewed: false,
+        }
+    } else if !session.inventory.project_config.config.approval.lookup.is_empty() {
+        hook(session, wiring, units)?
+    } else if let Some(record) = github(&wiring.process_env, session.resolved.name.as_str())? {
+        record
+    } else if is_ci(&wiring.process_env) {
+        ApprovalRecord {
+            by: Vec::new(),
+            identity: ApprovalIdentity::Asserted,
+            source: Some(wiring.runner.clone()),
+            digest: None,
+            reviewed: false,
+        }
+    } else {
+        ApprovalRecord {
+            by: vec![local.to_owned()],
+            identity: ApprovalIdentity::Local,
+            source: Some("local".into()),
+            digest: None,
+            reviewed: false,
+        }
+    })
 }
 
 fn is_ci(env: &BTreeMap<String, String>) -> bool {

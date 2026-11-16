@@ -130,7 +130,9 @@ kept for audit; removing them is a manual step.
 A move carries an environment's [PromotionRecords](/nyl/orchestration/resource-guides/promotion-path/#where-records-live)
 (`desired/promotions/`) whether it moves history or, when the new location
 uses a `path` or splits the refs differently, copies the documents. A Nyl older
-than the release that introduced promotion drops them in a copying move.
+than the release that introduced promotion drops them in a copying move. The
+environment-wide attestations (`observed/attestations.yaml`) travel the same
+way, and an older Nyl drops them too.
 
 ### Moving every instance of a template
 
@@ -242,8 +244,10 @@ historical state content while preserving current admission. The named commit
 must belong to the environment's state history. The restore includes the
 environment's PromotionRecords (`desired/promotions/`): a record the commit
 lacked is removed and one it held returns, so the records always agree with the
-restored `appliedPromotionSequence`. A Nyl older than the release that
-introduced promotion leaves the records as they are.
+restored `appliedPromotionSequence`. The environment-wide attestations
+(`observed/attestations.yaml`) are restored likewise. A Nyl older than the
+release that introduced promotion leaves the records and the attestations as
+they are.
 
 ## `nyl lease break`
 

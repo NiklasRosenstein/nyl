@@ -788,6 +788,8 @@ fn move_holding(
                 drift: written(&source.drift),
                 observations: written(&source.observations),
                 attestations: written(&source.attestations),
+                environment_attestations: (!source.environment_attestations.is_empty())
+                    .then(|| source.environment_attestations.clone()),
                 promotions: written(&source.promotions),
                 ..TransitionChanges::default()
             };

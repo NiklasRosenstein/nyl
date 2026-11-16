@@ -99,6 +99,22 @@ migrates it.
   `appliedPromotionSequence`.
 - The `gitops.nyl/v1/state/promotion-record` JSON Schema describes the record.
 
+### Environment-wide attestations
+
+`observed/attestations.yaml` holds the attestations of the environment's
+current state that `nyl attest --name` records without `--unit`, each naming
+the desired commit it attests (see [external
+attestations](/nyl/reference/cli/detect-drift/#external-attestations)). The
+observed layout always listed it; it joins format `v1` without a version
+change.
+
+- A Nyl older than this release keeps the file through its transitions, `hold`,
+  `resume`, and `state forget`, but cannot read or write it, so it must not be
+  used to run promotion that gates on environment-wide attestations.
+- This release's snapshots, `state move`, and `state restore` include the file.
+  An older Nyl's `state move`, when it copies documents instead of history,
+  does not carry it, and its `state restore` leaves it as it is.
+
 ## Preview environments
 
 An [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)

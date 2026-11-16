@@ -27,6 +27,7 @@ pub mod vendor;
 
 pub mod capture;
 
+pub mod attest;
 pub mod build;
 pub mod check;
 pub mod exec;

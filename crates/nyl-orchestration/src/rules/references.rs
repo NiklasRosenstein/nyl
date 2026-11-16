@@ -1453,30 +1453,17 @@ mod tests {
 
     /// Catches a cross-environment `dependsOn` entry whose attestation
     /// requirement can never be met being reported as a wait for a receipt:
-    /// an undeclared name, an external-only name, and `evidence: attested`
-    /// on a producer that declares an external-only one are resolution
-    /// errors with their own codes even before the producer has a receipt,
+    /// an undeclared name is a resolution
+    /// error with its own code even before the producer has a receipt,
     /// as for a producer in the same environment, and block nothing.
     #[test]
     fn test_cross_environment_depends_on_rejects_unmeetable_attestations_before_the_receipt_check() {
         let world = producer_without_receipt();
-        for (entry, code, text) in [
-            (
-                json!({"environment": "infra", "unit": "network", "attestations": ["helthy"]}),
-                Code::AttestationUndeclared,
-                "requires attestation \"helthy\" of unit network",
-            ),
-            (
-                json!({"environment": "infra", "unit": "network", "attestations": ["qa"]}),
-                Code::AttestationExternalUnsupported,
-                "requires attestation \"qa\" of unit network",
-            ),
-            (
-                json!({"environment": "infra", "unit": "network", "evidence": "attested"}),
-                Code::AttestationExternalUnsupported,
-                "which only an external source supplies",
-            ),
-        ] {
+        for (entry, code, text) in [(
+            json!({"environment": "infra", "unit": "network", "attestations": ["helthy"]}),
+            Code::AttestationUndeclared,
+            "requires attestation \"helthy\" of unit network",
+        )] {
             let unit = desired("smoke", "Command", json!({ "dependsOn": [entry] }), "smoke");
             let resolution = resolve_unit(&world.view(), &unit);
             assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
@@ -1506,19 +1493,57 @@ mod tests {
         );
     }
 
-    /// Catches an external-only attestation reaching a reference as a wait
-    /// that never ends: `fromUnit` requirements on one are resolution
-    /// errors, named or through `evidence: attested`.
+    /// Catches a dependent that cannot gate on an external attestation: a
+    /// `fromUnit` requiring `qa` (declared `from: external`), by name or
+    /// through `evidence: attested`, waits as pending while nothing is
+    /// recorded for the current receipt, as failing for a recorded `fail`
+    /// (also from another environment), and resolves once a pass for the
+    /// current receipt is recorded.
     #[test]
-    fn test_from_unit_rejects_external_only_attestations() {
-        let world = producer_without_receipt();
-        for reference in [
-            json!({"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["qa"]}),
-            json!({"environment": "infra", "unit": "network", "output": "vpcId", "evidence": "attested"}),
+    fn test_from_unit_gates_on_external_attestations() {
+        let mut world = World::new();
+        attest(&mut world, &[], &[]);
+        world
+            .desired
+            .get_mut(&name("network"))
+            .unwrap()
+            .spec
+            .as_object_mut()
+            .unwrap()
+            .insert("attestations".to_owned(), json!([{"name": "qa", "from": "external"}]));
+        let blocked = |world: &World, reference: &Value| match world.resolve(reference.clone()).unwrap() {
+            ReferenceValue::Blocked { reason, .. } => reason.message(),
+            ReferenceValue::Value { .. } => "resolved".to_owned(),
+        };
+        let named = json!({"unit": "network", "output": "vpcId", "attestations": ["qa"]});
+        let all = json!({"unit": "network", "output": "vpcId", "evidence": "attested"});
+        for reference in [&named, &all] {
+            assert_eq!(blocked(&world, reference), "attestation qa of network is pending");
+        }
+        for (result, expected) in [
+            (AttestationResult::Fail, "attestation qa of network is failing"),
+            (AttestationResult::Pass, "resolved"),
         ] {
-            let error = world.resolve(reference).unwrap_err();
-            assert_eq!(error.code, Code::AttestationExternalUnsupported, "{error}");
-            assert!(error.fix.contains("cannot be recorded yet"), "{}", error.fix);
+            let mut recorded = BTreeMap::new();
+            recorded.insert(
+                "qa".to_owned(),
+                Attestation {
+                    api_version: nyl_core::orchestration::state::StateV1,
+                    kind: nyl_core::orchestration::state::AttestationKind,
+                    name: "qa".to_owned(),
+                    unit: None,
+                    execution_key: key("network").to_string(),
+                    result,
+                    at: "2026-09-24T10:00:00Z".parse().unwrap(),
+                    source: json!({"external": {"by": ["alice"], "identity": "local"}}),
+                    reason: None,
+                    details: Value::Null,
+                },
+            );
+            world.attestations.insert(name("network"), recorded);
+            for reference in [&named, &all] {
+                assert_eq!(blocked(&world, reference), expected);
+            }
         }
     }
 
@@ -1534,7 +1559,7 @@ mod tests {
             "smoke",
             "Command",
             json!({"variables": {
-                "a": {"fromUnit": {"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["qa"]}},
+                "a": {"fromUnit": {"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["nope"]}},
                 "b": {"fromUnit": {"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["helthy"]}},
                 "c": {"fromUnit": {"environment": "elsewhere", "unit": "network", "output": "vpcId"}},
             }}),
@@ -1548,13 +1573,12 @@ mod tests {
         assert_eq!(
             seen,
             [
-                (Code::AttestationExternalUnsupported, "spec.variables.a"),
+                (Code::AttestationUndeclared, "spec.variables.a"),
                 (Code::AttestationUndeclared, "spec.variables.b"),
                 (Code::ReferenceInvalid, "spec.variables.c"),
             ],
             "{errors:?}"
         );
-        assert!(errors[0].fix.contains("cannot be recorded yet"), "{}", errors[0].fix);
         assert!(errors[1]
             .fix
             .starts_with("require an attestation the producer declares"));

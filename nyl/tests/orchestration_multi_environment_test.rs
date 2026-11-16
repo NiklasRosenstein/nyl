@@ -304,11 +304,7 @@ fn test_a_consumer_waits_for_an_attestation_of_another_environments_unit() {
     assert_eq!(run.exit, 0, "{}", run.stderr);
     assert_eq!(section(&run, "app")["units"]["app"]["result"], "executed");
 
-    for (requirement, code) in [
-        ("attestations: [helthy]", "NYL-ATTESTATION-UNDECLARED"),
-        ("attestations: [qa]", "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED"),
-        ("evidence: attested", "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED"),
-    ] {
+    for (requirement, code) in [("attestations: [helthy]", "NYL-ATTESTATION-UNDECLARED")] {
         let harness = Harness::with_units(&producer, &consumer(requirement));
         let rejected = harness.invoke(&["reconcile", "-e", "infra", "-e", "app"]);
         assert_eq!(rejected.exit, 1, "{requirement}: {}", rejected.stderr);

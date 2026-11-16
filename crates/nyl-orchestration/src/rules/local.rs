@@ -147,7 +147,7 @@ fn replace<K: Clone + Ord, T: Clone + PartialEq>(
 
 /// The changes that make `current` hold `target`'s content: every document
 /// of `target` put, every document absent from it removed, including
-/// artifacts, drift records, observed values, attestations, and promotion records. `state.yaml` is carried
+/// artifacts, drift records, observed values, attestations (the environment-wide ones included), and promotion records. `state.yaml` is carried
 /// forward, never restored: the caller appends the `state-restored` event.
 /// Admission is not part of a snapshot, so it is never restored.
 pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapshot) -> TransitionChanges {
@@ -164,6 +164,8 @@ pub fn restore_changes(current: &EnvironmentSnapshot, target: &EnvironmentSnapsh
         drift: replace(&current.drift, &target.drift),
         observations: replace(&current.observations, &target.observations),
         attestations: replace(&current.attestations, &target.attestations),
+        environment_attestations: (current.environment_attestations != target.environment_attestations)
+            .then(|| target.environment_attestations.clone()),
         promotions: replace(&current.promotions, &target.promotions),
         ..TransitionChanges::default()
     }
@@ -610,6 +612,39 @@ mod tests {
         let changes = restore_changes(&current, &target);
         assert_eq!(changes.promotions[&path].as_ref().map(|r| r.sequence), Some(1));
         assert_eq!(changes.promotions[&other], None, "a record the target lacks is removed");
+        assert!(restore_changes(&target, &target).is_empty());
+    }
+
+    /// Decision F4: a restore replaces the environment-wide attestations with
+    /// the target's, and an unchanged set is no change.
+    #[test]
+    fn test_restore_changes_replace_environment_attestations() {
+        let attestation = |result: &str| -> nyl_core::orchestration::state::Attestation {
+            serde_json::from_value(json!({
+                "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "qa",
+                "executionKey": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a", "result": result,
+                "at": "2026-09-24T10:00:00Z", "source": {"external": {"by": ["a"], "identity": "local"}}
+            }))
+            .unwrap()
+        };
+        let mut current = EnvironmentSnapshot::default();
+        current
+            .environment_attestations
+            .insert("qa".to_owned(), attestation("fail"));
+        let mut target = EnvironmentSnapshot::default();
+        let changes = restore_changes(&current, &target);
+        assert_eq!(
+            changes.environment_attestations,
+            Some(std::collections::BTreeMap::new())
+        );
+        target
+            .environment_attestations
+            .insert("qa".to_owned(), attestation("pass"));
+        let changes = restore_changes(&current, &target);
+        assert_eq!(
+            changes.environment_attestations,
+            Some(target.environment_attestations.clone())
+        );
         assert!(restore_changes(&target, &target).is_empty());
     }
 

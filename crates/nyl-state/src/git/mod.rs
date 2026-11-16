@@ -576,6 +576,8 @@ const DRIFT_FILE: &str = "/drift.yaml";
 const OBSERVATIONS_FILE: &str = "/observations.yaml";
 /// The file name of a unit's attestations beneath `observed/units/<unit>`.
 const ATTESTATIONS_FILE: &str = "/attestations.yaml";
+/// The environment-wide attestations (decision F4: additive within `v1`).
+const ENVIRONMENT_ATTESTATIONS_FILE: &str = "observed/attestations.yaml";
 
 /// Replace a unit's directory of documents of one kind with `set`, or
 /// remove it for `None`.
@@ -625,6 +627,12 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
         for (unit, set) in &changes.attestations {
             let record = set.as_ref().and_then(AttestationRecord::from_set);
             put_unit_file(files, unit, ATTESTATIONS_FILE, record.as_ref())?;
+        }
+        if let Some(set) = &changes.environment_attestations {
+            match AttestationRecord::from_set(set) {
+                Some(record) => files.insert(ENVIRONMENT_ATTESTATIONS_FILE.to_owned(), to_yaml(&record)?),
+                None => files.remove(ENVIRONMENT_ATTESTATIONS_FILE),
+            };
         }
     }
     Ok(())
@@ -680,6 +688,12 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         drift: unit_files(observed, DRIFT_FILE)?,
         observations: unit_files(observed, OBSERVATIONS_FILE)?,
         attestations: attestations(observed)?,
+        environment_attestations: observed
+            .get(ENVIRONMENT_ATTESTATIONS_FILE)
+            .map(|bytes| from_yaml::<AttestationRecord>(ENVIRONMENT_ATTESTATIONS_FILE, bytes))
+            .transpose()?
+            .map(AttestationRecord::into_set)
+            .unwrap_or_default(),
         promotions: promotions(desired)?,
     })
 }
@@ -1873,5 +1887,37 @@ mod promotion_file_tests {
         assert!(matches!(unmarked, Err(StateError::Corrupt(_))), "{unmarked:?}");
         let misnamed = promotions(&files("hotfix-to-prod", format!("{MARKERS}{RECORD}"))).unwrap_err();
         assert!(misnamed.to_string().contains("hotfix-to-prod.yaml"), "{misnamed}");
+    }
+}
+
+#[cfg(test)]
+mod environment_attestation_file_tests {
+    use super::*;
+
+    /// The file as the contract documents it, with an external attester.
+    const FILE: &str = "apiVersion: gitops.nyl/v1\nkind: AttestationRecord\nattestations:\n  qa:\n    executionKey: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a\n    result: pass\n    at: \"2026-09-25T16:40:00Z\"\n    source:\n      external:\n        by: [alice]\n        identity: verified\n        source: github-environment prod\n        url: https://qa.example/1\n    reason: QA signed off\n";
+
+    /// Catches the environment file read as a unit's or not at all, and the
+    /// written bytes drifting from the documented layout: the file at
+    /// `observed/attestations.yaml` has no `unit`, and writing what was read
+    /// reproduces the same set.
+    #[test]
+    fn test_the_environment_attestation_file_round_trips_without_a_unit() {
+        let mut observed = Files::from([(ENVIRONMENT_ATTESTATIONS_FILE.to_owned(), FILE.as_bytes().to_vec())]);
+        let snapshot = snapshot_of(StateTips::default(), &Files::new(), &observed).unwrap();
+        assert!(snapshot.attestations.is_empty(), "not a unit's");
+        let qa = &snapshot.environment_attestations["qa"];
+        assert!(qa.unit.is_none());
+        assert_eq!(qa.source["external"]["identity"], "verified");
+        let changes = TransitionChanges {
+            environment_attestations: Some(snapshot.environment_attestations.clone()),
+            ..TransitionChanges::default()
+        };
+        observed.clear();
+        apply_changes(&mut observed, &changes, false, true).unwrap();
+        let written = String::from_utf8(observed[ENVIRONMENT_ATTESTATIONS_FILE].clone()).unwrap();
+        assert!(!written.contains("unit:"), "{written}");
+        let again = snapshot_of(StateTips::default(), &Files::new(), &observed).unwrap();
+        assert_eq!(again.environment_attestations, snapshot.environment_attestations);
     }
 }

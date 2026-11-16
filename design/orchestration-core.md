@@ -408,12 +408,10 @@ spec:
   producer's attestations to require instead of all it declares (see
   [Attestations](#attestations)). Naming an attestation the producer does not
   declare is a resolution error (`NYL-ATTESTATION-UNDECLARED`, also reported by
-  `nyl validate`). So is a requirement that would include a name declared
-  only with `from: external`, by name or through `evidence: attested`
-  (`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`, also reported by `nyl validate`):
-  nothing can record an external attestation until `nyl attest --name …
-  --result …` ships (M6), so the consumer would wait forever. Its fix says so
-  and names the attestations the producer's driver observes. For a producer
+  `nyl validate`). A name declared with `from: external` may be required, by
+  name or through `evidence: attested`: `nyl attest --name … --result …`
+  records it (see [Attestations](#attestations)), and the consumer waits as
+  pending until it does. For a producer
   in another environment, `nyl validate` cannot see the names its driver
   reports, so `plan` and `reconcile` report these errors. A consumer whose producer lacks the evidence is `blocked` on
   it, exit 2, until the producer's current receipt has every required
@@ -3067,7 +3065,7 @@ attestations:
     executionKey: sha256:…            # the receipt attested; environment-wide: the desired commit of the state
     result: pass                      # pass | fail
     at: 2026-09-25T16:40:00Z
-    source: {driver: attest}          # or {driver: reconcile}, or {external: {by: alice, source: …, url: …}}
+    source: {driver: attest}          # or {driver: reconcile}, or {external: {by: [alice], identity: verified, source: …, url: …}}
     reason: null
     details: {}                       # driver-specific, such as each Application's running publication
 ```
@@ -3102,9 +3100,16 @@ attestations:
   (`NYL-ATTESTATION-FAILED`).
   Both forms run under the lease, like every state-writing operation, and
   `--wait-lease` lets a CI job wait for a running reconcile; a refused name
-  exits 1. Implementation status: the driver form is implemented, including
-  the publication unit's `accepted` and `healthy`; the external form is not
-  yet.
+  exits 1. A held lease is exit 2, as for every state-writing operation. The
+  name must be declared with `from: external` in the unit's
+  `spec.attestations`, or for the environment form (no `--unit`) in
+  `Environment.spec.attestations`, and the attestation is recorded for the
+  unit's current receipt or for the environment's current desired commit, with
+  `source: {external: {by, identity, source, url}}` where `by` and `identity`
+  are an approver's (the same lookup, GitHub, CI, and workstation sources).
+  `--state-revision` and `--revision` do not exist (M11). Implementation
+  status: both forms are implemented, including the publication unit's
+  `accepted` and `healthy`.
 - An attestation is valid only for the receipt or state it names. Declared
   attestations of a new receipt are pending until attested; the newest per
   name and receipt wins. Git history keeps earlier ones, so an older state

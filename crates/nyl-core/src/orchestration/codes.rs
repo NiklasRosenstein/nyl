@@ -121,10 +121,8 @@ codes! {
     /// A unit declares `env.secrets`, but no secrets provider is wired into
     /// orchestration yet (M3).
     UnitSecretsUnsupported => "NYL-UNIT-SECRETS-UNSUPPORTED",
-    /// A reference or `dependsOn` entry requires an attestation its producer does not declare.
+    /// A reference or `dependsOn` entry requires an attestation its producer does not declare, or `nyl attest --name` names one its scope does not declare with `from: external`.
     AttestationUndeclared => "NYL-ATTESTATION-UNDECLARED",
-    /// A reference or `dependsOn` entry requires an attestation only an external source supplies, which Nyl cannot record yet.
-    AttestationExternalUnsupported => "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED",
     /// A consumer waits for an attestation of its producer's current receipt that is not recorded yet.
     AttestationPending => "NYL-ATTESTATION-PENDING",
     /// A consumer waits for an attestation of its producer's current receipt that is recorded as failing.
@@ -153,7 +151,7 @@ codes! {
     DriftDetected => "NYL-DRIFT-DETECTED",
     /// `nyl reconcile --detect-drift` was combined with an option that leaves it nothing to check.
     DriftOptionInvalid => "NYL-DRIFT-OPTION-INVALID",
-    /// `nyl attest --unit` named a unit without a current receipt to attest.
+    /// `nyl attest --unit` named a unit without a current receipt to attest, or `nyl attest --name` without `--unit` found no recorded state to attest.
     AttestNoReceipt => "NYL-ATTEST-NO-RECEIPT",
     /// A PromotionPath uses a form M6 does not support: `changeGate: pullRequest`, or a DeploymentTarget in `from` or `to` (M11).
     PromoteUnsupported => "NYL-PROMOTE-UNSUPPORTED",
