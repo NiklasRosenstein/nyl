@@ -609,6 +609,7 @@ fn resource_metadata_labels(resource: &GitOpsResource) -> BTreeMap<String, Strin
         GitOpsResource::Environment(resource) => resource.metadata.labels.clone(),
         GitOpsResource::EnvironmentGroup(resource) => resource.metadata.labels.clone(),
         GitOpsResource::EnvironmentTemplate(resource) => resource.metadata.labels.clone(),
+        GitOpsResource::PromotionPath(resource) => resource.metadata.labels.clone(),
     }
 }
 

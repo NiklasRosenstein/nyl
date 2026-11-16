@@ -270,8 +270,29 @@ impl Driver for TestDriver {
             teardown: RecoveryPolicy::Manual,
         }
     }
+    /// Free-form, except kind `Typed`, whose schema is closed.
     fn spec_schema(&self) -> schemars::Schema {
+        if self.kind == "Typed" {
+            return schemars::json_schema!({
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                    "source": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    "replicas": {"type": "integer"},
+                    "image": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"fromUnit": {}}}]}
+                }
+            });
+        }
         schemars::json_schema!({})
+    }
+    /// The names a spec's `declares` lists.
+    fn attestations(&self, spec: &Value) -> Vec<String> {
+        spec.get("declares")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
     }
     fn validate_spec(&self, spec: &Value) -> Result<(), String> {
         if spec.get("broken").is_some() {

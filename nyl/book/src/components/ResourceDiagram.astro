@@ -69,6 +69,7 @@ const orchestration: Node[] = [
   { label: 'EnvironmentTemplate', x: 400, y: 200, link: true },
   { label: 'OciImage', x: 40, y: 310, link: true },
   { label: 'Terraform', note: 'or OpenTofu', x: 300, y: 310, link: true },
+  { label: 'PromotionPath', x: 540, y: 310, link: true },
 ];
 const orchestrationEdges: Edge[] = [
   { from: [130, 74], to: [130, 168], label: 'selects by labels', at: [138, 125], anchor: 'start' },
@@ -79,6 +80,7 @@ const orchestrationEdges: Edge[] = [
   { from: [300, 332], to: [222, 332], label: 'fromUnit', at: [261, 324] },
   { from: [490, 198], to: [490, 146], label: 'state.repositoryRef', at: [498, 176], anchor: 'start' },
   { from: [400, 235], to: [222, 318], label: 'unitSelector', at: [330, 262] },
+  { from: [540, 322], to: [222, 205], label: 'from and to', at: [490, 290] },
 ];
 
 const diagrams = [
@@ -104,7 +106,7 @@ const diagrams = [
     edges: orchestrationEdges,
     viewBox: '0 0 760 380',
     claim:
-      'EnvironmentGroups supply defaults and state repositories. Environments and EnvironmentTemplates (whose instances are environments) select native image and infrastructure units by labels; infrastructure units consume image artifacts and units read declared outputs through fromUnit.',
+      'EnvironmentGroups supply defaults and state repositories. Environments and EnvironmentTemplates (whose instances are environments) select native image and infrastructure units by labels; infrastructure units consume image artifacts and units read declared outputs through fromUnit. A PromotionPath connects a source Environment to a target Environment and names the values it promotes.',
   },
 ];
 const diagram = diagrams.find((candidate) => candidate.id === Astro.props.section);

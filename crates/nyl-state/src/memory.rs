@@ -17,11 +17,12 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::require_local_branches;
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, PromotionPathName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, Committed, Coordination, Divergence, EnvironmentSnapshot, HeldLease, LocalDivergence, LogEntry,
     RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition, TransitionChanges,
 };
+use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::{
     ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord, ObservedUnit,
     Run, Signal, StateLocation, StateRecord,
@@ -38,6 +39,7 @@ struct Directory {
     drift: BTreeMap<UnitName, DriftRecord>,
     observations: BTreeMap<UnitName, ObservationRecord>,
     attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    promotions: BTreeMap<PromotionPathName, PromotionRecord>,
 }
 
 /// One ref: its tip and the directories it holds, by `state.path`.
@@ -177,6 +179,16 @@ fn apply_side(
             directory.environment = Some(environment.clone());
         }
         apply_map(&mut directory.desired, &changes.desired);
+        for (path, record) in &changes.promotions {
+            match record {
+                Some(record) => {
+                    directory.promotions.insert(path.clone(), record.clone());
+                }
+                None => {
+                    directory.promotions.remove(path);
+                }
+            }
+        }
     }
     if observed_side {
         apply_map(&mut directory.observed, &changes.observed);
@@ -776,6 +788,9 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
             .or_else(|| observed.and_then(|directory| directory.record.clone())),
         environment: desired.and_then(|directory| directory.environment.clone()),
         desired: desired.map(|directory| directory.desired.clone()).unwrap_or_default(),
+        promotions: desired
+            .map(|directory| directory.promotions.clone())
+            .unwrap_or_default(),
         observed: observed.map(|directory| directory.observed.clone()).unwrap_or_default(),
         artifacts: observed
             .map(|directory| directory.artifacts.clone())

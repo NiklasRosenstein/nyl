@@ -155,6 +155,18 @@ codes! {
     DriftOptionInvalid => "NYL-DRIFT-OPTION-INVALID",
     /// `nyl attest --unit` named a unit without a current receipt to attest.
     AttestNoReceipt => "NYL-ATTEST-NO-RECEIPT",
+    /// A PromotionPath uses a form M6 does not support: `changeGate: pullRequest`, or a DeploymentTarget in `from` or `to` (M11).
+    PromoteUnsupported => "NYL-PROMOTE-UNSUPPORTED",
+    /// A PromotionPath's source or target is not a declared Environment.
+    PromoteEnvironmentUnknown => "NYL-PROMOTE-ENVIRONMENT-UNKNOWN",
+    /// A PromotionPath selector, or a path attestation scope, names a unit the source environment does not select.
+    PromoteSelectorUnit => "NYL-PROMOTE-SELECTOR-UNIT",
+    /// A PromotionPath selector is malformed, or its pointer, output, or artifact does not resolve against the source unit's kind.
+    PromoteSelectorInvalid => "NYL-PROMOTE-SELECTOR-INVALID",
+    /// A promoted value's type does not fit a binding that reads it.
+    PromoteValueType => "NYL-PROMOTE-VALUE-TYPE",
+    /// A `fromPromotion` binding names a path or a value no PromotionPath declares.
+    PromoteBindingUnknown => "NYL-PROMOTE-BINDING-UNKNOWN",
     /// A unit's driver could not produce its attestations.
     AttestUnknown => "NYL-ATTEST-UNKNOWN",
     /// A unit declares `observations`, but its kind cannot read observed values.

@@ -151,6 +151,7 @@ fn plan(
     Stop,
 > {
     let session = Session::open(&args.path, &args.environment[0])?;
+    session.check_promotion_paths(wiring)?;
     let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,

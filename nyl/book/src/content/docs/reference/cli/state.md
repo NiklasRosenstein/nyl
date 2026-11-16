@@ -52,6 +52,9 @@ executes again at the next reconcile. It is also the way to start over at a
 location whose state was deleted with [`nyl state delete`](#nyl-state-delete):
 a plain `state init` there exits 1 with `NYL-STATE-DELETED`.
 
+`nyl state init --fresh` starts every unit over but keeps the environment's
+PromotionRecords: they are lineage, not unit state.
+
 `--template <name>` creates the environment as an instance of an
 [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
 instead of an Environment, with `--param <name>=<value>` (repeatable) for its
@@ -123,6 +126,11 @@ records the move so that every command against it refuses with
 `NYL-STATE-MOVED` and names the new one, and only then does the new location
 become usable. An interrupted move completes when run again. The old refs are
 kept for audit; removing them is a manual step.
+
+A move carries an environment's [PromotionRecords](/nyl/orchestration/resource-guides/promotion-path/#where-records-live)
+(`desired/promotions/`) whether it moves history or, when the new location
+uses a `path` or splits the refs differently, copies the documents. A Nyl older
+than the release that introduced promotion drops them in a copying move.
 
 ### Moving every instance of a template
 
@@ -231,7 +239,11 @@ records must be recovered locally before resetting.
 
 `nyl state restore -e dev --to <commit>` writes forward commits restoring
 historical state content while preserving current admission. The named commit
-must belong to the environment's state history.
+must belong to the environment's state history. The restore includes the
+environment's PromotionRecords (`desired/promotions/`): a record the commit
+lacked is removed and one it held returns, so the records always agree with the
+restored `appliedPromotionSequence`. A Nyl older than the release that
+introduced promotion leaves the records as they are.
 
 ## `nyl lease break`
 

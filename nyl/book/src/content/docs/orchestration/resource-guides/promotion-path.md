@@ -1,0 +1,105 @@
+---
+title: 'Using PromotionPath'
+---
+
+See the [PromotionPath resource reference](/nyl/reference/resources/gitops.nyl/v1/promotion-path/) for the API, example, and field definitions.
+
+:::note[Status]
+M6 delivers promotion in steps. The resource, its validation, `nyl get promotion-paths`,
+and the record type exist today. `nyl promote`, the evidence rules, and external
+attestations follow; until then a path validates but nothing writes records, and an
+Environment cannot yet take its source from a promotion.
+:::
+
+## What a path says
+
+A PromotionPath is the explicit link between a source Environment and a target
+Environment. It says how strong the evidence must be and which fields of the
+source become named values that `fromPromotion` bindings read. Source and target
+may differ in unit names, input names, and document shape; the path states the
+mapping.
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata:
+  name: dev-to-prod
+spec:
+  from: {environment: dev}
+  to: {environment: prod}
+  evidence: attested
+  maxAttestationAge: 1h
+  values:
+    webImage:
+      select: {unit: web-image, artifact: image, pointer: /reference}
+    databaseSource:
+      select: {unit: database, input: /source}
+```
+
+- `from` and `to` name declared Environments, never an instance of an
+  EnvironmentTemplate. The path's name is a DNS label and names the record file.
+- `evidence` is `published` (the source produced the value: a current receipt) or
+  `attested` (published, and every attestation the covered units and the source
+  environment declare passes). `attestations` replaces the required names per
+  scope, or adds requirements at `published`; `maxAttestationAge` makes older
+  attestations not count.
+- `verifyArtifacts` (default `true`) checks that promoted artifacts still exist
+  before a record is written. `coverage` narrows which Applications count toward
+  a source promotion's publication attestations.
+
+## Selecting values
+
+Each value reads one source field, with the JSON Pointer semantics of `fromUnit`
+references:
+
+| Selector | Reads |
+| --- | --- |
+| `{unit, input: <pointer>}` | The source unit's resolved spec: what it ran, such as `/source` |
+| `{unit, output, pointer?}` | A declared, non-sensitive output of the unit's receipt |
+| `{unit, artifact, kind?, pointer}` | A field of an artifact the unit's receipt lists, relative to the artifact's `spec` |
+
+The target reads a value with a `fromPromotion` binding, naming the value and,
+optionally, the path:
+
+```yaml
+releaseInputs:
+  platform/web:
+    image: {fromPromotion: {path: dev-to-prod, value: webImage}}
+```
+
+## Validation
+
+`nyl validate` checks every path against the units the environments render, and
+`nyl plan -e <environment>` reports the same findings for the paths touching that
+environment. Every finding has a stable code and a fix:
+
+| Code | Reported when |
+| --- | --- |
+| `NYL-PROMOTE-ENVIRONMENT-UNKNOWN` | `from` or `to` is not a declared Environment (an instance of a template is not one) |
+| `NYL-PROMOTE-SELECTOR-UNIT` | A selector, or an `attestations` scope, names a unit the source environment does not select or the path does not cover |
+| `NYL-PROMOTE-SELECTOR-INVALID` | A pointer resolves neither in the unit's rendered spec nor in its kind's schema, or an output is undeclared or `sensitive` |
+| `NYL-PROMOTE-VALUE-TYPE` | A value's type does not fit a unit field that reads it |
+| `NYL-PROMOTE-BINDING-UNKNOWN` | A `fromPromotion` binding names a path or value no path declares |
+| `NYL-ATTESTATION-UNDECLARED` | The path requires an attestation its unit or environment scope does not declare |
+| `NYL-PROMOTE-UNSUPPORTED` | `changeGate: pullRequest`, or a DeploymentTarget in `from` or `to`: both arrive with M11 |
+
+Types are compared when both sides are known: what a selector reads (a rendered
+literal, a declared output's type, or the kind's schema at the pointer) against
+the field a unit's `fromPromotion` binding replaces. A Release input's declared
+type is not compared yet.
+
+## Where records live
+
+`nyl promote` will write one `PromotionRecord` per path into the target
+environment's desired state, `desired/promotions/<path>.yaml`, or, with
+`record: source`, into the Environment's `source.fromPromotion.promoted` block.
+The record has one shape in both places. See
+[promotion records](/nyl/orchestration/environments-and-state/#promotion-records)
+for how the file behaves with older Nyl versions, `state move`, and
+`state restore`.
+
+## See also
+
+- [Environment](/nyl/reference/resources/gitops.nyl/v1/environment/)
+- [`nyl get`](/nyl/reference/cli/project-resources/)
+- [`nyl validate`](/nyl/reference/cli/validate/)

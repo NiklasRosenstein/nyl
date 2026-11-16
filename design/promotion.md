@@ -55,6 +55,19 @@ selected by the source environment, pointers resolve against the source's
 current documents or the kind's schema, and each value's type fits every
 binding that reads it. `plan` reports the same findings for an existing path.
 
+Each failure has a stable code and a fix: `NYL-PROMOTE-ENVIRONMENT-UNKNOWN` (the
+source or target is not a declared Environment, an instance of a template
+included), `NYL-PROMOTE-SELECTOR-UNIT` (a selector or an `attestations` scope
+names a unit the source does not select, or the path does not cover),
+`NYL-PROMOTE-SELECTOR-INVALID` (a pointer that resolves neither in the unit's
+rendered spec nor in its kind's schema, an undeclared or `sensitive` output, or a
+malformed selector), `NYL-PROMOTE-VALUE-TYPE` (a value's type does not fit a unit
+field that reads it; a Release input's declared type is not compared yet),
+`NYL-PROMOTE-BINDING-UNKNOWN` (a `fromPromotion` binding names a path or value no
+path declares), `NYL-ATTESTATION-UNDECLARED` (a required attestation its scope
+does not declare), and `NYL-PROMOTE-UNSUPPORTED`. A pointer into an optional
+field the rendered spec omits resolves through the kind's schema.
+
 ### PromotionRecord
 
 `nyl promote` writes one `gitops.nyl/v1` `PromotionRecord` per path into the
@@ -62,8 +75,12 @@ target environment's desired state, `desired/promotions/<path>.yaml`, or, with
 `record: source`, into the Environment's `source.fromPromotion.promoted` block
 (see [Promoting an environment's source](#promoting-an-environments-source)).
 Each promotion replaces the path's record; Git history keeps earlier ones.
-The record has one shape wherever it is kept: in desired state, in an
-Environment's `promoted` block, and (M11) in a target's `spec.promotions`.
+The record has one shape wherever it is kept (`apiVersion` and `kind` are
+written in the state file and left out of a block that sits in a resource): in desired state, in an
+Environment's `promoted` block, and (M11) in a target's `spec.promotions`. The
+shape already holds M11's target source (`from: {target, repository, branch,
+commit}`, and a value without a source `unit`), so M11 changes no format; M6 never
+writes it, and a reader loads it.
 
 | Field | Meaning |
 | --- | --- |
@@ -651,17 +668,23 @@ spec:
       image: {fromPromotion: {path: dev-to-production, value: webImage}}
   promotions:                        # written by nyl promote, never by hand
     dev-to-production:
+      path: dev-to-production        # the one PromotionRecord shape, as in state
       sequence: 4                    # increases with every promotion into this target
       from: {target: dev, repository: https://git.example.com/deploy.git, branch: deploy/dev, commit: 9c1e…}
       values:
         webImage:
           value: registry.example.com/web@sha256:4f0c…
           select: {input: /releases/platform~1web/image}
-          inputDigest: sha256:…
-      evidence: {level: attested, attestations: [{scope: dev, name: accepted, result: pass, at: …, details: {…}}, {scope: dev, name: healthy, result: pass, at: …, details: {…}}], override: null}
-      artifactsVerified: true
+          inputDigest: sha256:…      # `unit: {name, uid}` appears when the value has a source unit
+      evidence:
+        level: attested
+        attestations: [{scope: dev, name: accepted, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}, {scope: dev, name: healthy, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}]
+        override: null
+      ignoredAttestations: []
+      excludedApplications: []
       superseded: []
-      requested: {by: …, at: 2026-09-25T16:40:00Z, reason: …}
+      artifactsVerified: true
+      requested: {by: …, identity: verified, source: …, at: 2026-09-25T16:40:00Z, reason: …}
 ```
 
 - **Record.** `spec.promotions.<path>` holds the path's PromotionRecord with

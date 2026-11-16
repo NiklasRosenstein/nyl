@@ -29,6 +29,13 @@
       "slug": "environment-template"
     },
     {
+      "apiVersion": "gitops.nyl/v1",
+      "dynamicKind": false,
+      "name": "PromotionPath",
+      "schema": "gitops.nyl/v1/promotion-path.schema.json",
+      "slug": "promotion-path"
+    },
+    {
       "apiVersion": "k8s.nyl/v1",
       "dynamicKind": false,
       "name": "Cluster",

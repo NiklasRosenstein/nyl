@@ -1,0 +1,67 @@
+apiVersion: gitops.nyl/v1
+kind: PromotionRecord
+path: dev-to-prod
+sequence: 7
+from:
+  environment: dev
+  run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90
+  desiredCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+  observedCommit: 41f09c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+sourceCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+values:
+  databaseHost:
+    value: db.dev.internal
+    select:
+      unit: database
+      output: connection
+      pointer: /host
+    unit:
+      name: database
+      uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+    executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+  webImage:
+    value: >-
+      registry.example.com/web@sha256:4f0c000000000000000000000000000000000000000000000000000000000001
+    select:
+      unit: web-image
+      artifact: image
+      pointer: /reference
+    unit:
+      name: web-image
+      uid: 0192f0c4-8d0a-7c3e-9a51-000000000001
+    executionKey: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+evidence:
+  level: attested
+  attestations:
+  - scope: kubernetes
+    name: accepted
+    result: pass
+    at: "2026-09-25T16:40:00Z"
+    details:
+      applications:
+        web:
+          publication: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+  - scope: environment
+    name: qa
+    result: pass
+    at: "2026-09-25T16:30:00Z"
+  override: null
+ignoredAttestations:
+- scope: kubernetes
+  name: healthy
+  reason: Degraded by a known outage
+  by: alice
+excludedApplications:
+- batch
+superseded:
+- repository: https://example.invalid/web.git
+  commit: 5c2d9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+  reason: replaced by 3e7b9c0
+  by: alice
+artifactsVerified: true
+requested:
+  by: alice
+  identity: verified
+  source: github-environment production
+  at: "2026-09-25T16:41:00Z"
+  reason: Release 3

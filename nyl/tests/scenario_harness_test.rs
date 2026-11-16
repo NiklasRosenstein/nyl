@@ -1230,9 +1230,15 @@ fn changed(pointer: &str, value: serde_json::Value) -> serde_json::Value {
 fn test_promotion_expectation_checks_every_field_of_the_record() {
     use serde_json::json;
     check_promotion(PROMOTION_EXPECTATION, &promotion_record(), None).unwrap();
-    // A PromotionRecord resource keeps its fields under `spec`.
-    let resource = json!({"apiVersion": "gitops.nyl/v1", "kind": "PromotionRecord", "spec": promotion_record()});
-    check_promotion(PROMOTION_EXPECTATION, &resource, None).unwrap();
+    // The state file carries its markers beside the flat fields; a record nested
+    // under `spec` is not the shape Nyl writes, so the scenarios pin the flat one.
+    let mut document = promotion_record();
+    document["apiVersion"] = json!("gitops.nyl/v1");
+    document["kind"] = json!("PromotionRecord");
+    check_promotion(PROMOTION_EXPECTATION, &document, None).unwrap();
+    let nested = json!({"apiVersion": "gitops.nyl/v1", "kind": "PromotionRecord", "spec": promotion_record()});
+    let error = check_promotion(PROMOTION_EXPECTATION, &nested, None).unwrap_err();
+    assert!(error.contains("path is"), "{error}");
 
     let cases = [
         ("/path", json!("other"), "path is"),

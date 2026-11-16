@@ -1,13 +1,14 @@
 /// Resource definitions shared across Nyl's layers.
 ///
 /// The `gitops.nyl/v1` resources (GitRepository, Environment,
-/// EnvironmentGroup), the fields every unit kind shares, and the schema
+/// EnvironmentGroup, PromotionPath), the fields every unit kind shares, and the schema
 /// catalogue machinery. Kubernetes rendering and Kubernetes GitOps resources
 /// live in nyl-render's `resources` module.
 pub mod environment;
 pub mod git_source;
 mod gitops;
 pub mod parse;
+pub mod promotion;
 pub mod schema;
 pub mod strict;
 pub mod units;

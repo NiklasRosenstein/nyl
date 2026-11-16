@@ -261,9 +261,9 @@ pub struct PromotedSource {
     /// Where the PromotionRecord lives: `state` (default) or `source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<String>,
-    /// The record `nyl promote` writes here with `record: source`, never by hand.
+    /// The PromotionRecord `nyl promote` writes here with `record: source`, never by hand. It has the shape of the record in state, without `apiVersion` and `kind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub promoted: Option<serde_json::Value>,
+    pub promoted: Option<crate::orchestration::promotion::PromotionRecord>,
 }
 
 fn environment_source_schema(schema: &mut schemars::Schema) {
@@ -503,6 +503,11 @@ impl EnvironmentSource {
             if promoted.path.is_some() != promoted.paths.is_empty() {
                 return Err(CoreError::config(format!(
                     "{field}.fromPromotion needs exactly one of path and paths"
+                )));
+            }
+            if promoted.promoted.is_some() && promoted.record.as_deref() != Some("source") {
+                return Err(CoreError::config(format!(
+                    "{field}.fromPromotion.promoted is the record of `record: source`; set record: source, or remove the block (state holds the record otherwise)"
                 )));
             }
             return match promoted.record.as_deref() {

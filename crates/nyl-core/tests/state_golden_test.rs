@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nyl_core::orchestration::promotion::PromotionRecordDocument;
 use nyl_core::orchestration::state::{
     ArtifactDocument, AttestationRecord, BlockedReason, DesiredUnit, DriftRecord, EnvironmentRecord, Lease,
     ObservationRecord, ObservedUnit, Readiness, Run, Signal, StateRecord,
@@ -322,6 +323,95 @@ fn samples() -> Vec<(&'static str, Value)> {
     required["retry"] = json!({"state":"required","context":{"version":1,"resource":"test-owned-context"}});
     samples.push(("observed-unit-retry-required.v1.yaml", required));
     samples.push(("observed-unit-repaired.v1.yaml", repaired));
+    samples.push((
+        "promotion-record.v1.yaml",
+        json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "PromotionRecord",
+            "path": "dev-to-prod", "sequence": 7,
+            "from": {"environment": "dev", "run": RUN, "desiredCommit": COMMIT, "observedCommit": COMMIT.replace("3e7b", "41f0")},
+            "sourceCommit": COMMIT,
+            "values": {
+                "webImage": {
+                    "value": "registry.example.com/web@sha256:4f0c000000000000000000000000000000000000000000000000000000000001",
+                    "select": {"unit": "web-image", "artifact": "image", "pointer": "/reference"},
+                    "unit": {"name": "web-image", "uid": UID},
+                    "executionKey": KEY
+                },
+                "databaseHost": {
+                    "value": "db.dev.internal",
+                    "select": {"unit": "database", "output": "connection", "pointer": "/host"},
+                    "unit": {"name": "database", "uid": UID},
+                    "executionKey": KEY
+                }
+            },
+            "evidence": {
+                "level": "attested",
+                "attestations": [
+                    {"scope": "kubernetes", "name": "accepted", "result": "pass", "at": "2026-09-25T16:40:00Z", "details": {"applications": {"web": {"publication": COMMIT}}}},
+                    {"scope": "environment", "name": "qa", "result": "pass", "at": "2026-09-25T16:30:00Z"}
+                ],
+                "override": null
+            },
+            "ignoredAttestations": [{"scope": "kubernetes", "name": "healthy", "reason": "Degraded by a known outage", "by": "alice"}],
+            "excludedApplications": ["batch"],
+            "superseded": [{"repository": "https://example.invalid/web.git", "commit": COMMIT.replace("3e7b", "5c2d"), "reason": "replaced by 3e7b9c0", "by": "alice"}],
+            "artifactsVerified": true,
+            "requested": {"by": "alice", "identity": "verified", "source": "github-environment production", "at": "2026-09-25T16:41:00Z", "reason": "Release 3"}
+        }),
+    ));
+    samples.push((
+        // Reserved for M11: a target source and a value without a source unit.
+        // M6 never writes it, but a reader must load it.
+        "promotion-record-target-source.v1.yaml",
+        json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "PromotionRecord",
+            "path": "dev-to-production", "sequence": 4,
+            "from": {"target": "dev", "repository": "https://git.example.com/deploy.git", "branch": "deploy/dev", "commit": COMMIT},
+            "values": {
+                "webImage": {
+                    "value": "registry.example.com/web@sha256:4f0c000000000000000000000000000000000000000000000000000000000001",
+                    "select": {"input": "/releases/platform~1web/image"},
+                    "inputDigest": KEY
+                }
+            },
+            "evidence": {"level": "attested", "attestations": [
+                {"scope": "dev", "name": "accepted", "result": "pass", "at": "2026-09-25T16:40:00Z"}
+            ], "override": null},
+            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "artifactsVerified": true,
+            "requested": {"by": "alice", "identity": "local", "at": "2026-09-25T16:40:00Z", "reason": "Release 3"}
+        }),
+    ));
+    samples.push((
+        // A value-only path: no source commit, a value from another state, and an override.
+        "promotion-record-value-only.v1.yaml",
+        json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "PromotionRecord",
+            "path": "dev-to-staging", "sequence": 2,
+            "from": {"environment": "dev", "run": RUN, "desiredCommit": COMMIT},
+            "values": {
+                "webImage": {
+                    "value": "registry.example.com/web@sha256:4f0c000000000000000000000000000000000000000000000000000000000001",
+                    "select": {"unit": "kubernetes", "input": "/releases/web~1web/image"},
+                    "unit": {"name": "kubernetes", "uid": UID},
+                    "inputDigest": KEY
+                },
+                "apiImage": {
+                    "value": "registry.example.com/api@sha256:7a11000000000000000000000000000000000000000000000000000000000002",
+                    "select": {"unit": "kubernetes", "input": "/releases/web~1api/image"},
+                    "unit": {"name": "kubernetes", "uid": UID},
+                    "inputDigest": KEY,
+                    "state": {"run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91", "desiredCommit": COMMIT.replace("3e7b", "77aa"), "observedCommit": COMMIT.replace("3e7b", "41f0")}
+                }
+            },
+            "evidence": {"level": "published", "attestations": [], "override": {"reason": "rollback after incident 4711"}},
+            "ignoredAttestations": [],
+            "excludedApplications": [],
+            "superseded": [],
+            "artifactsVerified": false,
+            "requested": {"by": "ci", "identity": "asserted", "at": "2026-09-26T08:00:00Z"}
+        }),
+    ));
     samples
 }
 
@@ -347,6 +437,7 @@ fn render(name: &str, sample: &Value) -> String {
         "Lease" => typed::<Lease>(name, sample),
         "Run" => typed::<Run>(name, sample),
         "Signal" => typed::<Signal>(name, sample),
+        "PromotionRecord" => typed::<PromotionRecordDocument>(name, sample),
         other => panic!("no type for kind {other}"),
     }
 }
@@ -385,6 +476,25 @@ fn test_readers_reject_unknown_format_versions_and_kinds() {
     lease["apiVersion"] = json!("gitops.nyl/v1");
     lease["kind"] = json!("Run");
     assert!(serde_json::from_value::<Lease>(lease).is_err());
+}
+
+/// The record's reader asks for an upgrade on a newer format, and refuses a
+/// document of another kind, so a Nyl that cannot read it never misreads it.
+#[test]
+fn test_promotion_records_reject_unknown_format_versions_and_kinds() {
+    let mut record = samples()
+        .into_iter()
+        .find(|(name, _)| *name == "promotion-record.v1.yaml")
+        .unwrap()
+        .1;
+    record["apiVersion"] = json!("gitops.nyl/v2");
+    let error = serde_json::from_value::<PromotionRecordDocument>(record.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("upgrade Nyl"), "{error}");
+    record["apiVersion"] = json!("gitops.nyl/v1");
+    record["kind"] = json!("Run");
+    assert!(serde_json::from_value::<PromotionRecordDocument>(record).is_err());
 }
 
 /// Catches a reader that accepts a newer format of a kind whose fields it

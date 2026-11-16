@@ -93,6 +93,17 @@ reference between units is checked only for the producer's existence. A
 names into that Environment. A target placed by publication units of two
 Environments fails with `NYL-TARGET-ENVIRONMENT-CONFLICT`.
 
+Validation also checks every
+[PromotionPath](/nyl/orchestration/resource-guides/promotion-path/#validation)
+against the units the environments render, and each failure has its own code:
+`NYL-PROMOTE-ENVIRONMENT-UNKNOWN`, `NYL-PROMOTE-SELECTOR-UNIT`,
+`NYL-PROMOTE-SELECTOR-INVALID`, `NYL-PROMOTE-VALUE-TYPE`,
+`NYL-PROMOTE-BINDING-UNKNOWN`, `NYL-ATTESTATION-UNDECLARED` for an attestation a
+path requires that its scope does not declare, and `NYL-PROMOTE-UNSUPPORTED` for
+`changeGate: pullRequest` or a DeploymentTarget in `from` or `to`, which M11
+delivers. `nyl plan -e <environment>` reports the same findings for the paths
+that touch the environment.
+
 A unit that declares its target inline (`spec.target.inline`) places the
 inline target, named `<environment>-<unit>` or by `spec.target.name`. Validation
 parses it as strictly as a discovered target, compiles it with every other

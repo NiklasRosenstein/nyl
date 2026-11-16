@@ -198,6 +198,72 @@ fn commit_unit(world: &World, location: &StateLocation, unit: &str, lifecycle: s
     store.release_lease(location, &dev(), &committed.lease_version).unwrap();
 }
 
+/// Put a PromotionRecord of `path` into state with one desired commit, as `nyl promote` will.
+fn seed_promotion(world: &World, location: &StateLocation, path: &str, sequence: u64) {
+    let record = serde_json::from_value(json!({
+        "path": path, "sequence": sequence,
+        "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "desiredCommit": COMMIT},
+        "sourceCommit": COMMIT,
+        "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
+        "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+        "artifactsVerified": true,
+        "requested": {"by": "alice", "identity": "local", "at": "2026-09-24T10:00:00Z"}
+    }))
+    .unwrap();
+    let lease = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: world.ids.run_id(),
+        runner: "seed".to_owned(),
+        operation: Operation::Promote,
+        units: Vec::new(),
+        deadline: world.clock.now() + chrono::Duration::minutes(5),
+        taken_at: world.clock.now(),
+        broken: None,
+    };
+    let store = world.store.as_ref();
+    let held = store
+        .coordination(location, &dev())
+        .unwrap()
+        .lease
+        .map(|held| held.version);
+    let version = store.take_lease(location, &dev(), &lease, held.as_deref()).unwrap();
+    let base = store.snapshot(location).unwrap().tips;
+    let committed = store
+        .commit(
+            location,
+            &dev(),
+            &base,
+            &Transition {
+                message: format!(
+                    "nyl: promote dev\n\nNyl-Run-Id: {}\nNyl-Environment: dev\n",
+                    world.ids.run_id()
+                ),
+                changes: TransitionChanges {
+                    promotions: BTreeMap::from([(
+                        nyl_core::orchestration::ids::PromotionPathName::new(path).unwrap(),
+                        Some(record),
+                    )]),
+                    ..TransitionChanges::default()
+                },
+            },
+            &version,
+        )
+        .unwrap();
+    store.release_lease(location, &dev(), &committed.lease_version).unwrap();
+}
+
+fn sequences(world: &World, location: &StateLocation) -> BTreeMap<String, u64> {
+    world
+        .store
+        .snapshot(location)
+        .unwrap()
+        .promotions
+        .iter()
+        .map(|(path, record)| (path.to_string(), record.sequence))
+        .collect()
+}
+
 #[test]
 fn test_state_init_creates_state_once_and_fresh_starts_over() {
     for world in worlds() {
@@ -550,6 +616,97 @@ fn test_state_restore_recovers_historical_content() {
         let snapshot = world.store.snapshot(&location).unwrap();
         assert!(snapshot.desired.contains_key(&UnitName::new("web").unwrap()));
         assert!(!snapshot.desired.contains_key(&UnitName::new("extra").unwrap()));
+    }
+}
+
+/// Decision F1: a restore rolls `desired/promotions/` back with the other
+/// documents. Catches a restore that leaves the current record beside a
+/// restored `appliedPromotionSequence`.
+#[test]
+fn test_state_restore_rolls_promotion_records_back() {
+    for world in worlds() {
+        let context = world.context();
+        let location = world.dev();
+        state::init(&context, &dev(), &location, false, &requested());
+        seed_promotion(&world, &location, "dev-to-prod", 1);
+        // A run's transition pairs a desired with an observed commit, which a restore names.
+        let message = format!(
+            "nyl: reconcile dev\n\nNyl-Run-Id: {}\nNyl-Environment: dev\n",
+            world.ids.run_id()
+        );
+        commit_unit(&world, &location, "web", json!({"state": "active"}), &message);
+        let target = world.store.snapshot(&location).unwrap().tips.desired.unwrap();
+        seed_promotion(&world, &location, "dev-to-prod", 2);
+        seed_promotion(&world, &location, "hotfix-to-prod", 3);
+        assert_eq!(sequences(&world, &location).len(), 2, "{}", world.name);
+        let report = state::restore(&context, &dev(), &location, &target, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
+        assert_eq!(
+            sequences(&world, &location),
+            BTreeMap::from([("dev-to-prod".to_owned(), 1)]),
+            "{}",
+            world.name
+        );
+    }
+}
+
+/// `state init --fresh` makes every unit a new incarnation but keeps the
+/// promotion records, which are lineage. Catches a fresh start that drops them.
+#[test]
+fn test_state_init_fresh_keeps_promotion_records() {
+    for world in worlds() {
+        let context = world.context();
+        let location = world.dev();
+        state::init(&context, &dev(), &location, false, &requested());
+        seed_unit(&world, &location, "seed", json!({"state": "active"}));
+        seed_promotion(&world, &location, "dev-to-prod", 6);
+        let report = state::init(&context, &dev(), &location, true, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
+        assert!(
+            world.store.snapshot(&location).unwrap().desired.is_empty(),
+            "{}",
+            world.name
+        );
+        assert_eq!(
+            sequences(&world, &location),
+            BTreeMap::from([("dev-to-prod".to_owned(), 6)]),
+            "{}",
+            world.name
+        );
+    }
+}
+
+/// Decision F1: `state move` carries the records whether it moves history or
+/// copies documents (a `path` or another ref split). Catches a copying move
+/// that drops them, as an older Nyl's does.
+#[test]
+fn test_state_move_carries_promotion_records_with_history_and_with_copied_documents() {
+    for world in worlds() {
+        let context = world.context();
+        let old = world.dev();
+        state::init(&context, &dev(), &old, false, &requested());
+        seed_promotion(&world, &old, "dev-to-prod", 4);
+
+        let history = world.location("state/dev/desired", "state/dev/observed");
+        let moved = state::relocate(&context, &dev(), &history, &old, &requested());
+        assert_eq!(moved.outcome, Outcome::Done, "{}: {moved:?}", world.name);
+        assert_eq!(
+            sequences(&world, &history),
+            BTreeMap::from([("dev-to-prod".to_owned(), 4)]),
+            "{}: history",
+            world.name
+        );
+
+        let mut copied = world.location("shared/desired", "shared/observed");
+        copied.path = "envs/dev".to_owned();
+        let moved = state::relocate(&context, &dev(), &copied, &history, &requested());
+        assert_eq!(moved.outcome, Outcome::Done, "{}: {moved:?}", world.name);
+        assert_eq!(
+            sequences(&world, &copied),
+            BTreeMap::from([("dev-to-prod".to_owned(), 4)]),
+            "{}: copied documents",
+            world.name
+        );
     }
 }
 

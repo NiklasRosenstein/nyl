@@ -23,12 +23,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use git2::{Oid, Repository};
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, RunId, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, PromotionPathName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
     Checkpoint, Clock, CommitIdentity, Committed, Coordination, Divergence, EnvironmentSnapshot, HeldLease,
     LocalDivergence, LogEntry, RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition,
     TransitionChanges,
 };
+use nyl_core::orchestration::promotion::{PromotionRecord, PromotionRecordDocument};
 use nyl_core::orchestration::state::{
     Attestation, AttestationRecord, DesiredUnit, Lease, ObservationRecord, ObservedUnit, Run, Signal, StateLocation,
     StateRecord,
@@ -44,6 +45,8 @@ use tree::Files;
 
 const STATE_FILE: &str = "state.yaml";
 const ENVIRONMENT_FILE: &str = "desired/environment.yaml";
+/// The directory of PromotionRecords on the desired side, one file per path.
+const PROMOTIONS_DIR: &str = "desired/promotions/";
 const LEASE_FILE: &str = "lease.yaml";
 const RUN_FILE: &str = "run.yaml";
 /// How often a transition is rebuilt on tips that other environments moved.
@@ -528,6 +531,30 @@ fn attestations(files: &Files) -> StateResult<BTreeMap<UnitName, BTreeMap<String
         .collect())
 }
 
+/// The PromotionRecord of each path, from `desired/promotions/<path>.yaml`.
+fn promotions(files: &Files) -> StateResult<BTreeMap<PromotionPathName, PromotionRecord>> {
+    let mut records = BTreeMap::new();
+    for (path, bytes) in files {
+        let Some(name) = path
+            .strip_prefix(PROMOTIONS_DIR)
+            .and_then(|file| file.strip_suffix(".yaml"))
+            .filter(|name| !name.contains('/'))
+        else {
+            continue;
+        };
+        let name = PromotionPathName::new(name).map_err(|error| StateError::Corrupt(format!("{path}: {error}")))?;
+        let document: PromotionRecordDocument = from_yaml(path, bytes)?;
+        if document.record.path != name {
+            return Err(StateError::Corrupt(format!(
+                "{path}: a promotion record is a PromotionRecord document of the path its file names, not {}",
+                document.record.path
+            )));
+        }
+        records.insert(name, document.record);
+    }
+    Ok(records)
+}
+
 /// Put or remove a unit's document at `observed/units/<unit><file>`.
 fn put_unit_file<T: Serialize>(
     files: &mut Files,
@@ -576,6 +603,13 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
             files.insert(ENVIRONMENT_FILE.to_owned(), to_yaml(environment)?);
         }
         put_units(files, "desired", &changes.desired)?;
+        for (path, record) in &changes.promotions {
+            let file = format!("{PROMOTIONS_DIR}{path}.yaml");
+            match record {
+                Some(record) => files.insert(file, to_yaml(&PromotionRecordDocument::from(record.clone()))?),
+                None => files.remove(&file),
+            };
+        }
     }
     if observed {
         put_units(files, "observed", &changes.observed)?;
@@ -646,6 +680,7 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         drift: unit_files(observed, DRIFT_FILE)?,
         observations: unit_files(observed, OBSERVATIONS_FILE)?,
         attestations: attestations(observed)?,
+        promotions: promotions(desired)?,
     })
 }
 
@@ -1814,4 +1849,29 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
         version,
         foreign: false,
     })
+}
+
+#[cfg(test)]
+mod promotion_file_tests {
+    use super::*;
+
+    const RECORD: &str = "path: dev-to-prod\nsequence: 1\nfrom:\n  environment: dev\n  run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90\n  desiredCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a\nvalues: {}\nevidence:\n  level: published\n  attestations: []\n  override: null\nignoredAttestations: []\nexcludedApplications: []\nsuperseded: []\nartifactsVerified: true\nrequested:\n  by: alice\n  identity: local\n  at: \"2026-09-25T16:41:00Z\"\n";
+    const MARKERS: &str = "apiVersion: gitops.nyl/v1\nkind: PromotionRecord\n";
+
+    fn files(name: &str, text: String) -> Files {
+        Files::from([(format!("{PROMOTIONS_DIR}{name}.yaml"), text.into_bytes())])
+    }
+
+    /// A record file is a PromotionRecord document of the path its file
+    /// names. Catches a store that reads a hand-edited file without its
+    /// markers, or one copied under another path's name, as that path's record.
+    #[test]
+    fn test_a_promotion_file_needs_its_markers_and_its_own_path_name() {
+        let read = promotions(&files("dev-to-prod", format!("{MARKERS}{RECORD}"))).unwrap();
+        assert_eq!(read.len(), 1);
+        let unmarked = promotions(&files("dev-to-prod", RECORD.to_owned()));
+        assert!(matches!(unmarked, Err(StateError::Corrupt(_))), "{unmarked:?}");
+        let misnamed = promotions(&files("hotfix-to-prod", format!("{MARKERS}{RECORD}"))).unwrap_err();
+        assert!(misnamed.to_string().contains("hotfix-to-prod.yaml"), "{misnamed}");
+    }
 }

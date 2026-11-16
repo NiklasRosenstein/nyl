@@ -490,6 +490,33 @@ impl Session {
         nyl_orchestration::shell::peers::Peers { locations, errors }
     }
 
+    /// Refuse to plan or reconcile while a PromotionPath that touches this
+    /// environment, or a promotion binding or source of its own, is invalid:
+    /// the one check `nyl plan` and `nyl reconcile` share, so neither accepts
+    /// what the other refuses. Teardown and the state commands do not call it:
+    /// they must work on an environment whose declaration is broken.
+    ///
+    /// Contract: [PromotionPath](../../../design/promotion.md#promotionpath).
+    /// The finding returned is the first; its message counts the others, and
+    /// `nyl validate` lists them all.
+    pub fn check_promotion_paths(&self, wiring: &Wiring<'_>) -> Result<(), Finding> {
+        let findings =
+            super::promotion::findings_for(&self.inventory, &self.resolved.name, wiring.drivers, &self.renderer())
+                .unwrap_or_default();
+        let Some(first) = findings.first() else {
+            return Ok(());
+        };
+        let mut finding = first.clone();
+        if findings.len() > 1 {
+            finding.message = format!(
+                "{} (and {} more finding(s); `nyl validate` lists them all)",
+                finding.message,
+                findings.len() - 1
+            );
+        }
+        Err(finding)
+    }
+
     /// The request of one `plan` or `reconcile`.
     pub fn request(&self, options: &RunOptions<'_>) -> Result<RunRequest, Finding> {
         let units = if options.units.is_empty() {

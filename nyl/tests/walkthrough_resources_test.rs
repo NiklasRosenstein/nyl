@@ -18,16 +18,14 @@ const NYL_API_VERSIONS: [&str; 3] = ["gitops.nyl/v1", "k8s.gitops.nyl/v1", "unit
 
 /// Kinds of later milestones that have no Rust type yet. Remove a kind from
 /// this list when its type lands, so its walkthrough documents are checked.
-const FUTURE_KINDS: [(&str, &str); 2] = [
-    ("gitops.nyl/v1", "PromotionPath"),
-    ("units.gitops.nyl/v1", "KubernetesPublication"),
-];
+const FUTURE_KINDS: [(&str, &str); 1] = [("units.gitops.nyl/v1", "KubernetesPublication")];
 
 #[test]
 fn test_walkthrough_projects_parse_as_current_resource_types() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/walkthroughs");
     let mut checked = 0;
     let mut skipped = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
     let mut failures = Vec::new();
     for entry in WalkDir::new(&root).sort_by_file_name() {
         let entry = entry.unwrap();
@@ -81,6 +79,7 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
                 continue;
             };
             checked += 1;
+            kinds.insert(kind.clone());
             if let Err(error) = result {
                 failures.push(format!("{relative}: {kind}: {error}"));
             }
@@ -92,6 +91,11 @@ fn test_walkthrough_projects_parse_as_current_resource_types() {
         failures.join("\n")
     );
     assert!(checked >= 10, "only {checked} walkthrough resources were checked");
+    // PromotionPath has its Rust type: the walkthroughs that declare one are checked against it.
+    assert!(
+        kinds.contains("PromotionPath"),
+        "no walkthrough PromotionPath was checked; checked kinds: {kinds:?}"
+    );
     let future = FUTURE_KINDS
         .iter()
         .map(|(api_version, kind)| ((*api_version).to_owned(), (*kind).to_owned()))

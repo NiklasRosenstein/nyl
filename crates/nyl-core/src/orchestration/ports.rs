@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::ids::{CommitId, EnvironmentName, RunId, Uid, UnitName};
+use super::ids::{CommitId, EnvironmentName, PromotionPathName, RunId, Uid, UnitName};
+use super::promotion::PromotionRecord;
 use super::state::{
     ArtifactDocument, Attestation, DesiredUnit, DriftRecord, EnvironmentRecord, Lease, ObservationRecord, ObservedUnit,
     Run, Signal, StateLocation, StateRecord,
@@ -149,6 +150,10 @@ pub struct EnvironmentSnapshot {
     /// Driver attestations by unit and name
     /// (`observed/units/<unit>/attestations.yaml`, one record per unit).
     pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    /// The PromotionRecord of each path that promoted into the environment
+    /// (`desired/promotions/<path>.yaml`). Contract:
+    /// [PromotionRecord](../../../../design/promotion.md#promotionrecord).
+    pub promotions: BTreeMap<PromotionPathName, PromotionRecord>,
 }
 
 /// What one operation writes: `Some` puts a document, `None` removes it.
@@ -171,6 +176,8 @@ pub struct TransitionChanges {
     /// The complete set of a unit's driver attestations by name; `None`
     /// removes all. Written by `nyl attest`, and by reconcile with a receipt.
     pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
+    /// A path's PromotionRecord on the desired side; `None` removes it.
+    pub promotions: BTreeMap<PromotionPathName, Option<PromotionRecord>>,
     /// Remove every file of the environment's state on both refs before
     /// applying the other changes: `state.yaml`, `desired/`, and `observed/`
     /// beneath the location's `path`, leaving other environments' files of a
@@ -198,6 +205,7 @@ impl TransitionChanges {
             && self.drift.is_empty()
             && self.observations.is_empty()
             && self.attestations.is_empty()
+            && self.promotions.is_empty()
     }
 }
 

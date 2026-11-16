@@ -134,12 +134,12 @@ pub(crate) fn read(
 }
 
 /// Every key of `map`, mapped to `None`: the change dropping each document.
-fn dropped<V>(map: &BTreeMap<UnitName, V>) -> BTreeMap<UnitName, Option<V>> {
+fn dropped<K: Clone + Ord, V>(map: &BTreeMap<K, V>) -> BTreeMap<K, Option<V>> {
     map.keys().map(|unit| (unit.clone(), None)).collect()
 }
 
 /// Every document of `map`, as changes writing it.
-fn written<V: Clone>(map: &BTreeMap<UnitName, V>) -> BTreeMap<UnitName, Option<V>> {
+fn written<K: Clone + Ord, V: Clone>(map: &BTreeMap<K, V>) -> BTreeMap<K, Option<V>> {
     map.iter()
         .map(|(unit, document)| (unit.clone(), Some(document.clone())))
         .collect()
@@ -788,6 +788,7 @@ fn move_holding(
                 drift: written(&source.drift),
                 observations: written(&source.observations),
                 attestations: written(&source.attestations),
+                promotions: written(&source.promotions),
                 ..TransitionChanges::default()
             };
             // The copy's commits are not the move's: step 3 writes its tip.

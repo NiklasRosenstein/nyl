@@ -40,6 +40,38 @@ fn resource_schema_cli_supports_argocd_instance() {
     }
 }
 
+/// PromotionPath is a published resource: its schema is reachable by kind and
+/// alias, closes its envelope, offers the unsupported M11 forms as fields (so
+/// validation, not the schema, names M11), and the record state schema is
+/// published beside the other state documents.
+#[test]
+fn resource_schema_cli_supports_promotion_path_and_publishes_its_record() {
+    for kind in ["PromotionPath", "promotion-path"] {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
+        command
+            .args(["schema", "resource", kind])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"const\": \"gitops.nyl/v1\""))
+            .stdout(predicate::str::contains("\"const\": \"PromotionPath\""))
+            .stdout(predicate::str::contains("\"maxAttestationAge\""))
+            .stdout(predicate::str::contains("\"changeGate\""));
+    }
+    let directory = tempfile::tempdir().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("nyl"))
+        .args(["schema", "all", "--output-dir"])
+        .arg(directory.path())
+        .assert()
+        .success();
+    for file in [
+        "gitops.nyl/v1/promotion-path.schema.json",
+        "gitops.nyl/v1/state/promotion-record.schema.json",
+    ] {
+        let contents = fs::read_to_string(directory.path().join(file)).unwrap();
+        let _: serde_json::Value = serde_json::from_str(&contents).unwrap();
+    }
+}
+
 #[test]
 fn resource_schema_cli_supports_release() {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("nyl"));
