@@ -4,7 +4,7 @@
 //! Contract: [Promotion paths](../../../../../design/promotion.md#promotion-paths),
 //! [Promoting an environment's source](../../../../../design/promotion.md#promoting-an-environments-source),
 //! [Health evidence](../../../../../design/promotion.md#health-evidence), and the
-//! decisions D2, D5 (not here), D6, D7, D8, D11, and D13 of the
+//! decisions D2, D11, and D13 (D5, D6, D7, and D8 are not here: see below) of the
 //! [M6 plan](../../../../../design/m6-plan.md#open-decisions).
 //!
 //! [`decide`] is a pure function of the source environment's recorded states
@@ -15,8 +15,8 @@
 //! - [`history`]: recorded states from the desired and observed history by
 //!   `Nyl-Run-Id`.
 //! - [`standing`]: the evidence rule for one state, at `published` and
-//!   `attested`: receipts, required attestations, `maxAttestationAge`,
-//!   failing attestations, and a publication's newest attestation (D8).
+//!   `attested`: receipts, required attestations, `maxAttestationAge`, and
+//!   failing attestations.
 //! - [`values`]: reading each promoted value through the shared reference
 //!   resolver.
 //! - this module: state selection and the record.
@@ -28,9 +28,13 @@
 //! `attested` through the attestations recorded for it, so it needs
 //! `--evidence published` only when those do not reach the level (D13), and
 //! then the record carries an override ([`Code::PromoteEvidenceOverride`]).
-//! `--evidence published` never clears a failing attestation: only
+//! With `--evidence published` and no explicit state, the newest state that
+//! reaches `published` is chosen, and the record carries an override only when
+//! that state is below the path's level. `--evidence published` never clears a
+//! failing attestation: only
 //! `--ignore-attestation <scope>/<name>=<reason>` does, and the record keeps
-//! the reason ([`IgnoreRequest`]). A state that ran an archived worktree
+//! the reason ([`IgnoreRequest`]); an entry for an attestation that is pending
+//! or aged, not failing, sets nothing aside. A state that ran an archived worktree
 //! snapshot is never a candidate.
 //!
 //! **Refusal.** When no state reaches the level, nothing is written:
@@ -40,7 +44,10 @@
 //!
 //! **Unchanged (D2).** When the chosen state and values are what the path's
 //! record already names and that record is the newest on the target (no other
-//! path wrote since), the decision is [`Decision::Unchanged`].
+//! path wrote since), the decision is [`Decision::Unchanged`]. "The record
+//! supplies every value of the target" is approximated by "it is the newest
+//! record on the target": the binding suppliers of path-less bindings (PR 9)
+//! can refine it when the shell passes them in.
 //!
 //! **Which paths.** A path whose target takes its source from the promotion
 //! (`promotes_source`) takes the source commit and every value from one state
@@ -55,7 +62,11 @@
 //! specifics of PR 11: judging a publication's `accepted` and `healthy` per
 //! covered Application (D6) and tracing an input selector to the Application
 //! of its Release (D7). Until then a value-only path judges the selected unit
-//! like any other unit, so a failing publication attestation blocks it.
+//! like any other unit, and a failing attestation of any unit of the chosen
+//! state blocks it. Also not here: D8 (a publication's newest attestation
+//! decides what runs, and mixed revisions block). It needs a typed,
+//! driver-decided "what runs now" result in state, which the core cannot read
+//! from the driver's private `details`; see the M6 plan.
 
 mod history;
 mod standing;
@@ -75,7 +86,7 @@ use nyl_core::orchestration::promotion::{
 use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::promotion::PromotionPath;
 
-pub use history::{recorded_states, RecordedState, StateAttestations, StateRef};
+pub use history::{recorded_states, DesiredEntry, RecordedState, StateAttestations, StateRef};
 pub use standing::{Gap, GapKind, Judgement, Used, ENVIRONMENT_SCOPE};
 pub use values::ArtifactCheck;
 
@@ -242,7 +253,6 @@ fn context<'a>(input: &'a PromotionInput<'_>, value_units: &'a BTreeSet<UnitName
         now: input.now,
         target_units: input.target_units,
         value_units,
-        history: input.history,
         ignores: &input.request.ignore,
     }
 }
@@ -259,7 +269,7 @@ pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
         ignores: &[],
         ..context(input, &value_units)
     };
-    let subject = Subject::Source { explicit: false };
+    let subject = Subject::Source;
     input
         .history
         .iter()
@@ -315,33 +325,42 @@ fn candidates<'a>(input: &'a PromotionInput<'_>) -> Vec<&'a RecordedState> {
         .collect()
 }
 
-fn select_whole<'a>(input: &'a PromotionInput<'_>, ctx: &Context<'_>) -> Result<Chosen<'a>, Refusal> {
-    let pool = candidates(input);
-    let subject = Subject::Source {
-        explicit: input.request.select.explicit(),
-    };
-    for state in &pool {
-        let judgement = judge(ctx, state, &subject, ctx.level());
-        if judgement.gaps.is_empty() {
-            return Ok(Chosen {
+/// Whether `state` qualifies for `subject`: it reaches the path's level, or,
+/// with `--evidence published`, it reaches `published`. The second element
+/// holds the gaps at the path's level when the state was taken below it, so
+/// the record carries an override only then.
+fn qualify<'a>(
+    input: &PromotionInput<'_>,
+    ctx: &Context<'_>,
+    state: &'a RecordedState,
+    subject: &Subject<'_>,
+) -> Option<Chosen<'a>> {
+    let judgement = judge(ctx, state, subject, ctx.level());
+    if judgement.gaps.is_empty() {
+        return Some(Chosen {
+            state,
+            judgement,
+            overridden: None,
+        });
+    }
+    if input.request.evidence_published && ctx.level() == EvidenceLevel::Attested {
+        let relaxed = judge(ctx, state, subject, EvidenceLevel::Published);
+        if relaxed.gaps.is_empty() {
+            return Some(Chosen {
                 state,
-                judgement,
-                overridden: None,
+                judgement: relaxed,
+                overridden: Some(judgement.gaps),
             });
         }
     }
-    if input.request.evidence_published && ctx.level() == EvidenceLevel::Attested {
-        for state in &pool {
-            let judgement = judge(ctx, state, &subject, EvidenceLevel::Published);
-            if judgement.gaps.is_empty() {
-                let gaps = judge(ctx, state, &subject, ctx.level()).gaps;
-                return Ok(Chosen {
-                    state,
-                    judgement,
-                    overridden: Some(gaps),
-                });
-            }
-        }
+    None
+}
+
+fn select_whole<'a>(input: &'a PromotionInput<'_>, ctx: &Context<'_>) -> Result<Chosen<'a>, Refusal> {
+    let pool = candidates(input);
+    let subject = Subject::Source;
+    if let Some(chosen) = pool.iter().find_map(|state| qualify(input, ctx, state, &subject)) {
+        return Ok(chosen);
     }
     let gaps = pool
         .first()
@@ -363,31 +382,14 @@ fn select_values<'a>(
         consumers.insert(name.clone(), unit);
     }
     let all: BTreeSet<UnitName> = consumers.values().cloned().collect();
-    let levels: Vec<EvidenceLevel> = match (ctx.level(), input.request.evidence_published) {
-        (EvidenceLevel::Published, _) => vec![EvidenceLevel::Published],
-        (EvidenceLevel::Attested, false) => vec![EvidenceLevel::Attested],
-        (EvidenceLevel::Attested, true) => vec![EvidenceLevel::Attested, EvidenceLevel::Published],
-    };
     let mut chosen: Vec<Chosen<'a>> = Vec::new();
     let mut per_value = BTreeMap::new();
-    // The newest state that reaches the path's level for `units`, else (with
-    // `--evidence published`) the newest that reaches `published`.
     let find = |units: &BTreeSet<UnitName>| {
         let subject = Subject::Units(units);
-        levels.iter().find_map(|level| {
-            pool.iter().find_map(|state| {
-                let judgement = judge(ctx, state, &subject, *level);
-                judgement.gaps.is_empty().then(|| Chosen {
-                    state,
-                    judgement,
-                    overridden: (*level != ctx.level()).then(|| judge(ctx, state, &subject, ctx.level()).gaps),
-                })
-            })
-        })
+        pool.iter().find_map(|state| qualify(input, ctx, state, &subject))
     };
     if input.request.select.explicit() {
-        let found = find(&all);
-        let Some(found) = found else {
+        let Some(found) = find(&all) else {
             let gaps = pool
                 .first()
                 .map(|state| judge(ctx, state, &Subject::Units(&all), ctx.level()).gaps)
@@ -402,8 +404,7 @@ fn select_values<'a>(
     }
     for (name, unit) in &consumers {
         let units = BTreeSet::from([unit.clone()]);
-        let found = find(&units);
-        let Some(found) = found else {
+        let Some(found) = find(&units) else {
             let gaps = pool
                 .first()
                 .map(|state| judge(ctx, state, &Subject::Units(&units), ctx.level()).gaps)
@@ -439,6 +440,16 @@ fn refuse(input: &PromotionInput<'_>, pool: &[&RecordedState], gaps: Vec<Gap>, v
             }
             Selection::SourceRevision(commit) => {
                 format!("no recorded state of {source} ran source commit {commit}")
+            }
+            Selection::StateRevision(commit)
+                if input
+                    .history
+                    .iter()
+                    .any(|state| state.desired_commit == *commit && !state.is_candidate()) =>
+            {
+                format!(
+                    "{commit} is a state of {source} that ran an archived worktree snapshot, which cannot establish promotion evidence"
+                )
             }
             Selection::StateRevision(commit) => format!("{commit} is not a recorded state of {source}"),
         };
@@ -497,11 +508,6 @@ fn fix_for(source: &EnvironmentName, gaps: &[Gap], level: &str) -> String {
             "fix what failed and record a newer passing attestation, or set it aside with `--ignore-attestation <unit>/<name>=<reason>` (or `environment/<name>=<reason>`)"
                 .to_owned(),
         );
-    }
-    if has(GapKind::Mixed) || has(GapKind::NotRunning) {
-        fixes.push(format!(
-            "bring every Application to one publication and run `nyl attest -e {source}`, or choose an attested state with `--state-revision`"
-        ));
     }
     if level == "attested" {
         fixes.push("or promote below the path's level with `--evidence published`".to_owned());
@@ -638,10 +644,12 @@ fn build(
                 })
                 .collect(),
             override_: below.then(|| EvidenceOverride {
-                reason: requested
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "--evidence published".to_owned()),
+                reason: requested.reason.clone().unwrap_or_else(|| {
+                    format!(
+                        "--evidence published, given without --reason, took a state below the path's {} level",
+                        ctx.level_name()
+                    )
+                }),
             }),
         },
         ignored_attestations: ignored

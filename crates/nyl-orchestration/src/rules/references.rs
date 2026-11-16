@@ -333,7 +333,7 @@ pub fn resolve_input(view: &ReferenceView<'_>, unit: &str, pointer: &str) -> Res
     };
     let Some(value) = nyl_core::json_pointer::resolve(resolved, pointer) else {
         return Err(ResolutionError::from(format!(
-            "selects input JSON Pointer {pointer:?}, which has no value in what unit {name} ran"
+            "selects input JSON Pointer {pointer:?}, which has no value in what unit {name} ran; an optional field its resolved spec omits has none to promote"
         )));
     };
     Ok(ReferenceValue::Value {

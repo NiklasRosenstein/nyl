@@ -82,6 +82,18 @@ pub fn declared(producer: &DesiredUnit) -> BTreeSet<String> {
     names
 }
 
+/// The environment-wide attestation names an Environment's resolved spec
+/// declares (`spec.attestations`), in order.
+pub fn declared_environment(spec: &Value) -> Vec<String> {
+    spec.get("attestations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The declared names that only an external source supplies: declared in
 /// `spec.attestations` with `from: external`, and neither reported by the
 /// driver nor declared there without it. A driver outcome for one is never

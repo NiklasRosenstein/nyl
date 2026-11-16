@@ -15,7 +15,7 @@
 //!
 //! The record names where each value came from: the source unit and its
 //! incarnation, and the receipt's execution key for an output or artifact, or
-//! the digest of the unit's resolved spec for an input.
+//! the digest of the selected input value (canonical JSON) for an input.
 //!
 //! Which unit *consumes* a value, and so whose evidence a value-only path
 //! judges, is [`consumer`]. Today it is the selected unit itself (the
@@ -33,7 +33,6 @@ use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::promotion::{PromotedUnit, PromotedValue, PromotionSelect};
 use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::promotion::SelectForm;
-use serde_json::Value;
 
 use super::history::RecordedState;
 use crate::rules::references::{resolve_input, resolve_reference, ReferenceValue, ReferenceView, ResolutionError};
@@ -160,13 +159,10 @@ pub(super) fn read(
         }
     };
     let (execution_key, input_digest) = match form {
+        // The digest of the canonical JSON of the selected value, the same
+        // digest the ownership index records for a Release input.
         SelectForm::Input => {
-            let resolved_spec = snapshot
-                .desired
-                .get(unit)
-                .and_then(|desired| desired.resolved_spec.as_ref())
-                .unwrap_or(&Value::Null);
-            let bytes = nyl_core::digest::canonical_json_bytes(resolved_spec).expect("a JSON value serializes");
+            let bytes = nyl_core::digest::canonical_json_bytes(&value).expect("a JSON value serializes");
             (None, Some(nyl_core::digest::sha256_prefixed(&bytes)))
         }
         _ => (Some(provenance.execution_key.clone()), None),

@@ -18,24 +18,15 @@
 //!   state it names ([`evidence::recorded_for`]; an environment-wide one
 //!   names the state's desired commit).
 //! - **Age.** An attestation older than `maxAttestationAge` does not count:
-//!   a required one is [`GapKind::Aged`], and an aged failing one no longer
-//!   blocks.
+//!   a required pass is [`GapKind::Aged`]. Age never clears a failure.
 //! - **Failing.** A failing attestation recorded for the state blocks it
 //!   whether or not the path requires it ([`GapKind::Failing`]), until an
-//!   `--ignore-attestation` entry sets it aside.
-//! - **Publications (D8).** A state judged without an explicit choice, at
-//!   `attested`, must also be what a publication unit's newest attestation
-//!   shows running: when that attestation names another receipt the state is
-//!   [`GapKind::NotRunning`], so a mix of revisions blocks without falling
-//!   back to an older state whose attestations once passed. An explicitly
-//!   chosen state uses the attestations recorded for it.
+//!   `--ignore-attestation` entry sets it aside; only a later passing
+//!   attestation of the same name or that entry clears a failure.
 //!
-//! A *publication unit*, for this rule, is a unit whose recorded attestations
-//! carry the neutral deployment reading of the contract's
-//! [Reading Argo CD](../../../../../design/promotion.md#reading-argo-cd)
-//! (`details.deployments`, each with `state`, `health`, and the `publication`
-//! it matched). No unit kind is named: any driver that records that reading
-//! gets the rule, and the details are read only to explain a failure.
+//! What a publication unit's newest attestation says is running (decision D8)
+//! needs a typed, driver-decided result that state does not record yet; see
+//! the M6 plan's D8. The core never reads the driver's `details`.
 
 use std::collections::BTreeSet;
 
@@ -44,7 +35,6 @@ use nyl_core::orchestration::promotion::EvidenceLevel;
 use nyl_core::orchestration::state::{Attestation, AttestationResult};
 use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::promotion::{PathEvidence, PromotionPathSpec};
-use serde_json::Value;
 
 use super::history::RecordedState;
 use super::IgnoreRequest;
@@ -66,11 +56,6 @@ pub enum GapKind {
     Aged,
     /// An attestation recorded for the state fails.
     Failing,
-    /// A publication unit's newest attestation names another receipt, so the
-    /// state is not what runs now.
-    NotRunning,
-    /// A publication's newest attestation shows Applications at different revisions.
-    Mixed,
 }
 
 /// One reason a state does not reach a level.
@@ -105,11 +90,12 @@ pub struct Judgement {
 /// What a state is judged for.
 pub(super) enum Subject<'a> {
     /// The whole source: every unit the target also selects and every unit a
-    /// value reads; `explicit` when the state was chosen by `--revision` or
-    /// `--state-revision`.
-    Source { explicit: bool },
+    /// value reads.
+    Source,
     /// The environment and exactly these units (a value-only path's
-    /// consumers).
+    /// consumers) must be proven; a failing attestation of any other unit of
+    /// the state still blocks it, until the per-Application judgement of
+    /// the value-only specifics (PR 11) replaces that.
     Units(&'a BTreeSet<UnitName>),
 }
 
@@ -121,8 +107,6 @@ pub(super) struct Context<'a> {
     pub target_units: &'a BTreeSet<UnitName>,
     /// The units the path's value selectors read.
     pub value_units: &'a BTreeSet<UnitName>,
-    /// Every recorded state of the source, newest first.
-    pub history: &'a [RecordedState],
     pub ignores: &'a [IgnoreRequest],
 }
 
@@ -154,70 +138,11 @@ impl Context<'_> {
             .iter()
             .find(|ignore| ignore.scope == scope && ignore.name == name)
     }
-
-    /// The newest attestation recorded for a publication unit in any state,
-    /// when the unit is one ([`is_publication`]).
-    fn newest_publication(&self, unit: &UnitName) -> Option<&Attestation> {
-        let all = || {
-            self.history
-                .iter()
-                .filter_map(|state| state.attestations.units.get(unit))
-                .flat_map(|set| set.values())
-        };
-        if !all().any(is_publication) {
-            return None;
-        }
-        all().max_by_key(|attestation| attestation.at)
-    }
-}
-
-/// Whether an attestation carries the neutral deployment reading.
-fn is_publication(attestation: &Attestation) -> bool {
-    attestation.details.get("deployments").is_some_and(Value::is_array)
-}
-
-/// The Applications of a deployment reading that do not pass, and whether
-/// they run different publications.
-fn explain(attestation: &Attestation) -> (Vec<String>, bool) {
-    let Some(deployments) = attestation.details.get("deployments").and_then(Value::as_array) else {
-        return (Vec::new(), false);
-    };
-    let mut failing = Vec::new();
-    let mut publications = BTreeSet::new();
-    let mut mixed = false;
-    for deployment in deployments {
-        let text = |field: &str| deployment.get(field).and_then(Value::as_str);
-        let id = text("id").unwrap_or("?");
-        let state = text("state").unwrap_or("?");
-        let health = text("health");
-        if let Some(publication) = text("publication") {
-            publications.insert(publication.to_owned());
-        }
-        if matches!(state, "other-publication" | "mixed") {
-            mixed = true;
-        }
-        if state != "accepted" || health.is_some_and(|health| health != "Healthy") {
-            failing.push(match health {
-                Some(health) => format!("{id} {state}, {health}"),
-                None => format!("{id} {state}"),
-            });
-        }
-    }
-    (failing, mixed || publications.len() > 1)
 }
 
 fn failing_gap(scope: &str, attestation: &Attestation) -> Gap {
     let name = &attestation.name;
-    let (failing, mixed) = explain(attestation);
     let mut message = format!("attestation {scope}/{name} fails");
-    if mixed {
-        message.push_str(": the Applications run mixed revisions");
-    }
-    if !failing.is_empty() {
-        message.push_str(" (");
-        message.push_str(&failing.join("; "));
-        message.push(')');
-    }
     if let Some(reason) = attestation.reason.as_deref().filter(|reason| !reason.is_empty()) {
         message.push_str(": ");
         message.push_str(reason);
@@ -225,7 +150,7 @@ fn failing_gap(scope: &str, attestation: &Attestation) -> Gap {
     Gap {
         scope: scope.to_owned(),
         name: Some(name.clone()),
-        kind: if mixed { GapKind::Mixed } else { GapKind::Failing },
+        kind: GapKind::Failing,
         message,
     }
 }
@@ -255,7 +180,9 @@ impl Judgement {
             }
             return;
         };
-        if ctx.aged(attestation) {
+        // Age retires a pass only: a failure stays until a later passing
+        // attestation of the same name replaces it, or it is ignored.
+        if ctx.aged(attestation) && attestation.result == AttestationResult::Pass {
             if required {
                 let age = ctx.spec.max_attestation_age.expect("only an age ages");
                 self.gap(
@@ -309,7 +236,7 @@ pub(super) fn judge(
     let desired = &state.snapshot.desired;
     // The units whose receipts and required attestations count.
     let covered: BTreeSet<UnitName> = match subject {
-        Subject::Source { .. } => ctx
+        Subject::Source => ctx
             .target_units
             .iter()
             .filter(|unit| desired.contains_key(*unit))
@@ -326,13 +253,10 @@ pub(super) fn judge(
             format!("unit {unit} is not selected in this state, so it has no receipt"),
         );
     }
-    let judged: BTreeSet<&UnitName> = match subject {
-        // A failing attestation of any unit blocks the state.
-        Subject::Source { .. } => desired.keys().collect(),
-        Subject::Units(units) => units.iter().filter(|unit| desired.contains_key(*unit)).collect(),
-    };
+    // A failing attestation of any unit blocks the state.
+    let judged: BTreeSet<&UnitName> = desired.keys().collect();
     for unit in judged {
-        judge_unit(ctx, state, subject, level, unit, covered.contains(unit), &mut verdict);
+        judge_unit(ctx, state, level, unit, covered.contains(unit), &mut verdict);
     }
     judge_environment(ctx, state, level, &mut verdict);
     verdict
@@ -357,7 +281,6 @@ fn required_names(named: Option<&Vec<String>>, declared: BTreeSet<String>, level
 fn judge_unit(
     ctx: &Context<'_>,
     state: &RecordedState,
-    subject: &Subject<'_>,
     level: EvidenceLevel,
     unit: &UnitName,
     covered: bool,
@@ -399,22 +322,6 @@ fn judge_unit(
         let attestation = evidence::recorded_for(name, desired, receipt, recorded);
         verdict.classify(ctx, unit.as_str(), name, attestation, required.contains(name));
     }
-    if let (Subject::Source { explicit: false }, EvidenceLevel::Attested, true) = (subject, level, covered) {
-        if let Some(newest) = ctx.newest_publication(unit) {
-            if newest.execution_key != receipt.execution_key.as_str() {
-                verdict.gap(
-                    unit.as_str(),
-                    None,
-                    GapKind::NotRunning,
-                    format!(
-                        "the newest attestation of {unit} ({}, recorded at {}) names another receipt, so this state is not what {unit} runs now",
-                        newest.name,
-                        newest.at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                    ),
-                );
-            }
-        }
-    }
 }
 
 fn judge_environment(ctx: &Context<'_>, state: &RecordedState, level: EvidenceLevel, verdict: &mut Judgement) {
@@ -422,12 +329,9 @@ fn judge_environment(ctx: &Context<'_>, state: &RecordedState, level: EvidenceLe
         .snapshot
         .environment
         .as_ref()
-        .and_then(|record| record.spec.get("attestations"))
-        .and_then(Value::as_array)
+        .map(|record| evidence::declared_environment(&record.spec))
+        .unwrap_or_default()
         .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
         .collect();
     let required = required_names(ctx.spec.attestations.environment.as_ref(), declared, level);
     let key = state.desired_commit.as_str();

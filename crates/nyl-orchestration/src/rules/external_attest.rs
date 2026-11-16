@@ -227,16 +227,11 @@ fn record_environment(
             format!("run `nyl reconcile -e {environment}`, then record the attestation"),
         )
     })?;
-    let declared: Vec<String> = snapshot
+    let declared = snapshot
         .environment
         .as_ref()
-        .and_then(|record| record.spec.get("attestations"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
+        .map(|record| super::evidence::declared_environment(&record.spec))
+        .unwrap_or_default();
     if !declared.contains(&request.name) {
         return Err(undeclared(
             &format!("environment {environment}"),

@@ -15,8 +15,8 @@
 //!   operations that record receipts) of this environment, paired with the
 //!   observed-ref commit of the same `Nyl-Run-Id`. One ref shared by both
 //!   sides pairs a commit with itself.
-//! - A run that wrote no desired commit records no state of its own: its
-//!   receipts belong to the state that last wrote the desired documents.
+//! - A state's desired commit is the state commit ([`DesiredEntry`]), which may
+//!   be older than the run's own commit.
 //! - Commits of other operations (`attest`, `promote`, `detect-drift`, ...)
 //!   and of other environments sharing the ref are not states. A `Nyl-Local`
 //!   commit is not shared evidence and is skipped.
@@ -44,23 +44,49 @@ pub struct StateRef {
     pub observed_commit: Option<CommitId>,
 }
 
+/// One commit of the desired ref's first-parent history with what only the
+/// store can tell: whether it changed this environment's `desired/` documents
+/// (beneath its location's path), as [`StateStore::state_commit`] asks.
+///
+/// [`StateStore::state_commit`]: nyl_core::orchestration::ports::StateStore::state_commit
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredEntry {
+    pub entry: LogEntry,
+    pub changed_desired: bool,
+}
+
 /// The states `environment` recorded, newest first.
-pub fn recorded_states(environment: &EnvironmentName, desired: &[LogEntry], observed: &[LogEntry]) -> Vec<StateRef> {
+///
+/// A state's `desired_commit` is its state commit, defined as
+/// `StateStore::state_commit` defines it: the newest commit at or before the
+/// run's own commit, along first parents, that changed the environment's
+/// desired documents, because that is the commit environment attestations
+/// name. A run whose own commit changed none (on one ref shared by both
+/// sides, a run that changed only observed documents) takes the older commit
+/// that did; a run with none at all records no state.
+pub fn recorded_states(
+    environment: &EnvironmentName,
+    desired: &[DesiredEntry],
+    observed: &[LogEntry],
+) -> Vec<StateRef> {
     let mut states: Vec<StateRef> = Vec::new();
-    for entry in desired {
-        let Some(run) = state_run(environment, &entry.message) else {
+    for (index, entry) in desired.iter().enumerate() {
+        let Some(run) = state_run(environment, &entry.entry.message) else {
             continue;
         };
         if states.iter().any(|state| state.run == run) {
             continue;
         }
+        let Some(state_commit) = desired[index..].iter().find(|older| older.changed_desired) else {
+            continue;
+        };
         let observed_commit = observed
             .iter()
             .find(|candidate| state_run(environment, &candidate.message).as_ref() == Some(&run))
             .map(|candidate| candidate.commit.clone());
         states.push(StateRef {
             run,
-            desired_commit: entry.commit.clone(),
+            desired_commit: state_commit.entry.commit.clone(),
             observed_commit,
         });
     }
@@ -97,8 +123,8 @@ pub struct StateAttestations {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedState {
     pub run: RunId,
-    /// The state's commit on the desired ref: the key environment-wide
-    /// attestations are compared with.
+    /// The state's commit on the desired ref, as `StateStore::state_commit`
+    /// defines it: the key environment-wide attestations are compared with.
     pub desired_commit: CommitId,
     pub observed_commit: Option<CommitId>,
     /// The documents as of the state: environment record, desired and
@@ -145,6 +171,20 @@ mod tests {
         }
     }
 
+    fn changed(entry: LogEntry) -> DesiredEntry {
+        DesiredEntry {
+            entry,
+            changed_desired: true,
+        }
+    }
+
+    fn unchanged(entry: LogEntry) -> DesiredEntry {
+        DesiredEntry {
+            entry,
+            changed_desired: false,
+        }
+    }
+
     fn dev() -> EnvironmentName {
         EnvironmentName::new("dev").unwrap()
     }
@@ -156,10 +196,10 @@ mod tests {
     #[test]
     fn test_states_pair_commits_by_run_and_skip_other_operations() {
         let desired = [
-            entry('d', "promote", RUN_C, ""),
-            entry('c', "reconcile", RUN_B, ""),
-            entry('b', "reconcile", RUN_A, "Nyl-Local: true\n"),
-            entry('a', "reconcile", RUN_A, ""),
+            changed(entry('d', "promote", RUN_C, "")),
+            changed(entry('c', "reconcile", RUN_B, "")),
+            changed(entry('b', "reconcile", RUN_A, "Nyl-Local: true\n")),
+            changed(entry('a', "reconcile", RUN_A, "")),
         ];
         let observed = [
             entry('4', "attest", RUN_C, ""),
@@ -188,16 +228,50 @@ mod tests {
         let mut other = entry('b', "reconcile", RUN_B, "");
         other.message = other.message.replace("Nyl-Environment: dev", "Nyl-Environment: prod");
         let shared = [other, entry('a', "reconcile", RUN_A, "")];
-        let states = recorded_states(&dev(), &shared, &shared);
+        let desired: Vec<_> = shared.iter().cloned().map(changed).collect();
+        let states = recorded_states(&dev(), &desired, &shared);
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].desired_commit, states[0].observed_commit.clone().unwrap());
+    }
+
+    /// Catches an environment attestation keyed to a commit no state matches:
+    /// on a shared ref, a run whose own commit changed only observed
+    /// documents takes the state commit `StateStore::state_commit` names, the
+    /// older commit that changed the desired documents, and a run with no
+    /// such commit records no state.
+    #[test]
+    fn test_state_commit_is_the_newest_commit_that_changed_desired_documents() {
+        let shared = [
+            entry('c', "reconcile", RUN_B, ""),
+            entry('b', "attest", RUN_C, ""),
+            entry('a', "reconcile", RUN_A, ""),
+        ];
+        let desired = [
+            unchanged(shared[0].clone()),
+            unchanged(shared[1].clone()),
+            changed(shared[2].clone()),
+        ];
+        let states = recorded_states(&dev(), &desired, &shared);
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| (
+                    state.run.as_str(),
+                    state.desired_commit.as_str().chars().next().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [(RUN_B, 'a'), (RUN_A, 'a')],
+            "the observed-only run B is attested under the commit of run A's state"
+        );
+        let nothing = recorded_states(&dev(), &[unchanged(shared[0].clone())], &shared[..1]);
+        assert!(nothing.is_empty());
     }
 
     /// Catches a run with no observed commit being dropped: a state needs
     /// only its desired commit.
     #[test]
     fn test_a_run_without_an_observed_commit_still_records_a_state() {
-        let states = recorded_states(&dev(), &[entry('a', "recover", RUN_A, "")], &[]);
+        let states = recorded_states(&dev(), &[changed(entry('a', "recover", RUN_A, ""))], &[]);
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].observed_commit, None);
     }

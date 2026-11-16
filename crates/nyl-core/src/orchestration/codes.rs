@@ -165,7 +165,7 @@ codes! {
     PromoteValueType => "NYL-PROMOTE-VALUE-TYPE",
     /// A `fromPromotion` binding names a path or a value no PromotionPath declares.
     PromoteBindingUnknown => "NYL-PROMOTE-BINDING-UNKNOWN",
-    /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing, or a publication whose newest attestation shows mixed revisions. Nothing was written. Exit 2.
+    /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing. Nothing was written. Exit 2.
     PromoteNoEvidence => "NYL-PROMOTE-NO-EVIDENCE",
     /// `--evidence published` promoted a state whose evidence is below the path's level; the record says so. A warning.
     PromoteEvidenceOverride => "NYL-PROMOTE-EVIDENCE-OVERRIDE",

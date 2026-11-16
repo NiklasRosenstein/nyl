@@ -224,14 +224,6 @@ fn running(publication: &str) -> Value {
     ]})
 }
 
-/// `web/api` still runs `old` while the rest runs `new`.
-fn mixed(new: &str, old: &str) -> Value {
-    json!({"deployments": [
-        {"id": "web/web", "state": "accepted", "health": "Healthy", "publication": new},
-        {"id": "web/api", "state": "other-publication", "health": "Healthy", "publication": old},
-    ]})
-}
-
 #[allow(clippy::needless_pass_by_value)] // Builders take the literal under test.
 fn path(spec: Value) -> PromotionPath {
     let mut base = json!({
@@ -524,13 +516,16 @@ fn test_aged_attestations_do_not_count() {
     fresh.promoted();
 }
 
-/// An aged failing attestation no longer blocks: aging retires it as it
-/// retires a pass.
+/// Age retires a pass, never a failure: an old failing attestation keeps
+/// blocking until a later pass of the same name or an ignore entry clears it.
 #[test]
-fn test_an_aged_failing_attestation_does_not_block() {
+fn test_an_aged_failing_attestation_keeps_blocking() {
     let path = path(json!({"evidence": "published", "maxAttestationAge": "1h"}));
     let history = vec![state(1, 'a', "sha256:one").env_attestation("qa", Fail, OLD)];
-    case(path, history).promoted();
+    let mut blocked = case(path, history);
+    assert_eq!(blocked.refused().gaps[0].kind, GapKind::Failing);
+    blocked.request.ignore = vec![IgnoreRequest::parse("environment/qa=known").unwrap()];
+    assert_eq!(blocked.promoted().record.ignored_attestations.len(), 1);
 }
 
 /// A failing attestation blocks its state on every path, required or not,
@@ -594,54 +589,25 @@ fn test_ignore_request_parses_scope_name_and_reason() {
     }
 }
 
-/// D8: a publication's newest attestation decides what runs. The newest
-/// state's attestations show mixed revisions, and the older state whose
-/// attestations once passed does not stand in: the promotion is refused.
+/// A publication's attestations are judged like any unit's: a failing one
+/// blocks its state, and an older state whose attestations passed is taken.
+/// What the newest attestation shows running (D8) is not decided here: the
+/// core does not read a driver's details.
 #[test]
-fn test_mixed_publication_blocks_without_falling_back() {
-    let history = || {
-        vec![
-            state(2, 'b', "sha256:two")
-                .env_attestation("qa", Pass, FRESH)
-                .kubernetes_attestation("accepted", Fail, FRESH, mixed("p2", "p1"))
-                .kubernetes_attestation("healthy", Fail, FRESH, mixed("p2", "p1")),
-            state(1, 'a', "sha256:one")
-                .env_attestation("qa", Pass, OLD)
-                .kubernetes_attestation("accepted", Pass, OLD, running("p1"))
-                .kubernetes_attestation("healthy", Pass, OLD, running("p1")),
-        ]
-    };
-    let refusal = case(attested(), history()).refused();
-    assert!(refusal.finding.message.contains("mixed"), "{}", refusal.finding.message);
-    let kinds: BTreeSet<_> = refusal.gaps.iter().map(|gap| gap.kind as u8).collect();
-    assert!(kinds.contains(&(GapKind::Mixed as u8)));
-    // The older state is not what runs: judged on its own it would pass.
-    let evaluations = case(attested(), history()).evaluations();
-    assert!(
-        evaluations[1].gaps.iter().all(|gap| gap.kind == GapKind::NotRunning),
-        "{:?}",
-        evaluations[1].gaps
-    );
-    // An explicitly chosen state uses the attestations recorded for it.
-    let mut explicit = case(attested(), history());
-    explicit.request.select = Selection::StateRevision(desired_commit_of(1));
-    let promotion = explicit.promoted();
-    assert_eq!(from_run(&promotion.record), run_id(1).to_string());
-    assert_eq!(promotion.record.evidence.level, EvidenceLevel::Attested);
-    assert!(promotion.record.evidence.override_.is_none());
-    assert!(promotion.warnings.is_empty());
-}
-
-/// At `published` a publication's attestations are not required: only a
-/// failing one blocks its own state, so the newest state's receipts suffice.
-#[test]
-fn test_published_does_not_apply_the_newest_attestation_rule() {
+fn test_publication_attestations_are_judged_generically() {
+    let details = json!({"deployments": [{"id": "web/api", "state": "other-publication"}]});
     let history = vec![
-        state(2, 'b', "sha256:two"),
-        state(1, 'a', "sha256:one").kubernetes_attestation("accepted", Pass, FRESH, running("p1")),
+        state(2, 'b', "sha256:two")
+            .env_attestation("qa", Pass, FRESH)
+            .kubernetes_attestation("accepted", Fail, FRESH, details.clone())
+            .kubernetes_attestation("healthy", Fail, FRESH, details),
+        state(1, 'a', "sha256:one")
+            .env_attestation("qa", Pass, FRESH)
+            .kubernetes_attestation("accepted", Pass, FRESH, running("p1"))
+            .kubernetes_attestation("healthy", Pass, FRESH, running("p1")),
     ];
-    let promotion = case(published(), history).promoted();
-    assert_eq!(from_run(&promotion.record), run_id(2).to_string());
+    let promotion = case(attested(), history).promoted();
+    assert_eq!(from_run(&promotion.record), run_id(1).to_string());
 }
 
 /// D13: an explicitly chosen older state needs `--evidence published` only
@@ -773,7 +739,12 @@ fn test_values_are_read_through_the_resolver() {
     assert_eq!(values["digest"].value, json!("sha256:one"));
     assert_eq!(values["release"].value, json!("sha256:one"));
     assert!(values["release"].execution_key.is_none());
-    assert!(values["release"].input_digest.as_ref().unwrap().starts_with("sha256:"));
+    let selected = nyl_core::digest::canonical_json_bytes(&json!("sha256:one")).unwrap();
+    assert_eq!(
+        values["release"].input_digest,
+        Some(nyl_core::digest::sha256_prefixed(&selected)),
+        "the digest of the selected value, not of the whole resolved spec"
+    );
     assert_eq!(
         values["source"].value,
         json!({"path": "/app", "commit": commit('a')}),
@@ -884,6 +855,7 @@ fn test_value_only_refusal_names_the_value_and_explicit_state_takes_all() {
     value_case.request.select = Selection::StateRevision(desired_commit_of(1));
     let promotion = value_case.promoted();
     assert_eq!(from_run(&promotion.record), run_id(1).to_string());
+    assert!(!promotion.record.values.is_empty());
     assert!(promotion.record.values.values().all(|value| value.state.is_none()));
 }
 
@@ -932,4 +904,85 @@ fn test_evaluate_reports_the_level_each_state_reaches() {
     );
     assert!(evaluations[2].gaps.is_empty());
     assert!(!evaluations[1].gaps.is_empty());
+}
+
+/// `--evidence published` without an explicit state takes the newest state
+/// that reaches `published`, recording an override only when that state is
+/// below the path's level: the newer unattested state wins over the older
+/// attested one, while a newest state that is attested needs no override.
+#[test]
+fn test_evidence_published_without_a_selection_takes_the_newest_published_state() {
+    let path = path(json!({"evidence": "attested", "attestations": {"units": {"kubernetes": [], "web-image": []}}}));
+    let history = || {
+        vec![
+            state(2, 'b', "sha256:two"),
+            state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH),
+        ]
+    };
+    let mut without = case(path.clone(), history());
+    assert_eq!(from_run(&without.promoted().record), run_id(1).to_string());
+    without.request.evidence_published = true;
+    without.request.requested = requested(None);
+    let promotion = without.promoted();
+    assert_eq!(from_run(&promotion.record), run_id(2).to_string());
+    assert!(promotion.record.evidence.override_.is_some());
+    assert_eq!(promotion.record.evidence.level, EvidenceLevel::Published);
+    assert!(promotion.record.evidence.override_.unwrap().reason.contains("--reason"));
+    let mut attested_newest = case(
+        path,
+        vec![state(2, 'b', "sha256:two").env_attestation("qa", Pass, FRESH)],
+    );
+    attested_newest.request.evidence_published = true;
+    let promotion = attested_newest.promoted();
+    assert!(promotion.record.evidence.override_.is_none());
+    assert_eq!(promotion.record.evidence.level, EvidenceLevel::Attested);
+    assert!(promotion.warnings.is_empty());
+}
+
+/// Until the per-Application judgement exists, a value-only path is blocked
+/// by a failing attestation of any unit of the state, not only its consumers.
+#[test]
+fn test_value_only_path_is_blocked_by_a_failing_attestation_of_another_unit() {
+    let path = path(json!({
+        "evidence": "published",
+        "values": {"webImage": {"select": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}}}
+    }));
+    let history = vec![
+        state(2, 'b', "sha256:two").kubernetes_attestation("accepted", Fail, FRESH, Value::Null),
+        state(1, 'a', "sha256:one"),
+    ];
+    let mut value_case = case(path, history);
+    value_case.promotes_source = false;
+    let promotion = value_case.promoted();
+    assert_eq!(
+        promotion.record.values["webImage"].value,
+        json!("sha256:one"),
+        "state 2's failing kubernetes attestation blocks it though kubernetes consumes no value"
+    );
+}
+
+/// An ignore entry sets only a failing attestation aside: one against a
+/// pending attestation leaves it pending.
+#[test]
+fn test_ignoring_a_pending_attestation_does_not_satisfy_it() {
+    let mut pending = case(attested(), vec![state(1, 'a', "sha256:one")]);
+    pending.request.ignore = vec![IgnoreRequest::parse("environment/qa=skip").unwrap()];
+    let refusal = pending.refused();
+    assert!(refusal
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == GapKind::Pending && gap.scope == "environment"));
+}
+
+/// A state chosen by `--state-revision` that ran a worktree snapshot says so.
+#[test]
+fn test_a_worktree_state_revision_is_named() {
+    let mut chosen = case(published(), vec![state(1, 'a', "sha256:one").worktree()]);
+    chosen.request.select = Selection::StateRevision(desired_commit_of(1));
+    let refusal = chosen.refused();
+    assert!(
+        refusal.finding.message.contains("worktree snapshot"),
+        "{}",
+        refusal.finding.message
+    );
 }
