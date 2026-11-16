@@ -82,6 +82,18 @@ pub fn declared(producer: &DesiredUnit) -> BTreeSet<String> {
     names
 }
 
+/// The environment-wide attestation names an Environment's resolved spec
+/// declares (`spec.attestations`), in order.
+pub fn declared_environment(spec: &Value) -> Vec<String> {
+    spec.get("attestations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The declared names that only an external source supplies: declared in
 /// `spec.attestations` with `from: external`, and neither reported by the
 /// driver nor declared there without it. A driver outcome for one is never
@@ -172,6 +184,26 @@ pub fn required(evidence: Evidence, named: &[String], producer: &DesiredUnit) ->
     Ok(selected)
 }
 
+/// The recorded attestation `name` when it names `producer`'s `receipt` and
+/// incarnation; one recorded for another receipt or incarnation never counts.
+/// Promotion reads states the same way ([`super::promotion`]).
+pub(crate) fn recorded_for<'a>(
+    name: &str,
+    producer: &DesiredUnit,
+    receipt: &Receipt,
+    recorded: Option<&'a BTreeMap<String, Attestation>>,
+) -> Option<&'a Attestation> {
+    recorded
+        .and_then(|recorded| recorded.get(name))
+        .filter(|attestation| attestation.execution_key == receipt.execution_key.as_str())
+        .filter(|attestation| {
+            attestation
+                .unit
+                .as_ref()
+                .is_none_or(|subject| Some(&subject.uid) == producer.unit.uid.as_ref())
+        })
+}
+
 /// How one required attestation stands for the producer's current receipt,
 /// `None` when it passes.
 fn waiting(
@@ -180,15 +212,7 @@ fn waiting(
     receipt: &Receipt,
     recorded: Option<&BTreeMap<String, Attestation>>,
 ) -> Option<AttestationWait> {
-    let attestation = recorded
-        .and_then(|recorded| recorded.get(name))
-        .filter(|attestation| attestation.execution_key == receipt.execution_key.as_str())
-        .filter(|attestation| {
-            attestation
-                .unit
-                .as_ref()
-                .is_none_or(|subject| Some(&subject.uid) == producer.unit.uid.as_ref())
-        });
+    let attestation = recorded_for(name, producer, receipt, recorded);
     match attestation.map(|attestation| attestation.result) {
         Some(AttestationResult::Pass) => None,
         Some(AttestationResult::Fail) => Some(AttestationWait::Failing),

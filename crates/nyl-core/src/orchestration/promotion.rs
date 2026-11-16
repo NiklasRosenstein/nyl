@@ -148,7 +148,7 @@ pub struct PromotedValue {
     /// The receipt the value came from, for an output or artifact selector.
     #[serde(rename = "executionKey", default, skip_serializing_if = "Option::is_none")]
     pub execution_key: Option<ExecutionKey>,
-    /// The digest of the unit's resolved input, for an `input` selector.
+    /// The `sha256:` digest of the canonical JSON of the value an `input` selector read: the same digest the ownership index records for a Release input.
     #[serde(rename = "inputDigest", default, skip_serializing_if = "Option::is_none")]
     pub input_digest: Option<String>,
     /// Present when a value-only path took the value from another state than `from`.

@@ -307,6 +307,41 @@ fn resolve_named(
     })
 }
 
+/// Read `pointer` (RFC 6901) in the resolved spec of the producer `unit`:
+/// what it ran, such as `/source` or `/releases/platform~1web/image`. This is
+/// the form a PromotionPath's `{unit, input}` selector reads
+/// ([`super::promotion`]), resolved next to the other reference forms so
+/// that the producer's ownership, current receipt, and citation follow the
+/// same rules. A producer whose document has no resolved spec (it is
+/// blocked) or whose spec has no value at `pointer` is a resolution error.
+pub fn resolve_input(view: &ReferenceView<'_>, unit: &str, pointer: &str) -> Result<ReferenceValue, ResolutionError> {
+    let (name, desired) = producer(view, unit)?;
+    let observed = view.observed.get(name);
+    if !receipt_is_current(desired, observed) {
+        return Ok(ReferenceValue::Blocked {
+            unit: name.clone(),
+            reason: Blocker::no_current_receipt(producer_ref(None, name)),
+        });
+    }
+    let receipt = observed
+        .and_then(|observed| observed.receipt.as_ref())
+        .expect("a current receipt exists");
+    let Some(resolved) = &desired.resolved_spec else {
+        return Err(ResolutionError::from(format!(
+            "reads input {pointer:?}, but unit {name} has no resolved spec in this state"
+        )));
+    };
+    let Some(value) = nyl_core::json_pointer::resolve(resolved, pointer) else {
+        return Err(ResolutionError::from(format!(
+            "selects input JSON Pointer {pointer:?}, which has no value in what unit {name} ran; an optional field its resolved spec omits has none to promote"
+        )));
+    };
+    Ok(ReferenceValue::Value {
+        value: value.clone(),
+        provenance: cite(view, (name, desired), receipt, None),
+    })
+}
+
 /// The citation of the receipt of `producer` that a value was read from, with
 /// the observed value (its name and last read) when it came from one.
 fn cite(

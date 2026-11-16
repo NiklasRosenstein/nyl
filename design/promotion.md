@@ -88,7 +88,7 @@ writes it, and a reader loads it.
 | `sequence` | Integer that increases with every promotion into the target environment, on any path; "newest" always means the highest `sequence` |
 | `from` | The source state: `{environment, run, desiredCommit, observedCommit}`, or for a target source `{target, repository, branch, commit}`. For a path that promotes only values, the newest state any value came from |
 | `sourceCommit` | The source commit of that state, present when the path promotes the target's source or a value's lineage includes one |
-| `values.<name>` | `{value, select, unit: {name, uid}, executionKey or inputDigest, state}`; `state` (`{run, desiredCommit, observedCommit}`) is present when a value-only path took the value from another state than `from` |
+| `values.<name>` | `{value, select, unit: {name, uid}, executionKey or inputDigest, state}`; `inputDigest` is the `sha256:` digest of the canonical JSON of the value an `input` selector read; `state` (`{run, desiredCommit, observedCommit}`) is present when a value-only path took the value from another state than `from` |
 | `evidence` | `{level, attestations: [{scope, name, result, at, details}], override: {reason} \| null}`; `details` are the driver's, such as each Application's running publication and health |
 | `ignoredAttestations` | `[{scope, name, reason, by}]` from `--ignore-attestation` |
 | `excludedApplications` | The path's `coverage.excludeApplications` at promotion time |
@@ -252,7 +252,13 @@ spec:
     [Promoting an environment's source](#promoting-an-environments-source));
     only when those do not reach the path's level, such as attestations
     older than `maxAttestationAge`, does it need `--evidence published`,
-    recorded as an override, for example to roll back. A commit the clone
+    recorded as an override, for example to roll back. Given without an
+    explicit state, `--evidence published` takes the newest state that reaches
+    `published`, and the record carries an override only when that state is
+    below the path's level. It never clears a failing attestation, and a
+    failing attestation stays failing however old it is: only a later passing
+    attestation of the same name or `--ignore-attestation` clears it, and
+    `--ignore-attestation` sets aside failing attestations only. A commit the clone
     lacks is fetched from the source repository like a recorded source
     commit.
 - `nyl promote dev-to-staging [--value …]` writes a
@@ -323,6 +329,16 @@ spec:
     and when it shows a mix of revisions the promotion is refused, without
     falling back to an older state whose attestations once passed, because
     they no longer describe what runs.
+
+    Status: M6 judges a publication unit's attestations like any unit's (a
+    failing one blocks its state, a passing one counts for its receipt). The
+    "what runs now" rule and mixed-revision blocking are not implemented
+    yet: they need a typed result the driver decides, recorded with the
+    attestation (for example which receipt an attestation says runs, or that
+    it shows a mix), because the core does not read a driver's `details`.
+    That is a change to the persisted attestation format, decided when the
+    value-only work starts (see the M6 plan, D8).
+
   - When the chosen state and its values are what the path's record already
     names, and that record supplies every value of the target, `nyl promote`
     writes nothing and exits 0 (`outcome: unchanged`). Otherwise, such as
