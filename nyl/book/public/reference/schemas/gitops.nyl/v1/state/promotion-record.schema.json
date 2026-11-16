@@ -36,10 +36,12 @@
       "description": "One transition commit pair of the source environment, pushed together\nwith one `Nyl-Run-Id`.",
       "properties": {
         "desiredCommit": {
-          "$ref": "#/$defs/CommitId"
+          "$ref": "#/$defs/CommitId",
+          "description": "The state's commit on the desired ref."
         },
         "environment": {
-          "$ref": "#/$defs/EnvironmentName"
+          "$ref": "#/$defs/EnvironmentName",
+          "description": "The source environment."
         },
         "observedCommit": {
           "anyOf": [
@@ -53,7 +55,8 @@
           "description": "Absent when the state has no observed commit of its own."
         },
         "run": {
-          "$ref": "#/$defs/RunId"
+          "$ref": "#/$defs/RunId",
+          "description": "The `Nyl-Run-Id` of the run that recorded the state."
         }
       },
       "required": [
@@ -72,6 +75,7 @@
       "description": "An attestation a promotion relied on.",
       "properties": {
         "at": {
+          "description": "When it was recorded.",
           "format": "date-time",
           "type": "string"
         },
@@ -79,10 +83,12 @@
           "description": "The driver's details, such as each Application's running publication and health."
         },
         "name": {
+          "description": "The attestation's name.",
           "type": "string"
         },
         "result": {
-          "$ref": "#/$defs/AttestationResult"
+          "$ref": "#/$defs/AttestationResult",
+          "description": "Whether it passed."
         },
         "scope": {
           "description": "The unit name, or `environment`.",
@@ -99,11 +105,18 @@
     },
     "EvidenceLevel": {
       "description": "The level a promotion's evidence reached.",
-      "enum": [
-        "published",
-        "attested"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "published",
+          "description": "The source state recorded every value.",
+          "type": "string"
+        },
+        {
+          "const": "attested",
+          "description": "The required attestations also passed.",
+          "type": "string"
+        }
+      ]
     },
     "ExecutionKey": {
       "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
@@ -114,15 +127,19 @@
       "description": "An attestation `--ignore-attestation` set aside.",
       "properties": {
         "by": {
+          "description": "Who set it aside.",
           "type": "string"
         },
         "name": {
+          "description": "The attestation's name.",
           "type": "string"
         },
         "reason": {
+          "description": "Why it was set aside.",
           "type": "string"
         },
         "scope": {
+          "description": "The unit name, or `environment`.",
           "type": "string"
         }
       },
@@ -139,7 +156,8 @@
       "description": "The state a value-only path took one value from, when that is not the\nrecord's `from`.",
       "properties": {
         "desiredCommit": {
-          "$ref": "#/$defs/CommitId"
+          "$ref": "#/$defs/CommitId",
+          "description": "The state's commit on the desired ref."
         },
         "observedCommit": {
           "anyOf": [
@@ -149,10 +167,12 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The state's commit on the observed ref; absent when it has none of its own."
         },
         "run": {
-          "$ref": "#/$defs/RunId"
+          "$ref": "#/$defs/RunId",
+          "description": "The `Nyl-Run-Id` of the run that recorded the state."
         }
       },
       "required": [
@@ -166,7 +186,8 @@
       "description": "The identity of the source unit a value came from.",
       "properties": {
         "name": {
-          "$ref": "#/$defs/UnitName"
+          "$ref": "#/$defs/UnitName",
+          "description": "The unit's name in the source environment."
         },
         "uid": {
           "anyOf": [
@@ -208,7 +229,8 @@
           ]
         },
         "select": {
-          "$ref": "#/$defs/PromotionSelect"
+          "$ref": "#/$defs/PromotionSelect",
+          "description": "The path's selector the value was read with."
         },
         "state": {
           "anyOf": [
@@ -232,7 +254,9 @@
           ],
           "description": "The source unit; absent for a target source's value (M11) and when unknown."
         },
-        "value": true
+        "value": {
+          "description": "The value as promoted."
+        }
       },
       "required": [
         "value",
@@ -245,19 +269,22 @@
       "description": "The evidence a promotion rested on.",
       "properties": {
         "attestations": {
+          "description": "The attestations the promotion relied on.",
           "items": {
             "$ref": "#/$defs/EvidenceAttestation"
           },
           "type": "array"
         },
         "level": {
-          "$ref": "#/$defs/EvidenceLevel"
+          "$ref": "#/$defs/EvidenceLevel",
+          "description": "The level the evidence reached."
         },
         "override": {
           "additionalProperties": false,
           "description": "Written as `null` when the promotion needed no override.",
           "properties": {
             "reason": {
+              "description": "Why the promotion went ahead below the path's level.",
               "type": "string"
             }
           },
@@ -277,7 +304,8 @@
     "PromotionFrom": {
       "anyOf": [
         {
-          "$ref": "#/$defs/EnvironmentFrom"
+          "$ref": "#/$defs/EnvironmentFrom",
+          "description": "A state of the source environment."
         },
         {
           "$ref": "#/$defs/TargetFrom",
@@ -298,22 +326,27 @@
       "description": "Who asked for the promotion, recorded like an approval.",
       "properties": {
         "at": {
+          "description": "When the promotion was requested.",
           "format": "date-time",
           "type": "string"
         },
         "by": {
+          "description": "Who asked for the promotion.",
           "type": "string"
         },
         "identity": {
-          "$ref": "#/$defs/ApprovalIdentity"
+          "$ref": "#/$defs/ApprovalIdentity",
+          "description": "How that identity was established, as for an approval."
         },
         "reason": {
+          "description": "The `--reason` given.",
           "type": [
             "string",
             "null"
           ]
         },
         "source": {
+          "description": "Where the identity came from, such as a CI provider.",
           "type": [
             "string",
             "null"
@@ -392,12 +425,15 @@
       "description": "A commit `--supersede` accepted as replaced.",
       "properties": {
         "by": {
+          "description": "Who accepted it.",
           "type": "string"
         },
         "commit": {
-          "$ref": "#/$defs/CommitId"
+          "$ref": "#/$defs/CommitId",
+          "description": "The commit accepted as replaced."
         },
         "reason": {
+          "description": "Why it no longer needs to reach the target.",
           "type": "string"
         },
         "repository": {
@@ -418,15 +454,19 @@
       "description": "A target source: the publication commit the values came from. Reserved for M11.",
       "properties": {
         "branch": {
+          "description": "The publication branch.",
           "type": "string"
         },
         "commit": {
-          "$ref": "#/$defs/CommitId"
+          "$ref": "#/$defs/CommitId",
+          "description": "The publication commit the values were read at."
         },
         "repository": {
+          "description": "The repository the target publishes to.",
           "type": "string"
         },
         "target": {
+          "description": "The DeploymentTarget the values came from.",
           "type": "string"
         }
       },
@@ -451,14 +491,16 @@
   "description": "`desired/promotions/<path>.yaml`: a [`PromotionRecord`] with the markers\nevery state document carries, both required.",
   "properties": {
     "apiVersion": {
-      "$ref": "#/$defs/StateV1"
+      "$ref": "#/$defs/StateV1",
+      "description": "The state format version."
     },
     "artifactsVerified": {
       "description": "Whether the artifact check ran.",
       "type": "boolean"
     },
     "evidence": {
-      "$ref": "#/$defs/PromotionEvidence"
+      "$ref": "#/$defs/PromotionEvidence",
+      "description": "The evidence the promotion rested on."
     },
     "excludedApplications": {
       "description": "The path's `coverage.excludeApplications` at promotion time.",
@@ -472,20 +514,23 @@
       "description": "The source state; for a path that promotes only values, the newest state any value came from."
     },
     "ignoredAttestations": {
+      "description": "The attestations `--ignore-attestation` set aside.",
       "items": {
         "$ref": "#/$defs/IgnoredAttestation"
       },
       "type": "array"
     },
     "kind": {
-      "$ref": "#/$defs/PromotionRecordKind"
+      "$ref": "#/$defs/PromotionRecordKind",
+      "description": "Always `PromotionRecord`."
     },
     "path": {
       "$ref": "#/$defs/PromotionPathName",
       "description": "The PromotionPath that wrote the record."
     },
     "requested": {
-      "$ref": "#/$defs/PromotionRequest"
+      "$ref": "#/$defs/PromotionRequest",
+      "description": "Who asked for the promotion, and why."
     },
     "sequence": {
       "description": "Increases with every promotion into the target environment, on any path; the highest is the newest.",
@@ -505,6 +550,7 @@
       "description": "The source commit of that state, present when the path promotes the target's source or a value's lineage includes one."
     },
     "superseded": {
+      "description": "The commits `--supersede` accepted as replaced.",
       "items": {
         "$ref": "#/$defs/SupersededCommit"
       },
