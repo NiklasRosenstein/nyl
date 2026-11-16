@@ -384,6 +384,21 @@ pub trait StateStore: Send + Sync {
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
 
+    /// The desired commit of the state at `tips`: the newest commit of the
+    /// desired ref, from `tips.desired` back along its first parents, that
+    /// changed this environment's `desired/` documents (beneath
+    /// `location.path`). `None` when the environment has no desired
+    /// documents. Observed-only commits, commits of other environments
+    /// sharing the ref, and a ref shared by both sides move the ref's tip but
+    /// not this commit, so it names the state an attestation is about.
+    /// Contract: [Attestations](../../../../design/orchestration-core.md#attestations).
+    fn state_commit(&self, location: &StateLocation, tips: &StateTips) -> StateResult<Option<CommitId>> {
+        let _ = (location, tips);
+        Err(StateError::Unavailable(
+            "this state store cannot name the desired commit of a state".to_owned(),
+        ))
+    }
+
     /// The `state.yaml` of every directory directly beneath `location.path`
     /// that has one: how instances of an EnvironmentTemplate that share a
     /// ref are found. Stores that keep no shared refs list none.

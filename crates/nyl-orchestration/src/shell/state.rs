@@ -232,6 +232,9 @@ pub fn init(
                     changes.desired = dropped(&snapshot.desired);
                     changes.observed = dropped(&snapshot.observed);
                     changes.artifacts = dropped(&snapshot.artifacts);
+                    // The environment-wide attestations were about the state this start replaces.
+                    changes.environment_attestations =
+                        (!snapshot.environment_attestations.is_empty()).then(BTreeMap::new);
                     let mut record = existing.clone();
                     record.events.push(event);
                     record
@@ -395,6 +398,9 @@ pub fn init_instance(
                         changes.desired = dropped(&snapshot.desired);
                         changes.observed = dropped(&snapshot.observed);
                         changes.artifacts = dropped(&snapshot.artifacts);
+                        // The environment-wide attestations were about the state this start replaces.
+                        changes.environment_attestations =
+                            (!snapshot.environment_attestations.is_empty()).then(BTreeMap::new);
                         record.events.push(event);
                     } else {
                         // Activity renews: a removal recorded but not started is undone with the expiry.

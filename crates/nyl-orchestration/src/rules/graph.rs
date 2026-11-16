@@ -629,6 +629,14 @@ mod tests {
             ),
         ])
         .unwrap();
-        assert!(!graph.edges.is_empty());
+        assert!(
+            !graph.edges.is_empty()
+                && graph
+                    .edges
+                    .iter()
+                    .all(|edge| edge.producer == name("db") && edge.consumer == name("app")),
+            "{:?}",
+            graph.edges
+        );
     }
 }

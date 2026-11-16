@@ -103,7 +103,8 @@ migrates it.
 
 `observed/attestations.yaml` holds the attestations of the environment's
 current state that `nyl attest --name` records without `--unit`, each naming
-the desired commit it attests (see [external
+the state's desired commit, the newest commit that changed the environment's
+`desired/` documents, that it attests (see [external
 attestations](/nyl/reference/cli/detect-drift/#external-attestations)). The
 observed layout always listed it; it joins format `v1` without a version
 change.

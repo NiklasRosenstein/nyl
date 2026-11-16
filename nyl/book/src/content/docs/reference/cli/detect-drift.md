@@ -161,6 +161,11 @@ knows, as `source: {external: {by, identity, source, url}}`:
   run (`asserted`), or the Git user of a workstation run (`local`) names it.
   `--url` records where the result can be read, and `--reason` is kept with the
   attestation and as the commit's `Nyl-Reason`.
+- **State.** Without `--unit`, the attestation names the state's desired
+  commit: the newest commit of the desired ref that changed this environment's
+  desired documents. Observed commits, including those `attest` writes, and
+  other environments sharing the ref do not move it, so several attestations
+  recorded in a row name the same state. `state init --fresh` removes them.
 - **Newest wins.** Each call writes a new attestation with its time, replacing
   the name's earlier one for the same receipt or state; Git history keeps the
   earlier ones. Recording for a new receipt drops the attestations of the
@@ -174,6 +179,8 @@ Dependents gate on these names like any other: a `dependsOn` entry or
 `fromUnit` that requires `qa` is [blocked](/nyl/orchestration/runs/#requiring-attestations)
 as `attestation-pending` until a pass is recorded for the current receipt, and
 as `attestation-failing` while the recorded result is `fail`.
+
+The driver form never records a name declared only with `from: external`, and its report and exit 3 cover what the drivers determined, not external results already recorded for the unit.
 
 It exits 0 once the result is recorded, whether it passes or fails, because the
 caller already knows the result; what a failing result blocks is reported by

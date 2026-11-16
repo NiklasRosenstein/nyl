@@ -288,6 +288,11 @@ spec:
         "attest", "-e", "dev", "--unit", "svc", "--name", "qa", "--result", "fail",
     ]);
     assert_eq!(failed.exit, 0, "recording a failing result succeeds: {}", failed.stderr);
+    // A driver `attest` afterwards leaves the external result of the same receipt as it was.
+    assert_eq!(harness.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
+    let record = harness.shell.show(OBSERVED, "observed/units/svc/attestations.yaml");
+    let qa = record.split("qa:").nth(1).expect("qa is still recorded");
+    assert!(qa.contains("result: fail") && qa.contains("external:"), "{record}");
     let failing = harness.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
     assert_eq!(
         blocked(&failing.report),
@@ -298,6 +303,12 @@ spec:
         )]
     );
     assert!(failing.stderr.contains("NYL-ATTESTATION-FAILING"), "{}", failing.stderr);
+    for command in ["plan", "status"] {
+        let shown = harness.shell.invoke(&[command, "-e", "dev", "-o", "json"]);
+        assert_eq!(shown.exit, 2, "{command}: {}", shown.stderr);
+        assert_eq!(unit(&shown.report, "gated")["state"], "blocked", "{command}");
+        assert_eq!(blocked(&shown.report)[0].1, "attestation-failing", "{command}");
+    }
 
     let passed = harness.shell.invoke(&[
         "attest", "-e", "dev", "--unit", "svc", "--name", "qa", "--result", "pass",

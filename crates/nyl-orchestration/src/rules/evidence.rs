@@ -82,6 +82,30 @@ pub fn declared(producer: &DesiredUnit) -> BTreeSet<String> {
     names
 }
 
+/// The declared names that only an external source supplies: declared in
+/// `spec.attestations` with `from: external`, and neither reported by the
+/// driver nor declared there without it. A driver outcome for one is never
+/// recorded ([`super::checks::attestations`]), so a driver cannot write what
+/// `nyl attest --name` owns.
+pub fn external_only(producer: &DesiredUnit) -> BTreeSet<String> {
+    let mut external = BTreeSet::new();
+    let mut observable: BTreeSet<String> = producer.attestations.iter().cloned().collect();
+    if let Some(Value::Array(entries)) = producer.spec.get("attestations") {
+        for entry in entries {
+            let Some(name) = entry.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if entry.get("from").and_then(Value::as_str) == Some("external") {
+                external.insert(name.to_owned());
+            } else {
+                observable.insert(name.to_owned());
+            }
+        }
+    }
+    external.retain(|name| !observable.contains(name));
+    external
+}
+
 /// Why a requirement cannot be met by anything: a resolution error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequirementError {

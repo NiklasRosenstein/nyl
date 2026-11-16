@@ -739,6 +739,23 @@ fn test_state_init_fresh_keeps_promotion_records() {
     }
 }
 
+/// `state init --fresh` removes the environment-wide attestations: they were
+/// about the state it replaces. Catches evidence of a discarded state
+/// surviving into the new one.
+#[test]
+fn test_state_init_fresh_clears_environment_attestations() {
+    for world in worlds() {
+        let context = world.context();
+        let location = world.dev();
+        state::init(&context, &dev(), &location, false, &requested());
+        seed_environment_attestation(&world, &location, COMMIT, "pass");
+        assert_eq!(environment_attestations(&world, &location).len(), 1, "{}", world.name);
+        let report = state::init(&context, &dev(), &location, true, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
+        assert!(environment_attestations(&world, &location).is_empty(), "{}", world.name);
+    }
+}
+
 /// Decision F1: `state move` carries the records whether it moves history or
 /// copies documents (a `path` or another ref split). Catches a copying move
 /// that drops them, as an older Nyl's does.

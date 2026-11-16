@@ -16,8 +16,13 @@
 //!   (`NYL-ATTESTATION-UNDECLARED`). A unit without a current receipt is
 //!   `NYL-ATTEST-NO-RECEIPT`. Stored attestations of an earlier receipt are
 //!   dropped with the write, like a driver attest drops them.
-//! - **Environment scope**: the environment's current state, the desired
-//!   commit, is attested, and the name must be in `Environment.spec.attestations`.
+//! - **Environment scope**: the environment's current state is attested, keyed
+//!   to the state's desired commit
+//!   ([`StateStore::state_commit`](nyl_core::orchestration::ports::StateStore::state_commit)):
+//!   the newest commit that changed this environment's `desired/` documents,
+//!   not the ref's tip, which observed-only commits (this command's own
+//!   included), other environments of a shared ref, and a ref shared by both
+//!   sides all move. The name must be in `Environment.spec.attestations`.
 //!   Names recorded for other states stay; the newest per name wins and
 //!   readers compare the commit.
 //!
@@ -30,7 +35,7 @@
 use std::collections::BTreeMap;
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactUnit, Attestation, AttestationKind, AttestationResult, StateV1,
@@ -133,12 +138,13 @@ pub fn record(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
     unit: Option<&UnitName>,
+    state_commit: Option<&CommitId>,
     request: &External,
     now: Timestamp,
 ) -> Result<Recording, Finding> {
     match unit {
         Some(unit) => record_unit(environment, snapshot, unit, request, now),
-        None => record_environment(environment, snapshot, request, now),
+        None => record_environment(environment, snapshot, state_commit, request, now),
     }
 }
 
@@ -191,7 +197,13 @@ fn record_unit(
         .get(unit)
         .into_iter()
         .flatten()
-        .filter(|(_, stored)| stored.execution_key == key)
+        .filter(|(_, stored)| {
+            stored.execution_key == key
+                && stored
+                    .unit
+                    .as_ref()
+                    .is_none_or(|subject| Some(&subject.uid) == desired.unit.uid.as_ref())
+        })
         .map(|(name, stored)| (name.clone(), stored.clone()))
         .collect();
     set.insert(request.name.clone(), request.attestation(subject, key, now));
@@ -204,21 +216,17 @@ fn record_unit(
 fn record_environment(
     environment: &EnvironmentName,
     snapshot: &EnvironmentSnapshot,
+    state_commit: Option<&CommitId>,
     request: &External,
     now: Timestamp,
 ) -> Result<Recording, Finding> {
-    let commit = snapshot
-        .tips
-        .desired
-        .as_ref()
-        .filter(|_| snapshot.environment.is_some())
-        .ok_or_else(|| {
-            Finding::new(
-                Code::AttestNoReceipt,
-                format!("{environment} has no recorded state to attest: nothing was reconciled yet"),
-                format!("run `nyl reconcile -e {environment}`, then record the attestation"),
-            )
-        })?;
+    let commit = state_commit.filter(|_| snapshot.environment.is_some()).ok_or_else(|| {
+        Finding::new(
+            Code::AttestNoReceipt,
+            format!("{environment} has no recorded state to attest: nothing was reconciled yet"),
+            format!("run `nyl reconcile -e {environment}`, then record the attestation"),
+        )
+    })?;
     let declared: Vec<String> = snapshot
         .environment
         .as_ref()
@@ -290,7 +298,6 @@ mod tests {
             applied_promotion_sequence: None,
             ownership: BTreeMap::new(),
         });
-        snapshot.tips.desired = Some(commit(COMMIT));
         snapshot
     }
 
@@ -306,6 +313,7 @@ mod tests {
             &env(),
             &snapshot,
             Some(&name("gate")),
+            None,
             &request("qa", AttestationResult::Fail),
             now(),
         )
@@ -341,6 +349,7 @@ mod tests {
                 &env(),
                 &snapshot,
                 unit.as_ref(),
+                Some(&commit(COMMIT)),
                 &request(name, AttestationResult::Pass),
                 now(),
             )
@@ -353,6 +362,7 @@ mod tests {
             &env(),
             &none,
             Some(&name("gate")),
+            None,
             &request("qa", AttestationResult::Pass),
             now(),
         )
@@ -373,19 +383,28 @@ mod tests {
             &env(),
             &no_receipt,
             Some(&name("gate")),
+            None,
             &request("qa", AttestationResult::Pass),
             now(),
         )
         .unwrap_err();
         assert_eq!(finding.code, Code::AttestNoReceipt);
-        let mut no_state = snapshot(SPEC(), true);
-        no_state.tips.desired = None;
-        let finding = record(&env(), &no_state, None, &request("qa", AttestationResult::Pass), now()).unwrap_err();
+        let no_state = snapshot(SPEC(), true);
+        let finding = record(
+            &env(),
+            &no_state,
+            None,
+            None,
+            &request("qa", AttestationResult::Pass),
+            now(),
+        )
+        .unwrap_err();
         assert_eq!(finding.code, Code::AttestNoReceipt);
         let finding = record(
             &env(),
             &no_state,
             Some(&name("nope")),
+            None,
             &request("qa", AttestationResult::Pass),
             now(),
         )
@@ -399,9 +418,15 @@ mod tests {
     #[test]
     fn test_environment_attestations_name_the_desired_commit_and_unit_sets_drop_stale_entries() {
         let mut snapshot = snapshot(SPEC(), true);
-        let Recording::Environment { set } =
-            record(&env(), &snapshot, None, &request("qa", AttestationResult::Pass), now()).unwrap()
-        else {
+        let Recording::Environment { set } = record(
+            &env(),
+            &snapshot,
+            None,
+            Some(&commit(COMMIT)),
+            &request("qa", AttestationResult::Pass),
+            now(),
+        )
+        .unwrap() else {
             panic!("environment scope");
         };
         assert_eq!(set["qa"].execution_key, COMMIT);
@@ -430,6 +455,7 @@ mod tests {
             &env(),
             &snapshot,
             Some(&name("gate")),
+            None,
             &request("qa", AttestationResult::Pass),
             now(),
         )

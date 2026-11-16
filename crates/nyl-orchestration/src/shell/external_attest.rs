@@ -22,7 +22,7 @@ use serde_json::json;
 
 use super::local::{check_record, check_remote_tips};
 use super::state::{commit, read, summary, with_lease, Requested};
-use super::Context;
+use super::{store_error, Context};
 use crate::report::StateOperationReport;
 use crate::rules::external_attest::{self, External, Recording};
 
@@ -46,7 +46,20 @@ pub fn record(
             let snapshot = read(context, location, environment)?;
             check_record(context.store, snapshot.record.as_ref(), environment, location)?;
             check_remote_tips(context.store, location, environment)?;
-            let recording = external_attest::record(environment, &snapshot, unit, request, context.clock.now())?;
+            // The state an environment attestation names is the newest commit that
+            // changed this environment's desired documents, not the ref's tip.
+            let state_commit = context
+                .store
+                .state_commit(location, &snapshot.tips)
+                .map_err(|error| store_error(environment, &error))?;
+            let recording = external_attest::record(
+                environment,
+                &snapshot,
+                unit,
+                state_commit.as_ref(),
+                request,
+                context.clock.now(),
+            )?;
             let result = match request.result {
                 AttestationResult::Pass => "pass",
                 AttestationResult::Fail => "fail",

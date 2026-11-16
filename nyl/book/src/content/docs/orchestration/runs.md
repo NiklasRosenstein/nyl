@@ -563,7 +563,10 @@ lookup = ["./ci/approvers.sh"]
 
 The hook runs in the project directory with `NYL_ENVIRONMENT`,
 `NYL_APPROVAL_UNITS` (a JSON array of explicitly approved names), and
-`NYL_APPROVAL_DIGESTS` (a JSON object mapping names to digests or null). It
+`NYL_APPROVAL_DIGESTS` (a JSON object mapping names to digests or null). For
+[`nyl attest --name`](/nyl/reference/cli/detect-drift/#external-attestations) it
+also receives `NYL_ATTESTATION` (the name) and `NYL_ATTESTATION_UNIT` (the unit,
+empty for the environment). It
 prints `{"by": ["alice"], "source": "production gate", "url": "https://ci.example/run/1"}`.
 Nyl records the command and result as `verified`. An invalid response, failure,
 cancellation, or 30-second timeout stops the invocation before unit effects

@@ -120,6 +120,7 @@ pub fn run(args: &AttestArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             (&args.attested_by, args.attestation_source.as_deref()),
             "--attested-by",
             &BTreeMap::new(),
+            Some((name, unit.as_ref())),
         ) {
             Ok(attester) => attester,
             Err(finding) => return refuse(finding),

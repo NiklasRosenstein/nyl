@@ -35,7 +35,7 @@ fn failure(message: impl Into<String>) -> Finding {
     Finding::new(
         Code::ApprovalInvalid,
         message,
-        "correct the approval flags or lookup configuration before retrying",
+        "correct the identity flags (`--approved-by`, `--attested-by`) or the lookup configuration before retrying",
     )
 }
 
@@ -59,6 +59,7 @@ impl ApprovalArgs {
             (&self.approved_by, self.approval_source.as_deref()),
             "--approved-by",
             &units,
+            None,
         )?;
         Ok(Approvals {
             units,
@@ -100,7 +101,9 @@ impl ApprovalArgs {
 /// names (`asserted`) win, then the project's lookup hook, GitHub's
 /// environment approvals, and a CI run (`verified`/`asserted`), and last the
 /// workstation's Git user (`local`). `flag` names the option that asserts
-/// `by` in messages; `units` reach the hook as the approval's units.
+/// `by` in messages; `units` reach the hook as the approval's units, and an
+/// `attestation` (its name and unit) as `NYL_ATTESTATION` and
+/// `NYL_ATTESTATION_UNIT`.
 pub fn attester(
     session: &Session,
     wiring: &Wiring<'_>,
@@ -108,6 +111,7 @@ pub fn attester(
     (by, source): (&[String], Option<&str>),
     flag: &str,
     units: &BTreeMap<UnitName, Option<ChangeDigest>>,
+    attestation: Option<(&str, Option<&UnitName>)>,
 ) -> Result<ApprovalRecord, Finding> {
     Ok(if !by.is_empty() || source.is_some() {
         if by.iter().any(|name| name.trim().is_empty()) {
@@ -121,7 +125,7 @@ pub fn attester(
             reviewed: false,
         }
     } else if !session.inventory.project_config.config.approval.lookup.is_empty() {
-        hook(session, wiring, units)?
+        hook(session, wiring, units, attestation)?
     } else if let Some(record) = github(&wiring.process_env, session.resolved.name.as_str())? {
         record
     } else if is_ci(&wiring.process_env) {
@@ -163,6 +167,7 @@ fn hook(
     session: &Session,
     wiring: &Wiring<'_>,
     units: &BTreeMap<UnitName, Option<ChangeDigest>>,
+    attestation: Option<(&str, Option<&UnitName>)>,
 ) -> Result<ApprovalRecord, Finding> {
     let lookup = &session.inventory.project_config.config.approval.lookup;
     if lookup[0].trim().is_empty() {
@@ -174,6 +179,14 @@ fn hook(
         "NYL_APPROVAL_UNITS".into(),
         serde_json::to_string(&units.keys().collect::<Vec<_>>()).expect("names serialize"),
     );
+    if let Some((name, unit)) = attestation {
+        // Tells the hook it is asked for an attester, not an approver.
+        env.insert("NYL_ATTESTATION".into(), name.to_owned());
+        env.insert(
+            "NYL_ATTESTATION_UNIT".into(),
+            unit.map(ToString::to_string).unwrap_or_default(),
+        );
+    }
     env.insert(
         "NYL_APPROVAL_DIGESTS".into(),
         serde_json::to_string(units).expect("digests serialize"),

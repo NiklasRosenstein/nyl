@@ -3107,7 +3107,16 @@ attestations:
   unit's current receipt or for the environment's current desired commit, with
   `source: {external: {by, identity, source, url}}` where `by` and `identity`
   are an approver's (the same lookup, GitHub, CI, and workstation sources).
-  `--state-revision` and `--revision` do not exist (M11). Implementation
+  `--state-revision` and `--revision` do not exist (M11). The environment
+  form attests the state's desired commit: the newest commit of the desired
+  ref that changed this environment's `desired/` documents (beneath its
+  `path`), found by following first parents from the ref's tip
+  (`StateStore::state_commit`). It is not the ref's tip, which every
+  observed-only commit moves when both sides share a ref, and which another
+  environment's commit moves on a shared ref; so two attestations recorded one
+  after the other name the same state, and a promotion compares an
+  attestation's `executionKey` with that commit of the state it reads.
+  `state init --fresh` removes the environment's attestations. Implementation
   status: both forms are implemented, including the publication unit's
   `accepted` and `healthy`.
 - An attestation is valid only for the receipt or state it names. Declared
@@ -3621,7 +3630,13 @@ honestly how it learned who did.
   trusted as much as the project's CI configuration, where the approval gate
   itself is defined. A failing or invalid hook fails the invocation before any
   effect, exit 1.
-- `nyl attest` records attesters through the same mechanism.
+- `nyl attest --name` records attesters through the same mechanism:
+  `--attested-by` and `--attestation-source` are the counterparts of
+  `--approved-by` and `--approval-source` (recorded as `asserted`), and the
+  lookup hook, GitHub, a CI run, and the Git user apply in the same order. The
+  hook also receives `NYL_ATTESTATION` (the name) and `NYL_ATTESTATION_UNIT`
+  (the unit, empty for the environment form), which an approval's invocation
+  does not set, so a hook can tell the two apart.
 - Approvals can be automated with a CI approval gate. With GitHub environment
   protection rules, a `plan` job runs `nyl plan --output json` and passes the
   digest as a job output; an apply job with `environment: production` runs

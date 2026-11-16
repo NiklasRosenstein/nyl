@@ -974,6 +974,126 @@ fn test_environment_attestations_round_trip_on_the_observed_ref_only() {
     }
 }
 
+/// The desired commit of a state (`StateStore::state_commit`) is the newest
+/// commit that changed this environment's `desired/` documents, not the ref's
+/// tip. Catches an environment attestation keyed to the tip: with one ref for
+/// both sides every observed-only commit moves the tip, with a shared `path`
+/// another environment's commit does, and neither changes the state.
+#[test]
+fn test_the_state_commit_ignores_observed_commits_and_other_environments() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let shared_a = location(&subject.repository, "nyl/shared", "nyl/shared", "pr-1");
+        let shared_b = location(&subject.repository, "nyl/shared", "nyl/shared", "pr-2");
+        let cases = [
+            ("separate refs", separate(&subject), "dev", None),
+            (
+                "one ref",
+                location(&subject.repository, "nyl/one", "nyl/one", ""),
+                "dev",
+                None,
+            ),
+            ("shared path", shared_a, "pr-1", Some(shared_b)),
+        ];
+        for (shape, location, name, neighbour) in cases {
+            let label = format!("{}: {shape}", subject.name);
+            let env = environment(name);
+            let committed = initialized(store, &location, &env);
+            let mut held = committed.lease_version;
+            let mut write = |location: &StateLocation, env: &EnvironmentName, changes: TransitionChanges| {
+                let base = store.snapshot(location).unwrap().tips;
+                let committed = store.commit(location, env, &base, &transition(changes), &held).unwrap();
+                held = committed.lease_version.clone();
+                committed
+            };
+            let state_commit = |location: &StateLocation| {
+                let tips = store.snapshot(location).unwrap().tips;
+                store.state_commit(location, &tips).unwrap()
+            };
+            assert_eq!(state_commit(&location), None, "{label}: no desired documents yet");
+
+            let (desired, observed) = unit("seed");
+            let seed = UnitName::new("seed").unwrap();
+            let first = write(
+                &location,
+                &env,
+                TransitionChanges {
+                    desired: BTreeMap::from([(seed.clone(), Some(desired.clone()))]),
+                    observed: BTreeMap::from([(seed.clone(), Some(observed))]),
+                    ..TransitionChanges::default()
+                },
+            );
+            let state = first.desired.clone().unwrap();
+            assert_eq!(state_commit(&location), Some(state.clone()), "{label}");
+
+            // Observed-only commits move the tip of a shared ref, not the state.
+            let attested = write(
+                &location,
+                &env,
+                TransitionChanges {
+                    environment_attestations: Some(BTreeMap::new()),
+                    drift: BTreeMap::from([(seed.clone(), None)]),
+                    commit_unchanged: true,
+                    ..TransitionChanges::default()
+                },
+            );
+            assert!(attested.observed.is_some(), "{label}");
+            assert_eq!(
+                state_commit(&location),
+                Some(state.clone()),
+                "{label}: observed-only commit"
+            );
+
+            // Another environment's desired commit on a shared ref does not move it either.
+            if let Some(other) = neighbour {
+                let other_environment = environment("pr-2");
+                let version = store
+                    .take_lease(&other, &other_environment, &lease(RUN_B), None)
+                    .unwrap();
+                let base = store.snapshot(&other).unwrap().tips;
+                let committed = store
+                    .commit(
+                        &other,
+                        &other_environment,
+                        &base,
+                        &transition(TransitionChanges {
+                            record: Some(record(&other, "pr-2")),
+                            desired: BTreeMap::from([(seed.clone(), Some(desired.clone()))]),
+                            ..TransitionChanges::default()
+                        }),
+                        &version,
+                    )
+                    .unwrap();
+                assert_ne!(committed.desired, Some(state.clone()), "{label}");
+                assert_eq!(
+                    state_commit(&location),
+                    Some(state.clone()),
+                    "{label}: neighbour's commit"
+                );
+                assert!(state_commit(&other).is_some(), "{label}");
+                store
+                    .release_lease(&other, &other_environment, &committed.lease_version)
+                    .unwrap();
+            }
+
+            // A change to the desired documents is a new state.
+            let mut changed = desired;
+            changed.fingerprint = Some("changed".to_owned());
+            let second = write(
+                &location,
+                &env,
+                TransitionChanges {
+                    desired: BTreeMap::from([(seed, Some(changed))]),
+                    ..TransitionChanges::default()
+                },
+            );
+            assert_eq!(state_commit(&location), second.desired, "{label}");
+            assert_ne!(second.desired, Some(state), "{label}");
+            store.release_lease(&location, &env, &held).unwrap();
+        }
+    }
+}
+
 fn promotion_record(path: &str, sequence: u64) -> nyl_core::orchestration::promotion::PromotionRecord {
     serde_json::from_value(json!({
         "path": path, "sequence": sequence,
