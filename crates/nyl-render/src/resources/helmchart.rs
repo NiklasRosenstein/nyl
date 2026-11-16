@@ -90,54 +90,30 @@ impl ObjectMetadata {
     }
 }
 
-/// The deprecated object form of `lookup`, `{}`, which means `true`.
-///
-/// It takes no fields: where the objects come from
-/// is chosen by the command that renders (the target's last publication, or the
-/// live cluster with `--lookup=live`), never by the declaration, so a chart renders
-/// the same way for every command that takes the same path.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HelmChartLookup {}
+/// The code of the error for `spec.lookup` written as an object, the form
+/// `lookup: {}` that enabled lookup before the field became a boolean.
+pub const LOOKUP_OBJECT_REMOVED_CODE: &str = "NYL-HELM-LOOKUP-OBJECT-REMOVED";
 
 /// Whether a chart's Helm `lookup` reads the Release's objects: `true` enables
 /// it, `false` declares that it is deliberately off.
 ///
 /// Leaving the field out is the third state: undeclared, which warns when the
-/// chart calls `lookup` anyway. `{}`, the form that enabled lookup before the
-/// field became a boolean, still parses as `true` but is deprecated
-/// ([`Self::is_legacy_object`]).
+/// chart calls `lookup` anyway. The object form `{}` is no longer accepted and
+/// fails with [`LOOKUP_OBJECT_REMOVED_CODE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LookupSetting {
     enabled: bool,
-    legacy_object: bool,
 }
 
 impl LookupSetting {
     /// `lookup: true`
-    pub const ENABLED: Self = Self {
-        enabled: true,
-        legacy_object: false,
-    };
+    pub const ENABLED: Self = Self { enabled: true };
     /// `lookup: false`
-    pub const DISABLED: Self = Self {
-        enabled: false,
-        legacy_object: false,
-    };
-    /// The deprecated `lookup: {}`, which means `true`.
-    pub const LEGACY_OBJECT: Self = Self {
-        enabled: true,
-        legacy_object: true,
-    };
+    pub const DISABLED: Self = Self { enabled: false };
 
     /// Whether lookup is on.
     pub fn is_enabled(&self) -> bool {
         self.enabled
-    }
-
-    /// Whether it was written as the deprecated `{}`.
-    pub fn is_legacy_object(&self) -> bool {
-        self.legacy_object
     }
 }
 
@@ -166,9 +142,11 @@ impl<'de> Deserialize<'de> for LookupSetting {
                 })
             }
 
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> std::result::Result<Self::Value, A::Error> {
-                HelmChartLookup::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(|_| LookupSetting::LEGACY_OBJECT)
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, _map: A) -> std::result::Result<Self::Value, A::Error> {
+                Err(serde::de::Error::custom(format!(
+                    "{LOOKUP_OBJECT_REMOVED_CODE}: spec.lookup is a boolean; write `lookup: true` \
+                     (or `lookup: false` to opt out)"
+                )))
             }
         }
 
@@ -181,18 +159,12 @@ impl JsonSchema for LookupSetting {
         "LookupSetting".into()
     }
 
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let legacy = generator.subschema_for::<HelmChartLookup>();
-        schemars::json_schema!({
-            "anyOf": [
-                {"type": "boolean"},
-                {
-                    "description": "Deprecated: `{}` means `true`. Write `lookup: true`.",
-                    "deprecated": true,
-                    "allOf": [legacy]
-                }
-            ]
-        })
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "boolean"})
     }
 }
 
@@ -217,7 +189,7 @@ pub struct HelmChartSpec {
     /// holding a CA, finds it when it renders again.
     ///
     /// Declare it as `lookup: true`, or `lookup: false` to state that the chart must not use it
-    /// (which silences `NYL-HELM-LOOKUP-UNDECLARED`). `{}` is the deprecated form of `true`.
+    /// (which silences `NYL-HELM-LOOKUP-UNDECLARED`).
     /// `lookup` then reads the Release's objects from the
     /// target's last publication (or, with `--lookup=live`, from the cluster) and sees
     /// nothing else: any other object is absent. Without a target, or before the
@@ -511,17 +483,16 @@ spec:
     }
 
     #[test]
-    fn test_lookup_object_is_the_deprecated_form_of_true() {
-        let setting = chart_with_lookup("{}").unwrap().spec.lookup.unwrap();
-        assert!(setting.is_enabled());
-        assert!(setting.is_legacy_object());
-        assert!(!LookupSetting::ENABLED.is_legacy_object());
+    fn test_lookup_object_is_removed_with_its_code_and_fix() {
+        for object in ["{}", "{source: live}"] {
+            let error = chart_with_lookup(object).unwrap_err();
+            assert!(error.contains(LOOKUP_OBJECT_REMOVED_CODE), "{object}: {error}");
+            assert!(error.contains("lookup: true"), "{object}: {error}");
+        }
     }
 
     #[test]
     fn test_lookup_rejects_other_values() {
-        let error = chart_with_lookup("{source: live}").unwrap_err();
-        assert!(error.contains("unknown field"), "{error}");
         for invalid in ["\"yes\"", "1", "[]"] {
             assert!(chart_with_lookup(invalid).is_err(), "{invalid}");
         }
