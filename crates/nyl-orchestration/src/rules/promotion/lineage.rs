@@ -13,7 +13,8 @@
 //!   sequence}` names the record the last run applied, and its
 //!   `sourceCommit` the commit it runs.
 //! - The path's current record supplies `from` when it is the record that
-//!   run applied. When a newer promotion replaced it and no run applied that
+//!   run applied. With `record: source` that record is the block in source
+//!   ([`lineage_with`]). When a newer promotion replaced it and no run applied that
 //!   one yet, `from` is left out (history keeps the applied record; `nyl get
 //!   promotions` lists it) and `pendingSequence` names the newer one.
 //! - An environment whose source was not chosen by a promotion has none.
@@ -26,12 +27,23 @@ use crate::run_report::PromotionLineage;
 /// The promotion lineage of the state `snapshot` holds, if a promotion chose
 /// its source commit.
 pub fn lineage(snapshot: &EnvironmentSnapshot) -> Option<PromotionLineage> {
+    lineage_with(snapshot, None)
+}
+
+/// [`lineage`] with the Environment's `source.fromPromotion` as the entry
+/// worktree declares it: with `record: source` the path's current record is
+/// the block the last run applied, or a newer block in the entry worktree
+/// that no run applied yet ([`crate::rules::sources::recorded_promotions`]).
+pub fn lineage_with(
+    snapshot: &EnvironmentSnapshot,
+    entry: Option<&nyl_core::resources::environment::PromotedSource>,
+) -> Option<PromotionLineage> {
     let record = snapshot.environment.as_ref()?;
     let SourceChoice::Promotion { path, sequence } = &record.source_chosen_by else {
         return None;
     };
-    let current = snapshot
-        .promotions
+    let records = crate::rules::sources::recorded_promotions(snapshot, entry);
+    let current = records
         .iter()
         .find(|(name, _)| name.as_str() == path)
         .map(|(_, record)| record);

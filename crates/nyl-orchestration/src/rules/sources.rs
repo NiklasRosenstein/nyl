@@ -10,8 +10,16 @@
 //!   A `source.fromPromotion` Environment takes S from the newest
 //!   PromotionRecord on its path or paths ([`promoted_record`]), recorded as
 //!   `sourceChosenBy: promotion` with the record's `sequence`; a path with no
-//!   record yet is `NYL-PROMOTION-MISSING`. `record: source` is not
-//!   supported yet ([`unsupported_source`]).
+//!   record yet is `NYL-PROMOTION-MISSING`.
+//! - With `record: source` the record of the Environment's path is the
+//!   `source.fromPromotion.promoted` block of the Environment as the entry
+//!   worktree declares it, in place of any record in state
+//!   ([`promotion_records`]); every reader takes the records through this
+//!   module. A block with a lower `sequence` than the one a run applied is
+//!   `NYL-PROMOTION-SEQUENCE-OLDER`, so an older checkout never rolls the
+//!   environment back: rolling back is a new promotion. Readers of state
+//!   that do not run anything see the block the last run applied, and a
+//!   newer one in the entry worktree as not applied yet ([`recorded_promotions`]).
 //! - S must be reachable from `protectedRefs` (default: the repository's
 //!   default branch) unless `allowUnprotectedSource`; an override follows the
 //!   same rule ([`run_source_refs`]). A locked commit (a unit source's or the
@@ -33,10 +41,10 @@ use nyl_core::local_path::validate_local_path;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::LocalPathField;
 use nyl_core::orchestration::ids::{CommitId, PromotionPathName};
-use nyl_core::orchestration::ports::SourceRepository;
+use nyl_core::orchestration::ports::{EnvironmentSnapshot, SourceRepository};
 use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::SourceChoice;
-use nyl_core::resources::environment::Environment;
+use nyl_core::resources::environment::{Environment, PromotedSource};
 use nyl_core::resources::GitSource;
 use serde_json::Value;
 
@@ -197,27 +205,237 @@ pub fn promoted_source_paths(environment_spec: &Value) -> Option<std::collection
 /// Refuse source forms the entry-repository resolver cannot represent.
 pub fn unsupported_source(entry: &Environment) -> Option<Finding> {
     let source = entry.spec.source.as_ref()?;
-    if source.git.is_remote() {
-        return Some(Finding::new(
+    source.git.is_remote().then(|| {
+        Finding::new(
             Code::SourceUnavailable,
             format!(
                 "Environment {} names a remote source repository, which is not supported yet",
                 entry.metadata.name
             ),
             "remove spec.source.repository and repositoryRef, and use a revision or commit from the entry repository",
-        ));
-    }
-    let promoted = source.from_promotion.as_ref()?;
-    (promoted.record.as_deref() == Some("source")).then(|| {
-        Finding::new(
-            Code::PromoteUnsupported,
-            format!(
-                "Environment {} keeps its promotion record in its source (`record: source`), which is not supported yet",
-                entry.metadata.name
-            ),
-            "remove `record: source`: the record then lives in the environment's state",
         )
     })
+}
+
+/// The `source.fromPromotion` of an Environment that keeps its record in its
+/// source (`record: source`).
+pub fn record_in_source(promoted: Option<&PromotedSource>) -> Option<&PromotedSource> {
+    promoted.filter(|promoted| promoted.record.as_deref() == Some("source"))
+}
+
+/// The `source.fromPromotion` of an Environment spec as JSON, such as the
+/// one an environment record keeps.
+pub fn promoted_source(environment_spec: &Value) -> Option<PromotedSource> {
+    environment_spec
+        .pointer("/source/fromPromotion")
+        .and_then(|promoted| serde_json::from_value(promoted.clone()).ok())
+}
+
+/// What an environment's runs applied, as its environment record keeps it:
+/// the highest promotion sequence, and the `record: source` block the last
+/// run applied (the record's `spec.source.fromPromotion.promoted`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Applied {
+    pub sequence: Option<u64>,
+    pub block: Option<PromotionRecord>,
+}
+
+impl Applied {
+    /// What `snapshot`'s environment record says was applied.
+    pub fn of(snapshot: &EnvironmentSnapshot) -> Self {
+        let Some(record) = snapshot.environment.as_ref() else {
+            return Self::default();
+        };
+        Self {
+            sequence: record.applied_promotion_sequence,
+            block: record_in_source(promoted_source(&record.spec).as_ref())
+                .and_then(|promoted| promoted.promoted.clone()),
+        }
+    }
+}
+
+/// The records [`promotion_records`] reads, and the `record: source` block
+/// that must still be checked against the source state it names: none when
+/// there is no block, or when it is the block a run already applied (which
+/// was checked then).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceRecords {
+    pub records: BTreeMap<PromotionPathName, PromotionRecord>,
+    pub check: Option<PromotionRecord>,
+}
+
+/// The finding for a `record: source` block that cannot be the record.
+pub fn invalid_block(environment: &str, problem: impl std::fmt::Display) -> Finding {
+    Finding::new(
+        Code::PromotionRecordInvalid,
+        format!("the promoted block of Environment {environment} {problem}"),
+        "restore the block `nyl promote` wrote, or promote again; the block is written by `nyl promote`, never by hand",
+    )
+}
+
+/// The PromotionRecords an environment's source and its `fromPromotion`
+/// bindings read: the records in its state, and with `record: source` the
+/// `promoted` block of `promoted` (the Environment's `source.fromPromotion`)
+/// in place of any record in state on the paths it names, which never
+/// count. No block is no record, which [`promoted_record`] reports as
+/// `NYL-PROMOTION-MISSING`.
+///
+/// The block must name a path of `promoted`, an environment source state,
+/// and a source commit (`NYL-PROMOTION-RECORD-INVALID`). Against `applied`:
+/// a block below the applied sequence is `NYL-PROMOTION-SEQUENCE-OLDER`, so
+/// an older checkout or a reverted promotion commit never rolls the
+/// environment back (rolling back is a new promotion, whose fix this names);
+/// a block at the applied sequence must be the applied block, because a
+/// sequence is never reused, such as by another branch's promotion
+/// (`NYL-PROMOTION-RECORD-INVALID`), and needs no new check; a newer block
+/// is returned in [`SourceRecords::check`].
+pub fn promotion_records(
+    environment: &str,
+    promoted: Option<&PromotedSource>,
+    state: &BTreeMap<PromotionPathName, PromotionRecord>,
+    applied: &Applied,
+) -> Result<SourceRecords, Finding> {
+    let Some(promoted) = record_in_source(promoted) else {
+        return Ok(SourceRecords {
+            records: state.clone(),
+            check: None,
+        });
+    };
+    let paths: Vec<&str> = promoted
+        .path
+        .iter()
+        .chain(&promoted.paths)
+        .map(String::as_str)
+        .collect();
+    let mut records: BTreeMap<_, _> = state
+        .iter()
+        .filter(|(name, _)| !paths.contains(&name.as_str()))
+        .map(|(name, record)| (name.clone(), record.clone()))
+        .collect();
+    let Some(block) = &promoted.promoted else {
+        return Ok(SourceRecords { records, check: None });
+    };
+    let invalid = |problem: String| invalid_block(environment, problem);
+    if !paths.contains(&block.path.as_str()) {
+        return Err(invalid(format!(
+            "names path {}, which is not among the paths its source is promoted along ({})",
+            block.path,
+            paths.join(", ")
+        )));
+    }
+    let Some(source_commit) = &block.source_commit else {
+        return Err(invalid("carries no source commit".to_owned()));
+    };
+    if !matches!(
+        block.from,
+        nyl_core::orchestration::promotion::PromotionFrom::Environment(_)
+    ) {
+        return Err(invalid(
+            "names a target as its source state, which M6 does not promote".to_owned(),
+        ));
+    }
+    let check = match applied.sequence {
+        Some(sequence) if block.sequence < sequence => {
+            return Err(Finding::new(
+                Code::PromotionSequenceOlder,
+                format!(
+                    "the promoted block of Environment {environment} has sequence {}, below sequence {sequence} that a run already applied: this checkout is older than what the environment runs",
+                    block.sequence
+                ),
+                format!(
+                    "run from the current branch tip; to roll back, promote the older state as a new promotion: `nyl promote {} --revision {source_commit}`",
+                    block.path
+                ),
+            ));
+        }
+        Some(sequence) if block.sequence == sequence => {
+            if applied.block.as_ref() != Some(block) {
+                return Err(invalid(format!(
+                    "has sequence {sequence}, which a run already applied with another record; a sequence is never reused, such as by a promotion on another branch"
+                )));
+            }
+            None
+        }
+        _ => Some(block.clone()),
+    };
+    records.insert(block.path.clone(), block.clone());
+    Ok(SourceRecords { records, check })
+}
+
+/// The records `nyl promote` compares a promotion with: [`promotion_records`],
+/// except that a `record: source` block that run would refuse (invalid, or
+/// older than what was applied) is no record, so the path then has none.
+/// Records in state on the block's paths never count, so switching an
+/// Environment from `record: state` to `record: source` writes its first
+/// block instead of finding the state's record `unchanged`.
+pub fn current_records(
+    environment: &str,
+    promoted: Option<&PromotedSource>,
+    state: &BTreeMap<PromotionPathName, PromotionRecord>,
+    applied: &Applied,
+) -> BTreeMap<PromotionPathName, PromotionRecord> {
+    promotion_records(environment, promoted, state, applied).map_or_else(
+        |_| {
+            let without = promoted.map(|promoted| PromotedSource {
+                promoted: None,
+                ..promoted.clone()
+            });
+            promotion_records(environment, without.as_ref(), state, &Applied::default())
+                .map(|read| read.records)
+                .unwrap_or_default()
+        },
+        |read| read.records,
+    )
+}
+
+/// The records a reader of `snapshot` that runs nothing shows (`status`,
+/// `nyl get promotions`, `promotion-candidates`, `nyl get` value forms): the
+/// block the environment record keeps, which its last run applied, and then
+/// `entry`'s block (the Environment as the entry worktree declares it) when
+/// that one is newer, promoted but not applied yet. An `entry` that keeps
+/// its record in state reads state alone, even when the last run applied a
+/// block. Never refuses and never checks a block against its state: a block
+/// that is invalid or older is left out here, and a run refuses it. This is
+/// a deliberate difference from the runs' [`promotion_records`]: these
+/// readers show what is recorded, and change nothing.
+pub fn recorded_promotions(
+    snapshot: &EnvironmentSnapshot,
+    entry: Option<&PromotedSource>,
+) -> BTreeMap<PromotionPathName, PromotionRecord> {
+    if entry.is_some() && record_in_source(entry).is_none() {
+        return snapshot.promotions.clone();
+    }
+    let environment = snapshot
+        .environment
+        .as_ref()
+        .map(|record| record.environment.to_string())
+        .unwrap_or_default();
+    let applied = snapshot
+        .environment
+        .as_ref()
+        .and_then(|record| promoted_source(&record.spec));
+    let mut records = promotion_records(
+        &environment,
+        applied.as_ref(),
+        &snapshot.promotions,
+        &Applied::default(),
+    )
+    .map_or_else(|_| snapshot.promotions.clone(), |read| read.records);
+    if let Some(block) = record_in_source(entry).and_then(|entry| {
+        promotion_records(&environment, Some(entry), &BTreeMap::new(), &Applied::default())
+            .ok()?
+            .records
+            .into_values()
+            .next()
+    }) {
+        if records
+            .get(&block.path)
+            .is_none_or(|current| current.sequence < block.sequence)
+        {
+            records.insert(block.path.clone(), block);
+        }
+    }
+    records
 }
 
 /// The effective `protectedRefs`, defaulting to the repository's default branch.
@@ -754,14 +972,166 @@ mod tests {
         );
     }
 
-    /// Catches `record: source` silently ignored while its block is not read.
+    fn in_source(block: Option<PromotionRecord>) -> PromotedSource {
+        PromotedSource {
+            path: Some("dev-to-prod".to_owned()),
+            record: Some("source".to_owned()),
+            promoted: block,
+            ..PromotedSource::default()
+        }
+    }
+
+    fn applied(sequence: u64, block: Option<PromotionRecord>) -> Applied {
+        Applied {
+            sequence: Some(sequence),
+            block,
+        }
+    }
+
+    /// With `record: source` the block is the path's record, in place of one
+    /// in state, and supplies the source; a block below the applied sequence
+    /// is refused with the reviewed way back (a new promotion), never applied.
+    /// Catches an older checkout rolling the environment back, a stale state
+    /// record shadowing the block, or a block applied for a path it does not
+    /// belong to.
     #[test]
-    fn test_record_source_is_refused_with_its_code() {
-        let source = environment(&json!({"source": {"fromPromotion": {"path": "p", "record": "source"}}}));
-        assert_eq!(unsupported_source(&source).unwrap().code, Code::PromoteUnsupported);
-        let state = environment(&json!({"source": {"fromPromotion": {"path": "p"}}}));
-        assert!(unsupported_source(&state).is_none());
-        assert!(unsupported_source(&environment(&json!({"source": {"revision": "main"}}))).is_none());
+    fn test_record_source_block_is_the_record_and_never_older_than_applied() {
+        let state = records(&[record("dev-to-prod", 5, Some('b')), record("other", 3, Some('c'))]);
+        let block = record("dev-to-prod", 3, Some('a'));
+        let promoted = in_source(Some(block.clone()));
+        let read = promotion_records("prod", Some(&promoted), &state, &applied(2, None)).unwrap();
+        assert_eq!(
+            read.records[&block.path], block,
+            "the block replaces the state's record"
+        );
+        assert_eq!(read.records[&PromotionPathName::new("other").unwrap()].sequence, 3);
+        assert_eq!(
+            read.check.as_ref(),
+            Some(&block),
+            "a newer block is checked against its state"
+        );
+        let environment = environment(&json!({"source": {"fromPromotion": serde_json::to_value(&promoted).unwrap()}}));
+        assert_eq!(
+            source_request(&environment, &commit('e'), None, false, &read.records).unwrap(),
+            SourceRequest::Promotion {
+                path: block.path.clone(),
+                sequence: 3,
+                commit: commit('a')
+            }
+        );
+
+        let older = promotion_records("prod", Some(&promoted), &state, &applied(4, None)).unwrap_err();
+        assert_eq!(older.code, Code::PromotionSequenceOlder);
+        assert!(
+            older
+                .fix
+                .contains(&format!("nyl promote dev-to-prod --revision {}", commit('a'))),
+            "{}",
+            older.fix
+        );
+
+        // No block yet: no record, so the source is NYL-PROMOTION-MISSING.
+        let none = promotion_records("prod", Some(&in_source(None)), &state, &applied(5, None)).unwrap();
+        assert!(!none.records.contains_key(&block.path));
+
+        for invalid in [record("other", 7, Some('a')), record("dev-to-prod", 7, None)] {
+            let finding =
+                promotion_records("prod", Some(&in_source(Some(invalid))), &state, &Applied::default()).unwrap_err();
+            assert_eq!(finding.code, Code::PromotionRecordInvalid);
+        }
+
+        // `record: state` reads state alone.
+        let in_state = PromotedSource {
+            record: None,
+            ..in_source(None)
+        };
+        assert_eq!(
+            promotion_records("prod", Some(&in_state), &state, &applied(9, None))
+                .unwrap()
+                .records,
+            state
+        );
+    }
+
+    /// A block at the applied sequence is the applied block, which needs no
+    /// second check; any other block with that sequence is refused, because
+    /// a sequence is never reused. Catches a promotion on another branch
+    /// that took the same sequence being run as if it were the applied one.
+    #[test]
+    fn test_a_block_at_the_applied_sequence_must_be_the_applied_block() {
+        let block = record("dev-to-prod", 3, Some('a'));
+        let same = promotion_records(
+            "prod",
+            Some(&in_source(Some(block.clone()))),
+            &BTreeMap::new(),
+            &applied(3, Some(block.clone())),
+        )
+        .unwrap();
+        assert_eq!(same.check, None);
+        assert_eq!(same.records[&block.path], block);
+        let reused = record("dev-to-prod", 3, Some('b'));
+        let finding = promotion_records(
+            "prod",
+            Some(&in_source(Some(reused))),
+            &BTreeMap::new(),
+            &applied(3, Some(block)),
+        )
+        .unwrap_err();
+        assert_eq!(finding.code, Code::PromotionRecordInvalid);
+    }
+
+    /// `nyl promote` compares with the checkout's block only when a run would
+    /// take it: a block older than what was applied is no record, and a
+    /// record in state on the block's path never is one. Catches a promotion
+    /// reported `unchanged` against an old checkout's block, and one that
+    /// never writes its first block after switching from `record: state`.
+    #[test]
+    fn test_promote_compares_with_a_block_only_when_a_run_would_take_it() {
+        let path = PromotionPathName::new("dev-to-prod").unwrap();
+        let state = records(&[record("dev-to-prod", 1, Some('b'))]);
+        // Switched from `record: state`: no block yet, and the state's record does not count.
+        let switched = current_records("prod", Some(&in_source(None)), &state, &applied(1, None));
+        assert!(!switched.contains_key(&path));
+        // The checkout's block is older than what ran: no current record.
+        let old = in_source(Some(record("dev-to-prod", 2, Some('a'))));
+        assert!(!current_records("prod", Some(&old), &state, &applied(3, None)).contains_key(&path));
+        // A block a run would take is the current record.
+        assert_eq!(
+            current_records("prod", Some(&old), &state, &applied(1, None))[&path].sequence,
+            2
+        );
+    }
+
+    /// Readers that run nothing show the block the last run applied, and a
+    /// newer one in the entry worktree as the path's record not applied yet;
+    /// an older entry block never replaces what ran. Catches `status` showing
+    /// an old checkout's block as current.
+    #[test]
+    fn test_recorded_promotions_prefer_the_newer_block() {
+        use nyl_core::orchestration::state::{EnvironmentRecord, EnvironmentRecordKind, StateV1};
+        let applied = in_source(Some(record("dev-to-prod", 2, Some('a'))));
+        let snapshot = EnvironmentSnapshot {
+            environment: Some(EnvironmentRecord {
+                api_version: StateV1,
+                kind: EnvironmentRecordKind,
+                environment: nyl_core::orchestration::ids::EnvironmentName::new("prod").unwrap(),
+                spec: json!({"source": {"fromPromotion": serde_json::to_value(&applied).unwrap()}}),
+                source_commit: commit('a'),
+                source_chosen_by: SourceChoice::Promotion {
+                    path: "dev-to-prod".to_owned(),
+                    sequence: 2,
+                },
+                applied_promotion_sequence: Some(2),
+                ownership: BTreeMap::new(),
+            }),
+            ..EnvironmentSnapshot::default()
+        };
+        let path = PromotionPathName::new("dev-to-prod").unwrap();
+        assert_eq!(recorded_promotions(&snapshot, None)[&path].sequence, 2);
+        let newer = in_source(Some(record("dev-to-prod", 3, Some('b'))));
+        assert_eq!(recorded_promotions(&snapshot, Some(&newer))[&path].sequence, 3);
+        let older = in_source(Some(record("dev-to-prod", 1, Some('c'))));
+        assert_eq!(recorded_promotions(&snapshot, Some(&older))[&path].sequence, 2);
     }
 
     #[test]

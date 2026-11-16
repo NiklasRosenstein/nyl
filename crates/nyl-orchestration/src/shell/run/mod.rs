@@ -56,11 +56,14 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{
     Driver, DriverOperation, DriverSet, ExecutionContext, KeyInputs, Outcome, ResolutionContext, Supported, ToolRunner,
 };
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, ExecutionKey, RunId, UnitAddress, UnitName};
+use nyl_core::orchestration::ids::{
+    CommitId, EnvironmentName, ExecutionKey, PromotionPathName, RunId, UnitAddress, UnitName,
+};
 use nyl_core::orchestration::ports::{
     Checkpoint, CommitIdentity, EnvironmentSnapshot, OperatorPrompt, RenderedSource, SourceRenderer, SourceRepository,
     SourceResolver, StateError, TransitionChanges,
 };
+use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::{
     ApprovalRecord, ArtifactDigest, ArtifactDocument, ArtifactUnit, BlockedReason, Condition, DesiredUnit, Lifecycle,
     ObservedUnit, Operation, Readiness, Receipt, Run, RunKind, StateLocation, StateV1,
@@ -318,6 +321,9 @@ pub struct RunRequest {
     /// `state delete` removes with the instance's state; `None` for a
     /// declared environment and unless the template sets `keepSource: true`.
     pub keep_prefix: Option<String>,
+    /// The PromotionPaths the project declares: a `record: source` block is
+    /// checked against the path it names.
+    pub promotion_paths: Vec<nyl_core::resources::promotion::PromotionPath>,
 }
 
 impl RunRequest {
@@ -393,7 +399,7 @@ pub fn teardown_readiness_preview(
                     run: None,
                     produced_in_run: &produced,
                     previous: &snapshot.desired,
-                    promotions: &snapshot.promotions,
+                    promotions: &prepared.promotions,
                 },
                 &held_view,
             );
@@ -497,6 +503,10 @@ struct Prepared {
     rendered: RenderedSource,
     desired: Desired,
     order: Vec<UnitName>,
+    /// The PromotionRecords the environment's source and `fromPromotion`
+    /// bindings read: its state's, or with `record: source` the block in
+    /// its source ([`crate::rules::sources::promotion_records`]).
+    promotions: BTreeMap<PromotionPathName, PromotionRecord>,
 }
 
 /// One resolution pass over the ownership set.
@@ -802,7 +812,10 @@ impl<'r, 'a> Session<'r, 'a> {
     /// S: chosen by the source rules, resolved, and checked for
     /// reachability. An Environment `source.revision`+`commit` lock is also
     /// checked against [`pin_refs`].
-    fn source_commit(&self, snapshot: &EnvironmentSnapshot) -> Result<(SourceRequest, CommitId), Finding> {
+    fn source_commit(
+        &self,
+        promotions: &BTreeMap<PromotionPathName, PromotionRecord>,
+    ) -> Result<(SourceRequest, CommitId), Finding> {
         if let Some(snapshot) = &self.request.worktree_source {
             if self.request.source_override.is_some() {
                 return Err(source_unavailable("--worktree and --source are mutually exclusive"));
@@ -826,7 +839,7 @@ impl<'r, 'a> Session<'r, 'a> {
             &self.request.entry_commit,
             self.request.source_override.as_deref(),
             self.request.source_recorded,
-            &snapshot.promotions,
+            promotions,
         )?;
         let commit = match &request {
             SourceRequest::Worktree(snapshot) => snapshot.commit.clone(),
@@ -858,9 +871,34 @@ impl<'r, 'a> Session<'r, 'a> {
         Ok((request, commit))
     }
 
+    /// The records the run reads, through the one function every entry
+    /// point that resolves an environment shares
+    /// ([`crate::shell::promote::environment_promotions`]).
+    fn promotions(
+        &self,
+        snapshot: &EnvironmentSnapshot,
+    ) -> Result<BTreeMap<PromotionPathName, PromotionRecord>, Finding> {
+        crate::shell::promote::environment_promotions(
+            self.base().store,
+            &|environment, path| {
+                crate::shell::promote::source_location(
+                    &self.request.environments,
+                    &self.request.environment_errors,
+                    environment,
+                    path,
+                )
+                .cloned()
+            },
+            &self.request.promotion_paths,
+            &self.request.entry,
+            snapshot,
+        )
+    }
+
     /// Choose S, render it, and build the desired documents and graph.
     fn prepare(&self, snapshot: &EnvironmentSnapshot) -> Result<Prepared, Vec<Finding>> {
-        let (request, source_commit) = self.source_commit(snapshot).map_err(|finding| vec![finding])?;
+        let promotions = self.promotions(snapshot).map_err(|finding| vec![finding])?;
+        let (request, source_commit) = self.source_commit(&promotions).map_err(|finding| vec![finding])?;
         let worktree = self
             .resolution_worktree(&source_commit)
             .map_err(|finding| vec![finding])?;
@@ -950,6 +988,7 @@ impl<'r, 'a> Session<'r, 'a> {
             rendered,
             desired,
             order,
+            promotions,
         })
     }
 
@@ -1604,7 +1643,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
                 run: None,
                 produced_in_run: &produced,
                 previous: &snapshot.desired,
-                promotions: &snapshot.promotions,
+                promotions: &prepared.promotions,
             },
             &held_view,
         );
@@ -2648,7 +2687,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     run: Some(&self.run),
                     produced_in_run: &produced,
                     previous: &snapshot.desired,
-                    promotions: &snapshot.promotions,
+                    promotions: &prepared.promotions,
                 },
                 &held_view,
             );

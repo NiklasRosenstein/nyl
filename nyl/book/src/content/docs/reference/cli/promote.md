@@ -3,7 +3,8 @@ title: 'promote'
 ---
 
 `nyl promote` records what one environment proved as a `PromotionRecord` in
-another environment's desired state, along a
+another environment's desired state, or with `record: source` in that
+Environment's source, along a
 [PromotionPath](/nyl/orchestration/resource-guides/promotion-path/). It reads
 the source's recorded states and writes nothing to the source; it never
 observes anything itself, so it runs from a workstation without cluster
@@ -33,6 +34,49 @@ command that writes state, and writes one desired commit with the operation
 the path, the sequence, and the source state. `--wait-lease` waits for a
 running reconcile; a lease that stays held is exit 2.
 
+## `record: source`
+
+When the path promotes the source of a target whose Environment says
+`record: source`, the record is written into that Environment's
+`source.fromPromotion.promoted` block instead, as one commit on the branch
+the entry worktree has checked out, with the same message a state commit
+would carry (kept verbatim) and `--author` as its author and committer. Your
+Git configuration otherwise applies, so a configured commit signature signs
+it. The commit carries only the Environment's file and is pushed to the
+branch's upstream (`branch.<name>.remote` and `branch.<name>.merge`)
+fast-forward only; the push is never forced. The report lists the commit
+under `commits.source`, and nothing is written to the target's state. The
+block in the checkout is the path's current record for
+[Unchanged](#unchanged) only when a run would take it (it is valid and not
+older than what prod applied); records in state on that path never count.
+`--dry-run` checks everything below without committing. The
+[promotion guide](/nyl/orchestration/promotion/#keeping-the-record-in-source)
+explains how runs read the block.
+
+Each refusal exits 1 with `NYL-PROMOTE-SOURCE-UNWRITABLE` and its own fix,
+except a moved branch:
+
+- a detached HEAD: check out the branch the record belongs on;
+- a branch without an upstream: set one with `git branch --set-upstream-to`;
+- a branch with commits its upstream lacks, which the push would publish
+  with the record: push or drop them first;
+- an untracked Environment file, or uncommitted changes to it;
+- a `fromPromotion` the Environment inherits (such as from its group), or
+  one not in block style: declare it in the Environment, one key per line;
+- an Environment no file declares, such as a template's instance;
+- a push the remote refuses for another reason, such as branch protection or
+  a hook: the commit is undone; promoting through a pull request
+  (`changeGate: pullRequest`) comes in a later milestone;
+- a push that fails without a refusal, such as a network error: the record
+  may have reached the remote, so the commit is kept; fetch and check.
+
+A push refused because the branch moved since the checkout undoes the local
+commit and exits 2 with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout
+(`git pull --ff-only`) and run `nyl promote` again. The undo moves the branch
+back only while it still points at the promotion commit, and restores the
+file only while it holds what was written; an undo that cannot finish is
+reported with the commit to drop.
+
 ## Options
 
 | Option | Meaning |
@@ -46,7 +90,7 @@ running reconcile; a lease that stays held is exit 2.
 | `--ignore-attestation <scope>/<name>=<reason>` | Set a failing attestation aside (repeatable); `<scope>` is a unit name or `environment`. The record keeps the reason and who gave it. |
 | `--no-verify-artifacts` | Do not check that promoted artifacts still exist, for runners without registry access; the record says `artifactsVerified: false`. A path's `verifyArtifacts: false` does the same. |
 | `--wait-lease <duration>` | Wait up to this long for another run's lease on the target. |
-| `--author "Name <email>"` | Author of the state commit; defaults to Git's `user.name` and `user.email`. |
+| `--author "Name <email>"` | Author of the state commit, or of the source commit with `record: source`; defaults to Git's `user.name` and `user.email`. |
 | `-o json` | The operation's typed `PromoteReport`. |
 
 ## Which units the target selects
@@ -89,8 +133,8 @@ false`.
 | Exit | When |
 | --- | --- |
 | 0 | The record was written, or the path's record already names the chosen state (`unchanged`), or the dry run found a promotion to make. |
-| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a target with `record: source` (`NYL-PROMOTE-UNSUPPORTED`), a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), or an unreadable commit. |
-| 2 | Nothing was written because evidence is missing, stale, or failing (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), or the target's lease is held (`NYL-LEASE-HELD`). |
+| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), an unreadable commit, or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
+| 2 | Nothing was written because evidence is missing, stale, or failing (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
 
 Run [`nyl reconcile`](/nyl/reference/cli/reconcile/) on the target afterwards:
 an environment that takes its source from a promotion exits 2 with

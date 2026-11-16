@@ -43,7 +43,8 @@ pub struct StateOperationReport {
     pub operation: &'static str,
     pub outcome: Outcome,
     pub exit: u8,
-    /// The transition commits written, by state ref side.
+    /// The transition commits written, by state ref side, or under `source`
+    /// the commit of a `record: source` block on the entry worktree's branch.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commits: BTreeMap<&'static str, CommitId>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -90,6 +91,7 @@ impl StateOperationReport {
                 | Code::InstanceRemovalPending
                 | Code::PromotionMissing
                 | Code::PromoteNoEvidence
+                | Code::PromoteSourceRejected
         ) {
             2
         } else {
@@ -148,7 +150,8 @@ pub struct PromoteReport {
     #[serde(rename = "dryRun")]
     pub dry_run: bool,
     pub exit: u8,
-    /// The transition commits written, by state ref side.
+    /// The transition commits written, by state ref side, or under `source`
+    /// the commit of a `record: source` block on the entry worktree's branch.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commits: BTreeMap<&'static str, CommitId>,
     #[serde(skip_serializing_if = "Option::is_none")]

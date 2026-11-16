@@ -84,12 +84,18 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
     };
     let state = &store as &dyn StateStore;
     let context = session.context(state, wiring, None);
+    // A `record: source` block newer than what ran is the lineage's pending record.
+    let promoted = session
+        .entry()
+        .ok()
+        .and_then(|entry| entry.spec.source.and_then(|source| source.from_promotion));
     let mut report = nyl_orchestration::shell::inspect::status_with(
         &context,
         &session.resolved.name,
         &session.resolved.location,
         Some(wiring.drivers),
         &session.peers(),
+        promoted.as_ref(),
     );
     for environment in &mut report.environments {
         environment.state_repository = Some(session.resolved.location.repository.clone());

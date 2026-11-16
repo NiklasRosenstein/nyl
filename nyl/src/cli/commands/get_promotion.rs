@@ -87,7 +87,12 @@ pub fn history(form: HistoryForm, args: &GetHistoryArgs) -> Result<CommandOutcom
             rendered(&report, report.exit, &report.errors, report.table(), names, args.output)?
         }
         HistoryForm::Promotions => {
-            let report = promotion_inspect::promotions(&store, location, environment);
+            // With `record: source` the entry worktree's block is the path's record.
+            let promoted = session
+                .entry()
+                .ok()
+                .and_then(|entry| entry.spec.source.and_then(|source| source.from_promotion));
+            let report = promotion_inspect::promotions(&store, location, environment, promoted.as_ref());
             let names = report.promotions.iter().map(|record| record.path.to_string());
             rendered(&report, report.exit, &report.errors, report.table(), names, args.output)?
         }
@@ -144,6 +149,7 @@ pub fn candidates(args: &GetCandidatesArgs, wiring: &Wiring<'_>) -> Result<Comma
             source: (&source, source_location),
             target_units: &view.target_units,
             promotes_source: view.promotes_source,
+            promoted: view.promoted.as_ref(),
             now: wiring.clock.now(),
         },
     );

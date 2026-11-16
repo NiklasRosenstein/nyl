@@ -552,6 +552,7 @@ impl Session {
             fail_fast: options.fail_fast,
             reason: options.reason.map(str::to_owned),
             keep_prefix: self.keep_prefix(),
+            promotion_paths: super::promotion::declared_paths(&self.inventory),
         })
     }
 }

@@ -1,13 +1,16 @@
 //! `nyl promote <path>`: record what one environment proved as a
-//! PromotionRecord in another environment's desired state.
+//! PromotionRecord in another environment's desired state, or with `record:
+//! source` in that Environment's source.
 //!
 //! Contract: [Promotion paths](../../../../design/promotion.md#promotion-paths)
 //! and [Exit categories](../../../../design/promotion.md#exit-categories). It
 //! runs under the target environment's lease (`--wait-lease` waits for a
 //! running reconcile; a held lease is exit 2), reads the source's recorded
 //! state and writes nothing to it, and writes one desired commit holding the
-//! record and a summary. `--dry-run` takes no lease, writes nothing, and
-//! reports the record it would write. The decisions are
+//! record and a summary; with `record: source` it writes no state and
+//! commits the record to the branch the entry worktree has checked out
+//! instead ([`crate::orchestration::record_source`]). `--dry-run` takes no
+//! lease, writes nothing, and reports the record it would write. The decisions are
 //! `nyl_orchestration::rules::promotion`'s and the effects the shell's; this
 //! module resolves the invocation, the project's declaration, and who asks.
 
@@ -85,7 +88,7 @@ pub struct PromoteArgs {
     #[arg(long)]
     pub wait_lease: Option<Duration>,
 
-    /// Author of state commits, as "Name <email>"; defaults to Git's user.name and user.email.
+    /// Author of the state commit, or of the source commit with `record: source`, as "Name <email>"; defaults to Git's user.name and user.email.
     #[arg(long)]
     pub author: Option<String>,
 
@@ -135,6 +138,28 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     }
     match prepare(args, wiring, &session, &path) {
         Ok((options, store_identity)) => {
+            // With `record: source` the record is a commit in the project's
+            // source; a dry run only checks that it could be written.
+            let writer = if options.records_in_source() {
+                match crate::orchestration::record_source::writer_for(
+                    &session,
+                    store_identity.clone(),
+                    wiring.clock.clone(),
+                ) {
+                    Ok(writer) => Some(writer),
+                    Err(error) => {
+                        return Ok(report_for(promote::writer_finding(
+                            &error,
+                            &session.resolved.name,
+                            &path
+                                .name()
+                                .map_err(|error| nyl_render::NylError::config(error.to_string()))?,
+                        )))
+                    }
+                }
+            } else {
+                None
+            };
             let author = store_identity.map(|identity| CommitAuthor {
                 identity,
                 clock: wiring.clock.clone(),
@@ -159,7 +184,14 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
             };
             let identity = author.as_ref().map(|author| &author.identity);
             let mut report = match session.run_with(wiring, &store, identity, &request, |context, request| {
-                promote::promote(context, request, &options)
+                promote::promote(
+                    context,
+                    request,
+                    &options,
+                    writer
+                        .as_ref()
+                        .map(|writer| writer as &dyn nyl_core::orchestration::ports::PromotionRecordWriter),
+                )
             }) {
                 Ok(report) => report,
                 Err(Stop::Finding(finding)) => return Ok(report_for(finding)),
@@ -235,6 +267,7 @@ fn prepare(
     let TargetView {
         target_units,
         promotes_source,
+        promoted,
         rebuilt,
     } = target_view(session, wiring.drivers, path)?;
     Ok((
@@ -249,6 +282,7 @@ fn prepare(
             target_units,
             rebuilt,
             promotes_source,
+            promoted,
             requested,
         },
         identity,

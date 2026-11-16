@@ -177,6 +177,14 @@ codes! {
     PromoteRebuilt => "NYL-PROMOTE-REBUILT",
     /// An environment's `fromPromotion` source, or a `fromPromotion` binding, names a path with no record yet. Exit 2.
     PromotionMissing => "NYL-PROMOTION-MISSING",
+    /// The `record: source` block in an Environment's source has a lower `sequence` than the one a run applied, such as an older checkout or a reverted promotion commit. Rolling back is a new promotion. Exit 1.
+    PromotionSequenceOlder => "NYL-PROMOTION-SEQUENCE-OLDER",
+    /// The `record: source` block in an Environment's source does not match the source state it names, or names a path the Environment does not promote along. Exit 1.
+    PromotionRecordInvalid => "NYL-PROMOTION-RECORD-INVALID",
+    /// `nyl promote` cannot commit or push a `record: source` block: the entry worktree has no branch checked out (detached HEAD), the branch has no upstream or commits its upstream lacks, the Environment's file is untracked or has uncommitted changes, the block cannot be placed in the Environment's own document, the Environment is not declared in a file (a template's instance), the remote refused the push for another reason than a moved branch (branch protection, a hook), or the push failed in a way that may have reached the remote. The message says whether anything was written; the fix is the cause's. Exit 1.
+    PromoteSourceUnwritable => "NYL-PROMOTE-SOURCE-UNWRITABLE",
+    /// The remote refused the fast-forward push of a `record: source` commit because the branch moved since the checkout (non-fast-forward). The commit was undone, so nothing was written; update the checkout and promote again. Exit 2.
+    PromoteSourceRejected => "NYL-PROMOTE-SOURCE-REJECTED",
     /// A unit's driver could not produce its attestations.
     AttestUnknown => "NYL-ATTEST-UNKNOWN",
     /// A unit declares `observations`, but its kind cannot read observed values.

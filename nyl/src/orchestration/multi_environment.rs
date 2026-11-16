@@ -430,14 +430,24 @@ fn read_environment(
         .filter(|_| request.template.is_none())
         .and_then(|instance| instance.record.as_ref()?.source_commit.clone());
     let commit = recorded.as_ref().unwrap_or(commit);
-    // A promoted source takes its commit from the records in the environment's state.
-    let promotions = if entry
+    // A promoted source takes its commit from the environment's records: in
+    // its state, or with `record: source` the block in its source, read and
+    // checked as a run reads them.
+    let promoted = entry
         .spec
         .source
         .as_ref()
-        .is_some_and(|source| source.from_promotion.is_some())
-    {
-        snapshot(inventory, name, request)?.promotions
+        .and_then(|source| source.from_promotion.as_ref());
+    let promotions = if promoted.is_some() {
+        let store = super::project::open_store_mode(inventory, &resolved, None, request.offline)?;
+        let snapshot = store.snapshot(&resolved.location).map_err(|error| {
+            Finding::new(
+                Code::StateUnavailable,
+                error.to_string(),
+                "check access to the environment’s state",
+            )
+        })?;
+        super::promotion::environment_promotions(inventory, request, &store, &entry, &snapshot)?
     } else {
         BTreeMap::new()
     };

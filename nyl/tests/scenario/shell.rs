@@ -262,11 +262,22 @@ impl Harness {
 
     /// A fresh clone of `main`, with the entry Environment as it renders there.
     pub fn job(&self, units: &[&str], cancellation: Cancellation) -> Job {
+        self.job_for(&dev(), self.location.clone(), units, cancellation)
+    }
+
+    /// [`Self::job`] for `environment`, whose state is at `location`.
+    pub fn job_for(
+        &self,
+        environment: &EnvironmentName,
+        location: StateLocation,
+        units: &[&str],
+        cancellation: Cancellation,
+    ) -> Job {
         let clone = self.world.fresh_clone("main");
         let entry_commit = CommitId::new(git_output(&clone, &["rev-parse", "HEAD"])).unwrap();
         let sources = GitSourceResolver::new(clone.join(".git"), GitAuth::none());
         let renderer = UnitSourceRenderer::new("/nyl", nyl::resource_catalogue());
-        let entry = renderer.render(&clone, &dev(), &entry_commit).unwrap().environment;
+        let entry = renderer.render(&clone, environment, &entry_commit).unwrap().environment;
         Job {
             sources,
             renderer,
@@ -278,9 +289,9 @@ impl Harness {
                 environments: BTreeMap::new(),
                 instances: BTreeSet::new(),
                 approvals: Default::default(),
-                environment: dev(),
+                environment: environment.clone(),
                 entry,
-                location: self.location.clone(),
+                location,
                 entry_commit,
                 source_recorded: false,
                 entry_project_dir: "/nyl".to_owned(),
@@ -297,6 +308,7 @@ impl Harness {
                 fail_fast: false,
                 reason: None,
                 keep_prefix: None,
+                promotion_paths: Vec::new(),
             },
             workspace: TempDir::new().unwrap(),
         }
@@ -325,6 +337,28 @@ impl Harness {
             process_env: &self.process_env,
             secrets: None,
             commit_identity: identity.then_some(&self.identity),
+            progress: None,
+            prompt: None,
+        };
+        operation(&context, &job.request)
+    }
+
+    /// Call `operation` with the run context of `job`, for shell operations
+    /// that report otherwise than a run, such as `promote`.
+    pub fn with_context<T>(&self, job: &Job, operation: impl FnOnce(&RunContext<'_>, &RunRequest) -> T) -> T {
+        let base = self.context();
+        let tools = ProcessRunner::new().cancelled_by(job.request.cancellation.shared());
+        let context = RunContext {
+            instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+            base: &base,
+            sources: &job.sources,
+            renderer: &job.renderer,
+            drivers: &self.drivers,
+            tools: &tools,
+            workspace: job.workspace.path(),
+            process_env: &self.process_env,
+            secrets: None,
+            commit_identity: Some(&self.identity),
             progress: None,
             prompt: None,
         };

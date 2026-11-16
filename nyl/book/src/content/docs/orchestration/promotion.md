@@ -12,7 +12,7 @@ reads it when it reconciles.
 :::note[Status]
 M6 delivers promotion in steps. `nyl promote`, `fromPromotion` sources and
 bindings, artifact verification, `nyl get states`, `promotion-candidates`,
-and `promotions`, and `status` lineage work today. `record: source`,
+and `promotions`, `status` lineage, and `record: source` work today.
 `hotfix` paths with `--supersede`, and value-only coverage follow.
 :::
 
@@ -43,7 +43,8 @@ nyl promote dev-to-prod --revision 3e7b9c… --evidence published --reason "Roll
   sequence are written to the environment record as `sourceChosenBy` and
   `appliedPromotionSequence`. Before the first promotion `reconcile` and `plan`
   exit 2 with `NYL-PROMOTION-MISSING`; its fix names `nyl promote <path>`.
-  `record: source` is not supported yet.
+  With `record: source` the record lives in the Environment itself, as
+  described [below](#keeping-the-record-in-source).
 - **Bindings.** `{fromPromotion: {value: webImage}}` in a unit's spec, or in a
   DeploymentTarget's `releaseInputs`, resolves through the one binding
   resolver. With `path` it reads that path's record; without it, the newest
@@ -91,6 +92,77 @@ bc1847b0292df2e0548131fe07c6bfd71777a2a6 published (promoted, running)
   value webImage: registry.invalid:5000/web@sha256:88e3d32b27feb6648d7e9ce25a18b1124b27849a11e8f9d5d0c1d70767567a75
 ```
 
+## Keeping the record in source
+
+By default the record lives in the target's state, at
+`desired/promotions/<path>.yaml`. With `record: source` it lives in the
+target Environment's own `source` block instead, so the promoted source
+commit and the values it runs with are one reviewed change in Git:
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: prod
+spec:
+  source:
+    fromPromotion:
+      path: dev-to-prod
+      record: source
+      promoted: # written by nyl promote, never by hand
+        path: dev-to-prod
+        sequence: 2
+        from:
+          environment: dev
+          run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90
+          desiredCommit: 77aa…
+          observedCommit: 41f0…
+        sourceCommit: 3e7b9c…
+        values:
+          webImage:
+            value: registry.example.com/web@sha256:4f0c…
+            select: {unit: web-image, artifact: image, pointer: /reference}
+            unit: {name: web-image, uid: 2b90…}
+            executionKey: sha256:…
+        # evidence, requested, and the other fields of every PromotionRecord
+```
+
+- **Writing.** `nyl promote dev-to-prod` writes the block, with the same
+  fields as a record in state, as one commit on the branch the entry
+  worktree has checked out, and pushes it to that branch's upstream
+  fast-forward only. It writes nothing to prod's state. Write
+  `fromPromotion` in the Environment itself, in block style, one key per
+  line; the rest of the file stays as written. A detached HEAD, a branch
+  ahead of its upstream, uncommitted changes to the Environment's file, or a
+  push the remote refuses for branch protection exit 1 with
+  `NYL-PROMOTE-SOURCE-UNWRITABLE`, each with its own fix. A push refused
+  because the branch moved since the checkout writes nothing and exits 2
+  with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout and promote again.
+  A promotion is never forced. The [command
+  page](/nyl/reference/cli/promote/#record-source) lists every case.
+- **Reading.** Every command that resolves prod (`plan`, `reconcile`,
+  `build`, and the multi-environment runs) reads the block as the entry
+  worktree declares it, like the rest of `source`, and checks a block no run
+  applied yet against its PromotionPath (its source environment, values, and
+  selectors) and the state of dev it names (its run, source commit, and
+  every value read again from that state). A block that does not match, or
+  names a state dev's history does not hold, is refused with
+  `NYL-PROMOTION-RECORD-INVALID`. `status` and `nyl get` show the block and
+  refuse nothing. `source-locks` never touches the block.
+- **Sequence.** The block's `sequence` rises with every promotion into prod,
+  and prod's state records the highest one a run applied. A run from an
+  older checkout, such as a re-run of an old CI job, or after the promotion
+  commit was reverted, finds a lower sequence and exits 1 with
+  `NYL-PROMOTION-SEQUENCE-OLDER`, writing nothing. A block with the
+  sequence prod applied must be the block prod applied: a sequence is never
+  reused, such as by a promotion on another branch. Rolling back is a new
+  promotion of the older state, with a higher sequence:
+  `nyl promote dev-to-prod --revision <source commit> --reason "…"`.
+- **Inspecting.** `status`, `nyl get promotions`, and
+  `nyl get promotion-candidates` show the block as the path's record. Earlier
+  blocks are in the Git history of the Environment's file; `nyl get
+  promotions` lists only promotions recorded in state as its history.
+
 ## How a promotion reads the source
 
 `nyl promote` reads the source environment's state history in Git: the desired
@@ -98,7 +170,8 @@ and observed logs, the documents as of each state, and the attestations
 recorded for each state, found by walking the observed history from the state's
 commit to the tip. It never takes the source's lease. The record's `sequence` is
 one above the highest ever recorded into the target, taken from the target's
-desired history, so restoring older state with
+desired history, its current records, the sequence a run applied, and a
+`record: source` block, so restoring older state with
 [`nyl state restore`](/nyl/reference/cli/state/) never hands a sequence out
 twice.
 

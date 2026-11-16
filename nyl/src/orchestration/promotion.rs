@@ -183,13 +183,14 @@ pub fn promotable_path(
 pub struct TargetView {
     pub target_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
     pub promotes_source: bool,
+    /// The target's `source.fromPromotion` as the entry worktree declares
+    /// it; with `record: source` its block is the path's current record.
+    pub promoted: Option<nyl_core::resources::environment::PromotedSource>,
     pub rebuilt: Vec<(String, Finding)>,
 }
 
 /// The [`TargetView`] of `path` from the target's session, the one way
-/// `nyl promote` and `nyl get promotion-candidates` both take it. A target
-/// that keeps its record in its source (`record: source`) is refused with
-/// `NYL-PROMOTE-UNSUPPORTED` until that form is supported, by both.
+/// `nyl promote` and `nyl get promotion-candidates` both take it.
 pub fn target_view(
     session: &super::session::Session,
     drivers: &DriverSet,
@@ -197,23 +198,11 @@ pub fn target_view(
 ) -> std::result::Result<TargetView, Finding> {
     use nyl_core::orchestration::codes::Code;
     let entry = session.entry()?;
-    // `record: source` writes a block into the Environment's source, which is a later change.
-    if entry
+    let promoted = entry
         .spec
         .source
         .as_ref()
-        .and_then(|source| source.from_promotion.as_ref())
-        .is_some_and(|promoted| promoted.record.as_deref() == Some("source"))
-    {
-        return Err(Finding::new(
-            Code::PromoteUnsupported,
-            format!(
-                "Environment {} keeps its promotion record in its source (`record: source`), which is not supported yet",
-                session.resolved.name
-            ),
-            "remove `record: source`: the record then lives in the environment's state",
-        ));
-    }
+        .and_then(|source| source.from_promotion.clone());
     let promotes_source = entry
         .spec
         .source
@@ -249,6 +238,34 @@ pub fn target_view(
     Ok(TargetView {
         target_units,
         promotes_source,
+        promoted,
         rebuilt,
     })
+}
+
+/// The PromotionRecords of `entry`'s environment, read from `snapshot` as a
+/// run reads them ([`nyl_orchestration::shell::promote::environment_promotions`]):
+/// with `record: source` the block is refused below the applied sequence and
+/// checked against its path and the source state it names, which is read
+/// through `store` at the source environment's location in `inventory`.
+pub fn environment_promotions(
+    inventory: &GitOpsInventory,
+    request: &super::project::InstanceRequest,
+    store: &dyn nyl_core::orchestration::ports::StateStore,
+    entry: &nyl_core::resources::environment::Environment,
+    snapshot: &nyl_core::orchestration::ports::EnvironmentSnapshot,
+) -> std::result::Result<
+    BTreeMap<nyl_core::orchestration::ids::PromotionPathName, nyl_core::orchestration::promotion::PromotionRecord>,
+    Finding,
+> {
+    nyl_orchestration::shell::promote::environment_promotions(
+        store,
+        &|environment, _path| {
+            super::project::resolve_environment_with(inventory, environment.as_str(), request)
+                .map(|resolved| resolved.location)
+        },
+        &declared_paths(inventory),
+        entry,
+        snapshot,
+    )
 }

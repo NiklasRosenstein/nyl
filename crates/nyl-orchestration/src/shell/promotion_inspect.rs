@@ -20,6 +20,7 @@ use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateHistory, StateSto
 use nyl_core::orchestration::promotion::{EvidenceLevel, PromotionFrom, PromotionRecord, PromotionRequest};
 use nyl_core::orchestration::state::{ApprovalIdentity, SourceChoice, StateLocation};
 use nyl_core::orchestration::time::Timestamp;
+use nyl_core::resources::environment::PromotedSource;
 use nyl_core::resources::promotion::{PathEvidence, PromotionPath};
 use serde_json::Value;
 
@@ -73,6 +74,9 @@ pub struct CandidatesRequest<'a> {
     pub target_units: &'a BTreeSet<UnitName>,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
+    /// The target's `source.fromPromotion` as the entry worktree declares
+    /// it: with `record: source`, its block is the path's current record.
+    pub promoted: Option<&'a PromotedSource>,
     pub now: Timestamp,
 }
 
@@ -111,13 +115,14 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
             reason: None,
         },
     };
+    let records = crate::rules::sources::recorded_promotions(&snapshot, request.promoted);
     let input = PromotionInput {
         path,
         source,
         history: &history,
         target_units: request.target_units,
         promotes_source: request.promotes_source,
-        target_records: &snapshot.promotions,
+        target_records: &records,
         sequence: 0,
         now: request.now,
         request: &ask,
@@ -128,11 +133,11 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         Ok(Decision::Unchanged(record)) => (states_named(&record), None),
         Err(refusal) => (Vec::new(), Some(refusal.finding)),
     };
-    let current = path.name().ok().and_then(|name| snapshot.promotions.get(&name));
+    let current = path.name().ok().and_then(|name| records.get(&name));
     let promoted = current.map(states_named).unwrap_or_default();
     // What the target runs: the path's record, when the last run applied it
     // and no newer one waits (the lineage `status` shows).
-    let running = promotion::lineage(&snapshot)
+    let running = promotion::lineage_with(&snapshot, request.promoted)
         .filter(|lineage| {
             lineage.path == path.metadata.name && lineage.pending_sequence.is_none() && lineage.from.is_some()
         })
@@ -162,7 +167,15 @@ fn states_named(record: &PromotionRecord) -> Vec<CommitId> {
 
 /// `nyl get promotions -e <env>`: the environment's PromotionRecords, the
 /// one its last run applied, and every promotion its desired history records.
-pub fn promotions(store: &dyn StateStore, location: &StateLocation, environment: &EnvironmentName) -> PromotionsReport {
+/// With `record: source`, `promoted` (the Environment's `source.fromPromotion`
+/// as the entry worktree declares it) supplies the path's record; its earlier
+/// records are commits in source, not in the desired history.
+pub fn promotions(
+    store: &dyn StateStore,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+    promoted: Option<&PromotedSource>,
+) -> PromotionsReport {
     let report = PromotionsReport::new(environment.clone());
     let (snapshot, history) = match read(store, location, environment) {
         Ok(read) => read,
@@ -179,7 +192,9 @@ pub fn promotions(store: &dyn StateStore, location: &StateLocation, environment:
             }),
             _ => None,
         });
-    let mut records: Vec<PromotionRecord> = snapshot.promotions.into_values().collect();
+    let mut records: Vec<PromotionRecord> = crate::rules::sources::recorded_promotions(&snapshot, promoted)
+        .into_values()
+        .collect();
     records.sort_by_key(|record| std::cmp::Reverse(record.sequence));
     report.promotions = records;
     report.history = history

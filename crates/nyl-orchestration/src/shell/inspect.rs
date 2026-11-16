@@ -25,7 +25,7 @@ use crate::run_report::{EnvironmentRunReport, ReportKind, RunReport, TeardownRea
 /// the clone's local state branches diverged from the remote. Through a
 /// the offline store it reports local state.
 pub fn status(context: &Context<'_>, environment: &EnvironmentName, location: &StateLocation) -> RunReport {
-    status_with(context, environment, location, None, &Peers::default())
+    status_with(context, environment, location, None, &Peers::default(), None)
 }
 
 /// The snapshots of the other environments whose observed values the active
@@ -57,13 +57,17 @@ pub fn producer_snapshots(
 /// cross-environment references, without a lease, and shows a unit whose
 /// resolved value differs from the producer's current one as `ready`. A
 /// producer that cannot be read is an error of the status
-/// ([`producer_snapshots`]).
+/// ([`producer_snapshots`]). `promoted` is the Environment's
+/// `source.fromPromotion` as the entry worktree declares it: with `record:
+/// source` its block, when newer than what the last run applied, is the
+/// lineage's pending record ([`crate::rules::promotion::lineage_with`]).
 pub fn status_with(
     context: &Context<'_>,
     environment: &EnvironmentName,
     location: &StateLocation,
     drivers: Option<&DriverSet>,
     peers: &Peers,
+    promoted: Option<&nyl_core::resources::environment::PromotedSource>,
 ) -> RunReport {
     let read = || {
         let snapshot = context
@@ -86,6 +90,7 @@ pub fn status_with(
             &readiness.unwrap_or_default(),
             &producers,
         );
+        report.promotion = crate::rules::promotion::lineage_with(&snapshot, promoted);
         for (name, unit) in &mut report.units {
             unit.receipt_nyl_version = snapshot.desired.get(name).and_then(|desired| {
                 crate::rules::unit_state::receipt_nyl_version(desired, snapshot.observed.get(name), &context.version)
@@ -233,6 +238,10 @@ pub fn get_value(
         .environment
         .as_ref()
         .and_then(|record| crate::rules::sources::promoted_source_paths(&record.spec));
+    // `nyl get` shows what is recorded and runs nothing, so it reads the
+    // records without refusing or checking a block, as other readers of
+    // state do; runs read them through `shell::promote::environment_promotions`.
+    let promotions = crate::rules::sources::recorded_promotions(snapshot, None);
     let resolve = |desired: &BTreeMap<UnitName, DesiredUnit>| {
         resolve_reference(
             &ReferenceView {
@@ -248,7 +257,7 @@ pub fn get_value(
                 run: None,
                 produced_in_run: &produced,
                 previous: &snapshot.desired,
-                promotions: &snapshot.promotions,
+                promotions: &promotions,
                 source_paths: source_paths.as_ref(),
             },
             source,
