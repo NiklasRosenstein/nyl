@@ -3,16 +3,9 @@
 
 mod scenario;
 
-use std::collections::BTreeMap;
-
 use scenario::format::{PublicationDrivers, StepKind};
 use scenario::world::World;
-use scenario::REACHED;
-
-/// Scenarios the harness has reached that cannot run yet, with what they
-/// wait for. A scenario leaves this list in the change that makes it run, so
-/// none is skipped silently: every reached scenario runs, or is pending.
-const PENDING: [(&str, &str); 0] = [];
+use scenario::{PENDING, REACHED};
 
 /// Every reached scenario that is not pending runs in tier 1 and passes its
 /// checks.
@@ -20,13 +13,10 @@ const PENDING: [(&str, &str); 0] = [];
 fn test_reached_scenarios_pass_in_tier_one() {
     let (loaded, problems) = scenario::load_all();
     assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let pending = PENDING.into_iter().collect::<BTreeMap<_, _>>();
-    let runnable = loaded
-        .iter()
-        .filter(|loaded| loaded.scenario.milestone <= REACHED)
+    let runnable = scenario::selected(&loaded)
+        .into_iter()
         .filter(|loaded| loaded.scenario.tiers.contains(&1))
         .filter(|loaded| loaded.scenario.publication != PublicationDrivers::Real)
-        .filter(|loaded| !pending.contains_key(loaded.name.as_str()))
         .collect::<Vec<_>>();
     assert!(!runnable.is_empty(), "no scenario runs in tier 1");
     let failures = std::thread::scope(|scope| {
@@ -54,9 +44,9 @@ fn test_reached_scenarios_pass_in_tier_one() {
 fn test_reached_scenarios_pass_in_tier_two() {
     let (loaded, problems) = scenario::load_all();
     assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let runnable = loaded
-        .iter()
-        .filter(|loaded| loaded.scenario.milestone <= REACHED && loaded.scenario.tiers.contains(&2))
+    let runnable = scenario::selected(&loaded)
+        .into_iter()
+        .filter(|loaded| loaded.scenario.tiers.contains(&2))
         .collect::<Vec<_>>();
     assert!(!runnable.is_empty(), "no scenario runs in tier 2");
     let failures = std::thread::scope(|scope| {
@@ -114,27 +104,16 @@ fn test_every_scenario_follows_the_format() {
 #[test]
 fn test_reached_scenarios_run_or_are_listed_as_pending() {
     let (loaded, _) = scenario::load_all();
-    let pending = PENDING.into_iter().collect::<BTreeMap<_, _>>();
-    let reached = loaded
-        .iter()
-        .filter(|loaded| loaded.scenario.milestone <= REACHED)
-        .map(|loaded| loaded.name.as_str())
-        .collect::<Vec<_>>();
     // Every reached scenario runs in tier 1 (test_reached_scenarios_pass_in_tier_one)
-    // or is pending; a pending one must still be reached.
+    // or is pending; a pending one must exist and be reached.
     for loaded in loaded.iter().filter(|loaded| loaded.scenario.milestone <= REACHED) {
         assert!(
-            pending.contains_key(loaded.name.as_str()) || loaded.scenario.tiers.contains(&1),
+            PENDING.iter().any(|(name, _)| *name == loaded.name) || loaded.scenario.tiers.contains(&1),
             "{} is reached at {REACHED} but neither runs in tier 1 nor is listed as pending",
             loaded.name
         );
     }
-    for name in pending.keys() {
-        assert!(
-            reached.contains(name),
-            "{name} is listed as pending but not reached at {REACHED}"
-        );
-    }
+    scenario::validate_pending(&loaded, REACHED, &PENDING).unwrap();
     // Step kinds of later milestones are validated now and executed from their milestone.
     for loaded in &loaded {
         if loaded.scenario.milestone <= REACHED {
@@ -157,11 +136,7 @@ fn test_reached_scenarios_run_or_are_listed_as_pending() {
 fn test_running_scenarios_parse_with_the_command_line() {
     let (loaded, problems) = scenario::load_all();
     assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let pending = PENDING.into_iter().collect::<BTreeMap<_, _>>();
-    for loaded in loaded
-        .iter()
-        .filter(|loaded| loaded.scenario.milestone <= REACHED && !pending.contains_key(loaded.name.as_str()))
-    {
+    for loaded in scenario::selected(&loaded) {
         for (index, step) in loaded.scenario.steps.iter().enumerate() {
             if let Some(args) = &step.nyl {
                 if let Err(error) = scenario::format::validate_arguments(args) {
@@ -882,9 +857,8 @@ fn test_summary_lists_and_lease_break_are_read_from_the_summary() {
 fn test_reached_scenarios_pass_in_tier_one_with_the_real_publication_driver() {
     let (loaded, problems) = scenario::load_all();
     assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
-    let runnable = loaded
-        .iter()
-        .filter(|loaded| loaded.scenario.milestone <= REACHED)
+    let runnable = scenario::selected(&loaded)
+        .into_iter()
         .filter(|loaded| loaded.scenario.tiers.contains(&1))
         .filter(|loaded| loaded.scenario.publication != PublicationDrivers::Fake)
         .collect::<Vec<_>>();
@@ -975,4 +949,489 @@ fn test_publication_drivers_default_to_both_and_real_narrows_them() {
     );
     let bad = "contract: design/reference-scenarios.md#tiers\nmilestone: M3\npublication: neither\nsteps: []\n";
     assert!(serde_saphyr::from_str::<scenario::format::Scenario>(bad).is_err());
+}
+
+/// One selection function decides what every runner runs: a pending scenario
+/// is in none of them, whatever its tiers and publication drivers, and every
+/// other reached scenario is in all that its tiers and drivers admit. Catches a
+/// runner that filters on the milestone alone and so runs a scenario that
+/// cannot pass yet.
+#[test]
+fn test_a_pending_scenario_runs_in_no_runner() {
+    let (loaded, problems) = scenario::load_all();
+    assert!(problems.is_empty(), "invalid scenarios:\n{}", problems.join("\n"));
+    let selected = scenario::selected(&loaded)
+        .into_iter()
+        .map(|loaded| loaded.name.as_str())
+        .collect::<Vec<_>>();
+    for (name, _) in PENDING {
+        assert!(!selected.contains(&name), "{name} is pending yet selected to run");
+    }
+    // M6 is reached and every M6 scenario is listed, so none of them runs;
+    // the earlier ones all do.
+    for loaded in &loaded {
+        let pending = PENDING.iter().any(|(name, _)| *name == loaded.name);
+        assert_eq!(
+            selected.contains(&loaded.name.as_str()),
+            loaded.scenario.milestone <= REACHED && !pending,
+            "{}",
+            loaded.name
+        );
+    }
+    assert!(selected.contains(&"reference/platform"));
+
+    // The same holds for a synthetic list over the real scenarios, where
+    // a reached scenario is made pending.
+    let pending = [("reference/platform", "synthetic")];
+    let runs = scenario::runnable(&loaded, REACHED, &pending);
+    assert!(runs.iter().all(|loaded| loaded.name != "reference/platform"));
+    assert!(runs.iter().any(|loaded| loaded.name == "walkthroughs/drift"));
+    // A lower REACHED excludes the M6 scenarios without any list.
+    let lower = scenario::runnable(&loaded, scenario::format::Milestone(5), &[]);
+    assert!(lower.iter().all(|loaded| loaded.scenario.milestone.0 <= 5));
+    assert!(lower.len() < scenario::runnable(&loaded, REACHED, &[]).len());
+}
+
+/// The pending list cannot rot: a name that is no scenario, or a scenario
+/// above the reached milestone, is an error that names the entry.
+#[test]
+fn test_pending_entries_must_name_reached_scenarios() {
+    let (loaded, _) = scenario::load_all();
+    scenario::validate_pending(&loaded, REACHED, &[("reference/platform", "ok")]).unwrap();
+    let missing = scenario::validate_pending(&loaded, REACHED, &[("reference/renamed-away", "gone")]).unwrap_err();
+    assert!(
+        missing.contains("reference/renamed-away") && missing.contains("no such scenario"),
+        "{missing}"
+    );
+    let above = scenario::validate_pending(
+        &loaded,
+        scenario::format::Milestone(5),
+        &[("reference/promotion", "too early"), ("reference/platform", "fine")],
+    )
+    .unwrap_err();
+    assert!(
+        above.contains("reference/promotion") && above.contains("above M5"),
+        "{above}"
+    );
+    assert!(!above.contains("reference/platform"), "{above}");
+}
+
+// ---------------------------------------------------------------------------
+// Argument placeholders
+// ---------------------------------------------------------------------------
+
+fn resolve_with(text: &str) -> Result<String, String> {
+    use scenario::runner::{expand_placeholders, Resolver};
+    let state = |id: &str| match id {
+        "r1" => Ok("d1".to_owned()),
+        "obs-only" => Ok("o2".to_owned()),
+        other => Err(format!("no nyl step with id {other} has run")),
+    };
+    let observed = |id: &str| match id {
+        "r1" => Ok("o1".to_owned()),
+        other => Err(format!("the step {other} wrote no observed-state commit")),
+    };
+    let commit = |revision: &str| match revision {
+        "main" => Ok("c0ffee".to_owned()),
+        "main~1" => Ok("beef".to_owned()),
+        other => Err(format!("{other:?} names no commit of project.git")),
+    };
+    let plan_digest = |environment: &str, unit: &str| Ok(format!("sha256:{environment}-{unit}"));
+    expand_placeholders(
+        text,
+        &Resolver {
+            state: &state,
+            observed: &observed,
+            commit: &commit,
+            plan_digest: &plan_digest,
+        },
+    )
+}
+
+/// Each placeholder is replaced by its resolver's value wherever it appears in
+/// an argument, several to one argument, and a failed lookup names the
+/// placeholder that failed. Catches a placeholder passed to `nyl` verbatim.
+#[test]
+fn test_placeholders_are_replaced_by_their_resolvers() {
+    assert_eq!(
+        resolve_with("--state-revision=%STATE(r1)%").unwrap(),
+        "--state-revision=d1"
+    );
+    assert_eq!(resolve_with("%OBSERVED(r1)%").unwrap(), "o1");
+    assert_eq!(resolve_with("%COMMIT(main~1)%").unwrap(), "beef");
+    assert_eq!(
+        resolve_with("database=%PLAN-DIGEST(prod/database)%").unwrap(),
+        "database=sha256:prod-database"
+    );
+    assert_eq!(
+        resolve_with("%COMMIT(main)%..%COMMIT(main)% %STATE(r1)%/%OBSERVED(r1)%").unwrap(),
+        "c0ffee..c0ffee d1/o1"
+    );
+    assert_eq!(
+        resolve_with("no placeholder, 100% sure, %PROJECT_URL%").unwrap(),
+        "no placeholder, 100% sure, %PROJECT_URL%"
+    );
+    let unknown = resolve_with("%STATE(nope)%").unwrap_err();
+    assert!(
+        unknown.contains("%STATE(nope)%") && unknown.contains("no nyl step with id nope"),
+        "{unknown}"
+    );
+    let unobserved = resolve_with("x %OBSERVED(obs-only)%").unwrap_err();
+    assert!(unobserved.contains("wrote no observed-state commit"), "{unobserved}");
+    let revision = resolve_with("%COMMIT(nowhere)%").unwrap_err();
+    assert!(revision.contains("names no commit"), "{revision}");
+    assert!(resolve_with("%BOGUS(x)%").unwrap_err().contains("unknown placeholder"));
+}
+
+/// The runner resolves placeholders against the real run: `%STATE%` and
+/// `%OBSERVED%` are the commits an earlier step wrote (`get --state-revision`
+/// accepts only a real state commit), `%COMMIT%` a revision of `project.git`
+/// resolved when the step runs, and `%PLAN-DIGEST%` the digest `plan` reports.
+#[test]
+fn test_the_runner_resolves_placeholders_against_the_run() {
+    let run = |steps: &str| {
+        let text = format!(
+            "contract: design/reference-scenarios.md#scenario-1-platform-environment\nmilestone: M6\ntiers: [1]\nsteps:\n  - branch: {{name: deploy, from: main}}\n  - nyl: [state, init, -e, dev]\n    exit: 0\n{steps}"
+        );
+        run_inline("reference/platform", "inline/placeholders", &text)
+    };
+    run(
+        "  - nyl: [plan, -e, dev, --unit, network]\n    exit: 0\n    expect:\n      get:\n        args: [plan, -e, dev, --unit, network, -o, json]\n        json:\n          /environments/0/units/network/changeDigest: '%PLAN-DIGEST(dev/network)%'\n  - nyl: [reconcile, -e, dev]\n    id: r1\n    exit: 0\n  - nyl: [get, units, -e, dev, --state-revision, '%STATE(r1)%']\n    exit: 0\n  - nyl: [get, units, -e, dev, --state-revision, '%OBSERVED(r1)%']\n    exit: 0\n",
+    )
+    .unwrap();
+    // A literal placeholder is no state commit, so it is the substitution that makes these pass.
+    let wrong = run(
+        "  - nyl: [reconcile, -e, dev]\n    id: r1\n    exit: 0\n  - nyl: [get, units, -e, dev, --state-revision, '%COMMIT(main)%']\n    exit: 0\n",
+    )
+    .unwrap_err();
+    assert!(
+        wrong.contains("exit 1 instead of 0") && wrong.contains("is not a commit of the environment"),
+        "{wrong}"
+    );
+    let missing =
+        run("  - nyl: [get, units, -e, dev, --state-revision, '%COMMIT(no-such-branch)%']\n    exit: 1\n").unwrap_err();
+    assert!(
+        missing.contains("%COMMIT(no-such-branch)%") && missing.contains("names no commit"),
+        "{missing}"
+    );
+    // A step that failed wrote no state commit for a later step to name.
+    let unwritten = run(
+        "  - nyl: [reconcile, -e, nope]\n    id: r1\n    exit: 1\n  - nyl: [get, units, -e, dev, --state-revision, '%STATE(r1)%']\n    exit: 1\n",
+    )
+    .unwrap_err();
+    assert!(unwritten.contains("wrote no state commit"), "{unwritten}");
+}
+
+// ---------------------------------------------------------------------------
+// The `promotion` expectation
+// ---------------------------------------------------------------------------
+
+const PROMOTION_EXPECTATION: &str = r#"
+path: dev-to-prod
+sequence: 3
+sourceCommit: main
+from: {environment: dev, run: r1, desiredCommit: '%STATE(r1)%', observedCommit: '%OBSERVED(r1)%'}
+requested: {reason: Release 1}
+values:
+  webImage:
+    equals: [get, artifact, web-image/image, -e, dev, --pointer, /reference]
+  tag:
+    equals: v1
+    state: r2
+evidence: {level: attested, override: false, attestations: [environment/qa, web/accepted]}
+superseded:
+  - {commit: main~1, reason: Fix merged}
+artifactsVerified: true
+ignoredAttestations:
+  - {attestation: environment/qa, reason: Behind a flag}
+"#;
+
+fn promotion_record() -> serde_json::Value {
+    serde_json::json!({
+        "path": "dev-to-prod",
+        "sequence": 3,
+        "sourceCommit": "c0ffee",
+        "from": {"environment": "dev", "run": "run-1", "desiredCommit": "d1", "observedCommit": "o1"},
+        "values": {
+            "webImage": {"value": "registry/web@sha256:aaa", "select": {"unit": "web-image"}},
+            "tag": {"value": "v1", "state": {"run": "run-2", "desiredCommit": "d2"}},
+        },
+        "evidence": {
+            "level": "attested",
+            "attestations": [{"scope": "environment", "name": "qa"}, {"scope": "web", "name": "accepted"}],
+            "override": null,
+        },
+        "ignoredAttestations": [{"scope": "environment", "name": "qa", "reason": "Behind a flag"}],
+        "superseded": [{"commit": "beef", "reason": "Fix merged"}],
+        "artifactsVerified": true,
+        "requested": {"by": "someone", "reason": "Release 1"},
+    })
+}
+
+fn check_promotion(expectation: &str, record: &serde_json::Value, path_from: Option<&str>) -> Result<(), String> {
+    use scenario::runner::{check_promotion_record, expand_placeholders, PromotionLookups, Resolver};
+    let expected: scenario::format::PromotionExpectation = serde_saphyr::from_str(expectation).unwrap();
+    let run_of = |id: &str| match id {
+        "r1" => Ok("run-1".to_owned()),
+        "r2" => Ok("run-2".to_owned()),
+        other => Err(format!("no step {other}")),
+    };
+    let get = |args: &[String]| {
+        assert_eq!(args[0], "get");
+        // The value prints, as `nyl get` does for a string.
+        Ok((serde_json::Value::Null, "registry/web@sha256:aaa".to_owned()))
+    };
+    let state = |id: &str| Ok(format!("d{}", &id[1..]));
+    let observed = |id: &str| Ok(format!("o{}", &id[1..]));
+    let commit = |revision: &str| match revision {
+        "main" => Ok("c0ffee".to_owned()),
+        "main~1" => Ok("beef".to_owned()),
+        other => Err(format!("{other:?} names no commit")),
+    };
+    let plan = |_: &str, _: &str| Err("no plan".to_owned());
+    let resolver = Resolver {
+        state: &state,
+        observed: &observed,
+        commit: &commit,
+        plan_digest: &plan,
+    };
+    let expand = |text: &str| expand_placeholders(text, &resolver);
+    check_promotion_record(
+        &expected,
+        record,
+        &PromotionLookups {
+            path_from,
+            run_of: &run_of,
+            get: &get,
+            expand: &expand,
+            commit: &commit,
+        },
+    )
+}
+
+fn changed(pointer: &str, value: serde_json::Value) -> serde_json::Value {
+    let mut record = promotion_record();
+    let (parent, key) = pointer.rsplit_once('/').unwrap();
+    let parent = record.pointer_mut(parent).unwrap();
+    match parent {
+        serde_json::Value::Array(items) => items[key.parse::<usize>().unwrap()] = value,
+        other => {
+            other.as_object_mut().unwrap().insert(key.to_owned(), value);
+        }
+    }
+    record
+}
+
+/// Every field of the `promotion` expectation is compared with the record,
+/// including `from.observedCommit`, `requested.reason`, a value's own state,
+/// the evidence's override and attestations, and the ignored ones. One
+/// differing field fails and names that field.
+#[test]
+fn test_promotion_expectation_checks_every_field_of_the_record() {
+    use serde_json::json;
+    check_promotion(PROMOTION_EXPECTATION, &promotion_record(), None).unwrap();
+    // A PromotionRecord resource keeps its fields under `spec`.
+    let resource = json!({"apiVersion": "gitops.nyl/v1", "kind": "PromotionRecord", "spec": promotion_record()});
+    check_promotion(PROMOTION_EXPECTATION, &resource, None).unwrap();
+
+    let cases = [
+        ("/path", json!("other"), "path is"),
+        ("/sequence", json!(4), "sequence is 4 instead of 3"),
+        ("/sourceCommit", json!("deadbeef"), "sourceCommit"),
+        ("/from/environment", json!("stage"), "from.environment"),
+        ("/from/run", json!("run-9"), "from.run"),
+        ("/from/desiredCommit", json!("d9"), "from.desiredCommit"),
+        ("/from/observedCommit", json!("o9"), "from.observedCommit"),
+        (
+            "/values/webImage/value",
+            json!("registry/web@sha256:bbb"),
+            "values.webImage",
+        ),
+        ("/values/tag/value", json!("v2"), "values.tag"),
+        ("/values/tag/state/run", json!("run-9"), "values.tag.state.run"),
+        (
+            "/values/webImage/state",
+            json!({"run": "run-2"}),
+            "values.webImage names its own state",
+        ),
+        ("/values/extra", json!({"value": 1}), "values are"),
+        ("/evidence/level", json!("published"), "evidence.level"),
+        ("/evidence/override", json!({"reason": "late"}), "evidence.override"),
+        (
+            "/evidence/attestations",
+            json!([{"scope": "environment", "name": "qa"}]),
+            "evidence.attestations",
+        ),
+        ("/superseded", json!([]), "superseded"),
+        ("/superseded/0/reason", json!("Other"), "superseded"),
+        ("/superseded/0/commit", json!("c0ffee"), "superseded"),
+        ("/artifactsVerified", json!(false), "artifactsVerified"),
+        ("/requested/reason", json!("Release 2"), "requested.reason"),
+        ("/ignoredAttestations", json!([]), "ignoredAttestations"),
+        ("/ignoredAttestations/0/reason", json!("Because"), "ignoredAttestations"),
+        ("/ignoredAttestations/0/name", json!("smoke"), "ignoredAttestations"),
+    ];
+    for (pointer, value, expected) in cases {
+        let error = check_promotion(PROMOTION_EXPECTATION, &changed(pointer, value), None)
+            .expect_err(&format!("{pointer} differs but passed"));
+        assert!(
+            error.contains(expected) && error.contains("dev-to-prod"),
+            "{pointer}: {error}"
+        );
+    }
+}
+
+/// A key the expectation leaves out is not checked, `sourceCommit: null` means
+/// the record has none, a value taken from `from` names no state, and
+/// `from.environment` defaults to the path's source.
+#[test]
+fn test_promotion_expectation_checks_only_the_keys_it_gives() {
+    use serde_json::json;
+    let minimal = "path: dev-to-prod\nfrom: {run: r1}\n";
+    let mut junk = promotion_record();
+    junk["sequence"] = json!(99);
+    junk["values"] = json!({"anything": {"value": 1}});
+    junk["evidence"]["level"] = json!("published");
+    check_promotion(minimal, &junk, None).unwrap();
+    // Without `from.environment`, the path's own source is expected.
+    check_promotion(minimal, &promotion_record(), Some("dev")).unwrap();
+    let error = check_promotion(minimal, &promotion_record(), Some("stage")).unwrap_err();
+    assert!(
+        error.contains("from.environment is \"dev\" instead of \"stage\""),
+        "{error}"
+    );
+    // The step the expectation names must have run.
+    let unknown = check_promotion("path: dev-to-prod\nfrom: {run: nope}\n", &promotion_record(), None).unwrap_err();
+    assert!(
+        unknown.contains("from.run") && unknown.contains("no step nope"),
+        "{unknown}"
+    );
+
+    let value_only = "path: values\nfrom: {run: r1}\nsourceCommit: null\n";
+    let mut record = promotion_record();
+    record["path"] = json!("values");
+    record.as_object_mut().unwrap().remove("sourceCommit");
+    check_promotion(value_only, &record, None).unwrap();
+    record["sourceCommit"] = json!(null);
+    check_promotion(value_only, &record, None).unwrap();
+    record["sourceCommit"] = json!("c0ffee");
+    let error = check_promotion(value_only, &record, None).unwrap_err();
+    assert!(error.contains("sourceCommit is \"c0ffee\" instead of null"), "{error}");
+    // Empty lists are exact too: nothing superseded, nothing ignored.
+    let empty = "path: dev-to-prod\nfrom: {run: r1}\nsuperseded: []\nignoredAttestations: []\nevidence: {level: attested, attestations: []}\n";
+    assert!(check_promotion(empty, &promotion_record(), None).is_err());
+    let mut bare = promotion_record();
+    bare["superseded"] = json!([]);
+    bare["ignoredAttestations"] = json!([]);
+    bare["evidence"]["attestations"] = json!([]);
+    check_promotion(empty, &bare, None).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Counting a `promote` step's commits
+// ---------------------------------------------------------------------------
+
+fn platform_documents(scenario: &str) -> Vec<serde_json::Value> {
+    let text =
+        std::fs::read_to_string(scenario::scenarios_root().join(format!("{scenario}/project/nyl/platform.yaml")))
+            .unwrap();
+    serde_saphyr::from_multiple(&text).unwrap()
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.split(' ').map(str::to_owned).collect()
+}
+
+/// A `promote` step counts the refs of the environment its path promotes into,
+/// read from the PromotionPath; `environment_of` alone would count dev's, which
+/// the step never writes, and `commits: {desired: 0, observed: 0}` would prove
+/// nothing. Other steps keep counting their `-e`, or dev.
+#[test]
+fn test_a_promote_step_counts_the_target_environments_refs() {
+    use scenario::runner::{counted_environment, promotion_target};
+    let documents = platform_documents("reference/promotion");
+    let promote = words("promote dev-to-prod --reason Release");
+    let path = promotion_target(&documents, &promote);
+    let target = path.as_ref().unwrap();
+    assert_eq!((target.from.as_deref(), target.to.as_str()), (Some("dev"), "prod"));
+    assert_eq!(counted_environment(&promote, Some(&path)), "prod");
+    // The path may follow its options.
+    let dry = promotion_target(&documents, &words("promote --dry-run dev-to-prod")).unwrap();
+    assert_eq!(dry.to, "prod");
+    // The hotfix scenario's second path promotes from another environment into prod too.
+    let hotfix = promotion_target(
+        &platform_documents("reference/hotfix"),
+        &words("promote hotfix-to-prod"),
+    )
+    .unwrap();
+    assert_eq!(
+        (hotfix.from.as_deref(), hotfix.to.as_str()),
+        (Some("prod-hotfix"), "prod")
+    );
+    // Not a promote step: its `-e`, or dev.
+    assert_eq!(counted_environment(&words("reconcile -e prod"), None), "prod");
+    assert_eq!(counted_environment(&words("reconcile"), None), "dev");
+    // A path that cannot be read is an error, not a silent count of dev's refs.
+    let missing = promotion_target(&documents, &words("promote no-such-path"));
+    assert!(missing.as_ref().unwrap_err().contains("0 of the"), "{missing:?}");
+    assert_eq!(
+        counted_environment(&words("promote no-such-path"), Some(&missing)),
+        "dev"
+    );
+}
+
+/// Every state ref but the target's own must be unchanged after a `promote`
+/// step: the source environment's branches, other environments', and their
+/// leases. A moved, added, or removed ref is reported by name.
+#[test]
+fn test_a_promote_step_leaves_every_other_state_ref_unchanged() {
+    use scenario::runner::unchanged_violations;
+    let refs = |entries: &[(&str, &str)]| {
+        entries
+            .iter()
+            .map(|(name, commit)| ((*name).to_owned(), (*commit).to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = refs(&[
+        ("refs/heads/nyl/dev/desired", "a1"),
+        ("refs/heads/nyl/dev/observed", "b1"),
+        ("refs/heads/nyl/prod/desired", "c1"),
+        ("refs/nyl/prod/lease", "l1"),
+        ("refs/nyl/dev/lease", "l2"),
+        ("refs/heads/nyl/staging/desired", "s1"),
+    ]);
+    // The target's desired ref moves and its lease is taken and released.
+    let promoted = refs(&[
+        ("refs/heads/nyl/dev/desired", "a1"),
+        ("refs/heads/nyl/dev/observed", "b1"),
+        ("refs/heads/nyl/prod/desired", "c2"),
+        ("refs/heads/nyl/prod/observed", "c3"),
+        ("refs/nyl/dev/lease", "l2"),
+        ("refs/heads/nyl/staging/desired", "s1"),
+    ]);
+    assert_eq!(unchanged_violations(&before, &promoted, "prod"), Vec::<String>::new());
+    // The source moved: a promotion that wrote to dev.
+    let mut moved = promoted.clone();
+    moved.insert("refs/heads/nyl/dev/desired".to_owned(), "a2".to_owned());
+    assert_eq!(
+        unchanged_violations(&before, &moved, "prod"),
+        ["refs/heads/nyl/dev/desired"]
+    );
+    // A ref that appeared, and one that disappeared, outside the target.
+    let mut added = promoted.clone();
+    added.insert("refs/heads/nyl/dev/extra".to_owned(), "x".to_owned());
+    added.remove("refs/nyl/dev/lease");
+    assert_eq!(
+        unchanged_violations(&before, &added, "prod"),
+        ["refs/heads/nyl/dev/extra", "refs/nyl/dev/lease"]
+    );
+    // Counting dev as the target would have excused exactly the source's change.
+    assert!(!unchanged_violations(&before, &moved, "dev").contains(&"refs/heads/nyl/dev/desired".to_owned()));
+    // A target whose name prefixes another environment's does not excuse it.
+    let mut prefixed = promoted;
+    prefixed.insert("refs/heads/nyl/prod-hotfix/desired".to_owned(), "h".to_owned());
+    assert_eq!(
+        unchanged_violations(&before, &prefixed, "prod"),
+        ["refs/heads/nyl/prod-hotfix/desired"]
+    );
 }

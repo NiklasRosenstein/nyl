@@ -22,7 +22,75 @@ use std::path::{Path, PathBuf};
 use format::{Milestone, Scenario};
 
 /// The milestone this harness has reached.
-pub const REACHED: Milestone = Milestone(5);
+pub const REACHED: Milestone = Milestone(6);
+
+/// Scenarios of the reached milestone that cannot pass yet, with what they
+/// wait for. A scenario leaves this list in the change that turns it green,
+/// so none is skipped silently: every reached scenario runs, or is pending.
+/// [`runnable`] applies it, and every runner (tier 1 with each publication
+/// driver, and tier 2) selects its scenarios through that one function.
+pub const PENDING: [(&str, &str); 5] = [
+    (
+        "reference/promotion",
+        "m6/inspect: promote, attest, and the promotion reports",
+    ),
+    (
+        "reference/hotfix",
+        "m6/supersede: hotfix paths and NYL-PROMOTE-SUPERSEDES",
+    ),
+    (
+        "walkthroughs/promotion-record-source",
+        "m6/record-source: record: source on the Environment",
+    ),
+    (
+        "walkthroughs/stale-promotion-evidence",
+        "m6/inspect: promote, attest, and the promotion reports",
+    ),
+    (
+        "walkthroughs/value-only-promotion",
+        "m6/value-only: a path that promotes only values",
+    ),
+];
+
+/// The scenarios a runner runs: those `reached` that are not in `pending`.
+/// A runner narrows the result by tier and publication driver, never by
+/// milestone or pending list.
+pub fn runnable<'a>(loaded: &'a [Loaded], reached: Milestone, pending: &[(&str, &str)]) -> Vec<&'a Loaded> {
+    loaded
+        .iter()
+        .filter(|loaded| loaded.scenario.milestone <= reached)
+        .filter(|loaded| !pending.iter().any(|(name, _)| *name == loaded.name))
+        .collect()
+}
+
+/// [`runnable`] with this harness's [`REACHED`] and [`PENDING`].
+pub fn selected(loaded: &[Loaded]) -> Vec<&Loaded> {
+    runnable(loaded, REACHED, &PENDING)
+}
+
+/// Every `pending` entry names a scenario that exists and whose milestone is
+/// reached, so the list cannot keep a scenario that was renamed, deleted, or
+/// not yet in scope.
+pub fn validate_pending(loaded: &[Loaded], reached: Milestone, pending: &[(&str, &str)]) -> Result<(), String> {
+    let mut problems = Vec::new();
+    for (name, reason) in pending {
+        match loaded.iter().find(|loaded| loaded.name == *name) {
+            None => problems.push(format!(
+                "{name} is listed as pending ({reason}) but no such scenario exists"
+            )),
+            Some(found) if found.scenario.milestone > reached => problems.push(format!(
+                "{name} is listed as pending ({reason}) but its milestone {} is above {reached}",
+                found.scenario.milestone
+            )),
+            Some(_) => {}
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
 
 /// A scenario file and its parsed content.
 pub struct Loaded {

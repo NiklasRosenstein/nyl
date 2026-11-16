@@ -833,6 +833,18 @@ pub enum Placeholder {
     PlanDigest { environment: String, unit: String },
 }
 
+impl Placeholder {
+    /// The text a scenario writes for it, which the runner replaces.
+    pub fn token(&self) -> String {
+        match self {
+            Self::State(id) => format!("%STATE({id})%"),
+            Self::Observed(id) => format!("%OBSERVED({id})%"),
+            Self::Commit(revision) => format!("%COMMIT({revision})%"),
+            Self::PlanDigest { environment, unit } => format!("%PLAN-DIGEST({environment}/{unit})%"),
+        }
+    }
+}
+
 /// The first milestone whose harness replaces argument placeholders.
 pub const PLACEHOLDERS_FROM: Milestone = Milestone(6);
 

@@ -36,8 +36,9 @@ use nyl_units::process::ProcessRunner;
 use serde_json::Value;
 
 use super::format::{
-    DeployExpectation, DriverOperation as StepOperation, DriverOutcome, Expect, KeepRefsExpectation, Mention,
-    PointName, ReceiptExpectation, Step, StepKind, UidExpectation, UnitExpectation,
+    placeholders, DeployExpectation, DriverOperation as StepOperation, DriverOutcome, EvidenceLevel, Expect,
+    KeepRefsExpectation, Mention, Placeholder, PointName, PromotionExpectation, ReceiptExpectation, RecordLocation,
+    Step, StepKind, UidExpectation, UnitExpectation,
 };
 use super::world::{git_output, World};
 use super::Loaded;
@@ -245,6 +246,7 @@ fn run_tier(loaded: &Loaded, tier: u8, publication: Publication) -> Result<(), S
             uids: BTreeMap::new(),
             written: BTreeMap::new(),
             paused: BTreeMap::new(),
+            writes: BTreeMap::new(),
         };
         let mut result = loaded.scenario.steps.iter().enumerate().try_for_each(|(index, step)| {
             state
@@ -270,7 +272,15 @@ type Counts = (usize, usize);
 
 /// What a step's checks compare against, taken before its invocation.
 struct Before {
+    /// The step's arguments with their placeholders replaced.
+    args: Vec<String>,
+    /// The environment whose refs `commits` counts: the step's `-e`, else
+    /// dev's, and for `promote` the environment its path promotes into.
     environment: String,
+    /// For `promote`: the path it names, or why that could not be read.
+    promote: Option<Result<PromotionPath, String>>,
+    /// For a `promote` step that checks `commits`: every state ref before it ran.
+    state_refs: Option<BTreeMap<String, String>>,
     counts: Counts,
     /// The commits other steps had written to the environment's refs.
     written: Counts,
@@ -295,6 +305,18 @@ struct RunState<'s, 'scope, 'l> {
     /// while it was paused.
     written: BTreeMap<String, Counts>,
     paused: BTreeMap<String, Paused<'scope, 'l>>,
+    /// What each `nyl` step with an `id` wrote, for the placeholders and the
+    /// `promotion` expectation.
+    writes: BTreeMap<String, StepWrite>,
+}
+
+/// The state commits a `nyl` step with an `id` wrote, and the run that wrote them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StepWrite {
+    desired: Option<String>,
+    observed: Option<String>,
+    /// The `Nyl-Run-Id` trailer of those commits.
+    run: Option<String>,
 }
 
 impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
@@ -391,8 +413,8 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             StepKind::Nyl => {
                 let args = step.nyl.as_ref().expect("kind");
                 let branch = step.at.as_deref().unwrap_or("main");
-                let before = self.before(args, step.expect.as_ref());
-                let outcome = self.invoke(args, branch)?;
+                let before = self.before(args, step.expect.as_ref(), branch)?;
+                let outcome = self.invoke(&before.args, branch)?;
                 self.check(step, step, outcome, &before)?;
             }
             StepKind::Resume => {
@@ -441,8 +463,9 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             .steps
             .iter()
             .find(|candidate| candidate.resume.as_deref() == Some(id.as_str()));
-        let before = self.before(args, resume.and_then(|step| step.expect.as_ref()));
         let branch = step.at.as_deref().unwrap_or("main");
+        let before = self.before(args, resume.and_then(|step| step.expect.as_ref()), branch)?;
+        let args = before.args.clone();
         let (reached_sender, reached) = mpsc::channel();
         let (resume_sender, resume_receiver) = mpsc::channel();
         let world = self.world;
@@ -455,7 +478,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 resume: Mutex::new(resume_receiver),
             };
             let wiring = shared.wiring(&pausing);
-            invoke(world, &wiring, args, branch)
+            invoke(world, &wiring, &args, branch)
         });
         match reached.recv_timeout(REACH_TIMEOUT) {
             Ok(()) => {
@@ -488,17 +511,28 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         }
     }
 
-    /// What `check` compares a step's result against, taken before it runs.
-    fn before(&self, args: &[String], expect: Option<&Expect>) -> Before {
-        let environment = environment_of(args);
-        Before {
+    /// What `check` compares a step's result against, taken before it runs,
+    /// with the placeholders of its arguments replaced.
+    fn before(&self, args: &[String], expect: Option<&Expect>, branch: &str) -> Result<Before, String> {
+        let args = self.expand_all(args, branch)?;
+        let promote = (args.first().map(String::as_str) == Some("promote")).then(|| self.promotion_path(&args, branch));
+        // A `promote` step counts the refs of the environment its path
+        // promotes into; an unreadable path leaves `environment_of`, and a
+        // check that needs the target then fails with the reason.
+        let environment = counted_environment(&args, promote.as_ref());
+        let state_refs =
+            (promote.is_some() && expect.is_some_and(|expect| expect.commits.is_some())).then(|| self.state_refs());
+        Ok(Before {
             counts: self.state_counts(&environment),
             written: self.written.get(&environment).copied().unwrap_or_default(),
             deploy: expect
                 .and_then(|expect| expect.deploy.as_ref())
                 .map(|deploy| self.tree(&deploy.branch)),
             environment,
-        }
+            args,
+            promote,
+            state_refs,
+        })
     }
 
     /// Check the result of the invocation of `invoked` against the `exit`,
@@ -511,7 +545,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         outcome: CommandOutcome,
         before: &Before,
     ) -> Result<(), String> {
-        let args = invoked.nyl.as_ref().expect("kind");
+        let args = &before.args;
         let branch = invoked.at.as_deref().unwrap_or("main");
         let environment = before.environment.as_str();
         // The invocation's own commits: the new ones less those other steps
@@ -525,6 +559,9 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         );
         written.0 += new_commits.0;
         written.1 += new_commits.1;
+        if let Some(id) = &invoked.id {
+            self.record_write(id, environment, new_commits);
+        }
         let describe = || {
             format!(
                 "nyl {}:\nstdout:\n{}\nstderr:\n{}",
@@ -560,6 +597,15 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         } else {
             Vec::new()
         };
+        // A check against the target needs the path's target.
+        if let Some(Err(error)) = &before.promote {
+            if expect.commits.is_some() || expect.promotion.is_some() {
+                return Err(format!(
+                    "the promote step's target environment is unknown ({error}), so its commits and record cannot be checked; {}",
+                    describe()
+                ));
+            }
+        }
         check_results(expect, &outcome.report, (!local).then_some(summaries.as_slice()))
             .map_err(|error| format!("{error}; {}", describe()))?;
         if let Some(commits) = &expect.commits {
@@ -573,6 +619,14 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     describe()
                 ));
             }
+        }
+        if let Some(refs) = &before.state_refs {
+            self.check_other_refs_unchanged(refs, environment)
+                .map_err(|error| format!("{error}; {}", describe()))?;
+        }
+        if let Some(promotion) = &expect.promotion {
+            self.check_promotion(promotion, before, branch, &outcome)
+                .map_err(|error| format!("{error}; {}", describe()))?;
         }
         if let Some(codes) = &expect.codes {
             let mut reported = BTreeSet::new();
@@ -637,21 +691,27 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
             self.check_keep_refs(keep)?;
         }
         if let Some(get) = &expect.get {
-            let outcome = self.invoke(&get.args, branch)?;
-            if let Some(value) = &get.value {
+            let args = self.expand_all(&get.args, branch)?;
+            let outcome = self.invoke(&args, branch)?;
+            let expanded = |value: &Value| match value {
+                Value::String(text) => self.expand(text, branch).map(Value::String),
+                other => Ok(other.clone()),
+            };
+            if let Some(value) = get.value.as_ref().map(expanded).transpose()? {
+                let value = &value;
                 let printed = Value::String(outcome.stdout.trim().to_owned());
                 if &outcome.report != value && &printed != value {
                     return Err(format!(
-                        "get {:?} gave {} (printed {:?}) instead of {value}",
-                        get.args, outcome.report, outcome.stdout
+                        "get {args:?} gave {} (printed {:?}) instead of {value}",
+                        outcome.report, outcome.stdout
                     ));
                 }
             }
             for (pointer, value) in get.json.iter().flatten() {
+                let value = &expanded(value)?;
                 if outcome.report.pointer(pointer) != Some(value) {
                     return Err(format!(
-                        "get {:?}: {pointer} is {:?} instead of {value}",
-                        get.args,
+                        "get {args:?}: {pointer} is {:?} instead of {value}",
                         outcome.report.pointer(pointer)
                     ));
                 }
@@ -681,6 +741,254 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         let wiring = self.shared.wiring(&self.shared.faults);
         invoke(self.world, &wiring, args, branch)
     }
+    /// `text` with its placeholders replaced, as of `branch`.
+    fn expand(&self, text: &str, branch: &str) -> Result<String, String> {
+        let written = |id: &str| {
+            self.writes
+                .get(id)
+                .ok_or_else(|| format!("no nyl step with id {id} has run"))
+        };
+        let state = |id: &str| {
+            let write = written(id)?;
+            write
+                .desired
+                .clone()
+                .or_else(|| write.observed.clone())
+                .ok_or_else(|| format!("the step {id} wrote no state commit"))
+        };
+        let observed = |id: &str| {
+            written(id)?
+                .observed
+                .clone()
+                .ok_or_else(|| format!("the step {id} wrote no observed-state commit"))
+        };
+        let commit = |revision: &str| self.world.try_rev_parse(revision);
+        let plan_digest = |environment: &str, unit: &str| {
+            // Through the binary in tier 2, like every step there.
+            let args = ["plan", "-e", environment, "--unit", unit, "-o", "json"].map(str::to_owned);
+            let outcome = self.invoke(&args, branch)?;
+            let pointer = format!(
+                "/environments/0/units/{}/changeDigest",
+                unit.replace('~', "~0").replace('/', "~1")
+            );
+            outcome
+                .report
+                .pointer(&pointer)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!(
+                        "nyl plan -e {environment} --unit {unit} reported no changeDigest (exit {}); stdout:\n{}\nstderr:\n{}",
+                        outcome.exit, outcome.stdout, outcome.stderr
+                    )
+                })
+        };
+        expand_placeholders(
+            text,
+            &Resolver {
+                state: &state,
+                observed: &observed,
+                commit: &commit,
+                plan_digest: &plan_digest,
+            },
+        )
+    }
+
+    fn expand_all(&self, texts: &[String], branch: &str) -> Result<Vec<String>, String> {
+        texts.iter().map(|text| self.expand(text, branch)).collect()
+    }
+
+    /// Remember the tips the step with `id` wrote to `environment`'s refs.
+    fn record_write(&mut self, id: &str, environment: &str, new_commits: Counts) {
+        let repository = self.world.repository();
+        let tip = |side: &str, count: usize| {
+            (count > 0)
+                .then(|| {
+                    repository
+                        .refname_to_id(&format!("refs/heads/nyl/{environment}/{side}"))
+                        .ok()
+                })
+                .flatten()
+        };
+        let desired = tip("desired", new_commits.0);
+        let observed = tip("observed", new_commits.1);
+        let run = desired.or(observed).and_then(|oid| {
+            let commit = repository.find_commit(oid).ok()?;
+            let message = String::from_utf8_lossy(commit.message_bytes()).into_owned();
+            message
+                .lines()
+                .find_map(|line| line.strip_prefix("Nyl-Run-Id:"))
+                .map(|run| run.trim().to_owned())
+        });
+        self.writes.insert(
+            id.to_owned(),
+            StepWrite {
+                desired: desired.map(|oid| oid.to_string()),
+                observed: observed.map(|oid| oid.to_string()),
+                run,
+            },
+        );
+    }
+
+    /// Every YAML document of the tip of `branch` that parses.
+    fn documents(&self, branch: &str) -> Vec<Value> {
+        let repository = self.world.repository();
+        let Ok(tree) = repository
+            .revparse_single(&format!("refs/heads/{branch}"))
+            .and_then(|object| object.peel_to_tree())
+        else {
+            return Vec::new();
+        };
+        let mut documents = Vec::new();
+        tree.walk(git2::TreeWalkMode::PreOrder, |_, entry| {
+            let yaml = entry
+                .name()
+                .is_ok_and(|name| name.ends_with(".yaml") || name.ends_with(".yml"));
+            if yaml && entry.kind() == Some(git2::ObjectType::Blob) {
+                if let Ok(blob) = repository.find_blob(entry.id()) {
+                    if let Ok(parsed) = serde_saphyr::from_multiple::<Value>(&String::from_utf8_lossy(blob.content())) {
+                        documents.extend(parsed);
+                    }
+                }
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .expect("the tree walks");
+        documents
+    }
+
+    /// The PromotionPath a `promote` step names, as declared at `branch`.
+    fn promotion_path(&self, args: &[String], branch: &str) -> Result<PromotionPath, String> {
+        promotion_target(&self.documents(branch), args)
+    }
+
+    /// Every state ref of `project.git` and the commit it names: the state
+    /// branches and the leases.
+    fn state_refs(&self) -> BTreeMap<String, String> {
+        git_output(
+            &self.world.bare(),
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/nyl/",
+                "refs/nyl/",
+            ],
+        )
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(name, commit)| (name.to_owned(), commit.to_owned()))
+        .collect()
+    }
+
+    /// Promotion only reads its source: no state ref but the target
+    /// environment's own (its branches and its lease) may have changed.
+    fn check_other_refs_unchanged(&self, before: &BTreeMap<String, String>, target: &str) -> Result<(), String> {
+        let after = self.state_refs();
+        let changed = unchanged_violations(before, &after, target);
+        if changed.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "the promote step changed state refs other than {target}'s: {}",
+                changed.join(", ")
+            ))
+        }
+    }
+
+    /// The text of `desired/<relative>` in `environment`'s state: beside its
+    /// own refs, or under its name in a shared state repository.
+    fn desired_file(&self, environment: &str, relative: &str) -> Result<String, String> {
+        let bare = self.world.bare();
+        let refs = git_output(&bare, &["for-each-ref", "--format=%(refname)", "refs/heads/nyl/"]);
+        let candidates = std::iter::once(format!("refs/heads/nyl/{environment}/desired:desired/{relative}")).chain(
+            refs.lines()
+                .map(|reference| format!("{reference}:{environment}/desired/{relative}")),
+        );
+        for candidate in candidates {
+            let shown = std::process::Command::new("git")
+                .current_dir(&bare)
+                .args(["show", &candidate])
+                .output()
+                .map_err(|error| error.to_string())?;
+            if shown.status.success() {
+                return Ok(String::from_utf8_lossy(&shown.stdout).into_owned());
+            }
+        }
+        Err(format!("{environment}'s desired state has no {relative}"))
+    }
+
+    /// The PromotionRecord a `promote` step wrote, where its path keeps it.
+    fn promotion_record(
+        &self,
+        expected: &PromotionExpectation,
+        before: &Before,
+        branch: &str,
+        outcome: &CommandOutcome,
+    ) -> Result<Value, String> {
+        if before.args.iter().any(|arg| arg == "--dry-run") {
+            return outcome
+                .report
+                .pointer("/record")
+                .cloned()
+                .ok_or_else(|| "the dry run's report shows no record".to_owned());
+        }
+        let target = &before.environment;
+        match expected.record {
+            RecordLocation::State => {
+                let text = self.desired_file(target, &format!("promotions/{}.yaml", expected.path))?;
+                serde_saphyr::from_str(&text)
+                    .map_err(|error| format!("{target}'s record of {}: {error}", expected.path))
+            }
+            RecordLocation::Source => self
+                .documents(branch)
+                .into_iter()
+                .filter(|document| {
+                    document.get("kind").and_then(Value::as_str) == Some("Environment")
+                        && document.pointer("/metadata/name").and_then(Value::as_str) == Some(target.as_str())
+                })
+                .find_map(|document| document.pointer("/spec/source/fromPromotion/promoted").cloned())
+                .ok_or_else(|| format!("{branch} has no source.fromPromotion.promoted block on Environment {target}")),
+        }
+    }
+
+    fn check_promotion(
+        &self,
+        expected: &PromotionExpectation,
+        before: &Before,
+        branch: &str,
+        outcome: &CommandOutcome,
+    ) -> Result<(), String> {
+        let record = self.promotion_record(expected, before, branch, outcome)?;
+        let path_from = before
+            .promote
+            .as_ref()
+            .and_then(|path| path.as_ref().ok())
+            .and_then(|path| path.from.clone());
+        let run_of = |id: &str| {
+            self.writes
+                .get(id)
+                .and_then(|write| write.run.clone())
+                .ok_or_else(|| format!("the step {id} wrote no state commit with a run"))
+        };
+        let get = |args: &[String]| {
+            let outcome = self.invoke(&self.expand_all(args, branch)?, branch)?;
+            Ok((outcome.report, outcome.stdout.trim().to_owned()))
+        };
+        let expand = |text: &str| self.expand(text, branch);
+        let commit = |revision: &str| self.world.try_rev_parse(revision);
+        check_promotion_record(
+            expected,
+            &record,
+            &PromotionLookups {
+                path_from: path_from.as_deref(),
+                run_of: &run_of,
+                get: &get,
+                expand: &expand,
+                commit: &commit,
+            },
+        )
+    }
+
     /// Commits on the environment's desired and observed refs.
     fn state_counts(&self, environment: &str) -> (usize, usize) {
         let repository = self.world.repository();
@@ -870,7 +1178,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 let text = match mention {
                     Mention::Text(text) => text.clone(),
                     Mention::Get(args) => {
-                        let outcome = self.invoke(args, branch)?;
+                        let outcome = self.invoke(&self.expand_all(args, branch)?, branch)?;
                         match &outcome.report {
                             Value::String(value) => value.clone(),
                             Value::Null => outcome.stdout.trim().to_owned(),
@@ -1192,6 +1500,390 @@ fn check_status_attributes(unit: &str, expectation: &UnitExpectation, status: &V
         }
     }
     Ok(())
+}
+
+/// What a `promote` step's PromotionPath declares, as far as the harness reads it.
+#[derive(Debug, Clone)]
+pub struct PromotionPath {
+    /// The source environment, absent for a target source.
+    pub from: Option<String>,
+    /// The environment whose state holds the records.
+    pub to: String,
+}
+
+/// The PromotionPath of `documents` that the arguments of a `promote` step name.
+pub fn promotion_target(documents: &[Value], args: &[String]) -> Result<PromotionPath, String> {
+    let declared = documents
+        .iter()
+        .filter(|document| document.get("kind").and_then(Value::as_str) == Some("PromotionPath"))
+        .collect::<Vec<_>>();
+    let named = declared
+        .iter()
+        .filter(|document| {
+            document
+                .pointer("/metadata/name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| args.iter().skip(1).any(|arg| arg == name))
+        })
+        .collect::<Vec<_>>();
+    let [path] = named.as_slice() else {
+        return Err(format!(
+            "{} of the {} PromotionPaths are named in {args:?}",
+            named.len(),
+            declared.len()
+        ));
+    };
+    let environment = |side: &str| {
+        path.pointer(&format!("/spec/{side}/environment"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    Ok(PromotionPath {
+        from: environment("from"),
+        to: environment("to").ok_or("the PromotionPath promotes into no environment (a target?)")?,
+    })
+}
+
+/// The environment whose refs a step's `commits` count: the one its path
+/// promotes into for a `promote` step, else the step's `-e`, or dev.
+pub fn counted_environment(args: &[String], promote: Option<&Result<PromotionPath, String>>) -> String {
+    match promote {
+        Some(Ok(path)) => path.to.clone(),
+        _ => environment_of(args),
+    }
+}
+
+/// The state refs in `after` that differ from `before` (added, removed, or
+/// moved), leaving out the target environment's own refs: its branches and
+/// its lease.
+pub fn unchanged_violations(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    target: &str,
+) -> Vec<String> {
+    let own = [format!("refs/heads/nyl/{target}/"), format!("refs/nyl/{target}/")];
+    before
+        .keys()
+        .chain(after.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| !own.iter().any(|prefix| name.starts_with(prefix.as_str())))
+        .filter(|name| before.get(*name) != after.get(*name))
+        .cloned()
+        .collect()
+}
+
+/// Where placeholders get their values; see [`expand_placeholders`].
+pub struct Resolver<'a> {
+    pub state: &'a dyn Fn(&str) -> Result<String, String>,
+    pub observed: &'a dyn Fn(&str) -> Result<String, String>,
+    pub commit: &'a dyn Fn(&str) -> Result<String, String>,
+    pub plan_digest: &'a dyn Fn(&str, &str) -> Result<String, String>,
+}
+
+/// `text` with every placeholder (`%STATE(<id>)%`, `%OBSERVED(<id>)%`,
+/// `%COMMIT(<revision>)%`, `%PLAN-DIGEST(<environment>/<unit>)%`) replaced by
+/// what `resolver` gives for it.
+pub fn expand_placeholders(text: &str, resolver: &Resolver<'_>) -> Result<String, String> {
+    let mut expanded = text.to_owned();
+    for placeholder in placeholders(text)? {
+        let value = match &placeholder {
+            Placeholder::State(id) => (resolver.state)(id),
+            Placeholder::Observed(id) => (resolver.observed)(id),
+            Placeholder::Commit(revision) => (resolver.commit)(revision),
+            Placeholder::PlanDigest { environment, unit } => (resolver.plan_digest)(environment, unit),
+        }
+        .map_err(|error| format!("{}: {error}", placeholder.token()))?;
+        expanded = expanded.replace(&placeholder.token(), &value);
+    }
+    Ok(expanded)
+}
+
+/// A `nyl get` invocation's report and its printed value.
+pub type GetValue = (Value, String);
+
+/// What [`check_promotion_record`] looks things up with.
+pub struct PromotionLookups<'a> {
+    /// The path's source environment, for a `from.environment` that is not given.
+    pub path_from: Option<&'a str>,
+    /// The run recorded on the state commits of the `nyl` step with an id.
+    pub run_of: &'a dyn Fn(&str) -> Result<String, String>,
+    /// A `nyl get` invocation's report and printed value.
+    pub get: &'a dyn Fn(&[String]) -> Result<GetValue, String>,
+    /// Replaces the placeholders of a commit the expectation names.
+    pub expand: &'a dyn Fn(&str) -> Result<String, String>,
+    /// A revision of `project.git` as a commit ID.
+    pub commit: &'a dyn Fn(&str) -> Result<String, String>,
+}
+
+/// Compare a PromotionRecord with a `promotion` expectation: every key given
+/// (`design/reference-scenarios.md#expect`), and only those. Lists the first
+/// difference of every key that differs.
+pub fn check_promotion_record(
+    expected: &PromotionExpectation,
+    record: &Value,
+    lookups: &PromotionLookups<'_>,
+) -> Result<(), String> {
+    // A PromotionRecord resource keeps its fields in `spec`; the block of an
+    // Environment's source holds them directly.
+    let record = match record.get("spec") {
+        Some(spec) if record.get("kind").and_then(Value::as_str) == Some("PromotionRecord") && spec.is_object() => spec,
+        _ => record,
+    };
+    let mut problems = Problems::default();
+    problems.compare("path", Value::String(expected.path.clone()), record.get("path"));
+    if let Some(sequence) = expected.sequence {
+        problems.compare("sequence", Value::from(sequence), record.get("sequence"));
+    }
+    match &expected.source_commit {
+        None => {}
+        Some(Value::Null) => problems.compare("sourceCommit", Value::Null, record.get("sourceCommit")),
+        Some(Value::String(revision)) => {
+            if let Some(commit) = problems.resolved("sourceCommit", (lookups.commit)(revision)) {
+                problems.compare("sourceCommit", Value::String(commit), record.get("sourceCommit"));
+            }
+        }
+        Some(other) => problems.push(format!("sourceCommit {other} must be a revision or null")),
+    }
+
+    let from = record.get("from");
+    let field = |value: Option<&Value>, name: &str| value.and_then(|value| value.get(name)).cloned();
+    if let Some(environment) = expected.from.environment.as_deref().or(lookups.path_from) {
+        problems.compare(
+            "from.environment",
+            Value::String(environment.to_owned()),
+            from.and_then(|from| from.get("environment")),
+        );
+    }
+    if let Some(run) = problems.resolved("from.run", (lookups.run_of)(&expected.from.run)) {
+        problems.compare("from.run", Value::String(run), from.and_then(|from| from.get("run")));
+    }
+    for (name, wanted) in [
+        ("desiredCommit", &expected.from.desired_commit),
+        ("observedCommit", &expected.from.observed_commit),
+    ] {
+        if let Some(wanted) = wanted {
+            if let Some(commit) = problems.resolved(&format!("from.{name}"), (lookups.expand)(wanted)) {
+                problems.compare(
+                    &format!("from.{name}"),
+                    Value::String(commit),
+                    from.and_then(|from| from.get(name)),
+                );
+            }
+        }
+    }
+
+    if let Some(values) = &expected.values {
+        let recorded = record.get("values").and_then(Value::as_object);
+        let names = |map: Option<&serde_json::Map<String, Value>>| {
+            map.into_iter()
+                .flat_map(|map| map.keys().cloned())
+                .collect::<BTreeSet<_>>()
+        };
+        let wanted_names = values.keys().cloned().collect::<BTreeSet<_>>();
+        if names(recorded) != wanted_names {
+            problems.push(format!("values are {:?} instead of {wanted_names:?}", names(recorded)));
+        }
+        for (name, wanted) in values {
+            let Some(entry) = recorded.and_then(|recorded| recorded.get(name)) else {
+                continue;
+            };
+            let actual = entry.get("value");
+            match &wanted.equals {
+                Mention::Text(text) => problems.compare(&format!("values.{name}"), Value::String(text.clone()), actual),
+                Mention::Get(args) => match (lookups.get)(args) {
+                    Ok((report, printed)) => {
+                        if actual != Some(&report) && actual != Some(&Value::String(printed.clone())) {
+                            problems.push(format!(
+                                "values.{name} is {} instead of {report} (printed {printed:?}) from {args:?}",
+                                actual.map_or_else(|| "absent".to_owned(), Value::to_string)
+                            ));
+                        }
+                    }
+                    Err(error) => problems.push(format!("values.{name}: {error}")),
+                },
+            }
+            let state = entry.get("state").filter(|state| !state.is_null());
+            match &wanted.state {
+                Some(id) => {
+                    if let Some(run) = problems.resolved(&format!("values.{name}.state"), (lookups.run_of)(id)) {
+                        problems.compare(
+                            &format!("values.{name}.state.run"),
+                            Value::String(run),
+                            state.and_then(|state| state.get("run")),
+                        );
+                    }
+                }
+                None => {
+                    if let Some(state) = state {
+                        problems.push(format!(
+                            "values.{name} names its own state {state}, but the expectation says it came from `from`"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(evidence) = &expected.evidence {
+        let recorded = record.get("evidence");
+        problems.compare(
+            "evidence.level",
+            Value::String(match evidence.level {
+                EvidenceLevel::Published => "published".to_owned(),
+                EvidenceLevel::Attested => "attested".to_owned(),
+            }),
+            recorded.and_then(|recorded| recorded.get("level")),
+        );
+        if let Some(overridden) = evidence.overridden {
+            let actual = field(recorded, "override").is_some_and(|value| !value.is_null());
+            if actual != overridden {
+                problems.push(format!("evidence.override is {actual} instead of {overridden}"));
+            }
+        }
+        if let Some(attestations) = &evidence.attestations {
+            let actual = scoped_names(recorded.and_then(|recorded| recorded.get("attestations")));
+            let wanted = attestations.iter().cloned().collect::<BTreeSet<_>>();
+            if actual != wanted {
+                problems.push(format!("evidence.attestations are {actual:?} instead of {wanted:?}"));
+            }
+        }
+    }
+
+    if let Some(superseded) = &expected.superseded {
+        let actual = record
+            .get("superseded")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry
+                                .get("commit")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                            entry
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut wanted = Vec::new();
+        for entry in superseded {
+            if let Some(commit) = problems.resolved("superseded", (lookups.commit)(&entry.commit)) {
+                wanted.push((commit, entry.reason.clone()));
+            }
+        }
+        if wanted.len() == superseded.len() && actual != wanted {
+            problems.push(format!("superseded is {actual:?} instead of {wanted:?}"));
+        }
+    }
+    if let Some(verified) = expected.artifacts_verified {
+        problems.compare(
+            "artifactsVerified",
+            Value::Bool(verified),
+            record.get("artifactsVerified"),
+        );
+    }
+    if let Some(requested) = &expected.requested {
+        problems.compare(
+            "requested.reason",
+            Value::String(requested.reason.clone()),
+            record.get("requested").and_then(|requested| requested.get("reason")),
+        );
+    }
+    if let Some(ignored) = &expected.ignored_attestations {
+        let mut actual = record
+            .get("ignoredAttestations")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            scoped_name(entry),
+                            entry
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut wanted = ignored
+            .iter()
+            .map(|entry| (entry.attestation.clone(), entry.reason.clone()))
+            .collect::<Vec<_>>();
+        actual.sort();
+        wanted.sort();
+        if actual != wanted {
+            problems.push(format!("ignoredAttestations are {actual:?} instead of {wanted:?}"));
+        }
+    }
+
+    if problems.found.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the promotion record of {}: {}",
+            expected.path,
+            problems.found.join("; ")
+        ))
+    }
+}
+
+/// The differences found while comparing a record.
+#[derive(Default)]
+struct Problems {
+    found: Vec<String>,
+}
+
+impl Problems {
+    fn push(&mut self, problem: String) {
+        self.found.push(problem);
+    }
+
+    /// `wanted` against `actual`, where an absent value equals `null`.
+    fn compare(&mut self, what: &str, wanted: Value, actual: Option<&Value>) {
+        let same = match actual {
+            Some(actual) => *actual == wanted,
+            None => wanted.is_null(),
+        };
+        if !same {
+            self.push(format!(
+                "{what} is {} instead of {wanted}",
+                actual.map_or_else(|| "absent".to_owned(), Value::to_string)
+            ));
+        }
+    }
+
+    /// The value of a lookup, or the reason it failed as a problem.
+    fn resolved(&mut self, what: &str, result: Result<String, String>) -> Option<String> {
+        result.map_err(|error| self.push(format!("{what}: {error}"))).ok()
+    }
+}
+
+/// `<scope>/<name>` of an attestation entry.
+fn scoped_name(entry: &Value) -> String {
+    let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or_default();
+    format!("{}/{}", text("scope"), text("name"))
+}
+
+fn scoped_names(entries: Option<&Value>) -> BTreeSet<String> {
+    entries
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(scoped_name)
+        .collect()
 }
 
 /// The environment of a step's `-e`, or `dev`.
