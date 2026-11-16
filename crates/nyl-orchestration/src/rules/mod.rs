@@ -17,6 +17,7 @@ pub mod lease;
 pub mod lifecycle;
 pub mod local;
 pub mod observed_values;
+pub mod promotion_paths;
 pub mod recovery;
 pub mod references;
 pub mod selection;

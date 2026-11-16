@@ -71,6 +71,9 @@ enum GetCommand {
         alias = "templates"
     )]
     EnvironmentTemplates(GetResourceArgs),
+    /// Get PromotionPath declarations.
+    #[command(name = "promotion-paths", alias = "promotion-path")]
+    PromotionPaths(GetResourceArgs),
     /// Get unit declarations, or with -e the units' state.
     Units(GetUnitsArgs),
     /// Get one unit's persisted desired and observed documents.
@@ -201,6 +204,7 @@ pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         GetCommand::ApplicationGroups(selection) => declarations(GitOpsResourceKind::ApplicationGroup, selection),
         GetCommand::Environments(selection) => environments(selection, wiring.clock.now()),
         GetCommand::EnvironmentTemplates(selection) => declarations(GitOpsResourceKind::EnvironmentTemplate, selection),
+        GetCommand::PromotionPaths(selection) => declarations(GitOpsResourceKind::PromotionPath, selection),
         GetCommand::Units(units) => match &units.state.environment {
             None => unit_declarations(&units.path, units.state.output),
             Some(environment) => state_form_with_peers(
@@ -869,6 +873,7 @@ fn resources_table(kind: GitOpsResourceKind, resources: &[&DiscoveredGitOpsResou
         GitOpsResourceKind::Environment => vec!["NAME", "UNITS", "STATE", "FILE"],
         GitOpsResourceKind::EnvironmentGroup => vec!["NAME", "SELECTOR", "FILE"],
         GitOpsResourceKind::EnvironmentTemplate => vec!["NAME", "PARAMETERS", "UNITS", "FILE"],
+        GitOpsResourceKind::PromotionPath => vec!["NAME", "FROM", "TO", "EVIDENCE", "VALUES", "FILE"],
     };
     let rows = resources
         .iter()
@@ -974,6 +979,27 @@ fn resource_row(kind: GitOpsResourceKind, resource: &DiscoveredGitOpsResource) -
             selector(&template.spec.unit_selector.match_labels),
             file,
         ],
+        Some(GitOpsResource::PromotionPath(path)) => {
+            let endpoint = |endpoint: &nyl_core::resources::promotion::PromotionEndpoint| {
+                endpoint
+                    .environment
+                    .clone()
+                    .or_else(|| endpoint.target.as_ref().map(|target| format!("target/{target}")))
+                    .unwrap_or_else(|| "-".to_owned())
+            };
+            let evidence = match path.spec.evidence {
+                nyl_core::resources::promotion::PathEvidence::Published => "published",
+                nyl_core::resources::promotion::PathEvidence::Attested => "attested",
+            };
+            vec![
+                name.clone(),
+                endpoint(&path.spec.from),
+                endpoint(&path.spec.to),
+                evidence.to_owned(),
+                path.spec.values.keys().cloned().collect::<Vec<_>>().join(","),
+                file,
+            ]
+        }
         None => templated_resource_row(kind, name, file),
     }
 }
@@ -1024,6 +1050,14 @@ fn templated_resource_row(kind: GitOpsResourceKind, name: &str, file: String) ->
                 file,
             ]
         }
+        GitOpsResourceKind::PromotionPath => vec![
+            name.to_owned(),
+            "<templated>".to_owned(),
+            "<templated>".to_owned(),
+            "<templated>".to_owned(),
+            "<templated>".to_owned(),
+            file,
+        ],
         GitOpsResourceKind::GitRepository
         | GitOpsResourceKind::ArgoCDInstance
         | GitOpsResourceKind::ApplicationGroup

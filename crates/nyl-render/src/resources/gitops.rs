@@ -1037,15 +1037,19 @@ pub enum GitOpsResourceKind {
     EnvironmentGroup,
     #[value(name = "EnvironmentTemplate", alias = "environment-template")]
     EnvironmentTemplate,
+    #[value(name = "PromotionPath", alias = "promotion-path")]
+    PromotionPath,
 }
 
 impl GitOpsResourceKind {
     /// API version of this control resource.
     pub const fn api_version(self) -> &'static str {
         match self {
-            Self::GitRepository | Self::Environment | Self::EnvironmentGroup | Self::EnvironmentTemplate => {
-                API_VERSION_GITOPS
-            }
+            Self::GitRepository
+            | Self::Environment
+            | Self::EnvironmentGroup
+            | Self::EnvironmentTemplate
+            | Self::PromotionPath => API_VERSION_GITOPS,
             Self::Cluster => API_VERSION,
             _ => API_VERSION_K8S_GITOPS,
         }
@@ -1062,6 +1066,7 @@ impl GitOpsResourceKind {
             Self::Environment => nyl_core::resources::environment::KIND_ENVIRONMENT,
             Self::EnvironmentGroup => nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP,
             Self::EnvironmentTemplate => nyl_core::resources::environment::KIND_ENVIRONMENT_TEMPLATE,
+            Self::PromotionPath => nyl_core::resources::promotion::KIND_PROMOTION_PATH,
         }
     }
 
@@ -1076,6 +1081,7 @@ impl GitOpsResourceKind {
             nyl_core::resources::environment::KIND_ENVIRONMENT => Some(Self::Environment),
             nyl_core::resources::environment::KIND_ENVIRONMENT_GROUP => Some(Self::EnvironmentGroup),
             nyl_core::resources::environment::KIND_ENVIRONMENT_TEMPLATE => Some(Self::EnvironmentTemplate),
+            nyl_core::resources::promotion::KIND_PROMOTION_PATH => Some(Self::PromotionPath),
             _ => None,
         }
     }
@@ -1091,10 +1097,11 @@ impl GitOpsResourceKind {
             Self::Environment => "environment.schema.json",
             Self::EnvironmentGroup => "environment-group.schema.json",
             Self::EnvironmentTemplate => "environment-template.schema.json",
+            Self::PromotionPath => "promotion-path.schema.json",
         }
     }
 
-    pub const fn all() -> [Self; 9] {
+    pub const fn all() -> [Self; 10] {
         [
             Self::GitRepository,
             Self::Cluster,
@@ -1105,6 +1112,7 @@ impl GitOpsResourceKind {
             Self::Environment,
             Self::EnvironmentGroup,
             Self::EnvironmentTemplate,
+            Self::PromotionPath,
         ]
     }
 }
@@ -1130,6 +1138,9 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         }
         GitOpsResourceKind::EnvironmentTemplate => {
             serde_json::to_value(schema_for!(nyl_core::resources::environment::EnvironmentTemplate))
+        }
+        GitOpsResourceKind::PromotionPath => {
+            serde_json::to_value(schema_for!(nyl_core::resources::promotion::PromotionPath))
         }
     }
     .expect("schema serialization should never fail");
@@ -1174,6 +1185,7 @@ pub enum GitOpsResource {
     Environment(Box<nyl_core::resources::environment::Environment>),
     EnvironmentGroup(nyl_core::resources::environment::EnvironmentGroup),
     EnvironmentTemplate(Box<nyl_core::resources::environment::EnvironmentTemplate>),
+    PromotionPath(Box<nyl_core::resources::promotion::PromotionPath>),
 }
 
 /// True when the manifest advertises the GitOps API and one of its known kinds.
@@ -1267,6 +1279,9 @@ pub fn parse_gitops_resource(value: &serde_json::Value) -> Result<Option<GitOpsR
         GitOpsResourceKind::EnvironmentTemplate => GitOpsResource::EnvironmentTemplate(Box::new(
             nyl_core::resources::parse_resource(value, nyl_core::resources::environment::KIND_ENVIRONMENT_TEMPLATE)?,
         )),
+        GitOpsResourceKind::PromotionPath => GitOpsResource::PromotionPath(Box::new(
+            nyl_core::resources::parse_resource(value, nyl_core::resources::promotion::KIND_PROMOTION_PATH)?,
+        )),
     };
     resource.validate()?;
     Ok(Some(resource))
@@ -1284,6 +1299,7 @@ impl GitOpsResource {
             Self::Environment(resource) => resource.validate(),
             Self::EnvironmentGroup(resource) => resource.validate(),
             Self::EnvironmentTemplate(resource) => resource.validate(),
+            Self::PromotionPath(resource) => resource.validate(),
         }
     }
 }

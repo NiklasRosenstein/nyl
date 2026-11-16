@@ -199,7 +199,9 @@ fn slash_path(path: &Path) -> String {
 /// unit checks `nyl plan` and `nyl reconcile` run
 /// ([`nyl_orchestration::rules::desired::check_units`]), with the drivers
 /// they use: specs, ownership scopes, unknown dependencies,
-/// cycles, and references to undeclared or sensitive outputs.
+/// cycles, and references to undeclared or sensitive outputs. The project's
+/// PromotionPaths are checked against the same rendered units
+/// ([`crate::orchestration::promotion`]).
 fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
     use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
     use nyl_core::orchestration::ports::SourceRenderer;
@@ -231,6 +233,13 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     if let Err(finding) = nyl_orchestration::rules::multi_environment::validate_sources(&rendered_sources, &instances) {
         issues.push(finding.to_string());
     }
+    // The paths read what the environments render, so they are checked last and
+    // with the units' own findings when those exist.
+    issues.extend(
+        crate::orchestration::promotion::findings(inventory, &rendered_sources, &wiring.drivers)
+            .iter()
+            .map(ToString::to_string),
+    );
     if issues.is_empty() {
         Ok(())
     } else {

@@ -3420,6 +3420,7 @@ pub(super) fn render_effective_control(
         GitOpsResource::EnvironmentTemplate(resource) => {
             (GitOpsResourceKind::EnvironmentTemplate, &resource.metadata.name)
         }
+        GitOpsResource::PromotionPath(resource) => (GitOpsResourceKind::PromotionPath, &resource.metadata.name),
     };
     if effective_identity.0 != discovered.identity.kind || effective_identity.1 != &discovered.identity.name {
         return Err(NylError::config(format!(
