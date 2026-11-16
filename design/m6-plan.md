@@ -143,9 +143,10 @@ Nothing in M6 needs a change to `DesiredUnit`, `ObservedUnit`, `Run`, or
 checkpoints: a value's source commits for the supersede check come from the
 producing desired unit's `sourceRevision` and the commits resolution already
 writes into each driver-declared source field (`Driver::source_fields`).
-PR 9 must verify that for `OciImage` named contexts in other repositories;
-if a commit is missing there, that becomes a `DesiredUnit` change and goes to
-the user before it is made.
+PR 9 verified that for `OciImage` named contexts in other repositories:
+the driver declares every directory context (`/context`, `/contexts/<name>`)
+as a source field, so resolution writes each context's repository and commit
+into the resolved spec, and no `DesiredUnit` change is needed.
 
 ## Open decisions
 

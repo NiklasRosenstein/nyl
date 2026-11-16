@@ -85,8 +85,10 @@ such as `environment 'local'`.
 For an environment whose source commit a [promotion](/nyl/orchestration/promotion/)
 chose, the report shows its lineage beneath the source commit: the path and
 sequence of the record the last run applied, and the source state that record
-promoted. A newer record that no run applied yet is named too, and then the
-replaced record's source state is left out; [`nyl get promotions`](/nyl/reference/cli/get-promotions/#get-promotions)
+promoted. A newer record that no run applied yet is named too, on any of
+the environment's source paths (`source.fromPromotion.paths`), such as a
+hotfix waiting for the next reconcile; when it is on the applied record's own
+path, that record's source state is left out; [`nyl get promotions`](/nyl/reference/cli/get-promotions/#get-promotions)
 lists it.
 
 ```console

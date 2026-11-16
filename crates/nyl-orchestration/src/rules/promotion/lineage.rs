@@ -16,7 +16,9 @@
 //!   run applied. With `record: source` that record is the block in source
 //!   ([`lineage_with`]). When a newer promotion replaced it and no run applied that
 //!   one yet, `from` is left out (history keeps the applied record; `nyl get
-//!   promotions` lists it) and `pendingSequence` names the newer one.
+//!   promotions` lists it).
+//! - `pendingSequence` names the newest record on any path that supplies the
+//!   source (`paths`) that no run applied yet: the source the next run takes.
 //! - An environment whose source was not chosen by a promotion has none.
 
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
@@ -47,6 +49,19 @@ pub fn lineage_with(
         .iter()
         .find(|(name, _)| name.as_str() == path)
         .map(|(_, record)| record);
+    // Every path that supplies the source counts for a pending record: the
+    // Environment as the entry worktree declares it, else as the run kept it.
+    let mut paths = entry
+        .map(|promoted| promoted.path.iter().chain(&promoted.paths).cloned().collect())
+        .or_else(|| crate::rules::sources::promoted_source_paths(&record.spec))
+        .unwrap_or_default();
+    paths.insert(path.clone());
+    let pending = records
+        .values()
+        .filter(|record| paths.contains(record.path.as_str()) && record.source_commit.is_some())
+        .map(|record| record.sequence)
+        .max()
+        .filter(|newest| newest > sequence);
     Some(PromotionLineage {
         path: path.clone(),
         sequence: *sequence,
@@ -54,9 +69,7 @@ pub fn lineage_with(
         from: current
             .filter(|current| current.sequence == *sequence)
             .map(|current| current.from.clone()),
-        pending_sequence: current
-            .map(|current| current.sequence)
-            .filter(|current| current > sequence),
+        pending_sequence: pending,
     })
 }
 
@@ -80,8 +93,12 @@ mod tests {
     }
 
     fn record(sequence: u64, desired: char) -> PromotionRecord {
+        record_on("dev-to-prod", sequence, desired)
+    }
+
+    fn record_on(path: &str, sequence: u64, desired: char) -> PromotionRecord {
         PromotionRecord {
-            path: PromotionPathName::new("dev-to-prod").unwrap(),
+            path: PromotionPathName::new(path).unwrap(),
             sequence,
             from: PromotionFrom::Environment(EnvironmentFrom {
                 environment: EnvironmentName::new("dev").unwrap(),
@@ -154,6 +171,25 @@ mod tests {
         assert_eq!(pending.sequence, 1);
         assert_eq!(pending.from, None);
         assert_eq!(pending.pending_sequence, Some(2));
+    }
+
+    /// With several source paths, a newer record on another path is the
+    /// pending one, while `from` still names the applied record of its own
+    /// path. Catches a status that hides a hotfix waiting for the next run.
+    #[test]
+    fn test_lineage_pending_sequence_counts_every_source_path() {
+        let mut state = snapshot(promoted(1), Some(record(1, 'd')));
+        state.environment.as_mut().unwrap().spec =
+            json!({"source": {"fromPromotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}});
+        let hotfix = record_on("hotfix-to-prod", 2, 'e');
+        state.promotions.insert(hotfix.path.clone(), hotfix);
+        let lineage = lineage(&state).unwrap();
+        assert_eq!(lineage.from, Some(record(1, 'd').from));
+        assert_eq!(lineage.pending_sequence, Some(2));
+
+        // A record on a path that does not supply the source is not pending.
+        state.environment.as_mut().unwrap().spec = json!({"source": {"fromPromotion": {"path": "dev-to-prod"}}});
+        assert_eq!(super::lineage(&state).unwrap().pending_sequence, None);
     }
 
     /// An environment whose source the entry worktree or a revision chose

@@ -101,9 +101,11 @@ path validation rejects, is refused here the same way, exit 1.
 ## get promotions
 
 The PromotionRecords in the environment's desired state, highest sequence
-first, the record whose source commit the environment's last run applied, and
-every promotion its desired history records, newest first, including records
-a later promotion replaced. Environments that share a desired ref
+first, the record whose source commit the environment's last run applied, the
+record the next run takes its source from, each `fromPromotion` binding of
+the environment's units with the record that supplies it, and every
+promotion its desired history records, newest first, including records a
+later promotion replaced. Environments that share a desired ref
 (`spec.state.path`) list only their own promotions.
 
 ```console
@@ -119,9 +121,21 @@ history, newest first:
   #1 dev-to-prod 3bb91c9e97ff73a14be1f5c90f5db4f918944477: Release 1
 ```
 
-A record the last run applied is marked `(applied)`. `-o json` prints a
-`PromotionsReport`: `promotions[]`, each the exact record state holds;
-`applied` (`path`, `sequence`); and `history[]` with the `promote` commit,
+A record the last run applied is marked `(applied)`. With several source
+paths (`source.fromPromotion.paths`), `source from <path> #<sequence>` names
+the newest record on them, which the next run takes its source commit from.
+Under `bindings:` each binding is listed with its unit, its place in the
+unit's spec (a DeploymentTarget's `releaseInputs` are in its publication
+unit's spec), the value, and the supplying record: a binding without `path`
+in an environment whose source is promoted follows the record that supplied
+the source, the same choice a run makes, and `no record yet` means its unit
+waits (`NYL-PROMOTION-MISSING`). The bindings are those of the units'
+desired documents, as the last run rendered them.
+
+`-o json` prints a `PromotionsReport`: `promotions[]`, each the exact record
+state holds; `applied` (`path`, `sequence`); `source` (`path`, `sequence`);
+`bindings[]` with `unit`, `pointer`, `value`, the binding's own `path`, and
+`supplier` (`path`, `sequence`); and `history[]` with the `promote` commit,
 `path`, `sequence`, `sourceCommit`, `from` (`environment`, `run`,
 `desiredCommit`), `requestedBy`, and `reason`, read
 from each commit's summary and trailers. `-o name` prints the paths.

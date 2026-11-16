@@ -535,11 +535,22 @@ decided when `nyl promote` writes, by the supersede check:
   When the refusal involves several repositories, an entry is qualified with
   the repository, `--supersede web:S1..c3d4=<reason>`, by GitRepository name
   or, for an inline repository, the name the refusal prints; an unqualified
-  full commit ID is accepted when it exists in only one of them.
+  full commit ID is accepted when it exists in only one of them. The
+  project's own repository is named by the GitRepository whose URL is its
+  `origin`, else `project`.
 - **Record.** The PromotionRecord lists every superseded commit with its
   repository URL, its reason, and who gave it, never the range, and a pull
   request under `changeGate: pullRequest` (M11) shows them. A later promotion on P
   is no longer checked against them, because P has now promoted after them.
+  The repository is its URL, and for the project's own repository the URL of
+  its `origin` (or `project` without one).
+- **Which records.** The records are the target's current ones and those its
+  desired history holds at each `promote` commit, so one `state restore`
+  removed still counts. With `record: source`, earlier blocks are commits in
+  source, and only the current block counts. A record's value has the source
+  commits its producing unit resolved in the state the record names, read
+  from the source environment's state history; a value whose state cannot be
+  read is unchecked. `plan` does not list unchecked values yet.
 
 ### Hotfixes
 

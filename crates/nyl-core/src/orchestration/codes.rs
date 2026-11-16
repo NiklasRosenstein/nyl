@@ -185,6 +185,12 @@ codes! {
     PromoteSourceUnwritable => "NYL-PROMOTE-SOURCE-UNWRITABLE",
     /// The remote refused the fast-forward push of a `record: source` commit because the branch moved since the checkout (non-fast-forward). The commit was undone, so nothing was written; update the checkout and promote again. Exit 2.
     PromoteSourceRejected => "NYL-PROMOTE-SOURCE-REJECTED",
+    /// `nyl promote` would replace commits another PromotionPath promoted into the target since this path last promoted: the promoted source commit or value does not contain them (`git cherry` lists them, by their changes). Nothing was written; merge the missing commits or pass `--supersede`. Exit 2.
+    PromoteSupersedes => "NYL-PROMOTE-SUPERSEDES",
+    /// A `nyl promote --supersede` entry has no reason of its own, and the promotion has no `--reason`. Exit 1.
+    PromoteSupersedeReason => "NYL-PROMOTE-SUPERSEDE-REASON",
+    /// The supersede check cannot check a promoted value: it, or another path's record of it, has no known source commit, such as an image from outside Nyl or a command output. A warning.
+    PromoteUnchecked => "NYL-PROMOTE-UNCHECKED",
     /// A unit's driver could not produce its attestations.
     AttestUnknown => "NYL-ATTEST-UNKNOWN",
     /// A unit declares `observations`, but its kind cannot read observed values.

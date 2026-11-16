@@ -20,11 +20,12 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::CommitId;
-use nyl_core::orchestration::ports::SourceResolver as _;
+use nyl_core::orchestration::ports::{SourceRepository, SourceResolver as _};
 use nyl_core::orchestration::promotion::PromotionRequest;
 use nyl_core::orchestration::time::Duration;
 use nyl_core::resources::promotion::PromotionPath;
 use nyl_orchestration::report::PromoteReport;
+use nyl_orchestration::rules::promotion::supersede::SupersedeRequest;
 use nyl_orchestration::rules::promotion::{IgnoreRequest, Selection};
 use nyl_orchestration::shell::promote::{self, PromoteOptions};
 use nyl_orchestration::shell::run::{LifecycleOptions, RunMode};
@@ -79,6 +80,11 @@ pub struct PromoteArgs {
     /// Set a failing attestation aside, with the reason the record keeps: `<unit>/<name>=<reason>` or `environment/<name>=<reason>` (repeatable).
     #[arg(long = "ignore-attestation")]
     pub ignore_attestation: Vec<String>,
+
+    /// Accept that the promotion replaces missing commits of another path's record (repeatable): `[<repository>:]<commit or range>[=<reason>]`, such as `--supersede a1b2c3^..c3d4e5=<reason>`.
+    /// An entry without its own reason takes `--reason`; one with neither is refused. Commits it names that are not missing are ignored.
+    #[arg(long = "supersede")]
+    pub supersede: Vec<String>,
 
     /// Record the promotion without checking that the promoted artifacts still exist, such as from a runner without registry access; the record then says `artifactsVerified: false`.
     #[arg(long)]
@@ -235,6 +241,18 @@ fn prepare(
                 .map_err(|message| invalid(message, "write <unit>/<name>=<reason>, or environment/<name>=<reason>"))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let supersede = args
+        .supersede
+        .iter()
+        .map(|text| {
+            SupersedeRequest::parse(text).map_err(|message| {
+                invalid(
+                    message,
+                    "write [<repository>:]<commit or range>[=<reason>], as the refusal prints the range",
+                )
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     let identity = if args.dry_run {
         None
     } else {
@@ -284,9 +302,40 @@ fn prepare(
             promotes_source,
             promoted,
             requested,
+            supersede,
+            repository_names: repository_names(session),
         },
         identity,
     ))
+}
+
+/// The project's names for repositories, by which `--supersede` entries are
+/// qualified: each GitRepository's name for its URL, and for the project's
+/// own repository the GitRepository whose URL is its `origin`.
+fn repository_names(session: &Session) -> BTreeMap<SourceRepository, String> {
+    let declared: Vec<(String, String)> = session
+        .inventory
+        .resources
+        .values()
+        .filter_map(|resource| match &resource.resource {
+            Some(nyl_render::resources::GitOpsResource::GitRepository(repository)) => {
+                Some((repository.metadata.name.clone(), repository.spec.repo_url.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let origin = session
+        .sources()
+        .ok()
+        .and_then(|sources| sources.repository_url(&SourceRepository::This));
+    let mut names = BTreeMap::new();
+    for (name, url) in declared {
+        if origin.as_deref() == Some(nyl_git::sanitize_url(&url).as_str()) {
+            names.entry(SourceRepository::This).or_insert_with(|| name.clone());
+        }
+        names.entry(SourceRepository::Url(url)).or_insert(name);
+    }
+    names
 }
 
 /// `--revision` as a source commit: a full commit ID as is, anything else
@@ -358,6 +407,10 @@ mod tests {
             "published",
             "--ignore-attestation",
             "environment/qa=flaky",
+            "--supersede",
+            "a1b2c3^..c3d4e5=merged differently",
+            "--supersede",
+            "web:a1b2c3",
             "--no-verify-artifacts",
             "--wait-lease",
             "5m",

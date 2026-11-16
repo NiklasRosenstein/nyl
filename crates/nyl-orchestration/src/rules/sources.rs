@@ -183,6 +183,41 @@ pub fn promoted_record<'a>(
         })
 }
 
+/// The record a `fromPromotion` binding reads among an environment's
+/// `records`, or `None` when none supplies it yet. Every reader of a
+/// binding takes it here: the binding provider of the shared resolver and
+/// `nyl get promotions`.
+///
+/// - With `path`, that path's record, when it carries the value.
+/// - Without `path`, in an environment whose source is promoted along
+///   `source_paths`: the record that supplies the source commit (the newest
+///   on those paths that carries one, as [`promoted_record`] chooses it), so
+///   the source commit and the values proven with it move together. A value
+///   it does not carry is not taken from an older record of another path.
+/// - Without `path` otherwise, the newest record that carries the value.
+pub fn binding_supplier<'a>(
+    records: &'a BTreeMap<PromotionPathName, PromotionRecord>,
+    source_paths: Option<&std::collections::BTreeSet<String>>,
+    binding: &nyl_core::bindings::PromotionInputSource,
+) -> Option<&'a PromotionRecord> {
+    let carries = |record: &&PromotionRecord| record.values.contains_key(&binding.value);
+    if let Some(path) = &binding.path {
+        return records
+            .values()
+            .filter(|record| record.path.as_str() == path)
+            .filter(carries)
+            .max_by_key(|record| record.sequence);
+    }
+    if let Some(paths) = source_paths {
+        return records
+            .values()
+            .filter(|record| paths.contains(record.path.as_str()) && record.source_commit.is_some())
+            .max_by_key(|record| record.sequence)
+            .filter(carries);
+    }
+    records.values().filter(carries).max_by_key(|record| record.sequence)
+}
+
 /// The promotion paths that supply an environment's source, from its
 /// Environment spec (the declared one or the one an environment record
 /// keeps): `None` unless `source.fromPromotion` is set. A `fromPromotion`

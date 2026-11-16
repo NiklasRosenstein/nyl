@@ -957,6 +957,68 @@ impl SourceResolver for GitSourceResolver {
         Ok(())
     }
 
+    fn missing_commits(
+        &self,
+        repository: &SourceRepository,
+        value: &CommitId,
+        record: &CommitId,
+    ) -> SourceResult<Vec<nyl_core::orchestration::ports::MissingCommit>> {
+        // Both commits in the entry clone, fetched as a recorded commit is.
+        self.checked_commit(repository, value)?;
+        self.checked_commit(repository, record)?;
+        let repo = self.open()?;
+        nyl_git::missing_commits(repo.path(), value.as_str(), record.as_str())
+            .map_err(|cause| error(cause.to_string()))?
+            .into_iter()
+            .map(|missing| {
+                Ok(nyl_core::orchestration::ports::MissingCommit {
+                    commit: CommitId::new(missing.commit).map_err(|cause| error(cause.to_string()))?,
+                    subject: missing.subject,
+                })
+            })
+            .collect()
+    }
+
+    fn commits_in(&self, repository: &SourceRepository, range: &str) -> SourceResult<Vec<CommitId>> {
+        let repo = self.open()?;
+        self.ensure_fetched(&repo, repository)?;
+        // Each end as a revision of the repository's own ref space; in this
+        // repository any revision Git reads (a short ID, `branch~1`) also works.
+        let end = |revision: &str| match self.resolve_revision(repository, revision) {
+            Ok(commit) => Ok(commit.as_str().to_owned()),
+            Err(_) if *repository == SourceRepository::This => Ok(revision.to_owned()),
+            Err(cause) => Err(cause),
+        };
+        let resolved = match range.split_once("..") {
+            Some((from, to)) if !from.is_empty() && !to.is_empty() && !to.starts_with('.') => {
+                format!("{}..{}", end(from)?, end(to)?)
+            }
+            Some(_) => range.to_owned(),
+            None => end(range)?,
+        };
+        nyl_git::commits_in(repo.path(), &resolved)
+            .map_err(|cause| {
+                error(format!(
+                    "{range:?} names no commits of {}: {cause}",
+                    Self::describe(repository)
+                ))
+            })?
+            .into_iter()
+            .map(|commit| CommitId::new(commit).map_err(|cause| error(cause.to_string())))
+            .collect()
+    }
+
+    fn repository_url(&self, repository: &SourceRepository) -> Option<String> {
+        match repository {
+            SourceRepository::Url(url) => Some(nyl_git::sanitize_url(url)),
+            SourceRepository::This => {
+                let repo = self.open().ok()?;
+                let remote = repo.find_remote("origin").ok()?;
+                remote.url().ok().map(nyl_git::sanitize_url)
+            }
+        }
+    }
+
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String> {
         let repo = self.open()?;
         match repository {

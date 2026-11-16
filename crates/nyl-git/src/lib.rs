@@ -23,6 +23,7 @@
 
 mod auth;
 mod error;
+mod history;
 mod lfs;
 mod status;
 mod transport;
@@ -30,6 +31,7 @@ mod url;
 
 pub use auth::{CredentialEntry, GitAuth, GitSettings};
 pub use error::{GitError, Rejection, Result};
+pub use history::{commits_in, missing_commits, MissingCommit};
 pub use lfs::{lfs_filter_problem, lfs_tracked_paths, LfsFilterProblem};
 pub use status::{worktree_status, WorktreeStatusEntry};
 pub use transport::{
