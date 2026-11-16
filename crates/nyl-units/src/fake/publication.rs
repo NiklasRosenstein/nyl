@@ -233,6 +233,31 @@ impl Driver for FakePublication {
         }
     }
 
+    /// `accepted` and `healthy`: read from the reconciler, they say what runs now.
+    fn running_attestations(&self, spec: &Value) -> Vec<String> {
+        crate::kubernetes_publication::running_attestations(spec)
+    }
+
+    fn deployment_verdicts(
+        &self,
+        _spec: &Value,
+        attestation: &nyl_core::orchestration::state::Attestation,
+    ) -> Option<Vec<nyl_core::orchestration::driver::DeploymentVerdict>> {
+        crate::kubernetes_publication::deployment_verdicts(attestation)
+    }
+
+    fn receipt_publication(
+        &self,
+        _spec: &Value,
+        artifacts: &std::collections::BTreeMap<String, ArtifactDocument>,
+    ) -> Option<String> {
+        crate::kubernetes_publication::receipt_publication(artifacts)
+    }
+
+    fn input_consumer(&self, spec: &Value, pointer: &str) -> Option<String> {
+        crate::kubernetes_publication::input_consumer(spec, pointer)
+    }
+
     /// None: the publication destination (repository, revision, and path
     /// prefix) belongs to the DeploymentTarget, which the spec names but
     /// does not contain, and claims are computed from the spec alone. Two

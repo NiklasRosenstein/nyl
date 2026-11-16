@@ -1057,8 +1057,7 @@ fn test_a_pending_scenario_runs_in_no_runner() {
     for (name, _) in PENDING {
         assert!(!selected.contains(&name), "{name} is pending yet selected to run");
     }
-    // M6 is reached and every M6 scenario is listed, so none of them runs;
-    // the earlier ones all do.
+    // Every reached scenario runs unless it is listed.
     for loaded in &loaded {
         let pending = PENDING.iter().any(|(name, _)| *name == loaded.name);
         assert_eq!(

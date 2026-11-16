@@ -15,8 +15,9 @@ export const orchestrationRoadmap = {
       { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: true },
       { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: true },
       { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
+      { text: 'Promote values only, each from the state its consuming Application runs, and gate promotion on the current receipt\'s publication attestations with `coverage`.', done: true },
     ],
-    outro: 'Value-only promotion and attestation-gated paths follow in the rest of M6; the [M6 plan](https://github.com/NiklasRosenstein/nyl/blob/develop/design/m6-plan.md) maps them onto pull requests. Promotion from and into non-orchestrated targets and the pull-request change gate follow in M11.',
+    outro: 'Every M6 item is delivered; the closing change of the [M6 plan](https://github.com/NiklasRosenstein/nyl/blob/develop/design/m6-plan.md) confirms the exit criterion and marks M6 done. Promotion from and into non-orchestrated targets and the pull-request change gate follow in M11.',
   },
   stages: [
     {
@@ -128,9 +129,9 @@ export const orchestrationRoadmap = {
         { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with `record: state` and `record: source`, the whole-source evidence rule, recorded evidence for older states, artifact verification, and rollback through `--revision`.', done: true },
         { text: 'Support several paths into one environment: `source.fromPromotion.paths`, path-less bindings, the per-value supersede check with `--supersede`, and the hotfix pattern with a fifth reference scenario.', done: true },
         { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
-        { text: 'Promote values only, such as an image digest and a Terraform source commit, across differently named units and inputs, each from the state its consumer runs.', done: false },
-        { text: 'Implement attestations: driver-declared names, `spec.attestations` on units and environments, external `nyl attest --name … --result …` for a unit\'s current receipt and an environment\'s current state (environment-wide ones in `observed/attestations.yaml`), the `published | attested` evidence levels with a path\'s per-unit `attestations`, blocking on failures with `--ignore-attestation`, and `maxAttestationAge`.', done: false },
-        { text: 'Gate promotion from an environment on fresh recorded attestations, sourcing each value from the publication its Application runs.', done: false },
+        { text: 'Promote values only, such as an image digest and a Terraform source commit, across differently named units and inputs, each from the state its consumer runs.', done: true },
+        { text: 'Implement attestations: driver-declared names, `spec.attestations` on units and environments, external `nyl attest --name … --result …` for a unit\'s current receipt and an environment\'s current state (environment-wide ones in `observed/attestations.yaml`), the `published | attested` evidence levels with a path\'s per-unit `attestations`, blocking on failures with `--ignore-attestation`, and `maxAttestationAge`.', done: true },
+        { text: 'Gate promotion from an environment on fresh recorded attestations, sourcing each value from the publication its Application runs.', done: true },
         { text: 'Show promotion lineage in `status`.', done: true },
       ],
     },

@@ -17,7 +17,8 @@
 //!   ([`reconciler::evaluate`]); [`argocd`] is the Argo CD reader (the
 //!   Kubernetes API of the control-plane Cluster, or the Argo CD API
 //!   server). [`observe`] is the driver's use of them, for `nyl attest` and
-//!   the `observe` teardown wait.
+//!   the `observe` teardown wait. [`running`] says, for promotion, what
+//!   those attestations show each deployment runs.
 //! - [`observed_values`] reads a field of a rendered resource from the
 //!   workload Cluster for the unit's observed values, once the Application
 //!   that owns the resource runs the current publication ([`workload`] reads
@@ -38,6 +39,7 @@ mod observed_values;
 mod readiness;
 pub mod reconciler;
 mod run;
+mod running;
 mod spec;
 mod workload;
 
@@ -53,6 +55,7 @@ pub(crate) use readiness::evaluate as evaluate_teardown_readiness;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use run::publish;
 pub(crate) use run::{plan, render, resolution_inputs, teardown, unit_owner, unit_target};
+pub(crate) use running::{deployment_verdicts, input_consumer, receipt_publication, running_attestations};
 pub(crate) use spec::teardown_wait;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use spec::validate_observe;

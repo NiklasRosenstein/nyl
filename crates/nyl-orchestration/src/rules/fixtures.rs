@@ -284,6 +284,14 @@ impl Driver for TestDriver {
         }
         schemars::json_schema!({})
     }
+    /// Kind `Built` builds from the Git source field `/source`.
+    fn source_fields(&self, _spec: &Value) -> Vec<String> {
+        if self.kind == "Built" {
+            vec!["/source".to_owned()]
+        } else {
+            Vec::new()
+        }
+    }
     /// The names a spec's `declares` lists.
     fn attestations(&self, spec: &Value) -> Vec<String> {
         spec.get("declares")

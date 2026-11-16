@@ -252,6 +252,47 @@ pub struct AttestationOutcome {
     pub details: Value,
 }
 
+/// What one running-scoped attestation says about one deployment of the
+/// unit, decided by the driver from its own `details`
+/// ([`Driver::deployment_verdicts`]). Promotion judges a value-only path's
+/// consumer and a path's `coverage` with it, so the engine never reads the
+/// details themselves.
+///
+/// Contract: [Kubernetes publications](../../../../design/promotion.md#kubernetes-publications),
+/// "Coverage" and "Manual syncs", and decision D6 of the
+/// [M6 plan](../../../../design/m6-plan.md#open-decisions). Computed when it
+/// is read and never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentVerdict {
+    /// The deployment's name, as a PromotionPath's `coverage.excludeApplications`
+    /// and `coverage.requireApplications` name it (for Argo CD, the Application).
+    pub name: String,
+    /// The group it belongs to, as `coverage.applicationGroups` names it;
+    /// `None` for one that belongs to no group.
+    pub group: Option<String>,
+    /// What it runs.
+    pub runs: DeploymentRuns,
+    /// Whether it meets the attestation at what it runs, such as being
+    /// Healthy for a health attestation.
+    pub meets: bool,
+    /// Why it falls short, or what it runs instead of the attested receipt,
+    /// in the driver's words.
+    pub reason: Option<String>,
+}
+
+/// What a deployment runs, as a running-scoped attestation shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeploymentRuns {
+    /// What the receipt the attestation names produced.
+    Receipt,
+    /// What another receipt of the unit produced, by the identity
+    /// [`Driver::receipt_publication`] gives that receipt.
+    Publication(String),
+    /// Nothing a receipt of the unit explains: a revision no publication
+    /// matches, a mix of revisions, nothing at all, or what could not be read.
+    Unproven,
+}
+
 /// One observed value as the driver read it. The engine checks a value
 /// against the declared type and records it; it never interprets a reason.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -772,6 +813,47 @@ pub trait Driver: Send + Sync {
     fn attestations(&self, spec: &Value) -> Vec<String> {
         let _ = spec;
         Vec::new()
+    }
+    /// The attestation names, among [`Self::attestations`], whose result says
+    /// what runs now rather than what one receipt did: they are produced by
+    /// reading the system that runs the unit's result (a publication's
+    /// reconciler). None by default.
+    ///
+    /// Promotion counts such an attestation only for the unit's current
+    /// receipt: once a newer receipt exists, an older state no longer
+    /// qualifies through it, and a failing newest one blocks without
+    /// falling back to an older state that once passed (decision D8 of the
+    /// [M6 plan](../../../../design/m6-plan.md#open-decisions)).
+    fn running_attestations(&self, spec: &Value) -> Vec<String> {
+        let _ = spec;
+        Vec::new()
+    }
+    /// What the running-scoped `attestation` (one of
+    /// [`Self::running_attestations`] for `spec`) says about each deployment
+    /// of the unit, read from its own `details`; `None` when it cannot tell,
+    /// and the default. Promotion then judges the attestation as a whole.
+    fn deployment_verdicts(
+        &self,
+        spec: &Value,
+        attestation: &super::state::Attestation,
+    ) -> Option<Vec<DeploymentVerdict>> {
+        let _ = (spec, attestation);
+        None
+    }
+    /// The identity of what a receipt with `artifacts` produced, as
+    /// [`DeploymentRuns::Publication`] names it, so promotion can find the
+    /// recorded state a deployment runs; `None` by default.
+    fn receipt_publication(&self, spec: &Value, artifacts: &BTreeMap<String, ArtifactDocument>) -> Option<String> {
+        let _ = (spec, artifacts);
+        None
+    }
+    /// The deployment, as [`DeploymentVerdict::name`] names it, that consumes
+    /// the resolved input at `pointer` of `spec`, such as the Application of
+    /// the Release whose input it is; `None` when the unit itself consumes
+    /// it, and by default (decision D7 of the M6 plan).
+    fn input_consumer(&self, spec: &Value, pointer: &str) -> Option<String> {
+        let _ = (spec, pointer);
+        None
     }
     /// The native resources a spec claims in an environment; an image tag prefix names the environment.
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope>;

@@ -136,6 +136,10 @@ pub struct RecordedState {
     /// `nyl attest` names this state's receipts or desired commit, and a
     /// later run drops them from the current files, but history keeps them.
     pub attestations: StateAttestations,
+    /// What the drivers say the running-scoped attestations of each unit
+    /// show, filled by the shell ([`super::running`]); empty when no driver
+    /// was asked.
+    pub running: BTreeMap<UnitName, super::running::UnitRunning>,
 }
 
 impl RecordedState {

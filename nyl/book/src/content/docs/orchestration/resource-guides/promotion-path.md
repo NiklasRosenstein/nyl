@@ -46,7 +46,14 @@ spec:
   attestations not count.
 - `verifyArtifacts` (default `true`) checks that promoted artifacts still exist
   before a record is written. `coverage` narrows which Applications count toward
-  a source promotion's publication attestations.
+  a source promotion's publication attestations (`applicationGroups`,
+  `excludeApplications`) and adds Applications that must meet them without
+  contributing values (`requireApplications`); see
+  [Coverage](/nyl/orchestration/promotion/#coverage).
+- A path whose target does not take its source from it promotes values only:
+  a value selected as a publication's Release input comes from the state its
+  Release's Application runs; see
+  [Value-only paths](/nyl/orchestration/promotion/#value-only-paths).
 
 ## Selecting values
 

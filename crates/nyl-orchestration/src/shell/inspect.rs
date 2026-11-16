@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nyl_core::bindings::UnitInputSource;
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{DriverSet, Supported};
-use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateStore, StateTips};
 use nyl_core::orchestration::state::{DesiredUnit, Lifecycle, ObservedUnit, StateLocation};
 use serde_json::Value;
@@ -91,6 +91,25 @@ pub fn status_with(
             &producers,
         );
         report.promotion = crate::rules::promotion::lineage_with(&snapshot, promoted);
+        // What fails for what runs: the current receipts' attestations, and
+        // the environment-wide ones of the current state.
+        let state_commit = context.store.state_commit(location, &snapshot.tips).ok().flatten();
+        let (units, environment_failures) = crate::rules::evidence::failing(
+            &snapshot.desired,
+            &snapshot.observed,
+            &snapshot.attestations,
+            (
+                environment.as_str(),
+                &snapshot.environment_attestations,
+                state_commit.as_ref().map(CommitId::as_str),
+            ),
+        );
+        for (name, failures) in units {
+            if let Some(unit) = report.units.get_mut(&name) {
+                unit.warnings.extend(failures);
+            }
+        }
+        report.warnings.extend(environment_failures);
         for (name, unit) in &mut report.units {
             unit.receipt_nyl_version = snapshot.desired.get(name).and_then(|desired| {
                 crate::rules::unit_state::receipt_nyl_version(desired, snapshot.observed.get(name), &context.version)

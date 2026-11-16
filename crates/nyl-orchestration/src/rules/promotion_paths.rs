@@ -588,6 +588,132 @@ pub fn rebuilt(
     warnings
 }
 
+/// The values that two or more paths into `target` promote whose selector
+/// names no source commit, so the supersede check cannot check them
+/// (`NYL-PROMOTE-UNCHECKED`, a warning `plan` reports before any promotion
+/// runs). Contract: [Several paths into one environment](../../../../design/promotion.md#several-paths-into-one-environment),
+/// "Source commit of a value". It mirrors what the check reads from a
+/// recorded state ([`super::promotion::supersede::value_commits`]), over the
+/// source environment's rendered units: an artifact or output has the
+/// producing unit's Git source fields, an input the field that holds it or
+/// the producer a `fromUnit` reference at or above it names. A value only one
+/// path carries is never compared, so it is not listed.
+pub fn unchecked(
+    paths: &[PromotionPath],
+    target: &EnvironmentName,
+    sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    drivers: &DriverSet,
+) -> Vec<Finding> {
+    let into: Vec<&PromotionPath> = paths
+        .iter()
+        .filter(|path| path.spec.to.environment.as_deref() == Some(target.as_str()))
+        .collect();
+    let mut findings = Vec::new();
+    for path in &into {
+        let Some(source) = path
+            .spec
+            .from
+            .environment
+            .as_deref()
+            .and_then(|name| EnvironmentName::new(name).ok())
+            .and_then(|name| sources.get(&name))
+        else {
+            continue;
+        };
+        let units = ownership_set(source);
+        for (name, value) in &path.spec.values {
+            let others: Vec<&str> = into
+                .iter()
+                .filter(|other| other.metadata.name != path.metadata.name && other.spec.values.contains_key(name))
+                .map(|other| other.metadata.name.as_str())
+                .collect();
+            if others.is_empty() {
+                continue;
+            }
+            let Some(unit) = value.select.unit.as_ref() else {
+                continue;
+            };
+            let has_fields = |unit: &RenderedUnit, within: Option<&str>| {
+                let Some(spec) = unit.spec.as_ref() else {
+                    return false;
+                };
+                drivers
+                    .get(&unit.envelope.api_version, &unit.envelope.kind)
+                    .is_some_and(|driver| {
+                        driver
+                            .source_fields(spec)
+                            .iter()
+                            .any(|field| within.is_none_or(|pointer| is_within(pointer, field)))
+                    })
+            };
+            let Some(rendered) = units.get(unit) else {
+                continue;
+            };
+            let checked = match value.select.input.as_deref() {
+                None => has_fields(rendered, None),
+                Some(pointer) => match cited_producer(rendered.spec.as_ref(), pointer) {
+                    Some(Cited::Producer(producer)) => {
+                        units.get(&producer).is_some_and(|producer| has_fields(producer, None))
+                    }
+                    Some(Cited::Elsewhere) => false,
+                    None => has_fields(rendered, Some(pointer)),
+                },
+            };
+            if !checked {
+                findings.push(Finding::new(
+                    Code::PromoteUnchecked,
+                    format!(
+                        "value {name:?} of path {} has no known source commit, so promoting it into {target} cannot be checked against what {} promoted there",
+                        path.metadata.name,
+                        others.join(", ")
+                    ),
+                    "select a value whose producer builds from a Git source (such as an image's artifact), or check by hand that a promotion keeps what the other path promoted",
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// Whether `pointer` is `ancestor` or lies beneath it.
+fn is_within(pointer: &str, ancestor: &str) -> bool {
+    pointer == ancestor || pointer.strip_prefix(ancestor).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// What a reference at a pointer or above it names.
+enum Cited {
+    /// A producer in the same environment.
+    Producer(nyl_core::orchestration::ids::UnitName),
+    /// A producer in another environment, or a promoted value.
+    Elsewhere,
+}
+
+/// The reference at `pointer` or above it, `None` without one.
+fn cited_producer(spec: Option<&Value>, pointer: &str) -> Option<Cited> {
+    let spec = spec?;
+    let mut current = String::new();
+    let mut cited = None;
+    for token in pointer.split('/').skip(1) {
+        current.push('/');
+        current.push_str(token);
+        let Some(Value::Object(fields)) = spec.pointer(&current) else {
+            continue;
+        };
+        if is_reference(fields) {
+            let reference = fields.get("fromUnit");
+            cited = Some(
+                reference
+                    .filter(|reference| reference.get("environment").is_none())
+                    .and_then(|reference| reference.get("unit"))
+                    .and_then(Value::as_str)
+                    .and_then(|unit| nyl_core::orchestration::ids::UnitName::new(unit).ok())
+                    .map_or(Cited::Elsewhere, Cited::Producer),
+            );
+        }
+    }
+    cited
+}
+
 /// The `fromPromotion` bindings in the specs of each environment's selected
 /// units, with the type each place accepts where the unit's kind schema says.
 pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers: &DriverSet) -> Vec<ValueReader> {

@@ -151,7 +151,7 @@ fn plan(
     Stop,
 > {
     let session = Session::open(&args.path, &args.environment[0])?;
-    session.check_promotion_paths(wiring)?;
+    let unchecked = session.check_promotion_paths(wiring)?;
     let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,
@@ -174,7 +174,15 @@ fn plan(
         request.units = Some(std::collections::BTreeSet::default());
     }
     let store = session.store(None)?;
-    let report = session.run(wiring, &store, None, &request, nyl_orchestration::shell::run::plan)?;
+    let mut report = session.run(wiring, &store, None, &request, nyl_orchestration::shell::run::plan)?;
+    // Values promoted into this environment that the supersede check cannot check.
+    if let Some(environment) = report
+        .environments
+        .iter_mut()
+        .find(|environment| environment.name == session.resolved.name)
+    {
+        environment.warnings.extend(unchecked);
+    }
     let mut exit = report.exit();
     let leaving = report
         .environments

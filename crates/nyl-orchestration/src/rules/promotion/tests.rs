@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nyl_core::orchestration::driver::{DeploymentRuns, DeploymentVerdict};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, PromotionPathName, UnitName};
 use nyl_core::orchestration::ports::EnvironmentSnapshot;
 use nyl_core::orchestration::promotion::{EvidenceLevel, PromotionFrom, PromotionRecord, PromotionRequest};
@@ -57,6 +58,7 @@ struct StateBuilder {
     kubernetes: Receipt,
     chosen_by: SourceChoice,
     attestations: StateAttestations,
+    running: BTreeMap<UnitName, UnitRunning>,
 }
 
 fn state(number: u8, source: char, image: &str) -> StateBuilder {
@@ -68,6 +70,7 @@ fn state(number: u8, source: char, image: &str) -> StateBuilder {
         kubernetes: Receipt::Current,
         chosen_by: SourceChoice::Entry,
         attestations: StateAttestations::default(),
+        running: BTreeMap::new(),
     }
 }
 
@@ -107,6 +110,38 @@ impl StateBuilder {
             attestation(attested, &commit, result, recorded, Value::Null),
         );
         self
+    }
+
+    /// `kubernetes`'s `accepted` and `healthy` are running-scoped, as its
+    /// driver declares them: its receipt published `publication`, and each
+    /// attestation recorded for it says `verdicts` about the deployments.
+    fn running(mut self, publication: &str, verdicts: &[DeploymentVerdict]) -> Self {
+        let recorded: Vec<String> = self
+            .attestations
+            .units
+            .get(&name("kubernetes"))
+            .map(|recorded| recorded.keys().cloned().collect())
+            .unwrap_or_default();
+        self.running.insert(
+            name("kubernetes"),
+            UnitRunning {
+                names: BTreeSet::from(["accepted".to_owned(), "healthy".to_owned()]),
+                publication: Some(publication.to_owned()),
+                verdicts: recorded
+                    .into_iter()
+                    .map(|attested| (attested, verdicts.to_vec()))
+                    .collect(),
+            },
+        );
+        self
+    }
+
+    /// `kubernetes`'s `accepted` and `healthy` for this state's receipt,
+    /// with `result`, running-scoped and saying `verdicts`.
+    fn observed(self, result: AttestationResult, publication: &str, verdicts: &[DeploymentVerdict]) -> Self {
+        self.kubernetes_attestation("accepted", result, FRESH, Value::Null)
+            .kubernetes_attestation("healthy", result, FRESH, Value::Null)
+            .running(publication, verdicts)
     }
 
     /// `kubernetes`'s attestation for this state's receipt.
@@ -149,7 +184,8 @@ impl StateBuilder {
             &kubernetes_seed(&image),
         );
         kubernetes.attestations = vec!["accepted".to_owned(), "healthy".to_owned()];
-        kubernetes.resolved_spec = Some(json!({"releases": {"web/web": {"image": image}}}));
+        kubernetes.resolved_spec =
+            Some(json!({"releases": {"web/web": {"image": image}, "web/api": {"image": image}}}));
         snapshot.desired.insert(name("web-image"), web_image);
         snapshot.desired.insert(name("kubernetes"), kubernetes);
         let finished = |seed: &str, outputs: Value, listed_artifacts| receipt(seed, outputs, listed_artifacts);
@@ -194,6 +230,7 @@ impl StateBuilder {
             observed_commit: Some(commit(char::from(b'0' + self.number))),
             snapshot,
             attestations: self.attestations,
+            running: self.running,
         }
     }
 }
@@ -269,6 +306,7 @@ struct Case {
     promotes_source: bool,
     records: BTreeMap<PromotionPathName, PromotionRecord>,
     sequence: u64,
+    consumers: BTreeMap<String, String>,
 }
 
 fn case(path: PromotionPath, history: Vec<StateBuilder>) -> Case {
@@ -279,6 +317,7 @@ fn case(path: PromotionPath, history: Vec<StateBuilder>) -> Case {
         promotes_source: true,
         records: BTreeMap::new(),
         sequence: 1,
+        consumers: BTreeMap::new(),
     }
 }
 
@@ -290,6 +329,7 @@ impl Case {
             history: &self.history,
             target_units: targets,
             promotes_source: self.promotes_source,
+            consumers: &self.consumers,
             target_records: &self.records,
             sequence: self.sequence,
             now: at(NOW),
@@ -591,16 +631,16 @@ fn test_ignore_request_parses_scope_name_and_reason() {
 
 /// A publication's attestations are judged like any unit's: a failing one
 /// blocks its state, and an older state whose attestations passed is taken.
-/// What the newest attestation shows running (D8) is not decided here: the
-/// core does not read a driver's details.
+/// Without a driver that declares running-scoped attestations (no reader),
+/// a publication's attestations are judged like any unit's: the newest
+/// failing state is passed over for the older one that passed.
 #[test]
-fn test_publication_attestations_are_judged_generically() {
-    let details = json!({"deployments": [{"id": "web/api", "state": "other-publication"}]});
+fn test_publication_attestations_without_a_reader_are_judged_generically() {
     let history = vec![
         state(2, 'b', "sha256:two")
             .env_attestation("qa", Pass, FRESH)
-            .kubernetes_attestation("accepted", Fail, FRESH, details.clone())
-            .kubernetes_attestation("healthy", Fail, FRESH, details),
+            .kubernetes_attestation("accepted", Fail, FRESH, Value::Null)
+            .kubernetes_attestation("healthy", Fail, FRESH, Value::Null),
         state(1, 'a', "sha256:one")
             .env_attestation("qa", Pass, FRESH)
             .kubernetes_attestation("accepted", Pass, FRESH, running("p1"))
@@ -608,6 +648,284 @@ fn test_publication_attestations_are_judged_generically() {
     ];
     let promotion = case(attested(), history).promoted();
     assert_eq!(from_run(&promotion.record), run_id(1).to_string());
+}
+
+fn verdict(
+    deployment: &str,
+    group: &str,
+    runs: DeploymentRuns,
+    meets: bool,
+    reason: Option<&str>,
+) -> DeploymentVerdict {
+    DeploymentVerdict {
+        name: deployment.to_owned(),
+        group: Some(group.to_owned()),
+        runs,
+        meets,
+        reason: reason.map(str::to_owned),
+    }
+}
+
+fn runs_receipt(deployment: &str) -> DeploymentVerdict {
+    verdict(deployment, "web", DeploymentRuns::Receipt, true, None)
+}
+
+fn runs_other(deployment: &str, publication: &str) -> DeploymentVerdict {
+    verdict(
+        deployment,
+        "web",
+        DeploymentRuns::Publication(publication.to_owned()),
+        true,
+        Some(&format!("{deployment} runs another publication ({publication})")),
+    )
+}
+
+/// D8: a publication's attestations say what runs now, so only the current
+/// receipt's count. State 1 passed; state 2's newest attestation fails, as
+/// its Applications still run state 1's publication. The promotion is
+/// refused with the driver's reason and does not fall back to state 1,
+/// whose attestations no longer describe what runs, and the fix names
+/// `--state-revision`. Explicitly chosen, state 1 is judged on the
+/// attestations recorded for it and promotes. Catches a fallback to an
+/// older state that once passed.
+#[test]
+fn test_only_the_current_receipts_publication_attestations_count() {
+    let history = vec![
+        state(2, 'b', "sha256:two").env_attestation("qa", Pass, FRESH).observed(
+            Fail,
+            "p2",
+            &[runs_other("web", "p1"), runs_other("api", "p1")],
+        ),
+        state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH).observed(
+            Pass,
+            "p1",
+            &[runs_receipt("web"), runs_receipt("api")],
+        ),
+    ];
+    let mut d8 = case(attested(), history);
+    let refusal = d8.refused();
+    assert_eq!(refusal.finding.code, Code::PromoteNoEvidence);
+    assert!(
+        refusal
+            .finding
+            .message
+            .contains("the newest recorded state falls short"),
+        "{}",
+        refusal.finding.message
+    );
+    assert!(refusal.gaps.iter().all(|gap| gap.kind == GapKind::Failing));
+    assert!(
+        refusal
+            .finding
+            .fix
+            .contains(&format!("--state-revision {}", desired_commit_of(1))),
+        "{}",
+        refusal.finding.fix
+    );
+    // `get promotion-candidates` shows why state 1 no longer qualifies.
+    let evaluations = d8.evaluations();
+    assert!(!evaluations[1].eligible);
+    assert!(evaluations[1]
+        .gaps
+        .iter()
+        .all(|gap| gap.kind == GapKind::NotRunning && gap.scope == "kubernetes"));
+
+    d8.request.select = Selection::StateRevision(desired_commit_of(1));
+    let promotion = d8.promoted();
+    assert_eq!(from_run(&promotion.record), run_id(1).to_string());
+    assert!(promotion.record.evidence.override_.is_none());
+    d8.request.select = Selection::SourceRevision(commit('a'));
+    assert_eq!(from_run(&d8.promoted().record), run_id(1).to_string());
+}
+
+/// D8 narrows only running-scoped attestations: an environment-wide
+/// attestation names a state, so the newest state that passed it still wins
+/// while the publication's receipt is the same in both states.
+#[test]
+fn test_environment_attestations_still_take_the_newest_passing_state() {
+    let both = [runs_receipt("web"), runs_receipt("api")];
+    let history = vec![
+        state(2, 'b', "sha256:one")
+            .env_attestation("qa", Fail, FRESH)
+            .observed(Pass, "p1", &both),
+        state(1, 'a', "sha256:one")
+            .env_attestation("qa", Pass, FRESH)
+            .observed(Pass, "p1", &both),
+    ];
+    let promotion = case(attested(), history).promoted();
+    assert_eq!(from_run(&promotion.record), run_id(1).to_string());
+}
+
+/// Two values of one publication, each consumed by its Release's
+/// Application (D7).
+fn per_release() -> (PromotionPath, BTreeMap<String, String>) {
+    let path = path(json!({
+        "evidence": "attested",
+        "attestations": {"environment": []},
+        "values": {
+            "webImage": {"select": {"unit": "kubernetes", "input": "/releases/web~1web/image"}},
+            "apiImage": {"select": {"unit": "kubernetes", "input": "/releases/web~1api/image"}},
+        }
+    }));
+    let consumers = BTreeMap::from([
+        ("webImage".to_owned(), "web".to_owned()),
+        ("apiImage".to_owned(), "api".to_owned()),
+    ]);
+    (path, consumers)
+}
+
+/// D6: a value-only path judges each value for the Application that consumes
+/// it, from the current receipt's attestations. web runs state 2's
+/// publication and api still runs state 1's, so the aggregate fails, yet
+/// each value comes from the state its consumer runs, and only a consumer's
+/// own finding blocks: api running a revision no publication explains
+/// refuses apiImage with the driver's reason. Catches a value-only path that
+/// blocks on the aggregate or takes a value its consumer does not run.
+#[test]
+fn test_value_only_values_follow_what_their_consumer_runs() {
+    let (path, consumers) = per_release();
+    let mixed = vec![
+        state(2, 'b', "sha256:two").observed(Fail, "p2", &[runs_receipt("web"), runs_other("api", "p1")]),
+        state(1, 'a', "sha256:one").observed(Pass, "p1", &[runs_receipt("web"), runs_receipt("api")]),
+    ];
+    let mut values = case(path, mixed);
+    values.promotes_source = false;
+    values.consumers = consumers;
+    let promotion = values.promoted();
+    let record = &promotion.record;
+    assert_eq!(from_run(record), run_id(2).to_string());
+    assert_eq!(record.values["webImage"].value, json!("sha256:two"));
+    assert!(record.values["webImage"].state.is_none());
+    assert_eq!(record.values["apiImage"].value, json!("sha256:one"));
+    assert_eq!(record.values["apiImage"].state.as_ref().unwrap().run, run_id(1));
+    let used: Vec<String> = record
+        .evidence
+        .attestations
+        .iter()
+        .map(|item| format!("{}/{}", item.scope, item.name))
+        .collect();
+    assert_eq!(used, ["kubernetes/accepted", "kubernetes/healthy"]);
+    // `get promotion-candidates` agrees per value.
+    let evaluations = values.evaluations();
+    assert!(evaluations[0].by_value["webImage"].eligible);
+    assert!(!evaluations[0].by_value["apiImage"].eligible);
+    assert!(evaluations[1].by_value["apiImage"].eligible);
+
+    let unmatched = verdict(
+        "api",
+        "web",
+        DeploymentRuns::Unproven,
+        false,
+        Some("api is unmatched: it runs revision c0ffee"),
+    );
+    values.history[0] = state(2, 'b', "sha256:two")
+        .observed(Fail, "p2", &[runs_receipt("web"), unmatched])
+        .build();
+    let refusal = values.refused();
+    assert!(
+        refusal.finding.message.contains("\"apiImage\""),
+        "{}",
+        refusal.finding.message
+    );
+    assert!(
+        refusal.finding.message.contains("api is unmatched"),
+        "{}",
+        refusal.finding.message
+    );
+}
+
+/// A consumer that is not healthy blocks its value when `healthy` is
+/// required, and a path's `coverage.excludeApplications` accepts it at what
+/// it runs; the record lists the exclusion.
+#[test]
+fn test_an_unhealthy_consumer_blocks_unless_excluded() {
+    let (path, consumers) = per_release();
+    let degraded = verdict("web", "web", DeploymentRuns::Receipt, false, Some("web is Degraded"));
+    let history = vec![state(1, 'a', "sha256:one").observed(Fail, "p1", &[degraded, runs_receipt("api")])];
+    let mut values = case(path, history);
+    values.promotes_source = false;
+    values.consumers = consumers;
+    let refusal = values.refused();
+    assert!(
+        refusal.finding.message.contains("web is Degraded"),
+        "{}",
+        refusal.finding.message
+    );
+    values.path.spec.coverage.exclude_applications = vec!["web".to_owned()];
+    let promotion = values.promoted();
+    assert_eq!(promotion.record.excluded_applications, ["web"]);
+    assert_eq!(promotion.record.values["webImage"].value, json!("sha256:one"));
+}
+
+/// Coverage for a path that promotes the source: `applicationGroups` and
+/// `excludeApplications` narrow the Applications whose findings count
+/// toward the publication's attestations, and `requireApplications` adds
+/// Applications that must meet them at whatever publication they run.
+#[test]
+fn test_coverage_narrows_and_extends_the_source_judgement() {
+    let jobs = verdict(
+        "worker",
+        "jobs",
+        DeploymentRuns::Publication("p0".to_owned()),
+        true,
+        Some("worker runs another publication (p0)"),
+    );
+    let history = vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH).observed(
+        Fail,
+        "p1",
+        &[runs_receipt("web"), runs_receipt("api"), jobs.clone()],
+    )];
+    let mut source = case(attested(), history);
+    // Without coverage, the attestation counts as a whole.
+    let refusal = source.refused();
+    assert!(refusal
+        .gaps
+        .iter()
+        .all(|gap| gap.kind == GapKind::Failing && gap.scope == "kubernetes"));
+    // A group the path does not cover is left out; the one it covers still counts.
+    source.path.spec.coverage.application_groups = vec!["jobs".to_owned()];
+    let refusal = source.refused();
+    assert!(
+        refusal.finding.message.contains("worker runs another publication"),
+        "{}",
+        refusal.finding.message
+    );
+
+    source.path.spec.coverage.application_groups = vec!["web".to_owned()];
+    assert_eq!(from_run(&source.promoted().record), run_id(1).to_string());
+
+    source.path.spec.coverage.application_groups = Vec::new();
+    source.path.spec.coverage.exclude_applications = vec!["worker".to_owned()];
+    assert_eq!(from_run(&source.promoted().record), run_id(1).to_string());
+
+    // worker runs another publication but meets `accepted` and `healthy`
+    // there, which is all `requireApplications` asks.
+    source.path.spec.coverage.require_applications = vec!["worker".to_owned()];
+    source.promoted();
+    let broken = verdict(
+        "worker",
+        "jobs",
+        DeploymentRuns::Unproven,
+        false,
+        Some("worker is missing"),
+    );
+    source.history[0] = state(1, 'a', "sha256:one")
+        .env_attestation("qa", Pass, FRESH)
+        .observed(Fail, "p1", &[runs_receipt("web"), runs_receipt("api"), broken])
+        .build();
+    let refusal = source.refused();
+    assert!(
+        refusal.finding.message.contains("requireApplications"),
+        "{}",
+        refusal.finding.message
+    );
+    source.path.spec.coverage.require_applications = vec!["nowhere".to_owned()];
+    let refusal = source.refused();
+    assert!(
+        refusal.finding.message.contains("nowhere"),
+        "{}",
+        refusal.finding.message
+    );
 }
 
 /// D13: an explicitly chosen older state needs `--evidence published` only

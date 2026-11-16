@@ -585,3 +585,65 @@ fn test_only_checks_the_bindings_of_one_environment() {
     assert_eq!(codes(&findings), [Code::PromoteBindingUnknown]);
     assert!(findings[0].message.contains("Environment prod"), "{}", findings[0]);
 }
+
+/// `plan` lists the values two paths into one environment promote that the
+/// supersede check cannot check, because nothing names their source
+/// commit: a command output, or a Release input written as a literal. An
+/// artifact of a unit built from Git, and a Release input a `fromUnit`
+/// reference fills from one, are checked; a value only one path carries is
+/// never compared. Catches a plan that stays silent about a value whose
+/// supersede check `nyl promote` will skip.
+#[test]
+fn test_unchecked_lists_values_without_a_source_commit() {
+    let mut drivers = drivers();
+    drivers.register(Arc::new(TestDriver { kind: "Built" }));
+    let dev = source(
+        "dev",
+        &[],
+        vec![
+            ("image", unit("Built", true, json!({"source": {"path": "/app"}}))),
+            (
+                "cmd",
+                unit("Test", true, json!({"outputs": {"out": {"type": "string"}}})),
+            ),
+            (
+                "pub",
+                unit(
+                    "Test",
+                    true,
+                    json!({"releases": {
+                        "web/web": {"image": {"fromUnit": {"unit": "image", "artifact": "image", "pointer": "/reference"}}},
+                        "web/api": {"image": "registry.example/api:1"}
+                    }}),
+                ),
+            ),
+        ],
+    );
+    let sources = BTreeMap::from([(environment("dev"), dev)]);
+    let values = json!({
+        "img": {"select": {"unit": "image", "artifact": "image", "pointer": "/reference"}},
+        "out": {"select": {"unit": "cmd", "output": "out"}},
+        "web": {"select": {"unit": "pub", "input": "/releases/web~1web/image"}},
+        "api": {"select": {"unit": "pub", "input": "/releases/web~1api/image"}},
+    });
+    let named = |name: &str, values: Value| {
+        let mut path = path(json!({"from": {"environment": "dev"}, "to": {"environment": "prod"}, "values": values}));
+        path.metadata.name = name.to_owned();
+        path
+    };
+    let paths = [
+        named("a", values.clone()),
+        named("b", values),
+        named("c", json!({"only": {"select": {"unit": "cmd", "output": "out"}}})),
+    ];
+    let findings = unchecked(&paths, &environment("prod"), &sources, &drivers);
+    let listed: Vec<&str> = findings
+        .iter()
+        .map(|finding| {
+            assert_eq!(finding.code, Code::PromoteUnchecked);
+            finding.message.split('"').nth(1).unwrap()
+        })
+        .collect();
+    assert_eq!(listed, ["api", "out", "api", "out"], "{findings:?}");
+    assert!(unchecked(&paths, &environment("dev"), &sources, &drivers).is_empty());
+}

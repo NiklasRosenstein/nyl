@@ -11,6 +11,11 @@
 //!   [`StateStore::state_commit`] defines it), the documents as of each state,
 //!   and the attestations recorded for each state by walking the observed
 //!   history from the state's commit to the tip.
+//! - **What runs.** Each unit's driver says which of its attestations are
+//!   running-scoped and, per recorded attestation, what it shows each
+//!   deployment runs ([`read_running`]), and maps a value's input selector
+//!   to the deployment that consumes it ([`value_consumers`]); the rules
+//!   judge these typed answers and never read an attestation's details.
 //! - **Sequence.** The record's `sequence` is the highest one ever recorded
 //!   into the target plus one, found in the target's desired history
 //!   ([`next_sequence`]), never in the current snapshot alone: `state restore`
@@ -34,7 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{ArtifactStatus, Supported, VerificationContext};
+use nyl_core::orchestration::driver::{ArtifactStatus, DriverSet, Supported, VerificationContext};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress};
 use nyl_core::orchestration::ports::{
     EnvironmentSnapshot, LogEntry, PromotionRecordWriter, RecordWriteError, SourceRepository, StateHistory, StateStore,
@@ -55,7 +60,7 @@ use crate::rules::freshness::receipt_is_current;
 use crate::rules::promotion::supersede::{self, Item, RecordCommits, SupersedeEntry, SupersedeRequest};
 use crate::rules::promotion::{
     self, recorded_states, ArtifactCheck, Decision, DesiredEntry, IgnoreRequest, PromotionInput, RecordedState,
-    Refusal, Request, Selection, StateAttestations,
+    Refusal, Request, Selection, StateAttestations, UnitRunning,
 };
 use crate::transition::{trailer, Trailers, TransitionSummary};
 
@@ -258,7 +263,9 @@ fn body(
         }
     }
 
-    let history = read_history(store, source_location, source, &options.select)?;
+    let mut history = read_history(store, source_location, source, &options.select)?;
+    read_running(context.drivers, &mut history);
+    let consumers = value_consumers(context.drivers, &history, &path);
     let target_history = store.history(location).map_err(|error| store_error(target, &error))?;
     let block_sequence = crate::rules::sources::record_in_source(options.promoted.as_ref())
         .and_then(|promoted| promoted.promoted.as_ref())
@@ -270,6 +277,7 @@ fn body(
         history: &history,
         target_units: &options.target_units,
         promotes_source: options.promotes_source,
+        consumers: &consumers,
         target_records: &target_records,
         sequence: history_sequence,
         now: base.clock.now(),
@@ -1289,9 +1297,84 @@ pub fn states_of(
             observed_commit: state.observed_commit,
             snapshot,
             attestations,
+            running: BTreeMap::new(),
         });
     }
     Ok(states)
+}
+
+/// Ask each unit's driver what its running-scoped attestations say in each
+/// state: their names, the identity of what the state's receipt produced,
+/// and per recorded attestation what it says about each deployment
+/// ([`crate::rules::promotion::UnitRunning`]). The rules judge these typed
+/// answers and never read the attestations' details (decisions D6 and D8 of
+/// the M6 plan). A unit whose kind is not registered says nothing.
+pub fn read_running(drivers: &DriverSet, states: &mut [RecordedState]) {
+    for state in states {
+        for (unit, desired) in &state.snapshot.desired {
+            let Some(driver) = drivers.get(&desired.unit.api_version, &desired.unit.kind) else {
+                continue;
+            };
+            let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
+            let names: BTreeSet<String> = driver.running_attestations(spec).into_iter().collect();
+            if names.is_empty() {
+                continue;
+            }
+            let publication = state
+                .snapshot
+                .artifacts
+                .get(unit)
+                .and_then(|artifacts| driver.receipt_publication(spec, artifacts));
+            let verdicts = state
+                .attestations
+                .units
+                .get(unit)
+                .into_iter()
+                .flatten()
+                .filter(|(name, _)| names.contains(*name))
+                .filter_map(|(name, attestation)| {
+                    driver
+                        .deployment_verdicts(spec, attestation)
+                        .map(|verdicts| (name.clone(), verdicts))
+                })
+                .collect();
+            state.running.insert(
+                unit.clone(),
+                UnitRunning {
+                    names,
+                    publication,
+                    verdicts,
+                },
+            );
+        }
+    }
+}
+
+/// Per value of `path`, the deployment that consumes it (D7): for an input
+/// selector, the deployment the selected unit's driver maps the pointer to
+/// in the newest state. Any other value is consumed by its unit.
+pub fn value_consumers(
+    drivers: &DriverSet,
+    history: &[RecordedState],
+    path: &PromotionPath,
+) -> BTreeMap<String, String> {
+    let Some(newest) = history.first() else {
+        return BTreeMap::new();
+    };
+    path.spec
+        .values
+        .iter()
+        .filter_map(|(name, value)| {
+            let pointer = value.select.input.as_deref()?;
+            let unit = value.select.unit.as_ref()?;
+            let desired = newest.snapshot.desired.get(unit)?;
+            let driver = drivers.get(&desired.unit.api_version, &desired.unit.kind)?;
+            let spec = desired.resolved_spec.as_ref().unwrap_or(&desired.spec);
+            driver
+                .input_consumer(spec, pointer)
+                .map(|deployment| (name.clone(), deployment))
+        })
+        .collect()
 }
 
 /// A snapshot reduced to the attestations it holds, so a long walk keeps

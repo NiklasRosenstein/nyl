@@ -498,13 +498,15 @@ impl Session {
     ///
     /// Contract: [PromotionPath](../../../design/promotion.md#promotionpath).
     /// The finding returned is the first; its message counts the others, and
-    /// `nyl validate` lists them all.
-    pub fn check_promotion_paths(&self, wiring: &Wiring<'_>) -> Result<(), Finding> {
-        let findings =
+    /// `nyl validate` lists them all. Without one, the warnings: the values
+    /// promoted into this environment that the supersede check cannot check
+    /// (`NYL-PROMOTE-UNCHECKED`), which `nyl plan` lists.
+    pub fn check_promotion_paths(&self, wiring: &Wiring<'_>) -> Result<Vec<Finding>, Finding> {
+        let (findings, warnings) =
             super::promotion::findings_for(&self.inventory, &self.resolved.name, wiring.drivers, &self.renderer())
                 .unwrap_or_default();
         let Some(first) = findings.first() else {
-            return Ok(());
+            return Ok(warnings);
         };
         let mut finding = first.clone();
         if findings.len() > 1 {

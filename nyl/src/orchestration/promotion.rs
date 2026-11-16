@@ -48,13 +48,16 @@ pub fn findings(
 
 /// The findings of the paths that touch `environment`: what `nyl plan` reports
 /// before it plans. Renders the worktree's units of `environment` and of the
-/// environments its paths connect it to, as `nyl validate` does.
+/// environments its paths connect it to, as `nyl validate` does. The second
+/// list holds the warnings: the values the supersede check cannot check
+/// into `environment` (`NYL-PROMOTE-UNCHECKED`,
+/// [`promotion_paths::unchecked`]).
 pub fn findings_for(
     inventory: &GitOpsInventory,
     environment: &EnvironmentName,
     drivers: &DriverSet,
     renderer: &dyn SourceRenderer,
-) -> Result<Vec<Finding>> {
+) -> Result<(Vec<Finding>, Vec<Finding>)> {
     let known = declared_paths(inventory);
     let paths: Vec<PromotionPath> = known
         .iter()
@@ -90,14 +93,9 @@ pub fn findings_for(
             sources.insert(name, source);
         }
     }
-    Ok(findings_of(
-        inventory,
-        &paths,
-        &known,
-        Some(environment),
-        &sources,
-        drivers,
-    ))
+    let findings = findings_of(inventory, &paths, &known, Some(environment), &sources, drivers);
+    let unchecked = promotion_paths::unchecked(&paths, environment, &sources, drivers);
+    Ok((findings, unchecked))
 }
 
 fn findings_of(

@@ -58,6 +58,15 @@ state, use [`nyl get unit <name> -e <env>`](/nyl/reference/cli/project-resources
   resources. A publication whose teardown waits warns with
   `NYL-TEARDOWN-WAITING`, naming `nyl teardown --unit <u> --confirm-removed`
   and `--allow-incomplete`.
+- **Failing attestations.** Each attestation that fails for what the
+  environment runs warns with `NYL-ATTESTATION-FAILED` and the attestation's
+  own reason: a unit's recorded for its current receipt, such as a
+  publication's `accepted` while an Application runs another publication,
+  and an environment-wide one recorded for the current state. A failing
+  attestation blocks promotion of the state and dependents that require it;
+  the fix names `nyl attest`. Attestations of replaced receipts and earlier
+  states are not shown; [`nyl get states`](/nyl/reference/cli/get-promotions/#get-states)
+  lists them.
 - **Teardown readiness.** Units whose kind reports teardown settings, such
   as a `KubernetesPublication`, carry their teardown readiness in the
   report, `ready` or the unmet requirements, read from the stored desired
