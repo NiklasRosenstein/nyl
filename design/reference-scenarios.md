@@ -248,7 +248,7 @@ and to the harness's validation, together with the first scenario using them.
 | `deploy` | Files on a deploy branch after the step: `contains` (patterns that match a file), `unchanged` (the files that match are the ones the step started with), `absent` (patterns that match no file), and `mentions` (per file pattern, texts that appear in at least one matching file: a literal, or the arguments of a `nyl get` invocation, whose value must appear) |
 | `keep-refs` | The keep refs of preview instances in `project.git` (`refs/nyl-keep/`): `count`, how many exist, and `kept`, revisions such as `pr-124` whose commit has one |
 | `source` | The commit a reconcile ran its environment at, as a Git revision of `project.git` |
-| `promotion` | The PromotionRecord a `promote` step wrote, read where its path keeps it (`record`: `state`, the default, reads the target environment's `desired/promotions/<path>.yaml`; `source` reads the Environment's `source.fromPromotion.promoted` block at the tip of the branch the step ran at), or for `--dry-run` the record the report shows it would write. Keys not given are not checked: `path`; `sequence`; `sourceCommit` as a Git revision of `project.git` such as `main~1`, or `null` for a path that promotes only values; `from.run` as the `id` of the `nyl` step whose run recorded the promoted state, `from.environment`, and `from.desiredCommit` and `from.observedCommit` (usually `%STATE(<id>)%` and `%OBSERVED(<id>)%`); `values`, exactly these names, each `equals` a literal or the value a `nyl get` invocation prints, and `state`, the `id` of the step whose run wrote the value's own state (not given: the record names none, so the value came from `from`); `evidence` with `level`, `override`, and exactly the `attestations` used as `<unit>/<name>` or `environment/<name>`; `superseded`, exactly these commits in commit order, each a revision of `project.git` with its `reason`; `artifactsVerified`; `requested.reason`; and `ignoredAttestations`, exactly these entries, each `{attestation: <unit>/<name> or environment/<name>, reason}` |
+| `promotion` | The PromotionRecord a `promote` step wrote, read where its path keeps it (`record`: `state`, the default, reads the target environment's `desired/promotions/<path>.yaml`; `source` reads the Environment's `source.fromPromotion.promoted` block at the tip of the branch the step ran at), or for `--dry-run` the record the report shows it would write, under its top-level `record`. Keys not given are not checked: `path`; `sequence`; `sourceCommit` as a Git revision of `project.git` such as `main~1`, or `null` for a path that promotes only values; `from.run` as the `id` of the `nyl` step whose run recorded the promoted state, `from.environment` (not given: the path's `from`), and `from.desiredCommit` and `from.observedCommit` (usually `%STATE(<id>)%` and `%OBSERVED(<id>)%`); `values`, exactly these names, each `equals` a literal or the value a `nyl get` invocation prints, and `state`, the `id` of the step whose run wrote the value's own state (not given: the record names none, so the value came from `from`); `evidence` with `level`, `override`, and exactly the `attestations` used as `<unit>/<name>` or `environment/<name>`; `superseded`, exactly these commits in commit order, each a revision of `project.git` with its `reason` and, when given, its `repository`; `artifactsVerified`; `requested.reason`; and `ignoredAttestations`, exactly these entries, each `{attestation: <unit>/<name> or environment/<name>, reason}` |
 
 A `promote` step's `commits` count the refs of the environment its path
 promotes into, which the harness reads from the PromotionPath at the step's
@@ -271,6 +271,20 @@ in advance:
 | `%OBSERVED(<id>)%` | The observed-state commit the `nyl` step with that `id` wrote |
 | `%COMMIT(<revision>)%` | The full commit ID of a revision of `project.git`, such as `main~1` or `release/prod`, resolved when the step runs |
 | `%PLAN-DIGEST(<environment>/<unit>)%` | The `changeDigest` that `nyl plan -e <environment> --unit <unit> -o json` reports for the unit at the step's checkout, for `--approve <unit>=<digest>` under `requireDigest`; in tier 2 that `plan` runs through the binary, like every step there |
+
+The runner expands them as the step starts, so a `%PLAN-DIGEST%` or `%STATE%`
+in an `expect` names the state before the step, not after it. The revisions a
+`promotion` expectation names (`sourceCommit`, `superseded`) are not
+placeholders and resolve after the step, when its commits exist, so
+`main~1` is the commit before a promotion commit it made on `main`.
+`%STATE(<id>)%` of a step that wrote only an observed commit is that
+commit, which never equals a record's `desiredCommit`. `%PLAN-DIGEST%` runs
+its `plan` with no fault armed, so a scenario does not script a `plan` driver
+outcome directly before a step that uses it. A `promote` step that gives
+`commits` also leaves every branch of `project.git`, every lease and every keep
+ref unchanged, except the target environment's own state refs and, for
+`record: source`, the branch the step ran at; a `--dry-run` leaves all of them
+unchanged. The harness reads the default state layout only.
 
 Validation rejects an unknown placeholder, a `%STATE(…)%` or
 `%OBSERVED(…)%` that names no earlier `nyl` step, and placeholders in a

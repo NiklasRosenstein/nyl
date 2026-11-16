@@ -269,6 +269,21 @@ impl World {
         git_output(&self.bare(), &["rev-parse", revision])
     }
 
+    /// [`Self::rev_parse`], reporting a revision that names no commit.
+    pub fn try_rev_parse(&self, revision: &str) -> Result<String, String> {
+        let output = git_command(
+            &self.bare(),
+            &["rev-parse", "--verify", "--quiet", &format!("{revision}^{{commit}}")],
+        )
+        .output()
+        .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        } else {
+            Err(format!("{revision:?} names no commit of project.git"))
+        }
+    }
+
     /// The files of a branch in `project.git`.
     pub fn files(&self, branch: &str) -> Vec<String> {
         git_output(

@@ -689,6 +689,8 @@ pub enum EvidenceLevel {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupersededExpectation {
+    /// The repository the commit is in, when it is checked.
+    pub repository: Option<String>,
     /// A revision of `project.git`, such as `release/prod~1`.
     pub commit: String,
     pub reason: String,
@@ -750,7 +752,31 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
     }
     let mut ids = BTreeMap::<String, bool>::new();
     let mut scripted = false;
+    // A `plan` script waiting for the next `nyl` step would be consumed by the
+    // `plan` that resolves a `%PLAN-DIGEST%`, not by the step it is meant for.
+    let mut plan_scripted = false;
     for (index, step) in scenario.steps.iter().enumerate() {
+        if plan_scripted
+            && substituted_arguments(step).into_iter().any(|argument| {
+                placeholders(argument)
+                    .is_ok_and(|found| found.iter().any(|p| matches!(p, Placeholder::PlanDigest { .. })))
+            })
+        {
+            return Err(format!(
+                "step {}: uses %PLAN-DIGEST%, whose `plan` would consume the `driver: {{operation: plan}}` script before it",
+                index + 1
+            ));
+        }
+        if step.kind()? == StepKind::Nyl {
+            plan_scripted = false;
+        }
+        if step
+            .driver
+            .as_ref()
+            .is_some_and(|driver| driver.operation == DriverOperation::Plan)
+        {
+            plan_scripted = true;
+        }
         validate_placeholders(step, scenario.milestone, &ids)
             .map_err(|error| format!("step {}: {error}", index + 1))?;
         validate_step(step, directory, &mut ids).map_err(|error| format!("step {}: {error}", index + 1))?;
@@ -831,6 +857,18 @@ pub enum Placeholder {
     /// `%PLAN-DIGEST(<environment>/<unit>)%`: the `changeDigest` that
     /// `nyl plan -e <environment> --unit <unit>` reports at the step's checkout.
     PlanDigest { environment: String, unit: String },
+}
+
+impl Placeholder {
+    /// The text a scenario writes for it, which the runner replaces.
+    pub fn token(&self) -> String {
+        match self {
+            Self::State(id) => format!("%STATE({id})%"),
+            Self::Observed(id) => format!("%OBSERVED({id})%"),
+            Self::Commit(revision) => format!("%COMMIT({revision})%"),
+            Self::PlanDigest { environment, unit } => format!("%PLAN-DIGEST({environment}/{unit})%"),
+        }
+    }
 }
 
 /// The first milestone whose harness replaces argument placeholders.
