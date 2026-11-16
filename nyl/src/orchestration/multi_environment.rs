@@ -430,14 +430,24 @@ fn read_environment(
         .filter(|_| request.template.is_none())
         .and_then(|instance| instance.record.as_ref()?.source_commit.clone());
     let commit = recorded.as_ref().unwrap_or(commit);
-    // A promoted source takes its commit from the records in the environment's state.
-    let promotions = if entry
+    // A promoted source takes its commit from the environment's records: in
+    // its state, or with `record: source` the block in its source, read as a run reads them.
+    let promoted = entry
         .spec
         .source
         .as_ref()
-        .is_some_and(|source| source.from_promotion.is_some())
-    {
-        snapshot(inventory, name, request)?.promotions
+        .and_then(|source| source.from_promotion.as_ref());
+    let promotions = if promoted.is_some() {
+        let snapshot = snapshot(inventory, name, request)?;
+        nyl_orchestration::rules::sources::promotion_records(
+            name.as_str(),
+            promoted,
+            &snapshot.promotions,
+            snapshot
+                .environment
+                .as_ref()
+                .and_then(|record| record.applied_promotion_sequence),
+        )?
     } else {
         BTreeMap::new()
     };

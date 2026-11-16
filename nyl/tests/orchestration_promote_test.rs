@@ -14,6 +14,7 @@ use nyl_core::orchestration::ports::{Clock as _, IdGenerator as _};
 use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, StateLocation, StateV1};
 use nyl_units::fake::Scripted;
 use scenario::shell::{self, project};
+use scenario::world::git_output;
 use tempfile::TempDir;
 
 const PROD_DESIRED: &str = "refs/heads/nyl/prod/desired";
@@ -733,22 +734,133 @@ fn test_get_promotions_and_status_show_lineage() {
     assert!(history[1]["commit"].is_string());
 }
 
-/// A target that keeps its record in its source (`record: source`) is not
-/// supported yet: `nyl promote` and `nyl get promotion-candidates` refuse it
-/// alike, so inspection never shows a promotion that cannot be made.
+/// A target that keeps its record in its source (`record: source`): the
+/// promotion is one commit on the checked-out branch, by the invocation's
+/// author, carrying the block, and writes no state; repeating it is
+/// `unchanged`; a run reads the block from source and applies its sequence;
+/// `status`, `get promotions`, and `promotion-candidates` show it as the
+/// path's record. Catches a record written into state, a second block, a
+/// run that ignores the block, and inspection blind to it.
 #[test]
-fn test_record_source_targets_are_refused_by_promote_and_candidates() {
+fn test_record_source_promotion_is_a_source_commit_that_runs_read() {
     let environments = ENVIRONMENTS.replace(
-        "source: {fromPromotion: {path: dev-to-prod}}",
-        "source: {fromPromotion: {path: dev-to-prod, record: source}}",
+        "  source: {fromPromotion: {path: dev-to-prod}}\n",
+        "  source:\n    fromPromotion:\n      path: dev-to-prod\n      record: source\n",
     );
-    let harness = Promote::of(&environments, UNITS, true);
-    let promoted = harness.promote(&["dev-to-prod", "--dry-run"]);
+    let harness = Promote::of(&environments, &format!("{UNITS}{BINDER}"), true);
+    let (prod_desired, main) = (harness.shell.tip(PROD_DESIRED), harness.shell.tip("refs/heads/main"));
+
+    let dry = harness.promote(&["dev-to-prod", "--dry-run"]);
+    assert_eq!(dry.exit, 0, "{}", dry.stderr);
+    assert_eq!(harness.shell.tip("refs/heads/main"), main, "a dry run writes nothing");
+
+    let promoted = harness.promote(&["dev-to-prod", "--reason", "Release 1"]);
+    assert_eq!(promoted.exit, 0, "{}", promoted.stderr);
+    assert_eq!(promoted.report["record"]["sequence"], 1);
+    let commit = promoted.report["commits"]["source"].as_str().unwrap().to_owned();
+    assert_eq!(harness.shell.tip("refs/heads/main"), commit);
+    assert_eq!(harness.shell.tip("refs/heads/main^"), main, "exactly one commit");
+    assert_eq!(harness.shell.tip(PROD_DESIRED), prod_desired, "no state is written");
+    assert!(promoted.report["commits"].get("desired").is_none());
+    assert!(harness.prod_lease_released());
+    let message = harness.shell.message("refs/heads/main");
+    assert!(message.starts_with("nyl: promote prod (dev-to-prod #1)"), "{message}");
+    assert!(message.contains("Nyl-Reason: Release 1"), "{message}");
+    assert_eq!(
+        git_output(
+            &harness.shell.world.bare(),
+            &["log", "-1", "--format=%an <%ae>", "main"]
+        ),
+        harness.shell.identity.to_string()
+    );
+    let declared = harness.shell.show("refs/heads/main", "nyl/environments.yaml");
+    assert!(
+        declared.contains("      promoted: # written by nyl promote"),
+        "{declared}"
+    );
+    assert!(declared.contains("        sequence: 1\n"), "{declared}");
+    assert_eq!(
+        git_output(&harness.shell.world.bare(), &["diff", "--name-only", "main^", "main"]),
+        "nyl/environments.yaml"
+    );
+
+    // The block in source names what was promoted: the same again is unchanged.
+    let again = harness.promote(&["dev-to-prod"]);
+    assert_eq!(again.exit, 0, "{}", again.stderr);
+    assert_eq!(again.report["outcome"], "unchanged");
+    assert_eq!(harness.shell.tip("refs/heads/main"), commit);
+
+    let applied = harness.shell.invoke(&["reconcile", "-e", "prod", "-o", "json"]);
+    assert_eq!(applied.exit, 0, "{}", applied.stderr);
+    let record = harness.shell.show(PROD_DESIRED, "desired/environment.yaml");
+    assert!(record.contains("appliedPromotionSequence: 1"), "{record}");
+    assert!(
+        record.contains(promoted.report["record"]["sourceCommit"].as_str().unwrap()),
+        "{record}"
+    );
+
+    let status = harness.shell.invoke(&["status", "-e", "prod", "-o", "json"]);
+    let lineage = &status.report["environments"][0]["promotion"];
+    assert_eq!(lineage["sequence"], 1);
+    assert_eq!(lineage["from"], promoted.report["record"]["from"]);
+    let promotions = harness.get(&["promotions", "-e", "prod"]);
+    assert_eq!(promotions.exit, 0, "{}", promotions.stderr);
+    assert_eq!(promotions.report["promotions"][0]["sequence"], 1);
     let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
-    for outcome in [&promoted, &candidates] {
-        assert_eq!(outcome.exit, 1, "{}", outcome.stderr);
-        assert!(outcome.stderr.contains("NYL-PROMOTE-UNSUPPORTED"), "{}", outcome.stderr);
-    }
+    assert_eq!(candidates.exit, 0, "{}", candidates.stderr);
+    let marked = |key: &str| -> Vec<serde_json::Value> {
+        candidates.report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|candidate| candidate[key] == true)
+            .map(|candidate| candidate["desiredCommit"].clone())
+            .collect()
+    };
+    let from = promoted.report["record"]["from"]["desiredCommit"].clone();
+    assert_eq!(marked("promoted"), std::slice::from_ref(&from));
+    assert_eq!(marked("running"), std::slice::from_ref(&from));
+
+    // A newer promotion in source waits for its run: status names it.
+    harness.release("2");
+    let second = harness.promote(&["dev-to-prod", "--reason", "Release 2"]);
+    assert_eq!(second.exit, 0, "{}", second.stderr);
+    assert_eq!(second.report["record"]["sequence"], 2);
+    let status = harness.shell.invoke(&["status", "-e", "prod", "-o", "json"]);
+    let lineage = &status.report["environments"][0]["promotion"];
+    assert_eq!(lineage["sequence"], 1);
+    assert_eq!(lineage["pendingSequence"], 2);
+}
+
+/// A block that does not match the state it names, such as one edited by
+/// hand to another image, is refused by the run, which writes nothing.
+/// Catches a block in source taken on trust.
+#[test]
+fn test_a_record_source_block_that_does_not_match_its_state_is_refused() {
+    let environments = ENVIRONMENTS.replace(
+        "  source: {fromPromotion: {path: dev-to-prod}}\n",
+        "  source:\n    fromPromotion:\n      path: dev-to-prod\n      record: source\n",
+    );
+    let harness = Promote::of(&environments, &format!("{UNITS}{BINDER}"), true);
+    let promoted = harness.promote(&["dev-to-prod"]);
+    assert_eq!(promoted.exit, 0, "{}", promoted.stderr);
+    let declared = harness.shell.show("refs/heads/main", "nyl/environments.yaml");
+    let image = promoted.report["record"]["values"]["webImage"]["value"]
+        .as_str()
+        .unwrap();
+    harness.shell.world.commit_files(
+        "main",
+        "Edit the block by hand",
+        &[(
+            "nyl/environments.yaml",
+            &declared.replace(image, "registry.invalid:5000/web@sha256:0000"),
+        )],
+    );
+    let before = harness.shell.tip(PROD_DESIRED);
+    let run = harness.shell.invoke(&["reconcile", "-e", "prod"]);
+    assert_eq!(run.exit, 1, "{}", run.stderr);
+    assert!(run.stderr.contains("NYL-PROMOTION-RECORD-INVALID"), "{}", run.stderr);
+    assert_eq!(harness.shell.tip(PROD_DESIRED), before);
 }
 
 /// Two environments that share a desired ref (`spec.state.path`) share its

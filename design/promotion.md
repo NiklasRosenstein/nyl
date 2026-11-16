@@ -124,6 +124,13 @@ Other codes of the promotion rules: `NYL-PROMOTION-MISSING` (exit 2 of a
 promote <path>`); `NYL-PROMOTION-SEQUENCE-OLDER` (exit 1: a `record: source`
 block, or (M11) a target's record, with a lower `sequence` than the one
 applied; the fix names `nyl promote <path> --revision`);
+`NYL-PROMOTION-RECORD-INVALID` (exit 1: a `record: source` block that does
+not match the source state it names, or names a path the Environment is not
+promoted along); `NYL-PROMOTE-SOURCE-UNWRITABLE` (exit 1: `nyl promote`
+cannot commit a `record: source` block, such as from a detached HEAD, whose
+fix is to check out a branch); `NYL-PROMOTE-SOURCE-REJECTED` (exit 2: the
+remote refused the fast-forward push of that commit, which is undone; the
+fix is to update the checkout and promote again);
 `NYL-PROMOTE-EVIDENCE-OVERRIDE` (a warning: `--evidence published` below the
 path's level, recorded as an override); and `NYL-PROMOTE-UNCHECKED` (a
 warning: a value without a known source commit, which the supersede check

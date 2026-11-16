@@ -11,8 +11,8 @@ export const orchestrationRoadmap = {
   nextStep: {
     intro: 'M5 is complete: one `reconcile` builds an image, applies OpenTofu, and publishes Kubernetes manifests that consume the image digest and the infrastructure output; the same Releases render with static inputs in a target that does not use orchestration; the `KubernetesPublication` unit declares its target inline, tears down in two phases behind an owner fence, builds and diffs from `nyl build`, observes Argo CD to attest `accepted` and `healthy`, and reads observed values; EnvironmentTemplates create preview environments that expire, share one catalog, and are removed with their pull request; and all three reference scenarios pass in both tiers with the real publication driver. The Orchestration guide ends with an end-to-end example that runs locally and in GitHub Actions. Continue with M6: promotion paths.',
     steps: [
-      { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks; validation rejects `changeGate: pullRequest`, which M11 adds.', done: false },
-      { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: false },
+      { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks; validation rejects `changeGate: pullRequest`, which M11 adds.', done: true },
+      { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: true },
       { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: false },
       { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
     ],
@@ -125,7 +125,7 @@ export const orchestrationRoadmap = {
       exitCriterion: 'Prod runs exactly the source commit and image digest dev proved, with auditable lineage; stale, missing, or mixed source evidence blocks promotion; a hotfix reaches prod through its own path, and a dev promotion without the fix is refused until the fix is merged or superseded; a value-only path promotes each value from what its consuming Application runs.',
       items: [
         { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks, recording each promotion directly; validation rejects `changeGate: pullRequest` until M11.', done: true },
-        { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with `record: state` and `record: source`, the whole-source evidence rule, recorded evidence for older states, artifact verification, and rollback through `--revision`.', done: false },
+        { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with `record: state` and `record: source`, the whole-source evidence rule, recorded evidence for older states, artifact verification, and rollback through `--revision`.', done: true },
         { text: 'Support several paths into one environment: `source.fromPromotion.paths`, path-less bindings, the per-value supersede check with `--supersede`, and the hotfix pattern with a fifth reference scenario.', done: false },
         { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
         { text: 'Promote values only, such as an image digest and a Terraform source commit, across differently named units and inputs, each from the state its consumer runs.', done: false },

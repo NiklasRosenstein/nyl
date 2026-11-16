@@ -20,6 +20,8 @@
 //! - [`values`]: reading each promoted value through the shared reference
 //!   resolver.
 //! - [`lineage`]: what `status` shows of the promotion an environment runs.
+//! - [`source_block`]: a `record: source` block checked against the state it
+//!   names.
 //! - this module: state selection and the record.
 //!
 //! **State selection.** Without flags, the newest state whose evidence
@@ -71,6 +73,7 @@
 
 mod history;
 mod lineage;
+mod source_block;
 mod standing;
 mod values;
 
@@ -89,7 +92,8 @@ use nyl_core::orchestration::time::Timestamp;
 use nyl_core::resources::promotion::PromotionPath;
 
 pub use history::{recorded_states, DesiredEntry, RecordedState, StateAttestations, StateRef};
-pub use lineage::lineage;
+pub use lineage::{lineage, lineage_with};
+pub use source_block::check_block;
 pub use standing::{Gap, GapKind, Judgement, Used, ENVIRONMENT_SCOPE};
 pub use values::ArtifactCheck;
 

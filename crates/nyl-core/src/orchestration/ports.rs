@@ -844,6 +844,38 @@ pub struct WorktreeSnapshot {
     pub reused: bool,
 }
 
+/// Why a `record: source` PromotionRecord could not be committed. Nothing
+/// was written in any case: a commit whose push the remote refused is undone
+/// in the entry worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordWriteError {
+    /// The entry worktree has no branch checked out.
+    Detached,
+    /// The remote refused the fast-forward push: the branch moved since the checkout.
+    Rejected(String),
+    /// Anything else, such as an uncommitted change to the Environment's
+    /// file, a block that cannot be placed, or a failing `git`.
+    Unwritable(String),
+}
+
+impl std::fmt::Display for RecordWriteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Detached => formatter.write_str("the entry worktree has no branch checked out (detached HEAD)"),
+            Self::Rejected(message) | Self::Unwritable(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// Writes the PromotionRecord of an Environment with `record: source` into
+/// its `source.fromPromotion.promoted` block: one commit on the branch the
+/// entry worktree has checked out, pushed to that branch's upstream
+/// fast-forward only, never forced (decision D3 of the M6 plan).
+pub trait PromotionRecordWriter: Send + Sync {
+    /// Commit `record` as the block with `message`, push it, and return the commit.
+    fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError>;
+}
+
 /// One unit as an environment's source renders it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedUnit {

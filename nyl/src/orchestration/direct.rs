@@ -190,7 +190,14 @@ pub fn prepare(
             run: None,
             produced_in_run: &BTreeSet::new(),
             previous: &snapshot.desired,
-            promotions: &snapshot.promotions,
+            // The current records, with `record: source` the block as the entry worktree declares it.
+            promotions: &nyl_orchestration::rules::sources::recorded_promotions(
+                &snapshot,
+                effective
+                    .as_ref()
+                    .and_then(|effective| effective.environment.spec.source.as_ref())
+                    .and_then(|source| source.from_promotion.as_ref()),
+            ),
             source_paths: source_paths.as_ref(),
         },
         &unit,

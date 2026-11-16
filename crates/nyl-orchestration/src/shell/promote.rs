@@ -13,13 +13,23 @@
 //!   history from the state's commit to the tip.
 //! - **Sequence.** The record's `sequence` is the highest one ever recorded
 //!   into the target plus one, found in the target's desired history
-//!   ([`next_sequence`]), never in the current snapshot: `state restore`
-//!   removes newer records but not their commits.
+//!   ([`next_sequence`]), never in the current snapshot alone: `state restore`
+//!   removes newer records but not their commits. The current records, the
+//!   sequence a run applied, and a `record: source` block count too.
 //! - **Verification.** Each promoted artifact is checked with its producing
 //!   driver's `verify_artifact` capability; the shell never names kinds.
 //! - **Lease and write.** Under the target's lease it writes one desired
 //!   commit holding the record and a summary. The source is only read, and
 //!   its lease never taken. `--dry-run` takes no lease and writes nothing.
+//! - **`record: source`.** A path that promotes the source of a target with
+//!   `record: source` writes no state: the record becomes the target
+//!   Environment's `source.fromPromotion.promoted` block, one commit on the
+//!   branch the entry worktree has checked out with the same message a
+//!   transition commit would carry, pushed fast-forward only through a
+//!   [`PromotionRecordWriter`] (decision D3 of the M6 plan). The block in the
+//!   entry worktree is the path's current record for `unchanged` (D2), and
+//!   its sequence counts for the next one. A detached HEAD and a refused
+//!   push write nothing ([`writer_finding`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,10 +37,12 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ArtifactStatus, Supported, VerificationContext};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress};
 use nyl_core::orchestration::ports::{
-    EnvironmentSnapshot, LogEntry, StateHistory, StateStore, StateTips, TransitionChanges,
+    EnvironmentSnapshot, LogEntry, PromotionRecordWriter, RecordWriteError, StateHistory, StateStore, StateTips,
+    TransitionChanges,
 };
 use nyl_core::orchestration::promotion::{PromotedState, PromotionFrom, PromotionRecord, PromotionRequest};
 use nyl_core::orchestration::state::{Operation, StateLocation};
+use nyl_core::resources::environment::PromotedSource;
 use nyl_core::resources::promotion::PromotionPath;
 use serde_json::{json, Value};
 
@@ -76,13 +88,30 @@ pub struct PromoteOptions {
     pub rebuilt: Vec<(String, Finding)>,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
+    /// The target's `source.fromPromotion` as the entry worktree declares
+    /// it: with `record: source`, its block is the path's current record.
+    pub promoted: Option<PromotedSource>,
     /// Who asks and why, recorded like an approval.
     pub requested: PromotionRequest,
 }
 
+impl PromoteOptions {
+    /// Whether the record goes into the target's source rather than its
+    /// state: the path promotes the source of a target with `record: source`.
+    pub fn records_in_source(&self) -> bool {
+        self.promotes_source && crate::rules::sources::record_in_source(self.promoted.as_ref()).is_some()
+    }
+}
+
 /// `nyl promote`, for the environment `request` is for (the target).
-pub fn promote(context: &RunContext<'_>, request: &RunRequest, options: &PromoteOptions) -> PromoteReport {
-    super::run::off_runtime(|| promote_in(context, request, options))
+/// `writer` commits a `record: source` block ([`PromoteOptions::records_in_source`]).
+pub fn promote(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    options: &PromoteOptions,
+    writer: Option<&dyn PromotionRecordWriter>,
+) -> PromoteReport {
+    super::run::off_runtime(|| promote_in(context, request, options, writer))
 }
 
 /// The path's source environment; `None` for a target source (M11).
@@ -94,7 +123,12 @@ pub fn source_of(path: &PromotionPath) -> Option<EnvironmentName> {
         .and_then(|name| EnvironmentName::new(name).ok())
 }
 
-fn promote_in(context: &RunContext<'_>, request: &RunRequest, options: &PromoteOptions) -> PromoteReport {
+fn promote_in(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    options: &PromoteOptions,
+    writer: Option<&dyn PromotionRecordWriter>,
+) -> PromoteReport {
     let target = request.environment.clone();
     let path_name = options.path.metadata.name.clone();
     let Some(source) = source_of(&options.path) else {
@@ -125,7 +159,7 @@ fn promote_in(context: &RunContext<'_>, request: &RunRequest, options: &PromoteO
             Err(finding) => return report.refused(finding),
         }
     };
-    let result = body(context, request, options, &source, held.as_mut(), &mut report);
+    let result = body(context, request, options, (&source, writer), held.as_mut(), &mut report);
     if let Some(held) = &held {
         if let Err(error) = lease::release(base, held, true) {
             report.warnings.push(store_error(&target, &error));
@@ -146,7 +180,7 @@ fn body(
     context: &RunContext<'_>,
     request: &RunRequest,
     options: &PromoteOptions,
-    source: &EnvironmentName,
+    (source, writer): (&EnvironmentName, Option<&dyn PromotionRecordWriter>),
     held: Option<&mut lease::HeldLease>,
     report: &mut PromoteReport,
 ) -> Result<(), Finding> {
@@ -196,9 +230,11 @@ fn body(
             "fix the PromotionPath's name",
         )
     })?;
-    // The decision sees the path's record narrowed to the values promoted: an
-    // equal subset leaves it `unchanged`.
-    let mut target_records = snapshot.promotions.clone();
+    // The target's current records: in state, and with `record: source` the
+    // block in the entry worktree. The decision sees the path's record
+    // narrowed to the values promoted: an equal subset leaves it `unchanged`.
+    let current = crate::rules::sources::recorded_promotions(&snapshot, options.promoted.as_ref());
+    let mut target_records = current.clone();
     if let Some(existing) = target_records.get_mut(&path_key) {
         if !options.values.is_empty() {
             existing.values.retain(|name, _| options.values.contains(name));
@@ -207,8 +243,10 @@ fn body(
 
     let history = read_history(store, source_location, source, &options.select)?;
     let target_history = store.history(location).map_err(|error| store_error(target, &error))?;
-    // PR 8 adds the sequence of a `record: source` block here.
-    let history_sequence = next_sequence(&target_history, &snapshot, target, []);
+    let block_sequence = crate::rules::sources::record_in_source(options.promoted.as_ref())
+        .and_then(|promoted| promoted.promoted.as_ref())
+        .map(|block| block.sequence);
+    let history_sequence = next_sequence(&target_history, &snapshot, target, block_sequence);
     let input = PromotionInput {
         path: &path,
         source,
@@ -228,7 +266,7 @@ fn body(
     let decision = promotion::decide(&input).map_err(|refusal| refusal_finding(&refusal, report))?;
     let promotion = match decision {
         Decision::Unchanged(record) => {
-            report.record = Some(snapshot.promotions.get(&path_key).cloned().unwrap_or(*record));
+            report.record = Some(current.get(&path_key).cloned().unwrap_or(*record));
             return Ok(());
         }
         Decision::Promote(promotion) => *promotion,
@@ -261,7 +299,7 @@ fn body(
 
     // Values the subset left alone stay at their lineage.
     if !options.values.is_empty() {
-        if let Some(existing) = snapshot.promotions.get(&path_key) {
+        if let Some(existing) = current.get(&path_key) {
             // A carried value keeps the state it came from: the old record's `from`,
             // unless the value already names its own.
             let carried_from = match &existing.from {
@@ -290,8 +328,6 @@ fn body(
         return Ok(());
     };
 
-    let mut changes = TransitionChanges::default();
-    changes.promotions.insert(path_key.clone(), Some(record.clone()));
     let mut summary = TransitionSummary {
         operation: Operation::Promote,
         environment: target.clone(),
@@ -311,11 +347,58 @@ fn body(
         source_commit: record.source_commit.clone(),
         ..super::trailers(base, held, &snapshot.tips)
     };
+    if options.records_in_source() {
+        // The record is a commit in source; the target's state is unchanged.
+        let writer = writer.ok_or_else(|| {
+            writer_finding(
+                &RecordWriteError::Unwritable("this invocation cannot write the project's source".to_owned()),
+                target,
+                &path_key,
+            )
+        })?;
+        let message = crate::transition::message(&summary, &trailers);
+        let commit = writer
+            .commit_record(&record, &message)
+            .map_err(|error| writer_finding(&error, target, &path_key))?;
+        report.commits.insert("source", commit);
+        report.outcome = Outcome::Done;
+        return Ok(());
+    }
+    let mut changes = TransitionChanges::default();
+    changes.promotions.insert(path_key.clone(), Some(record.clone()));
     let commits = super::commit_transition(base, location, held, &snapshot.tips, summary, changes, &trailers)
         .map_err(|error| store_error(target, &error))?;
     report.commits.extend(commits);
     report.outcome = Outcome::Done;
     Ok(())
+}
+
+/// Why a `record: source` block was not committed, as the finding the
+/// promotion is refused with. Nothing was written in any case.
+pub fn writer_finding(
+    error: &RecordWriteError,
+    target: &EnvironmentName,
+    path: &nyl_core::orchestration::ids::PromotionPathName,
+) -> Finding {
+    match error {
+        RecordWriteError::Detached => Finding::new(
+            Code::PromoteSourceUnwritable,
+            format!(
+                "Environment {target} keeps its promotion record in its source, but the entry worktree has no branch checked out (detached HEAD), so the record has no branch to be committed to"
+            ),
+            format!("check out the branch the record belongs on, such as `git checkout main`, and run `nyl promote {path}` again"),
+        ),
+        RecordWriteError::Rejected(message) => Finding::new(
+            Code::PromoteSourceRejected,
+            format!("the push of the promotion record of {target} was refused, so nothing was written: {message}"),
+            format!("the branch moved since this checkout: update it (`git pull --ff-only`) and run `nyl promote {path}` again; a promotion is never forced"),
+        ),
+        RecordWriteError::Unwritable(message) => Finding::new(
+            Code::PromoteSourceUnwritable,
+            format!("the promotion record of {target} cannot be committed to its source: {message}"),
+            "fix the cause, then run `nyl promote` again; the block is written by `nyl promote` under `spec.source.fromPromotion` of the Environment, in block style",
+        ),
+    }
 }
 
 /// The warnings that say an artifact could not be verified.
@@ -714,8 +797,9 @@ fn attestations_of(
 /// into the environment. The whole desired history holds every promotion's
 /// summary, including those whose records `state restore` removed, so the
 /// sequence never repeats. The current records, the sequence the environment
-/// record says a run applied, and `others` (a `record: source` block's, PR 8)
-/// count too, for state moved without its history. Environments that share
+/// record says a run applied, and `others` (a `record: source` block's)
+/// count too, for state moved without its history and for records kept in
+/// source, which no promote commit in state carries. Environments that share
 /// a desired ref (`spec.state.path`) share its history, so only promotions
 /// into `environment` count.
 pub fn next_sequence(

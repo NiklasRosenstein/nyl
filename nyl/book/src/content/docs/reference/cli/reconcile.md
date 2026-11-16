@@ -334,7 +334,7 @@ a stable code and its fix.
 | Exit | Meaning |
 | --- | --- |
 | 0 | Every selected unit is current, or its deletion completed (`removed`, `retained`, `released`). |
-| 1 | A configuration, resolution, or operational error, such as `NYL-STATE-MISSING`, `NYL-SOURCE-UNREACHABLE`, `NYL-UNIT-UNKNOWN`, or `NYL-COMMIT-IDENTITY-MISSING`. |
+| 1 | A configuration, resolution, or operational error, such as `NYL-STATE-MISSING`, `NYL-SOURCE-UNREACHABLE`, `NYL-UNIT-UNKNOWN`, or `NYL-COMMIT-IDENTITY-MISSING`; for an Environment with [`record: source`](/nyl/orchestration/promotion/#keeping-the-record-in-source), a block older than the sequence a run applied (`NYL-PROMOTION-SEQUENCE-OLDER`, whose fix names `nyl promote <path> --revision`) or one that does not match the state it names (`NYL-PROMOTION-RECORD-INVALID`). |
 | 2 | Not everything was reconciled and nothing failed: a unit is blocked, held, drifted, awaiting approval, `pending-teardown`, or `tearing-down`; another run holds the lease (`NYL-LEASE-HELD`); with `--detect-drift`, a drift check could not tell (`NYL-DRIFT-UNKNOWN`). |
 | 3 | At least one execution failed. |
 | 4 | At least one execution is uncertain, the run lost its lease (`NYL-LEASE-LOST`), or it was cancelled (`NYL-RUN-CANCELLED`). |

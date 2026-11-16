@@ -1090,3 +1090,28 @@ fn test_evaluate_judges_each_value_of_a_value_only_path_on_its_own() {
     assert!(evaluations[0].gaps.iter().any(|gap| gap.scope == "kubernetes"));
     assert!(evaluations[1].gaps.iter().any(|gap| gap.scope == "web-image"));
 }
+
+/// A `record: source` block matches the state it names exactly when it is
+/// the record `nyl promote` wrote for that state: another value, another
+/// source commit, or another state is `NYL-PROMOTION-RECORD-INVALID`.
+/// Catches a block edited by hand, or copied from another promotion, being
+/// run on trust.
+#[test]
+fn test_a_source_block_must_match_the_state_it_names() {
+    let case = case(
+        published(),
+        vec![state(2, 'b', "sha256:two"), state(1, 'a', "sha256:one")],
+    );
+    let record = case.promoted().record;
+    let named = &case.history[0];
+    check_block(&record, &dev(), named).unwrap();
+
+    let mut value = record.clone();
+    value.values.get_mut("webImage").unwrap().value = json!("sha256:other");
+    let mut source = record.clone();
+    source.source_commit = Some(commit('a'));
+    for (tampered, state) in [(&value, named), (&source, named), (&record, &case.history[1])] {
+        let finding = check_block(tampered, &dev(), state).unwrap_err();
+        assert_eq!(finding.code, Code::PromotionRecordInvalid, "{}", finding.message);
+    }
+}

@@ -9,6 +9,7 @@ pub mod ids;
 pub mod instances;
 pub mod project;
 pub mod promotion;
+pub mod record_source;
 pub mod run;
 pub mod session;
 

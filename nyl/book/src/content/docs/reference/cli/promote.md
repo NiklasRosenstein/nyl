@@ -3,7 +3,8 @@ title: 'promote'
 ---
 
 `nyl promote` records what one environment proved as a `PromotionRecord` in
-another environment's desired state, along a
+another environment's desired state, or with `record: source` in that
+Environment's source, along a
 [PromotionPath](/nyl/orchestration/resource-guides/promotion-path/). It reads
 the source's recorded states and writes nothing to the source; it never
 observes anything itself, so it runs from a workstation without cluster
@@ -33,6 +34,29 @@ command that writes state, and writes one desired commit with the operation
 the path, the sequence, and the source state. `--wait-lease` waits for a
 running reconcile; a lease that stays held is exit 2.
 
+## `record: source`
+
+When the path promotes the source of a target whose Environment says
+`record: source`, the record is written into that Environment's
+`source.fromPromotion.promoted` block instead, as one commit on the branch
+the entry worktree has checked out, with the same message a state commit
+would carry and `--author` as its author. The commit carries only the
+Environment's file and is pushed to the branch's upstream fast-forward only;
+the report lists it under `commits.source`, and nothing is written to the
+target's state. The block in the checkout is the path's current record for
+[Unchanged](#unchanged), and its sequence counts for the next one. The
+[promotion guide](/nyl/orchestration/promotion/#keeping-the-record-in-source)
+explains how runs read the block.
+
+- A detached HEAD has no branch to commit to: exit 1 with
+  `NYL-PROMOTE-SOURCE-UNWRITABLE`, whose fix is to check out the branch. The
+  same code refuses uncommitted changes to the Environment's file and a
+  `fromPromotion` that is not in block style.
+- A push the remote refuses, because the branch moved since the checkout,
+  undoes the local commit and exits 2 with `NYL-PROMOTE-SOURCE-REJECTED`:
+  update the checkout (`git pull --ff-only`) and run `nyl promote` again. The
+  push is never forced.
+
 ## Options
 
 | Option | Meaning |
@@ -46,7 +70,7 @@ running reconcile; a lease that stays held is exit 2.
 | `--ignore-attestation <scope>/<name>=<reason>` | Set a failing attestation aside (repeatable); `<scope>` is a unit name or `environment`. The record keeps the reason and who gave it. |
 | `--no-verify-artifacts` | Do not check that promoted artifacts still exist, for runners without registry access; the record says `artifactsVerified: false`. A path's `verifyArtifacts: false` does the same. |
 | `--wait-lease <duration>` | Wait up to this long for another run's lease on the target. |
-| `--author "Name <email>"` | Author of the state commit; defaults to Git's `user.name` and `user.email`. |
+| `--author "Name <email>"` | Author of the state commit, or of the source commit with `record: source`; defaults to Git's `user.name` and `user.email`. |
 | `-o json` | The operation's typed `PromoteReport`. |
 
 ## Which units the target selects
@@ -89,8 +113,8 @@ false`.
 | Exit | When |
 | --- | --- |
 | 0 | The record was written, or the path's record already names the chosen state (`unchanged`), or the dry run found a promotion to make. |
-| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a target with `record: source` (`NYL-PROMOTE-UNSUPPORTED`), a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), or an unreadable commit. |
-| 2 | Nothing was written because evidence is missing, stale, or failing (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), or the target's lease is held (`NYL-LEASE-HELD`). |
+| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), an unreadable commit, or a `record: source` block that cannot be committed (`NYL-PROMOTE-SOURCE-UNWRITABLE`: a detached HEAD, uncommitted changes to the Environment's file). |
+| 2 | Nothing was written because evidence is missing, stale, or failing (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
 
 Run [`nyl reconcile`](/nyl/reference/cli/reconcile/) on the target afterwards:
 an environment that takes its source from a promotion exits 2 with
