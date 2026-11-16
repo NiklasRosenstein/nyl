@@ -7,7 +7,7 @@ requests, lists the state and resource format changes M6 needs, and records
 the decisions on what the [promotion contract](promotion.md) left open. The
 user settled D1–D13, the format calls, and the deferral of target promotion
 and the change gate to M11; the contract and the roadmap now say the same.
-D14 is still open. Once M6 is
+D14 was settled afterwards. Once M6 is
 done, this note is history: the contract and the roadmap page describe what
 was built.
 
@@ -153,9 +153,9 @@ The user accepted every recommendation of D1–D13; they are written into
 `promotion.md` and `orchestration-core.md`, and the "Recommendation" column
 is now the decision. D10 became the move to M11, with the code
 `NYL-PROMOTE-UNSUPPORTED` for the forms M6 rejects (added to D1's list).
-D14 is still open; scenario 4 assumes its recommendation.
+D14 was settled afterwards, against its first recommendation (see its row).
 
-| # | Question | Options | Decision (D14: recommendation) | PR |
+| # | Question | Options | Decision | PR |
 | --- | --- | --- | --- | --- |
 | D1 | Stable codes the contract does not name | — | `NYL-PROMOTION-MISSING` (exit 2: a `fromPromotion` source or binding with no record; names `nyl promote <path>`), `NYL-PROMOTE-ARTIFACT-MISSING` (exit 1), `NYL-PROMOTE-EVIDENCE-OVERRIDE` (warning, `--evidence published` below the path's level), `NYL-PROMOTE-SUPERSEDE-REASON` (exit 1, an entry with neither its own reason nor `--reason`), `NYL-PROMOTION-SEQUENCE-OLDER` (exit 1, a `record: source` block or `spec.promotions` record below the applied sequence), `NYL-PROMOTE-UNCHECKED` (warning, a value without a known source commit), and `NYL-PROMOTE-UNSUPPORTED` (exit 1, a form M6 does not support: `changeGate: pullRequest`, a target in `from` or `to`). Settled | 3, 6 |
 | D2 | Promoting the state the path's record already names | Exit 0 writing nothing; or write a new record with a higher sequence | Exit 0, `outcome: unchanged`, when the chosen state and values equal the path's record *and* that record supplies every value; otherwise (another path wrote since) the promotion is a real one and the supersede check runs. Scenario 4 step 8 and scenario 5 step 10 depend on it Settled. | 6 |
@@ -170,7 +170,7 @@ D14 is still open; scenario 4 assumes its recommendation.
 | D11 | `from` of a value-only record whose values come from different states | The newest state; the state of the first value; none | The newest state any value came from, with `state` on each value from another one (as the walkthrough asserts) Settled. | 11 |
 | D12 | `--revision` on a fresh clone that lacks the commit | Fetch by id like recorded sources | Resolve against the source repository with the same fetch rules as a recorded source commit Settled. | 6 |
 | D13 | Promoting an explicitly chosen older state at `attested` | `promotion.md` says both "Promoting an older state than the evidence level would select requires `--evidence published`, recorded as an override, for example to roll back" (Promotion paths, lines 198–200) and "An explicitly chosen state satisfies `attested` through attestations recorded for that state … Only a state without them needs `--evidence published`" (Promoting an environment's source, lines 264–270) | Narrow the first sentence to the second: an explicitly chosen state needs `--evidence published` only when the attestations recorded for it do not reach the level (including aged ones). Scenario 4 step 11 (aged `qa`, override needed) and `value-only-promotion` (R1 chosen with its recorded attestations, no override) follow the second reading Settled. | 5 |
-| D14 | Exit of `nyl attest --name … --result fail` | The core contract's exit table lists `attest` in its own row (3 for a failing attestation) and again among the state operations (0 when done) | 3 with `NYL-ATTESTATION-FAILED`, as the driver form, so a CI job that records a failing check fails visibly; remove `attest` from the state-operations row. Scenario 4 step 12 assumes it | 4 |
+| D14 | Exit of `nyl attest --name … --result fail` | The core contract's exit table lists `attest` in its own row (3 for a failing attestation) and again among the state operations (0 when done) | The two rows describe two forms. The driver form (`nyl attest -e <env>`) determines the result and exits 3 with `NYL-ATTESTATION-FAILED` on a failing attestation. The external form (`--name … --result pass\|fail`) only records a result the caller already knows: it exits 0 once recorded, whatever the result, and 1 if it cannot record it; what a failing result blocks is reported by `promote` or a dependent. Scenario 4 step 12 expects 0 Settled. | 4 |
 
 ## Contract problems (resolved)
 
@@ -196,8 +196,9 @@ scenarios, and this plan agree:
 - `nyl attest --state-revision` is M11 (D9); `observed/attestations.yaml`
   and `desired/promotions/` are documented as additive within `v1`.
 
-Still open: **D14**, the exit of `nyl attest --name … --result fail`, listed
-twice in the core contract's exit table.
+D14 (the exit of `nyl attest --name … --result fail`) is settled: the
+external form exits 0 once recorded, the driver form 3 on a failing
+attestation.
 
 ## Not covered by the scenarios
 
