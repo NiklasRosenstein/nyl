@@ -310,6 +310,19 @@ impl World {
         }
     }
 
+    /// The content of `object` (`<revision>:<path>`) in `project.git`, or why
+    /// it cannot be shown.
+    pub fn show(&self, object: &str) -> Result<String, String> {
+        let output = git_command(&self.bare(), &["show", object])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+    }
+
     /// The files of a branch in `project.git`.
     pub fn files(&self, branch: &str) -> Vec<String> {
         git_output(

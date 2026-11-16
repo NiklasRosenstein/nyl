@@ -814,8 +814,6 @@ mod tests {
         );
     }
 
-    /// Catches a second check of an unchanged unit writing a commit only
-    /// because time moved on, and a changed result not being written.
     /// A failing driver attestation's warning shows the driver's reason
     /// unchanged, so `nyl attest` says why without reading the observed
     /// state; a passing one and an external one warn about nothing.
@@ -862,6 +860,8 @@ mod tests {
         );
     }
 
+    /// Catches a second check of an unchanged unit writing a commit only
+    /// because time moved on, and a changed result not being written.
     #[test]
     fn test_records_keep_stored_documents_that_differ_only_in_time() {
         let unit = desired_numbered("network", 1, Some(hex_key('a')));

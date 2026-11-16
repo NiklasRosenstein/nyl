@@ -659,6 +659,30 @@ steps:
     .unwrap();
 }
 
+/// An `argocd` step naming a Release the target has no Application for
+/// fails the scenario, instead of scripting a reading nothing reads.
+#[test]
+fn test_argocd_step_naming_no_release_of_the_target_fails() {
+    let error = run_inline(
+        "walkthroughs/value-only-promotion",
+        "inline/fake-argocd-unknown-release",
+        r#"contract: design/promotion.md#kubernetes-publications
+milestone: M6
+tiers: [1]
+publication: fake
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: r1
+    exit: 0
+  - argocd: {target: dev, all: {runs: r1}, releases: {web/nope: {runs: unmatched}}}
+"#,
+    )
+    .unwrap_err();
+    assert!(error.contains("no Application for Release web/nope"), "{error}");
+}
+
 fn expect(text: &str) -> scenario::format::Expect {
     serde_saphyr::from_str(text).unwrap()
 }

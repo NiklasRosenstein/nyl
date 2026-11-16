@@ -479,7 +479,7 @@ impl Evaluation {
                     "{} of {total} deployments do not run publication {}: {}",
                     not_accepted.len(),
                     self.commit,
-                    not_accepted.join("; ")
+                    listed(&not_accepted)
                 )
             }),
             details: details.clone(),
@@ -492,12 +492,12 @@ impl Evaluation {
                 (false, _) => Some(format!(
                     "not every deployment runs publication {}, so none of it is attested healthy: {}",
                     self.commit,
-                    not_accepted.join("; ")
+                    listed(&not_accepted)
                 )),
                 (true, false) => Some(format!(
                     "{} of {total} deployments are not Healthy: {}",
                     unhealthy.len(),
-                    unhealthy.join("; ")
+                    listed(&unhealthy)
                 )),
             },
             details,
@@ -556,6 +556,24 @@ impl Evaluation {
     }
 }
 
+/// How many deployments a reason names; the details list every one.
+const REASON_LISTS: usize = 3;
+
+/// The first [`REASON_LISTS`] of `entries`, and how many more there are, so
+/// a reason stays readable in a warning for a target with many deployments.
+fn listed(entries: &[String]) -> String {
+    let text = entries
+        .iter()
+        .take(REASON_LISTS)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    match entries.len().saturating_sub(REASON_LISTS) {
+        0 => text,
+        more => format!("{text}; and {more} more (see the attestation's details)"),
+    }
+}
+
 fn describe(finding: &Finding) -> String {
     format!(
         "{} {} ({})",
@@ -581,6 +599,19 @@ mod tests {
 
     use super::super::{ReadRequest, ReconcilerReader};
     use super::*;
+
+    /// A reason names at most three deployments and counts the rest, which
+    /// the details list. Catches a warning that grows with the target.
+    #[test]
+    fn test_reasons_list_three_deployments_and_count_the_rest() {
+        let entries = (1..=5).map(|n| format!("d{n} is Degraded")).collect::<Vec<_>>();
+        assert_eq!(
+            listed(&entries),
+            "d1 is Degraded; d2 is Degraded; d3 is Degraded; and 2 more (see the attestation's details)"
+        );
+        assert_eq!(listed(&entries[..3]), "d1 is Degraded; d2 is Degraded; d3 is Degraded");
+        assert_eq!(listed(&entries[..1]), "d1 is Degraded");
+    }
 
     /// A branch of publication commits `p1`..: for each commit, the tree of
     /// every deployment directory, and which ones changed the index.
