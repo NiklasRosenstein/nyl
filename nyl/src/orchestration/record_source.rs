@@ -207,8 +207,11 @@ impl GitRecordWriter {
             .map_err(|error| failed(format!("remote {remote} of branch {name} has no URL: {error}")))?;
         let file = std::fs::canonicalize(&self.file)
             .map_err(|error| failed(format!("cannot read {}: {error}", self.file.display())))?;
+        // Both sides canonical, so a verbatim (Windows) or symlinked (macOS
+        // `/var`) worktree path still contains the file.
+        let worktree = std::fs::canonicalize(&self.worktree).unwrap_or_else(|_| self.worktree.clone());
         let relative = file
-            .strip_prefix(&self.worktree)
+            .strip_prefix(&worktree)
             .map_err(|_| failed(format!("{} is outside the worktree", self.file.display())))?
             .to_string_lossy()
             .replace('\\', "/");
@@ -291,7 +294,7 @@ impl GitRecordWriter {
         let mut command = nyl_git::repository_command(&self.git_dir);
         command
             .arg("--work-tree")
-            .arg(&self.worktree)
+            .arg(nyl_git::cli_path(&self.worktree))
             .current_dir(&self.worktree)
             .envs(self.git_env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
         command

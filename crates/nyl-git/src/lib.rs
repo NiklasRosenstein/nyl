@@ -33,7 +33,7 @@ pub use error::{GitError, Rejection, Result};
 pub use lfs::{lfs_filter_problem, lfs_tracked_paths, LfsFilterProblem};
 pub use status::{worktree_status, WorktreeStatusEntry};
 pub use transport::{
-    fetch, fetch_branch, ls_remote, push_atomic, push_branch_if_unchanged, remote_branch, repository_command, Expect,
-    RefUpdate,
+    cli_path, fetch, fetch_branch, ls_remote, push_atomic, push_branch_if_unchanged, remote_branch, repository_command,
+    Expect, RefUpdate,
 };
 pub use url::{redact_url_credentials, sanitize_url};

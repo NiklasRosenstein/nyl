@@ -253,17 +253,46 @@ fn run(git_dir: &Path, url: &str, operation: &str, args: &[&str], auth: &GitAuth
     Ok(stdout)
 }
 
+/// A path as Git's command line accepts it.
+///
+/// Rust's canonical paths on Windows carry a verbatim prefix (`\\?\C:\…`),
+/// which Git for Windows cannot parse. Drive and UNC verbatim paths are turned
+/// back into ordinary ones; every other path is returned unchanged.
+pub fn cli_path(path: &Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, PathBuf, Prefix};
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            let mut ordinary = match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:", char::from(drive))),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut unc = PathBuf::from(r"\\");
+                    unc.push(server);
+                    unc.push(share);
+                    unc
+                }
+                _ => return path.to_path_buf(),
+            };
+            ordinary.push(components.as_path());
+            return ordinary;
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Build a Git command bound to this repository, ignoring inherited repository selectors.
 pub fn repository_command(git_dir: &Path) -> Command {
     // A hooks directory that never exists: the user's hooks, such as a
     // global `core.hooksPath` pre-push hook, must not judge Nyl's own
     // fetches and pushes.
+    let git_dir = cli_path(git_dir);
     let mut hooks_path = std::ffi::OsString::from("core.hooksPath=");
     hooks_path.push(git_dir.join("nyl-no-hooks"));
     let mut command = Command::new("git");
     command
         .arg("--git-dir")
-        .arg(git_dir)
+        .arg(&git_dir)
         // Fetches must not start background maintenance, a URL must never run
         // a command through the `ext::` transport, and push negotiation, which
         // some configurations enable, only adds noise to atomic pushes.
@@ -318,6 +347,24 @@ mod tests {
     use super::*;
     use git2::{Oid, Repository};
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn test_cli_path_drops_the_verbatim_prefix() {
+        for (canonical, ordinary) in [
+            (r"\\?\C:\work\clone with spaces", r"C:\work\clone with spaces"),
+            (r"\\?\UNC\server\share\clone", r"\\server\share\clone"),
+            (r"C:\already\ordinary", r"C:\already\ordinary"),
+        ] {
+            assert_eq!(cli_path(Path::new(canonical)), std::path::PathBuf::from(ordinary));
+        }
+    }
+
+    #[test]
+    fn test_cli_path_leaves_ordinary_paths_alone() {
+        let path = Path::new("relative/clone");
+        assert_eq!(cli_path(path), path.to_path_buf());
+    }
 
     fn commit(repository: &Repository, reference: &str, message: &str, parents: &[&git2::Commit<'_>]) -> Oid {
         let signature = git2::Signature::now("Test", "test@example.invalid").unwrap();
