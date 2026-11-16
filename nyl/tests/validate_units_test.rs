@@ -98,10 +98,6 @@ fn test_validate_runs_the_unit_checks_plan_runs() {
             "kind: Command\nmetadata:\n  name: waiter\n  labels: {dev: 'true'}\nspec:\n  command: [./wait.sh]\n  dependsOn: [{unit: network, attestations: [healthy]}]\n",
             "NYL-ATTESTATION-UNDECLARED",
         ),
-        (
-            "kind: Command\nmetadata:\n  name: gate\n  labels: {dev: 'true'}\nspec:\n  command: [./gate.sh]\n  attestations: [{name: qa, from: external}]\n---\napiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: waiter\n  labels: {dev: 'true'}\nspec:\n  command: [./wait.sh]\n  dependsOn: [{unit: gate, evidence: attested}]\n",
-            "NYL-ATTESTATION-EXTERNAL-UNSUPPORTED",
-        ),
     ];
     for (unit, code) in cases {
         let checkout = world.fresh_clone("main");
@@ -115,4 +111,19 @@ fn test_validate_runs_the_unit_checks_plan_runs() {
             .failure()
             .stderr(predicate::str::contains(code));
     }
+}
+
+/// Catches `nyl validate` refusing a dependent that gates on an attestation
+/// only `nyl attest --name` supplies: a producer's `spec.attestations` entry
+/// with `from: external` is a name a dependent may require, by name or
+/// through `evidence: attested`.
+#[test]
+fn test_validate_accepts_dependents_of_external_attestations() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    let units = checkout.join("nyl/units.yaml");
+    let mut contents = std::fs::read_to_string(&units).unwrap();
+    contents.push_str("---\napiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: gate\n  labels: {dev: 'true'}\nspec:\n  command: [./gate.sh]\n  attestations: [{name: qa, from: external}]\n---\napiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata:\n  name: waiter\n  labels: {dev: 'true'}\nspec:\n  command: [./wait.sh]\n  dependsOn: [{unit: gate, attestations: [qa]}, {unit: gate, evidence: attested}]\n");
+    std::fs::write(&units, contents).unwrap();
+    nyl_validate(&world, &checkout).assert().success();
 }

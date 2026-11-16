@@ -320,7 +320,7 @@ pub fn settle_drift(new: DriftRecord, stored: Option<&DriftRecord>) -> DriftReco
 /// The attestation documents of `outcomes` for `unit`'s current `receipt`
 /// at `now`, each with `source: {driver: <source>}` (`attest` for `nyl
 /// attest`, `reconcile` for the outcome of an execution) and the driver's
-/// details.
+/// details. Outcomes for names declared only `from: external` are left out.
 pub fn attestations(
     environment: &EnvironmentName,
     unit: &DesiredUnit,
@@ -334,8 +334,12 @@ pub fn attestations(
         name: unit.unit.name.clone(),
         uid,
     });
+    // A name declared only `from: external` is recorded by `nyl attest --name`
+    // alone, whatever a driver reports.
+    let external = super::evidence::external_only(unit);
     outcomes
         .iter()
+        .filter(|outcome| !external.contains(&outcome.name))
         .map(|outcome| {
             (
                 outcome.name.clone(),
@@ -404,11 +408,16 @@ pub fn drift_check(drift: &Drift) -> UnitCheck {
 }
 
 /// What `attest` reports for a unit's attestation set.
+///
+/// An attestation recorded by `nyl attest --name` stays in the unit's set but
+/// is not this check's result: the driver form reports, and exits 3 for, what
+/// its drivers determined.
 pub fn attest_check(attestations: &BTreeMap<String, Attestation>) -> UnitCheck {
     UnitCheck {
         result: CheckResult::Attested,
         attestations: attestations
             .iter()
+            .filter(|(_, attestation)| attestation.source.get("external").is_none())
             .map(|(name, attestation)| (name.clone(), attestation.result))
             .collect(),
         observations: BTreeMap::new(),
@@ -629,6 +638,27 @@ mod tests {
                 .insert(name(unit), observed_numbered(unit, 1, observed_key.map(hex_key)));
         }
         snapshot
+    }
+
+    /// Catches a driver writing an attestation `nyl attest --name` owns: an
+    /// outcome for a name declared only `from: external` is left out, whichever
+    /// driver reports it, while the names the unit's driver or its other
+    /// declarations produce are recorded.
+    #[test]
+    fn test_driver_outcomes_for_external_only_names_are_not_recorded() {
+        let mut unit = desired_numbered("network", 1, Some(hex_key('a')));
+        unit.spec = json!({"attestations": [{"name": "qa", "from": "external"}, {"name": "smoke"}, {"name": "healthy", "from": "external"}]});
+        unit.attestations = vec!["healthy".to_owned()];
+        let receipt = crate::rules::fixtures::receipt("a", json!({}), Vec::new());
+        let outcome = |name: &str| nyl_core::orchestration::driver::AttestationOutcome {
+            name: name.to_owned(),
+            result: AttestationResult::Pass,
+            reason: None,
+            details: Value::Null,
+        };
+        let outcomes = [outcome("qa"), outcome("smoke"), outcome("healthy")];
+        let recorded = attestations(&env(), &unit, &receipt, &outcomes, "attest", at(0));
+        assert_eq!(recorded.keys().collect::<Vec<_>>(), ["healthy", "smoke"]);
     }
 
     /// Catches a check of a stale receipt (drift against what no longer

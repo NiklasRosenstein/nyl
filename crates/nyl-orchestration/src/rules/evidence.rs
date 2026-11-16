@@ -19,13 +19,10 @@
 //!   waits forever). Without names, `evidence: attested` requires every
 //!   declared attestation, and a producer that declares none is satisfied by
 //!   its current receipt; `published` requires none.
-//! - **External.** A name declared only with `from: external` can be
-//!   recorded by nothing until `nyl attest --name … --result …` ships (M6),
-//!   so a requirement that would include one, by name or through `evidence:
-//!   attested`, is a resolution error too ([`RequirementError::External`],
-//!   [`Code::AttestationExternalUnsupported`]) instead of a consumer that
-//!   waits forever. A name the driver also reports, or that another entry
-//!   declares without `from: external`, is not external-only.
+//! - **External.** A name declared with `from: external` is supplied by
+//!   `nyl attest --name … --result …` ([`super::external_attest`]); a
+//!   requirement on it is met like any other and waits as `pending` until
+//!   someone records it.
 //! - **Standing.** An attestation counts only for the receipt it names: the
 //!   recorded `executionKey` equals the current receipt's and, when the record
 //!   names an incarnation, its uid equals the producer's. A required name
@@ -85,49 +82,11 @@ pub fn declared(producer: &DesiredUnit) -> BTreeSet<String> {
     names
 }
 
-/// Why a requirement cannot be met by anything: a resolution error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RequirementError {
-    /// A name the producer does not declare.
-    Undeclared(String),
-    /// A name only an external source supplies, which Nyl cannot record yet.
-    External(String),
-}
-
-/// The fix a resolution error of this kind carries; a `nyl validate` finding
-/// names the producer's attestations in its fix instead.
-impl RequirementError {
-    pub fn fix(&self) -> &'static str {
-        match self {
-            Self::Undeclared(_) => {
-                "require an attestation the producer declares, or declare it in the producer's `spec.attestations`"
-            }
-            Self::External(_) => {
-                "external attestations cannot be recorded yet (`nyl attest --name … --result …` arrives with promotion, M6): require only the names the producer's driver observes"
-            }
-        }
-    }
-
-    /// The stable code the error is reported with.
-    pub fn code(&self) -> Code {
-        match self {
-            Self::Undeclared(_) => Code::AttestationUndeclared,
-            Self::External(_) => Code::AttestationExternalUnsupported,
-        }
-    }
-}
-
-impl std::fmt::Display for RequirementError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Undeclared(message) | Self::External(message) => formatter.write_str(message),
-        }
-    }
-}
-
 /// The declared names that only an external source supplies: declared in
-/// `spec.attestations` with `from: external`, and not also reported by the
-/// driver or declared there without it.
+/// `spec.attestations` with `from: external`, and neither reported by the
+/// driver nor declared there without it. A driver outcome for one is never
+/// recorded ([`super::checks::attestations`]), so a driver cannot write what
+/// `nyl attest --name` owns.
 pub fn external_only(producer: &DesiredUnit) -> BTreeSet<String> {
     let mut external = BTreeSet::new();
     let mut observable: BTreeSet<String> = producer.attestations.iter().cloned().collect();
@@ -147,43 +106,44 @@ pub fn external_only(producer: &DesiredUnit) -> BTreeSet<String> {
     external
 }
 
-/// The names a requirement on `producer` can be met by today: declared and
-/// not external-only.
-pub fn recordable(producer: &DesiredUnit) -> BTreeSet<String> {
-    let external = external_only(producer);
-    declared(producer)
-        .into_iter()
-        .filter(|name| !external.contains(name))
-        .collect()
+/// Why a requirement cannot be met by anything: a resolution error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequirementError {
+    /// A name the producer does not declare.
+    Undeclared(String),
 }
 
-fn external_error(names: &[String], producer: &DesiredUnit) -> RequirementError {
-    let unit = &producer.unit.name;
-    let recordable = recordable(producer);
-    let others = if recordable.is_empty() {
-        format!("{unit} declares no attestation its driver observes")
-    } else {
-        format!(
-            "{unit}'s driver observes {}",
-            recordable.into_iter().collect::<Vec<_>>().join(", ")
-        )
-    };
-    RequirementError::External(format!(
-        "requires attestation {} of unit {unit}, which only an external source supplies; Nyl cannot record external attestations yet, so the consumer would wait forever ({others})",
-        names
-            .iter()
-            .map(|name| format!("{name:?}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
+/// The fix a resolution error of this kind carries; a `nyl validate` finding
+/// names the producer's attestations in its fix instead.
+impl RequirementError {
+    pub fn fix(&self) -> &'static str {
+        match self {
+            Self::Undeclared(_) => {
+                "require an attestation the producer declares, or declare it in the producer's `spec.attestations`"
+            }
+        }
+    }
+
+    /// The stable code the error is reported with.
+    pub fn code(&self) -> Code {
+        match self {
+            Self::Undeclared(_) => Code::AttestationUndeclared,
+        }
+    }
+}
+
+impl std::fmt::Display for RequirementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undeclared(message) => formatter.write_str(message),
+        }
+    }
 }
 
 /// The attestation names a consumer requires of `producer`, or why the
-/// requirement is a resolution error: a name the producer does not declare,
-/// or one only an external source supplies.
+/// requirement is a resolution error: a name the producer does not declare.
 pub fn required(evidence: Evidence, named: &[String], producer: &DesiredUnit) -> Result<Vec<String>, RequirementError> {
     let declared = declared(producer);
-    let external = external_only(producer);
     let selected: Vec<String> = if named.is_empty() {
         match evidence {
             Evidence::Published => Vec::new(),
@@ -209,16 +169,7 @@ pub fn required(evidence: Evidence, named: &[String], producer: &DesiredUnit) ->
         }
         selected
     };
-    let blocking: Vec<String> = selected
-        .iter()
-        .filter(|name| external.contains(*name))
-        .cloned()
-        .collect();
-    if blocking.is_empty() {
-        Ok(selected)
-    } else {
-        Err(external_error(&blocking, producer))
-    }
+    Ok(selected)
 }
 
 /// How one required attestation stands for the producer's current receipt,
@@ -390,33 +341,22 @@ mod tests {
             .contains("declares none"));
     }
 
-    /// Catches a consumer that waits forever for an attestation nothing can
-    /// record yet: a name declared only `from: external` is rejected, by name
-    /// and through `evidence: attested`, with the names that can be required
-    /// instead, while a name the driver also reports is not external-only.
+    /// Catches a requirement on a name declared `from: external` being
+    /// refused: `nyl attest --name` records it, so a dependent requiring it by
+    /// name or through `evidence: attested` waits as pending, never errors.
     #[test]
-    fn test_requiring_an_external_only_attestation_is_rejected() {
+    fn test_requiring_an_external_attestation_is_accepted() {
         let unit = producer(
             &["healthy"],
-            json!({"attestations": [{"name": "qa", "from": "external"}, {"name": "healthy", "from": "external"}]}),
+            json!({"attestations": [{"name": "qa", "from": "external"}]}),
         );
-        assert_eq!(external_only(&unit), BTreeSet::from(["qa".to_owned()]));
-        assert_eq!(recordable(&unit), BTreeSet::from(["healthy".to_owned()]));
-        for (evidence, named) in [
-            (Evidence::Published, vec!["qa".to_owned()]),
-            (Evidence::Published, vec!["healthy".to_owned(), "qa".to_owned()]),
-            (Evidence::Attested, Vec::new()),
-        ] {
-            let error = required(evidence, &named, &unit).unwrap_err();
-            assert_eq!(error.code(), Code::AttestationExternalUnsupported, "{named:?}");
-            assert!(
-                error.to_string().contains("\"qa\"") && error.to_string().contains("observes healthy"),
-                "{error}"
-            );
-        }
         assert_eq!(
-            required(Evidence::Published, &["healthy".to_owned()], &unit),
-            Ok(vec!["healthy".to_owned()])
+            required(Evidence::Published, &["qa".to_owned()], &unit),
+            Ok(vec!["qa".to_owned()])
+        );
+        assert_eq!(
+            required(Evidence::Attested, &[], &unit),
+            Ok(vec!["healthy".to_owned(), "qa".to_owned()])
         );
     }
 

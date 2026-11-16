@@ -408,12 +408,10 @@ spec:
   producer's attestations to require instead of all it declares (see
   [Attestations](#attestations)). Naming an attestation the producer does not
   declare is a resolution error (`NYL-ATTESTATION-UNDECLARED`, also reported by
-  `nyl validate`). So is a requirement that would include a name declared
-  only with `from: external`, by name or through `evidence: attested`
-  (`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`, also reported by `nyl validate`):
-  nothing can record an external attestation until `nyl attest --name …
-  --result …` ships (M6), so the consumer would wait forever. Its fix says so
-  and names the attestations the producer's driver observes. For a producer
+  `nyl validate`). A name declared with `from: external` may be required, by
+  name or through `evidence: attested`: `nyl attest --name … --result …`
+  records it (see [Attestations](#attestations)), and the consumer waits as
+  pending until it does. For a producer
   in another environment, `nyl validate` cannot see the names its driver
   reports, so `plan` and `reconcile` report these errors. A consumer whose producer lacks the evidence is `blocked` on
   it, exit 2, until the producer's current receipt has every required
@@ -3067,7 +3065,7 @@ attestations:
     executionKey: sha256:…            # the receipt attested; environment-wide: the desired commit of the state
     result: pass                      # pass | fail
     at: 2026-09-25T16:40:00Z
-    source: {driver: attest}          # or {driver: reconcile}, or {external: {by: alice, source: …, url: …}}
+    source: {driver: attest}          # or {driver: reconcile}, or {external: {by: [alice], identity: verified, source: …, url: …}}
     reason: null
     details: {}                       # driver-specific, such as each Application's running publication
 ```
@@ -3102,9 +3100,25 @@ attestations:
   (`NYL-ATTESTATION-FAILED`).
   Both forms run under the lease, like every state-writing operation, and
   `--wait-lease` lets a CI job wait for a running reconcile; a refused name
-  exits 1. Implementation status: the driver form is implemented, including
-  the publication unit's `accepted` and `healthy`; the external form is not
-  yet.
+  exits 1. A held lease is exit 2, as for every state-writing operation. The
+  name must be declared with `from: external` in the unit's
+  `spec.attestations`, or for the environment form (no `--unit`) in
+  `Environment.spec.attestations`, and the attestation is recorded for the
+  unit's current receipt or for the environment's current desired commit, with
+  `source: {external: {by, identity, source, url}}` where `by` and `identity`
+  are an approver's (the same lookup, GitHub, CI, and workstation sources).
+  `--state-revision` and `--revision` do not exist (M11). The environment
+  form attests the state's desired commit: the newest commit of the desired
+  ref that changed this environment's `desired/` documents (beneath its
+  `path`), found by following first parents from the ref's tip
+  (`StateStore::state_commit`). It is not the ref's tip, which every
+  observed-only commit moves when both sides share a ref, and which another
+  environment's commit moves on a shared ref; so two attestations recorded one
+  after the other name the same state, and a promotion compares an
+  attestation's `executionKey` with that commit of the state it reads.
+  `state init --fresh` removes the environment's attestations. Implementation
+  status: both forms are implemented, including the publication unit's
+  `accepted` and `healthy`.
 - An attestation is valid only for the receipt or state it names. Declared
   attestations of a new receipt are pending until attested; the newest per
   name and receipt wins. Git history keeps earlier ones, so an older state
@@ -3616,7 +3630,13 @@ honestly how it learned who did.
   trusted as much as the project's CI configuration, where the approval gate
   itself is defined. A failing or invalid hook fails the invocation before any
   effect, exit 1.
-- `nyl attest` records attesters through the same mechanism.
+- `nyl attest --name` records attesters through the same mechanism:
+  `--attested-by` and `--attestation-source` are the counterparts of
+  `--approved-by` and `--approval-source` (recorded as `asserted`), and the
+  lookup hook, GitHub, a CI run, and the Git user apply in the same order. The
+  hook also receives `NYL_ATTESTATION` (the name) and `NYL_ATTESTATION_UNIT`
+  (the unit, empty for the environment form), which an approval's invocation
+  does not set, so a hook can tell the two apart.
 - Approvals can be automated with a CI approval gate. With GitHub environment
   protection rules, a `plan` job runs `nyl plan --output json` and passes the
   digest as a job output; an apply job with `environment: production` runs

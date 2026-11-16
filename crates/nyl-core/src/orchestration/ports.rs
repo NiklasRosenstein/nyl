@@ -150,6 +150,11 @@ pub struct EnvironmentSnapshot {
     /// Driver attestations by unit and name
     /// (`observed/units/<unit>/attestations.yaml`, one record per unit).
     pub attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    /// The environment-wide attestations by name
+    /// (`observed/attestations.yaml`), each naming the desired commit of the
+    /// state it attests. Contract:
+    /// [Attestations](../../../../design/orchestration-core.md#attestations).
+    pub environment_attestations: BTreeMap<String, Attestation>,
     /// The PromotionRecord of each path that promoted into the environment
     /// (`desired/promotions/<path>.yaml`). Contract:
     /// [PromotionRecord](../../../../design/promotion.md#promotionrecord).
@@ -176,6 +181,11 @@ pub struct TransitionChanges {
     /// The complete set of a unit's driver attestations by name; `None`
     /// removes all. Written by `nyl attest`, and by reconcile with a receipt.
     pub attestations: BTreeMap<UnitName, Option<BTreeMap<String, Attestation>>>,
+    /// The complete set of the environment-wide attestations by name
+    /// (`observed/attestations.yaml`); `Some` of an empty set removes the
+    /// file, `None` leaves it alone. Written by `nyl attest --name` without
+    /// `--unit`.
+    pub environment_attestations: Option<BTreeMap<String, Attestation>>,
     /// A path's PromotionRecord on the desired side; `None` removes it.
     pub promotions: BTreeMap<PromotionPathName, Option<PromotionRecord>>,
     /// Remove every file of the environment's state on both refs before
@@ -205,6 +215,7 @@ impl TransitionChanges {
             && self.drift.is_empty()
             && self.observations.is_empty()
             && self.attestations.is_empty()
+            && self.environment_attestations.is_none()
             && self.promotions.is_empty()
     }
 }
@@ -372,6 +383,21 @@ pub trait StateStore: Send + Sync {
 
     /// Read both state refs once.
     fn snapshot(&self, location: &StateLocation) -> StateResult<EnvironmentSnapshot>;
+
+    /// The desired commit of the state at `tips`: the newest commit of the
+    /// desired ref, from `tips.desired` back along its first parents, that
+    /// changed this environment's `desired/` documents (beneath
+    /// `location.path`). `None` when the environment has no desired
+    /// documents. Observed-only commits, commits of other environments
+    /// sharing the ref, and a ref shared by both sides move the ref's tip but
+    /// not this commit, so it names the state an attestation is about.
+    /// Contract: [Attestations](../../../../design/orchestration-core.md#attestations).
+    fn state_commit(&self, location: &StateLocation, tips: &StateTips) -> StateResult<Option<CommitId>> {
+        let _ = (location, tips);
+        Err(StateError::Unavailable(
+            "this state store cannot name the desired commit of a state".to_owned(),
+        ))
+    }
 
     /// The `state.yaml` of every directory directly beneath `location.path`
     /// that has one: how instances of an EnvironmentTemplate that share a

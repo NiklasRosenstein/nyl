@@ -253,6 +253,69 @@ fn seed_promotion(world: &World, location: &StateLocation, path: &str, sequence:
     store.release_lease(location, &dev(), &committed.lease_version).unwrap();
 }
 
+/// Record the environment-wide attestation `name` (`qa`) of the desired
+/// commit `key` with `result`, in one observed commit, as `nyl attest --name`
+/// does.
+fn seed_environment_attestation(world: &World, location: &StateLocation, key: &str, result: &str) {
+    let attestation: nyl_core::orchestration::state::Attestation = serde_json::from_value(json!({
+        "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "qa",
+        "executionKey": key, "result": result,
+        "at": "2026-09-24T10:00:00Z",
+        "source": {"external": {"by": ["alice"], "identity": "local"}}
+    }))
+    .unwrap();
+    let lease = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: world.ids.run_id(),
+        runner: "seed".to_owned(),
+        operation: Operation::Attest,
+        units: Vec::new(),
+        deadline: world.clock.now() + chrono::Duration::minutes(5),
+        taken_at: world.clock.now(),
+        broken: None,
+    };
+    let store = world.store.as_ref();
+    let held = store
+        .coordination(location, &dev())
+        .unwrap()
+        .lease
+        .map(|held| held.version);
+    let version = store.take_lease(location, &dev(), &lease, held.as_deref()).unwrap();
+    let base = store.snapshot(location).unwrap().tips;
+    let committed = store
+        .commit(
+            location,
+            &dev(),
+            &base,
+            &Transition {
+                message: format!(
+                    "nyl: attest dev\n\nNyl-Run-Id: {}\nNyl-Environment: dev\n",
+                    world.ids.run_id()
+                ),
+                changes: TransitionChanges {
+                    environment_attestations: Some(BTreeMap::from([("qa".to_owned(), attestation)])),
+                    ..TransitionChanges::default()
+                },
+            },
+            &version,
+        )
+        .unwrap();
+    store.release_lease(location, &dev(), &committed.lease_version).unwrap();
+}
+
+/// The environment-wide attestations by name, with their result.
+fn environment_attestations(world: &World, location: &StateLocation) -> BTreeMap<String, String> {
+    world
+        .store
+        .snapshot(location)
+        .unwrap()
+        .environment_attestations
+        .iter()
+        .map(|(name, attestation)| (name.clone(), format!("{:?}", attestation.result)))
+        .collect()
+}
+
 fn sequences(world: &World, location: &StateLocation) -> BTreeMap<String, u64> {
     world
         .store
@@ -676,6 +739,23 @@ fn test_state_init_fresh_keeps_promotion_records() {
     }
 }
 
+/// `state init --fresh` removes the environment-wide attestations: they were
+/// about the state it replaces. Catches evidence of a discarded state
+/// surviving into the new one.
+#[test]
+fn test_state_init_fresh_clears_environment_attestations() {
+    for world in worlds() {
+        let context = world.context();
+        let location = world.dev();
+        state::init(&context, &dev(), &location, false, &requested());
+        seed_environment_attestation(&world, &location, COMMIT, "pass");
+        assert_eq!(environment_attestations(&world, &location).len(), 1, "{}", world.name);
+        let report = state::init(&context, &dev(), &location, true, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
+        assert!(environment_attestations(&world, &location).is_empty(), "{}", world.name);
+    }
+}
+
 /// Decision F1: `state move` carries the records whether it moves history or
 /// copies documents (a `path` or another ref split). Catches a copying move
 /// that drops them, as an older Nyl's does.
@@ -704,6 +784,89 @@ fn test_state_move_carries_promotion_records_with_history_and_with_copied_docume
         assert_eq!(
             sequences(&world, &copied),
             BTreeMap::from([("dev-to-prod".to_owned(), 4)]),
+            "{}: copied documents",
+            world.name
+        );
+    }
+}
+
+/// Decision F4: `observed/attestations.yaml` is rolled back by a restore with
+/// the other documents: a restore to a state before an attestation removes
+/// it, and one to a state that had a result brings it back. Catches a
+/// restore that leaves the newer environment-wide attestation standing.
+#[test]
+fn test_state_restore_rolls_environment_attestations_back() {
+    for world in worlds() {
+        let context = world.context();
+        let location = world.dev();
+        state::init(&context, &dev(), &location, false, &requested());
+        let message = || {
+            format!(
+                "nyl: reconcile dev\n\nNyl-Run-Id: {}\nNyl-Environment: dev\n",
+                world.ids.run_id()
+            )
+        };
+        commit_unit(&world, &location, "web", json!({"state": "active"}), &message());
+        let before = world.store.snapshot(&location).unwrap().tips.desired.unwrap();
+        commit_unit(&world, &location, "api", json!({"state": "active"}), &message());
+        let key = world.store.snapshot(&location).unwrap().tips.desired.unwrap();
+        seed_environment_attestation(&world, &location, key.as_str(), "pass");
+        commit_unit(&world, &location, "db", json!({"state": "active"}), &message());
+        let target = world.store.snapshot(&location).unwrap().tips.desired.unwrap();
+        seed_environment_attestation(&world, &location, target.as_str(), "fail");
+        assert_eq!(
+            environment_attestations(&world, &location),
+            BTreeMap::from([("qa".to_owned(), "Fail".to_owned())]),
+            "{}",
+            world.name
+        );
+        let report = state::restore(&context, &dev(), &location, &target, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
+        assert_eq!(
+            environment_attestations(&world, &location),
+            BTreeMap::from([("qa".to_owned(), "Pass".to_owned())]),
+            "{}: the result the target had",
+            world.name
+        );
+        let report = state::restore(&context, &dev(), &location, &before, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
+        assert!(
+            environment_attestations(&world, &location).is_empty(),
+            "{}: a state before the attestation has none",
+            world.name
+        );
+    }
+}
+
+/// Decision F4: `state move` carries the environment-wide attestations
+/// whether it moves history or copies documents. Catches a copying move that
+/// drops `observed/attestations.yaml`, as an older Nyl's does.
+#[test]
+fn test_state_move_carries_environment_attestations_with_history_and_with_copied_documents() {
+    for world in worlds() {
+        let context = world.context();
+        let old = world.dev();
+        state::init(&context, &dev(), &old, false, &requested());
+        seed_environment_attestation(&world, &old, COMMIT, "pass");
+
+        let history = world.location("state/dev/desired", "state/dev/observed");
+        let moved = state::relocate(&context, &dev(), &history, &old, &requested());
+        assert_eq!(moved.outcome, Outcome::Done, "{}: {moved:?}", world.name);
+        let expected = BTreeMap::from([("qa".to_owned(), "Pass".to_owned())]);
+        assert_eq!(
+            environment_attestations(&world, &history),
+            expected,
+            "{}: history",
+            world.name
+        );
+
+        let mut copied = world.location("shared/desired", "shared/observed");
+        copied.path = "envs/dev".to_owned();
+        let moved = state::relocate(&context, &dev(), &copied, &history, &requested());
+        assert_eq!(moved.outcome, Outcome::Done, "{}: {moved:?}", world.name);
+        assert_eq!(
+            environment_attestations(&world, &copied),
+            expected,
             "{}: copied documents",
             world.name
         );

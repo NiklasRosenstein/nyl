@@ -15,8 +15,7 @@
 //! ([`super::references::check_declaration`]): it reads an output its
 //! producer declares as non-sensitive, and an attestation a reference or
 //! `dependsOn` entry requires must be one its producer declares
-//! (`NYL-ATTESTATION-UNDECLARED`, or `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` for a
-//! name only an external source supplies; see [`super::evidence`]).
+//! (`NYL-ATTESTATION-UNDECLARED`; see [`super::evidence`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -231,7 +230,7 @@ fn reference_edges(
     }
 }
 
-/// `NYL-ATTESTATION-UNDECLARED` or `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` for
+/// `NYL-ATTESTATION-UNDECLARED` for
 /// one reference or `dependsOn` entry.
 fn attestation_requirement(
     consumer: &UnitName,
@@ -240,21 +239,6 @@ fn attestation_requirement(
     producer: &DesiredUnit,
 ) -> Finding {
     let fix = match error {
-        evidence::RequirementError::External(_) => {
-            let recordable = evidence::recordable(producer);
-            if recordable.is_empty() {
-                format!(
-                    "external attestations cannot be recorded yet (`nyl attest --name … --result …` arrives with promotion, M6); remove the requirement, or have {}'s kind declare an attestation it observes itself",
-                    producer.unit.name
-                )
-            } else {
-                format!(
-                    "external attestations cannot be recorded yet (`nyl attest --name … --result …` arrives with promotion, M6); require only the names {}'s driver observes, such as `attestations: [{}]`, instead of the external one or `evidence: attested`",
-                    producer.unit.name,
-                    recordable.iter().cloned().collect::<Vec<_>>().join(", ")
-                )
-            }
-        }
         evidence::RequirementError::Undeclared(_) => {
             let declared = evidence::declared(producer);
             if declared.is_empty() {
@@ -625,15 +609,14 @@ mod tests {
         );
     }
 
-    /// Catches a consumer that would wait forever for an attestation only an
-    /// external source supplies, which Nyl cannot record yet: naming it, and
-    /// `evidence: attested` on a producer that declares one, are errors in
-    /// `dependsOn` and in references with their own code and a fix naming
-    /// what can be required instead.
+    /// Catches an external attestation refused as a requirement: its
+    /// producer declares `qa` with `from: external`, which `nyl attest
+    /// --name` records, so `dependsOn` and `fromUnit` entries naming it, or
+    /// requiring `evidence: attested`, extract into edges like any other.
     #[test]
-    fn test_extract_rejects_requirements_only_an_external_source_could_meet() {
+    fn test_extract_accepts_requirements_an_external_source_meets() {
         let declaring = json!({"outputs": {"host": {"type": "string"}}, "attestations": [{"name": "qa", "from": "external"}, {"name": "smoke"}]});
-        let findings = graph(&[
+        let graph = graph(&[
             ("db", "Command", declaring),
             (
                 "app",
@@ -645,16 +628,15 @@ mod tests {
                 }),
             ),
         ])
-        .unwrap_err();
-        assert_eq!(findings.len(), 4, "{findings:?}");
-        for finding in &findings {
-            assert_eq!(finding.code, Code::AttestationExternalUnsupported, "{finding:?}");
-            assert!(finding.message.contains("\"qa\""), "{}", finding.message);
-            assert!(
-                finding.fix.contains("cannot be recorded yet") && finding.fix.contains("attestations: [smoke]"),
-                "{}",
-                finding.fix
-            );
-        }
+        .unwrap();
+        assert!(
+            !graph.edges.is_empty()
+                && graph
+                    .edges
+                    .iter()
+                    .all(|edge| edge.producer == name("db") && edge.consumer == name("app")),
+            "{:?}",
+            graph.edges
+        );
     }
 }

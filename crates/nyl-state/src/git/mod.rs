@@ -576,6 +576,8 @@ const DRIFT_FILE: &str = "/drift.yaml";
 const OBSERVATIONS_FILE: &str = "/observations.yaml";
 /// The file name of a unit's attestations beneath `observed/units/<unit>`.
 const ATTESTATIONS_FILE: &str = "/attestations.yaml";
+/// The environment-wide attestations (decision F4: additive within `v1`).
+const ENVIRONMENT_ATTESTATIONS_FILE: &str = "observed/attestations.yaml";
 
 /// Replace a unit's directory of documents of one kind with `set`, or
 /// remove it for `None`.
@@ -625,6 +627,12 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
         for (unit, set) in &changes.attestations {
             let record = set.as_ref().and_then(AttestationRecord::from_set);
             put_unit_file(files, unit, ATTESTATIONS_FILE, record.as_ref())?;
+        }
+        if let Some(set) = &changes.environment_attestations {
+            match AttestationRecord::from_set(set) {
+                Some(record) => files.insert(ENVIRONMENT_ATTESTATIONS_FILE.to_owned(), to_yaml(&record)?),
+                None => files.remove(ENVIRONMENT_ATTESTATIONS_FILE),
+            };
         }
     }
     Ok(())
@@ -680,6 +688,12 @@ fn snapshot_of(tips: StateTips, desired: &Files, observed: &Files) -> StateResul
         drift: unit_files(observed, DRIFT_FILE)?,
         observations: unit_files(observed, OBSERVATIONS_FILE)?,
         attestations: attestations(observed)?,
+        environment_attestations: observed
+            .get(ENVIRONMENT_ATTESTATIONS_FILE)
+            .map(|bytes| from_yaml::<AttestationRecord>(ENVIRONMENT_ATTESTATIONS_FILE, bytes))
+            .transpose()?
+            .map(AttestationRecord::into_set)
+            .unwrap_or_default(),
         promotions: promotions(desired)?,
     })
 }
@@ -717,6 +731,45 @@ impl StateStore for GitStateStore {
             &tree::beneath(&desired, &location.path),
             &tree::beneath(&observed, &location.path),
         )
+    }
+
+    fn state_commit(&self, location: &StateLocation, tips: &StateTips) -> StateResult<Option<CommitId>> {
+        let Some(tip) = &tips.desired else {
+            return Ok(None);
+        };
+        let repository = self.open(location)?;
+        let refs = self.refs(&repository, location);
+        let name = StateLocation::full_name(&location.desired_ref);
+        let heads = refs.heads(std::slice::from_ref(&name))?;
+        refs.fetch(&heads, true)?;
+        let directory = if location.path.trim_matches('/').is_empty() {
+            "desired".to_owned()
+        } else {
+            format!("{}/desired", location.path.trim_matches('/'))
+        };
+        let documents = |commit: &git2::Commit<'_>| -> StateResult<Option<Oid>> {
+            let tree = commit.tree().map_err(unavailable)?;
+            Ok(tree
+                .get_path(std::path::Path::new(&directory))
+                .ok()
+                .map(|entry| entry.id()))
+        };
+        let mut current = repository.find_commit(oid(tip)?).map_err(unavailable)?;
+        loop {
+            let documents_now = documents(&current)?;
+            let before = current.parent(0).ok();
+            let documents_before = match &before {
+                Some(parent) => documents(parent)?,
+                None => None,
+            };
+            if documents_now != documents_before {
+                return Ok(Some(commit_id(current.id())));
+            }
+            match before {
+                Some(parent) => current = parent,
+                None => return Ok(None),
+            }
+        }
     }
 
     /// The `state.yaml` of every directory directly beneath `location.path`
@@ -1873,5 +1926,63 @@ mod promotion_file_tests {
         assert!(matches!(unmarked, Err(StateError::Corrupt(_))), "{unmarked:?}");
         let misnamed = promotions(&files("hotfix-to-prod", format!("{MARKERS}{RECORD}"))).unwrap_err();
         assert!(misnamed.to_string().contains("hotfix-to-prod.yaml"), "{misnamed}");
+    }
+}
+
+#[cfg(test)]
+mod environment_attestation_file_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `observed/attestations.yaml` as the current writer produces it for an
+    /// external attestation of an environment's state: an `AttestationRecord`
+    /// without `unit`. After an intended change, regenerate it with
+    /// `cargo test -p nyl-state --lib environment_attestation_file -- --ignored`.
+    fn golden() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/observed/environment-attestations.yaml")
+    }
+
+    fn attestations() -> BTreeMap<String, nyl_core::orchestration::state::Attestation> {
+        let attestation = serde_json::from_value(json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "Attestation", "name": "qa",
+            "executionKey": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a", "result": "pass",
+            "at": "2026-09-25T16:40:00Z",
+            "source": {"external": {"by": ["alice"], "identity": "verified",
+                                    "source": "github-environment prod", "url": "https://qa.example/1"}},
+            "reason": "QA signed off"
+        }))
+        .unwrap();
+        BTreeMap::from([("qa".to_owned(), attestation)])
+    }
+
+    fn written() -> String {
+        let mut observed = Files::new();
+        let changes = TransitionChanges {
+            environment_attestations: Some(attestations()),
+            ..TransitionChanges::default()
+        };
+        apply_changes(&mut observed, &changes, false, true).unwrap();
+        String::from_utf8(observed[ENVIRONMENT_ATTESTATIONS_FILE].clone()).unwrap()
+    }
+
+    #[test]
+    #[ignore = "regenerates the golden file"]
+    fn regenerate_environment_attestation_file_golden() {
+        std::fs::create_dir_all(golden().parent().unwrap()).unwrap();
+        std::fs::write(golden(), written()).unwrap();
+    }
+
+    /// Catches the environment file drifting from its golden layout (no
+    /// `unit`, the external source kept as written) and a reader that cannot
+    /// read what the writer wrote, or reads it as a unit's.
+    #[test]
+    fn test_the_environment_attestation_file_matches_its_golden_file_and_reads_back() {
+        let golden = std::fs::read_to_string(golden()).unwrap();
+        assert_eq!(written(), golden);
+        assert!(!golden.contains("unit:"), "{golden}");
+        let observed = Files::from([(ENVIRONMENT_ATTESTATIONS_FILE.to_owned(), golden.into_bytes())]);
+        let snapshot = snapshot_of(StateTips::default(), &Files::new(), &observed).unwrap();
+        assert!(snapshot.attestations.is_empty(), "not a unit's");
+        assert_eq!(snapshot.environment_attestations, attestations());
     }
 }

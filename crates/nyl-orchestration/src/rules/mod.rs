@@ -7,6 +7,7 @@ pub mod drift;
 pub mod evidence;
 pub mod execution_key;
 pub mod expiry;
+pub mod external_attest;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod freshness;

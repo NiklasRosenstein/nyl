@@ -5,6 +5,7 @@
 //! rules, and writes what they decide.
 
 pub mod check;
+pub mod external_attest;
 pub mod inspect;
 pub mod lease;
 pub mod lifecycle;

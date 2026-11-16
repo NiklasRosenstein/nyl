@@ -39,6 +39,7 @@ struct Directory {
     drift: BTreeMap<UnitName, DriftRecord>,
     observations: BTreeMap<UnitName, ObservationRecord>,
     attestations: BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    environment_attestations: BTreeMap<String, Attestation>,
     promotions: BTreeMap<PromotionPathName, PromotionRecord>,
 }
 
@@ -90,6 +91,24 @@ impl Inner {
         let digest = nyl_core::digest::sha256_hex(self.counter.to_string().as_bytes());
         CommitId::new(&digest[..40]).expect("a digest prefix is a commit ID")
     }
+}
+
+/// What a directory holds on the desired side, which `state_commit` compares
+/// between commits: an absent directory holds nothing.
+fn desired_part(
+    directory: Option<&Directory>,
+) -> (
+    Option<EnvironmentRecord>,
+    BTreeMap<UnitName, DesiredUnit>,
+    BTreeMap<PromotionPathName, PromotionRecord>,
+) {
+    directory.map_or_else(Default::default, |directory| {
+        (
+            directory.environment.clone(),
+            directory.desired.clone(),
+            directory.promotions.clone(),
+        )
+    })
 }
 
 /// An in-memory state store. Clones share nothing; one store stands for one
@@ -196,6 +215,9 @@ fn apply_side(
         apply_map(&mut directory.drift, &changes.drift);
         apply_map(&mut directory.observations, &changes.observations);
         apply_map(&mut directory.attestations, &changes.attestations);
+        if let Some(set) = &changes.environment_attestations {
+            directory.environment_attestations = set.clone();
+        }
     }
     if directory == before && !(changes.commit_unchanged && observed_side) {
         return None;
@@ -326,6 +348,47 @@ impl StateStore for MemoryStateStore {
             desired_directory,
             observed_directory,
         ))
+    }
+
+    fn state_commit(&self, location: &StateLocation, tips: &StateTips) -> StateResult<Option<CommitId>> {
+        let Some(tip) = &tips.desired else {
+            return Ok(None);
+        };
+        let inner = self.lock();
+        let state_ref = inner
+            .refs
+            .get(&ref_key(location, &location.desired_ref))
+            .ok_or_else(|| {
+                StateError::Unavailable(format!(
+                    "state revision {tip} is not a commit of {}",
+                    location.desired_ref
+                ))
+            })?;
+        // The directory after each commit that touched this path, oldest first.
+        let mut previous: Option<&Directory> = None;
+        let mut newest = None;
+        let mut reached = false;
+        for (commit, changed) in &state_ref.log {
+            if changed == &location.path {
+                let directory = state_ref.history.get(commit).and_then(|all| all.get(&location.path));
+                if desired_part(previous) != desired_part(directory) {
+                    newest = Some(commit.clone());
+                }
+                previous = directory;
+            }
+            if commit == tip {
+                reached = true;
+                break;
+            }
+        }
+        if reached {
+            Ok(newest)
+        } else {
+            Err(StateError::Unavailable(format!(
+                "state revision {tip} is not a commit of {}",
+                location.desired_ref
+            )))
+        }
     }
 
     fn list_records(&self, location: &StateLocation) -> StateResult<Vec<StateRecord>> {
@@ -801,6 +864,9 @@ fn snapshot_of(tips: StateTips, desired: Option<&Directory>, observed: Option<&D
             .unwrap_or_default(),
         attestations: observed
             .map(|directory| directory.attestations.clone())
+            .unwrap_or_default(),
+        environment_attestations: observed
+            .map(|directory| directory.environment_attestations.clone())
             .unwrap_or_default(),
     }
 }

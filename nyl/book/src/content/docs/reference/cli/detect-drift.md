@@ -17,11 +17,9 @@ smoke test or a publication's Argo CD health; a `dependsOn` entry or
 `fromUnit` [requires them](/nyl/orchestration/runs/#requiring-attestations)
 with `evidence: attested` or `attestations`.
 
-:::note
-Orchestration is being built. `nyl attest` asks drivers to attest; recording
-an attestation from a person or an external system, with
-`nyl attest --name … --result …`, is not implemented yet.
-:::
+`nyl attest --name … --result …` is the second form of `attest`: it records
+an attestation from a person or an external system.
+[External attestations](#external-attestations) describes it.
 
 ## nyl detect-drift
 
@@ -134,6 +132,62 @@ earlier receipt's attestations. A unit that depends on an attestation stays
 recorded for the current receipt, and `attest` is what records it: the next
 `reconcile` runs the blocked unit, and no `attest` is needed between the two
 for a unit that attested itself in its `command`.
+
+## External attestations
+
+```bash
+nyl attest -e dev --unit web --name qa --result pass --reason "QA signed off" --url https://qa.example/runs/42
+nyl attest -e dev --name signoff --result fail --reason "Checkout flow broken"
+```
+
+With `--name`, `attest` asks no driver. It records a result the caller already
+knows, as `source: {external: {by, identity, source, url}}`:
+
+- **Scope.** With `--unit`, the attestation is for the unit's current
+  receipt, in `observed/units/<unit>/attestations.yaml`. Without it, it is for
+  the environment's current state, the desired commit, in
+  `observed/attestations.yaml`. A unit without a current receipt, and an
+  environment nothing was reconciled into, exit 1 with
+  `NYL-ATTEST-NO-RECEIPT`.
+- **Declared names only.** The name must be declared with `from: external` in
+  the unit's `spec.attestations`, or, without `--unit`, in the Environment's
+  `spec.attestations`. Anything else exits 1 with `NYL-ATTESTATION-UNDECLARED`,
+  so a typo cannot create evidence nobody requires; a name the unit's driver
+  produces is recorded by `nyl attest` without `--name`.
+- **Attester.** The attester is recorded like an
+  [approver](/nyl/orchestration/runs/#approvals): `--attested-by` and
+  `--attestation-source` assert it (`asserted`); without them, the project's
+  `[approval] lookup` hook or GitHub's environment approvals (`verified`), a CI
+  run (`asserted`), or the Git user of a workstation run (`local`) names it.
+  `--url` records where the result can be read, and `--reason` is kept with the
+  attestation and as the commit's `Nyl-Reason`.
+- **State.** Without `--unit`, the attestation names the state's desired
+  commit: the newest commit of the desired ref that changed this environment's
+  desired documents. Observed commits, including those `attest` writes, and
+  other environments sharing the ref do not move it, so several attestations
+  recorded in a row name the same state. `state init --fresh` removes them.
+- **Newest wins.** Each call writes a new attestation with its time, replacing
+  the name's earlier one for the same receipt or state; Git history keeps the
+  earlier ones. Recording for a new receipt drops the attestations of the
+  receipt it replaced. Attesting an earlier state, with `--state-revision` or
+  `--revision`, is not supported.
+- **Lease.** It takes the environment's lease like every state-writing
+  command; `--wait-lease` waits for a running reconcile, and a held lease exits 2
+  with `NYL-LEASE-HELD`.
+
+Dependents gate on these names like any other: a `dependsOn` entry or
+`fromUnit` that requires `qa` is [blocked](/nyl/orchestration/runs/#requiring-attestations)
+as `attestation-pending` until a pass is recorded for the current receipt, and
+as `attestation-failing` while the recorded result is `fail`.
+
+The driver form never records a name declared only with `from: external`, and its report and exit 3 cover what the drivers determined, not external results already recorded for the unit.
+
+It exits 0 once the result is recorded, whether it passes or fails, because the
+caller already knows the result; what a failing result blocks is reported by
+the command that reads it. It exits 1 when it cannot record it. The driver form
+exits 3 with `NYL-ATTESTATION-FAILED` for a failing attestation. `--name`
+accepts one `-e` and at most one `--unit`, and takes `--result pass|fail`,
+`--reason`, `--url`, `--attested-by`, and `--attestation-source`.
 
 [`nyl observe`](/nyl/reference/cli/observe/) is the third check of current
 receipts: it reads the observed values of units whose kind reads them, and

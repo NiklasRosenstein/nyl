@@ -109,14 +109,11 @@ values:
   `observe: {}`](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd), and the
   names in its `spec.attestations`. Naming another is an error
   (`NYL-ATTESTATION-UNDECLARED`), which `nyl validate` reports too.
-- An attestation declared with `from: external` is supplied only by a person
-  or an external system, and Nyl cannot record those yet
-  (`nyl attest --name … --result …` arrives with promotion). Requiring one,
-  by name or through `evidence: attested` on a producer that declares one, is
-  an error (`NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`) rather than a consumer
-  that waits forever; require the names the producer's driver observes
-  instead. `nyl validate` reports it for producers in the same environment;
-  for another environment's producer, `plan` and `reconcile` do.
+- An attestation declared with `from: external` is supplied by a person or an
+  external system with [`nyl attest --name … --result …`](/nyl/reference/cli/detect-drift/#external-attestations).
+  Requiring one, by name or through `evidence: attested`, keeps the consumer
+  blocked as `attestation-pending` until a pass is recorded for the producer's
+  current receipt.
 - An attestation counts only for the receipt it names. A producer that
   executes again starts with its attestations pending, and a pass recorded
   for the earlier receipt no longer counts.
@@ -566,7 +563,10 @@ lookup = ["./ci/approvers.sh"]
 
 The hook runs in the project directory with `NYL_ENVIRONMENT`,
 `NYL_APPROVAL_UNITS` (a JSON array of explicitly approved names), and
-`NYL_APPROVAL_DIGESTS` (a JSON object mapping names to digests or null). It
+`NYL_APPROVAL_DIGESTS` (a JSON object mapping names to digests or null). For
+[`nyl attest --name`](/nyl/reference/cli/detect-drift/#external-attestations) it
+also receives `NYL_ATTESTATION` (the name) and `NYL_ATTESTATION_UNIT` (the unit,
+empty for the environment). It
 prints `{"by": ["alice"], "source": "production gate", "url": "https://ci.example/run/1"}`.
 Nyl records the command and result as `verified`. An invalid response, failure,
 cancellation, or 30-second timeout stops the invocation before unit effects

@@ -117,3 +117,253 @@ fn test_attest_records_driver_attestations_of_current_receipts() {
     assert_eq!(unit(&named.report, "plain")["check"], "unsupported");
     assert!(named.stderr.contains("NYL-ATTEST-UNSUPPORTED"), "{}", named.stderr);
 }
+
+const DESIRED: &str = "refs/heads/nyl/dev/desired";
+
+/// `gate` declares `qa` for people and `smoke` for its driver; the
+/// environment declares `signoff`. Returns the harness with `dev` reconciled
+/// when `reconciled`.
+fn external(reconciled: bool) -> (shell::Harness, TempDir) {
+    let units = command(
+        "gate",
+        "true",
+        "  attestations: [{name: qa, from: external}, {name: smoke}]\n",
+    );
+    let environment = ENVIRONMENT.replace(
+        "  allowUnprotectedSource",
+        "  attestations: [signoff]\n  allowUnprotectedSource",
+    );
+    assert!(environment.contains("signoff"), "{environment}");
+    let project = project(&[
+        NYL_TOML,
+        ("nyl/environment.yaml", &environment),
+        ("nyl/gate.yaml", &units),
+    ]);
+    let harness = shell::Harness::new(project.path(), true);
+    assert_eq!(harness.invoke(&["state", "init", "-e", "dev"]).exit, 0);
+    if reconciled {
+        let run = harness.invoke(&["reconcile", "-e", "dev"]);
+        assert_eq!(run.exit, 0, "{}", run.stderr);
+    }
+    (harness, project)
+}
+
+/// A unit-scoped external attestation names the unit's current receipt,
+/// records the attester and what the caller gave (identity asserted by the
+/// flags), writes one observed commit under the operation `attest`, leaves
+/// the desired ref alone, and releases the lease. Catches the result landing
+/// in the wrong file or ref, the attester or url being dropped, and the
+/// write skipping the lease.
+#[test]
+fn test_an_external_attestation_records_the_unit_receipt_and_its_attester() {
+    let (harness, _project) = external(true);
+    let desired = harness.tip(DESIRED);
+    let attested = harness.invoke(&[
+        "attest",
+        "-e",
+        "dev",
+        "--unit",
+        "gate",
+        "--name",
+        "qa",
+        "--result",
+        "pass",
+        "--reason",
+        "QA signed off",
+        "--url",
+        "https://qa.example/1",
+        "--attested-by",
+        "alice",
+        "--attestation-source",
+        "qa-job 7",
+        "-o",
+        "json",
+    ]);
+    assert_eq!(attested.exit, 0, "{}", attested.stderr);
+    assert_eq!(attested.report["details"]["scope"], "unit");
+    assert_eq!(harness.tip(DESIRED), desired, "attesting writes the observed ref only");
+    assert!(harness.message(OBSERVED).starts_with("nyl: attest dev"));
+    assert!(harness.lease_released());
+    let record = harness.show(OBSERVED, "observed/units/gate/attestations.yaml");
+    for expected in [
+        "kind: AttestationRecord",
+        "qa:",
+        "result: pass",
+        "reason: QA signed off",
+        "external:",
+        "- alice",
+        "identity: asserted",
+        "source: qa-job 7",
+        "url: https://qa.example/1",
+    ] {
+        assert!(record.contains(expected), "{expected}: {record}");
+    }
+    let status = harness.invoke(&["status", "-e", "dev"]);
+    assert_eq!(status.exit, 0, "{}", status.stderr);
+}
+
+/// An environment-scoped attestation names the desired commit of the state
+/// and records the workstation's Git user as a `local` attester when
+/// nothing else says who; a failing result is recorded with exit 0 (D14),
+/// and the driver form still exits 3 for the same kind of result. Catches
+/// the environment scope keyed to anything but the desired commit, an
+/// identity left empty, and a failing external result reported as an error.
+#[test]
+fn test_an_environment_attestation_names_the_desired_commit_and_the_local_identity() {
+    let (harness, _project) = external(true);
+    // The attester is the commit identity, so `--author` names it.
+    for (result, author) in [("pass", None), ("fail", Some("Nyl Test <test@example.invalid>"))] {
+        let mut args = vec!["attest", "-e", "dev", "--name", "signoff", "--result", result];
+        if let Some(author) = author {
+            args.extend(["--author", author]);
+        }
+        let attested = harness.invoke(&args);
+        assert_eq!(attested.exit, 0, "{result}: {}", attested.stderr);
+        let record = harness.show(OBSERVED, "observed/attestations.yaml");
+        assert!(
+            record.contains(&format!("executionKey: {}", harness.tip(DESIRED))),
+            "{record}"
+        );
+        assert!(record.contains(&format!("result: {result}")), "{record}");
+        assert!(
+            record.contains("identity: local") && record.contains("source: local"),
+            "{record}"
+        );
+        let by = author.unwrap_or("Scenario <scenario@example.invalid>");
+        assert!(record.contains(&format!("- {by}")), "{by}: {record}");
+        assert!(!record.contains("unit:"), "{record}");
+    }
+    assert!(harness.lease_released());
+}
+
+/// Refusals exit 1, write nothing, and carry a stable code with the fix: a
+/// name the scope does not declare as external (a typo, a name its driver
+/// owns, a unit declaring none, the environment's), a unit that is unknown
+/// or has no current receipt, and an environment with no recorded state.
+/// Catches evidence nobody requires being recorded, and a refusal that
+/// still writes.
+#[test]
+fn test_external_attestations_refuse_undeclared_names_and_missing_state() {
+    let (harness, _project) = external(false);
+    let refuse = |args: &[&str], code: &str, text: &str| {
+        let tip = harness.tip(OBSERVED);
+        let mut full = vec!["attest", "-e", "dev", "--result", "pass", "-o", "json"];
+        full.extend_from_slice(args);
+        let refused = harness.invoke(&full);
+        assert_eq!(refused.exit, 1, "{args:?}: {}", refused.stderr);
+        assert!(
+            refused.stderr.contains(code) && refused.stderr.contains(text),
+            "{args:?}: {}",
+            refused.stderr
+        );
+        assert_eq!(harness.tip(OBSERVED), tip, "{args:?}: nothing is written");
+    };
+    // Before the first reconcile nothing is recorded: no unit, no state.
+    refuse(&["--unit", "gate", "--name", "qa"], "NYL-UNIT-UNKNOWN", "gate");
+    refuse(&["--name", "signoff"], "NYL-ATTEST-NO-RECEIPT", "no recorded state");
+    assert_eq!(harness.invoke(&["reconcile", "-e", "dev"]).exit, 0);
+    refuse(
+        &["--unit", "gate", "--name", "q"],
+        "NYL-ATTESTATION-UNDECLARED",
+        "use one of qa",
+    );
+    refuse(
+        &["--unit", "gate", "--name", "smoke"],
+        "NYL-ATTESTATION-UNDECLARED",
+        "produced by the driver",
+    );
+    refuse(&["--name", "qa"], "NYL-ATTESTATION-UNDECLARED", "use one of signoff");
+    refuse(&["--unit", "nope", "--name", "qa"], "NYL-UNIT-UNKNOWN", "nope");
+}
+
+/// The external form runs under the environment's lease: a lease held by
+/// another run is exit 2 (`NYL-LEASE-HELD`) with nothing written, as for
+/// every state-writing command, and `--wait-lease` waits for it. Catches a write that ignores the lease and
+/// races a running reconcile.
+#[test]
+fn test_an_external_attestation_waits_for_a_held_lease() {
+    use nyl_core::orchestration::ports::{Clock as _, IdGenerator as _};
+    use nyl_core::orchestration::state::{Lease, LeaseKind, Operation, StateV1};
+    let (harness, _project) = external(true);
+    let holder = Lease {
+        api_version: StateV1,
+        kind: LeaseKind,
+        run: harness.ids.run_id(),
+        runner: "https://ci.example.com/runs/1".to_owned(),
+        operation: Operation::Reconcile,
+        units: Vec::new(),
+        deadline: harness.clock.now() + chrono::Duration::minutes(5),
+        taken_at: harness.clock.now(),
+        broken: None,
+    };
+    harness
+        .store
+        .take_lease(&harness.location, &shell::dev(), &holder, None)
+        .unwrap();
+    let tip = harness.tip(OBSERVED);
+    let refused = harness.invoke(&[
+        "attest", "-e", "dev", "--unit", "gate", "--name", "qa", "--result", "pass",
+    ]);
+    assert_eq!(refused.exit, 2, "{}", refused.stderr);
+    assert!(refused.stderr.contains("NYL-LEASE-HELD"), "{}", refused.stderr);
+    assert_eq!(harness.tip(OBSERVED), tip);
+    // `--wait-lease` waits out a lease that expires meanwhile (the test clock advances while it waits).
+    let waited = harness.invoke(&[
+        "attest",
+        "-e",
+        "dev",
+        "--unit",
+        "gate",
+        "--name",
+        "qa",
+        "--result",
+        "pass",
+        "--wait-lease",
+        "10m",
+    ]);
+    assert_eq!(waited.exit, 0, "{}", waited.stderr);
+    assert_ne!(
+        harness.tip(OBSERVED),
+        tip,
+        "the attestation was written once the lease was free"
+    );
+    let recorded = harness.invoke(&[
+        "attest", "-e", "dev", "--unit", "gate", "--name", "qa", "--result", "pass",
+    ]);
+    assert_eq!(recorded.exit, 0, "{}", recorded.stderr);
+}
+
+/// A driver cannot write an attestation `nyl attest --name` owns: `drv`'s
+/// attest step reports `qa`, declared only `from: external`, and `smoke`; the
+/// driver form records `smoke` alone, so the external name stays pending
+/// until a person records it. Catches the driver form recording evidence for
+/// a name that only an external source may supply.
+#[test]
+fn test_the_driver_form_never_records_an_external_only_name() {
+    let results = TempDir::new().unwrap();
+    let dir = results.path().display().to_string().replace('\\', "/");
+    std::fs::write(
+        results.path().join("both.json"),
+        "{\"smoke\": \"pass\", \"qa\": \"pass\"}",
+    )
+    .unwrap();
+    let drv = command(
+        "drv",
+        "true",
+        &format!(
+            "  attest: [sh, -c, 'cp {dir}/both.json \"$NYL_ATTESTATIONS\"']\n  attestations: [{{name: smoke}}, {{name: qa, from: external}}]\n"
+        ),
+    );
+    let project = project(&[NYL_TOML, ("nyl/environment.yaml", ENVIRONMENT), ("nyl/drv.yaml", &drv)]);
+    let harness = shell::Harness::new(project.path(), true);
+    assert_eq!(harness.invoke(&["state", "init", "-e", "dev"]).exit, 0);
+    assert_eq!(harness.invoke(&["reconcile", "-e", "dev"]).exit, 0);
+    let attested = harness.invoke(&["attest", "-e", "dev", "-o", "json"]);
+    assert_eq!(attested.exit, 0, "{}", attested.stderr);
+    assert_eq!(
+        unit(&attested.report, "drv")["attestations"],
+        serde_json::json!({"smoke": "pass"})
+    );
+    let record = harness.show(OBSERVED, "observed/units/drv/attestations.yaml");
+    assert!(record.contains("smoke:") && !record.contains("qa:"), "{record}");
+}

@@ -27,3 +27,9 @@ id = "3df60286-ffad-476d-a4d4-03fc7983e5a5"
 type = "feature"
 description = "State gains the `PromotionRecord` kind at `desired/promotions/<path>.yaml`, added to format `v1` without a version bump: snapshots read it, and `nyl state move` (when it copies documents) and `nyl state restore` carry and roll it back. A Nyl older than this release keeps the file but cannot act on it, so it must not run `reconcile` in an environment that uses promotion, and its copying `state move` drops the file while its `state restore` leaves it as it is. An Environment's `source.fromPromotion.promoted` block is typed as the same record"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "288d2a8c-3024-4f49-86c0-80e34b85d2b3"
+type = "feature"
+description = "`nyl attest -e <env> [--unit <u>] --name <n> --result pass|fail [--reason …] [--url …]` records an external attestation for the unit's current receipt, or without `--unit` for the environment's current state, under the lease (`--wait-lease`). The name must be declared with `from: external` in the unit's `spec.attestations`, or in the Environment's `spec.attestations`; anything else exits 1 with `NYL-ATTESTATION-UNDECLARED`. The attester is recorded like an approver (`--attested-by`, `--attestation-source`, the approval lookup, CI, or the Git user). Recording exits 0 whether the result passes or fails; the driver form keeps exit 3 for a failing attestation. A dependent can now require an external attestation, so `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` is retired. Environment-wide attestations live in `observed/attestations.yaml`, added to format `v1` without a version bump: snapshots, `nyl state move` (when it copies documents), and `nyl state restore` carry and roll it back. A Nyl older than this release keeps the file through its transitions but cannot read or write it, its copying `state move` drops it, and its `state restore` leaves it as it is"
+author = "@NiklasRosenstein"

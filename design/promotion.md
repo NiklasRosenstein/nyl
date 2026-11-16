@@ -759,11 +759,15 @@ so every source writes the same record:
   non-orchestrated target's `_nyl/attestations.yaml`. Without `--name`,
   `nyl attest` asks the drivers instead (see the orchestration core
   contract's [Attestations](orchestration-core.md#attestations)); that form
-  is implemented, the external form (M6) and `--target` (M11) are not yet.
+  is implemented, and so is the external form (M6); `--target` (M11) is not yet.
   Environment-wide attestations live in `observed/attestations.yaml`, a file
   the observed layout of format `v1` always listed, added without a version
   change; a Nyl older than the release that writes it keeps it but cannot
-  act on it, as for `desired/promotions/` above.
+  act on it, as for `desired/promotions/` above. An environment-wide
+  attestation's `executionKey` is the state's desired commit: the newest
+  commit of the desired ref that changed the environment's `desired/`
+  documents, not the ref's tip (see the orchestration core contract's
+  [Attestations](orchestration-core.md#attestations)).
 - **Lifetime.** An attestation belongs to the receipt or state it names; a new
   receipt starts with its declared attestations pending. The newest
   attestation per name and receipt wins, and history keeps earlier ones.

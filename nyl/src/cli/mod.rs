@@ -127,8 +127,8 @@ enum Commands {
     /// Check whether an environment's current receipts still hold, and record drift
     DetectDrift(commands::check::CheckArgs),
 
-    /// Ask the drivers to attest an environment's current receipts
-    Attest(commands::check::CheckArgs),
+    /// Ask the drivers to attest an environment's current receipts, or record an external attestation with --name
+    Attest(commands::attest::AttestArgs),
 
     /// Read the observed values of an environment's current receipts and record them
     Observe(commands::check::CheckArgs),
@@ -311,7 +311,7 @@ impl Cli {
             Commands::State(args) => commands::state::run_state(&args, wiring),
             Commands::Lease(args) => commands::state::run_lease(&args, wiring),
             Commands::DetectDrift(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::DetectDrift, wiring),
-            Commands::Attest(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Attest, wiring),
+            Commands::Attest(args) => commands::attest::run(&args, wiring),
             Commands::Observe(args) => commands::check::run(&args, nyl_orchestration::rules::checks::Check::Observe, wiring),
             Commands::Recover(args) => commands::recover::run(&args, wiring),
             Commands::Teardown(args) => commands::teardown::run(&args, wiring),

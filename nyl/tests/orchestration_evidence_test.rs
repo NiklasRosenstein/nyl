@@ -249,39 +249,76 @@ spec:
     assert!(planned.stderr.contains("qa, smoke"), "{}", planned.stderr);
 }
 
-/// Catches a consumer that waits forever for an attestation only a person or
-/// an external system could supply, which Nyl cannot record yet: a name
-/// declared `from: external`, required by name or through `evidence:
-/// attested`, fails every run with `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED`
-/// before anything executes, and the fix names what can be required instead.
+/// A dependent gates on an attestation only a person or an external system
+/// supplies (`qa`, declared `from: external`): it waits as pending until
+/// `nyl attest --name qa` records one for the current receipt, keeps waiting
+/// while the recorded result is `fail` (recording it exits 0), and runs once
+/// a pass is recorded. Catches an external requirement refused as
+/// unrecordable, a failing result not blocking, and a driver `nyl attest`
+/// erasing the external result of the same receipt.
 #[test]
-fn test_requiring_an_external_attestation_is_an_error_before_anything_runs() {
-    for requirement in ["attestations: [qa]", "evidence: attested"] {
-        let harness = Harness::new(&format!(
-            "---
+fn test_a_dependent_gates_on_an_external_attestation_until_it_passes() {
+    let harness = Harness::new(
+        "---
 apiVersion: units.gitops.nyl/v1
 kind: Command
 metadata:
   name: gated
-  labels: {{dev: 'true'}}
+  labels: {dev: 'true'}
 spec:
   command: [sh, -c, 'true']
-  dependsOn: [{{unit: svc, {requirement}}}]
-"
-        ));
-        let planned = harness.shell.invoke(&["reconcile", "-e", "dev"]);
-        assert_eq!(planned.exit, 1, "{requirement}: {}", planned.stderr);
-        assert!(
-            planned.stderr.contains("NYL-ATTESTATION-EXTERNAL-UNSUPPORTED"),
-            "{requirement}: {}",
-            planned.stderr
-        );
-        assert!(
-            planned.stderr.contains("cannot be recorded yet") && planned.stderr.contains("attestations: [smoke]"),
-            "{requirement}: {}",
-            planned.stderr
-        );
+  dependsOn: [{unit: svc, attestations: [qa]}]
+",
+    );
+    let blocked = |report: &Value| blocked_by(report, "gated");
+    let waiting = harness.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(waiting.exit, 2, "{}", waiting.stderr);
+    assert_eq!(
+        blocked(&waiting.report),
+        [(
+            "/dependsOn/0".to_owned(),
+            "attestation-pending".to_owned(),
+            "svc/qa".to_owned()
+        )]
+    );
+
+    harness.result("pass");
+    assert_eq!(harness.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
+    let failed = harness.shell.invoke(&[
+        "attest", "-e", "dev", "--unit", "svc", "--name", "qa", "--result", "fail",
+    ]);
+    assert_eq!(failed.exit, 0, "recording a failing result succeeds: {}", failed.stderr);
+    // A driver `attest` afterwards leaves the external result of the same receipt as it was.
+    assert_eq!(harness.shell.invoke(&["attest", "-e", "dev"]).exit, 0);
+    let record = harness.shell.show(OBSERVED, "observed/units/svc/attestations.yaml");
+    let qa = record.split("qa:").nth(1).expect("qa is still recorded");
+    assert!(qa.contains("result: fail") && qa.contains("external:"), "{record}");
+    let failing = harness.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(
+        blocked(&failing.report),
+        [(
+            "/dependsOn/0".to_owned(),
+            "attestation-failing".to_owned(),
+            "svc/qa".to_owned()
+        )]
+    );
+    assert!(failing.stderr.contains("NYL-ATTESTATION-FAILING"), "{}", failing.stderr);
+    for command in ["plan", "status"] {
+        let shown = harness.shell.invoke(&[command, "-e", "dev", "-o", "json"]);
+        assert_eq!(shown.exit, 2, "{command}: {}", shown.stderr);
+        assert_eq!(unit(&shown.report, "gated")["state"], "blocked", "{command}");
+        assert_eq!(blocked(&shown.report)[0].1, "attestation-failing", "{command}");
     }
+
+    let passed = harness.shell.invoke(&[
+        "attest", "-e", "dev", "--unit", "svc", "--name", "qa", "--result", "pass",
+    ]);
+    assert_eq!(passed.exit, 0, "{}", passed.stderr);
+    let record = harness.shell.show(OBSERVED, "observed/units/svc/attestations.yaml");
+    assert!(record.contains("smoke:") && record.contains("qa:"), "{record}");
+    let released = harness.shell.invoke(&["reconcile", "-e", "dev", "-o", "json"]);
+    assert_eq!(released.exit, 0, "{}", released.stderr);
+    assert_eq!(unit(&released.report, "gated")["result"], "executed");
 }
 
 /// A producer that attests itself in `command` unblocks its consumer in a
