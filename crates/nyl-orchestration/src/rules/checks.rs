@@ -413,14 +413,21 @@ pub fn drift_check(drift: &Drift) -> UnitCheck {
 /// is not this check's result: the driver form reports, and exits 3 for, what
 /// its drivers determined.
 pub fn attest_check(attestations: &BTreeMap<String, Attestation>) -> UnitCheck {
-    UnitCheck {
-        result: CheckResult::Attested,
-        attestations: attestations
+    let determined = || {
+        attestations
             .iter()
             .filter(|(_, attestation)| attestation.source.get("external").is_none())
+    };
+    UnitCheck {
+        result: CheckResult::Attested,
+        attestations: determined()
             .map(|(name, attestation)| (name.clone(), attestation.result))
             .collect(),
         observations: BTreeMap::new(),
+        reasons: determined()
+            .filter(|(_, attestation)| attestation.result == AttestationResult::Fail)
+            .filter_map(|(name, attestation)| Some((name.clone(), attestation.reason.clone()?)))
+            .collect(),
     }
 }
 
@@ -432,6 +439,7 @@ pub fn observe_check(settled: &Settled, declared: &BTreeMap<String, ObservationD
     UnitCheck {
         result: CheckResult::Observed,
         attestations: BTreeMap::new(),
+        reasons: BTreeMap::new(),
         observations: declared
             .keys()
             .map(|name| {
@@ -560,11 +568,14 @@ pub fn warnings(
             )),
         }
     }
-    for (name, result) in &result.attestations {
-        if *result == AttestationResult::Fail {
+    for (name, outcome) in &result.attestations {
+        if *outcome == AttestationResult::Fail {
             warnings.push(Finding::new(
                 Code::AttestationFailed,
-                format!("attestation {name} of {unit} in {environment} failed"),
+                match result.reasons.get(name) {
+                    Some(reason) => format!("attestation {name} of {unit} in {environment} failed: {reason}"),
+                    None => format!("attestation {name} of {unit} in {environment} failed"),
+                },
                 "investigate the failing check; references that require the attestation stay unsatisfied until a newer one passes",
             ));
         }
@@ -805,6 +816,52 @@ mod tests {
 
     /// Catches a second check of an unchanged unit writing a commit only
     /// because time moved on, and a changed result not being written.
+    /// A failing driver attestation's warning shows the driver's reason
+    /// unchanged, so `nyl attest` says why without reading the observed
+    /// state; a passing one and an external one warn about nothing.
+    #[test]
+    fn test_attest_warns_with_the_reason_of_each_failing_driver_attestation() {
+        let unit = desired_numbered("kubernetes", 1, Some(hex_key('a')));
+        let receipt = observed_numbered("kubernetes", 1, Some(hex_key('a'))).receipt.unwrap();
+        let outcome = |name: &str, result, reason: Option<&str>| AttestationOutcome {
+            name: name.to_owned(),
+            result,
+            reason: reason.map(str::to_owned),
+            details: Value::Null,
+        };
+        let mut recorded = attestations(
+            &env(),
+            &unit,
+            &receipt,
+            &[
+                outcome("accepted", AttestationResult::Fail, Some("api other-publication (…)")),
+                outcome("healthy", AttestationResult::Pass, None),
+            ],
+            "attest",
+            at(1),
+        );
+        let mut external = recorded["healthy"].clone();
+        external.name = "qa".to_owned();
+        external.result = AttestationResult::Fail;
+        external.source = json!({"external": {"by": "someone"}});
+        recorded.insert("qa".to_owned(), external);
+        let findings = warnings(
+            Check::Attest,
+            &env(),
+            &name("kubernetes"),
+            &attest_check(&recorded),
+            None,
+            DriftRepair::Converge,
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].code, Code::AttestationFailed);
+        assert!(
+            findings[0].message.ends_with("failed: api other-publication (…)"),
+            "{}",
+            findings[0].message
+        );
+    }
+
     #[test]
     fn test_records_keep_stored_documents_that_differ_only_in_time() {
         let unit = desired_numbered("network", 1, Some(hex_key('a')));
@@ -920,6 +977,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 observations: BTreeMap::new(),
+                reasons: BTreeMap::new(),
             }),
             ..UnitReport::new("OpenTofu")
         }

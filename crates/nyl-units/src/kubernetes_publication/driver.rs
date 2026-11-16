@@ -61,7 +61,7 @@ use nyl_render::gitops::publication::{prepare_target_publication, PublicationAut
 use serde_json::{json, Value};
 
 use super::direct::{self, ClusterAccess};
-use super::observe::{self, RECONCILER};
+use super::observe;
 use super::observed_values::{self, ClusterReader, LiveReader};
 use super::readiness::{evaluate, evaluate_direct};
 use super::run::publish_via;
@@ -366,12 +366,7 @@ impl Driver for KubernetesPublicationDriver {
             }
         }
         if observe::observes(spec) || direct {
-            let (facts, unkeyed) = observe::recorded(&rendered)?;
-            inputs.recorded.insert(RECONCILER.to_owned(), facts);
-            // How the reconciler is read (the declared access, the
-            // control-plane context, the URL the branch is read from) changes
-            // no result: only what the target expects of it keys the unit.
-            inputs.excluded_fields.extend(unkeyed);
+            observe::record_facts(&rendered, &mut inputs)?;
         }
         // What an observation reads must be rendered by the target: the
         // owning Application and the workload Cluster are recorded, and the

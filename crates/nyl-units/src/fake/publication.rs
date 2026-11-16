@@ -9,6 +9,13 @@
 //! values), and `teardownSettings`
 //! that a scenario declares.
 //!
+//! `observe: {}` records the reconciler facts at resolution as the real
+//! driver does, and declares `accepted` and `healthy`. `attest` takes the
+//! real driver's path from a reading to those attestations, with the reading
+//! the fake observer makes from what a scenario scripted for the target
+//! (an `argocd` step), so the matching of what runs to the publication
+//! branch, the results, and their details are the real rules'.
+//!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit)
 //! and [Artifacts](../../../../design/orchestration-core.md#artifacts);
 //! [Fake kinds](../../../../design/reference-scenarios.md#fake-kinds).
@@ -30,9 +37,9 @@
 use std::ffi::OsString;
 
 use nyl_core::orchestration::driver::{
-    Capabilities, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus, ExecutionContext,
-    Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
-    RemovalContext, RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
+    AttestationCheck, Capabilities, DriftDetection, Driver, DriverError, DriverOperation, DriverResult, ExecStatus,
+    ExecutionContext, Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies,
+    RecoveryPolicy, RemovalContext, RemovalObservation, ResolutionContext, Supported, TeardownReadiness, WaitStrategy,
 };
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::state::{ArtifactDocument, DesiredUnit, Drift, Receipt};
@@ -42,9 +49,10 @@ use super::{Script, ScriptedOutcome};
 use nyl_render::gitops::publication::TeardownSettings;
 use nyl_render::gitops::units::PublicationTarget;
 
+use crate::kubernetes_publication::reconciler::evaluate::{ACCEPTED, HEALTHY};
 use crate::kubernetes_publication::{
-    build, evaluate_teardown_readiness, plan, publish, resolution_inputs, teardown, teardown_wait, unattended_teardown,
-    unit_target, validate_observe,
+    attest_with, build, evaluate_teardown_readiness, observes, plan, publish, record_facts, resolution_inputs,
+    teardown, teardown_wait, unattended_teardown, unit_target, validate_observe,
 };
 
 pub(super) const KIND: &str = "FakePublication";
@@ -114,7 +122,8 @@ impl Driver for FakePublication {
             detect_drift: true,
             teardown: true,
             build: true,
-            observed_values: spec.get("observe").is_some(),
+            attest: observes(spec),
+            observed_values: observes(spec),
             ..Capabilities::default()
         }
     }
@@ -216,8 +225,12 @@ impl Driver for FakePublication {
         Ok(())
     }
 
-    fn attestations(&self, _spec: &Value) -> Vec<String> {
-        Vec::new()
+    fn attestations(&self, spec: &Value) -> Vec<String> {
+        if observes(spec) {
+            vec![ACCEPTED.to_owned(), HEALTHY.to_owned()]
+        } else {
+            Vec::new()
+        }
     }
 
     /// None: the publication destination (repository, revision, and path
@@ -232,7 +245,11 @@ impl Driver for FakePublication {
 
     fn execution_key_inputs(&self, ctx: &ResolutionContext<'_>, spec: &Value) -> DriverResult<KeyInputs> {
         unit_target(spec)?;
-        resolution_inputs(&self.resource_catalogue, ctx, spec).map(|(_, inputs)| inputs)
+        let (rendered, mut inputs) = resolution_inputs(&self.resource_catalogue, ctx, spec)?;
+        if observes(spec) {
+            record_facts(&rendered, &mut inputs)?;
+        }
+        Ok(inputs)
     }
 
     fn plan(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<PlanReport>> {
@@ -281,6 +298,21 @@ impl Driver for FakePublication {
             .map(|observations| observations.keys().cloned().collect())
             .unwrap_or_default();
         self.script.observed(&unit.unit.name, &names).map(Supported::Supported)
+    }
+
+    /// `accepted` and `healthy` of the receipt's publication, from what the
+    /// scenario scripted the fake Argo CD to report for the unit's target
+    /// ([`super::FakeObserver::reading`]); unknown when nothing is scripted.
+    fn attest(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        unit: &DesiredUnit,
+        _receipt: &Receipt,
+    ) -> DriverResult<Supported<AttestationCheck>> {
+        let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
+        let target = unit_target(spec)?;
+        let observer = self.script.observer();
+        attest_with(ctx, unit, |facts| observer.reading(&target, &facts.expected)).map(Supported::Supported)
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {

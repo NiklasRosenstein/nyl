@@ -31,7 +31,7 @@
 use std::time::Duration;
 
 use nyl_core::orchestration::driver::{
-    AttestationCheck, DriverError, DriverResult, ExecutionContext, RemovalContext, RemovalObservation,
+    AttestationCheck, DriverError, DriverResult, ExecutionContext, KeyInputs, RemovalContext, RemovalObservation,
 };
 use nyl_core::orchestration::state::DesiredUnit;
 use nyl_render::gitops::observation::{GitPublicationHistory, ReconcilerFacts};
@@ -40,7 +40,7 @@ use serde_json::Value;
 
 use super::direct::ClusterAccess;
 use super::reconciler::evaluate::{ensure_provable, evaluate, removal, Conclusion, EvaluateError};
-use super::reconciler::{reader_with, ReadRequest};
+use super::reconciler::{reader_with, ReadError, ReadRequest, Reading};
 
 /// The pointer, in the resolved spec, of the recorded reconciler facts.
 pub(super) const RECONCILER: &str = "/reconciler";
@@ -49,7 +49,7 @@ pub(super) const RECONCILER: &str = "/reconciler";
 const READING: Duration = Duration::from_secs(30);
 
 /// Whether a spec observes the reconciler: it declares `observe`.
-pub(super) fn observes(spec: &Value) -> bool {
+pub(crate) fn observes(spec: &Value) -> bool {
     spec.get("observe").is_some()
 }
 
@@ -72,6 +72,18 @@ pub(super) fn recorded(rendered: &RenderedTarget) -> DriverResult<(Value, Vec<St
     Ok((facts, unkeyed))
 }
 
+/// Record the reconciler facts of `rendered` into `inputs` (see
+/// [`recorded`]): the one recording the kind and its test stand-in share.
+pub(crate) fn record_facts(rendered: &RenderedTarget, inputs: &mut KeyInputs) -> DriverResult<()> {
+    let (facts, unkeyed) = recorded(rendered)?;
+    inputs.recorded.insert(RECONCILER.to_owned(), facts);
+    // How the reconciler is read (the declared access, the control-plane
+    // context, the URL the branch is read from) changes no result: only what
+    // the target expects of it keys the unit.
+    inputs.excluded_fields.extend(unkeyed);
+    Ok(())
+}
+
 pub(super) fn facts_of(unit: &DesiredUnit) -> Result<ReconcilerFacts, String> {
     let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
     let facts = spec.pointer(RECONCILER).ok_or_else(|| {
@@ -92,11 +104,39 @@ pub(super) fn budget(
         .clamp(Duration::from_secs(1), READING)
 }
 
-/// `nyl attest`: `accepted` and `healthy` of the receipt's publication.
+/// `nyl attest`: `accepted` and `healthy` of the receipt's publication, read
+/// from the reconciler the recorded facts locate.
 pub(super) fn attest(
     ctx: &ExecutionContext<'_>,
     unit: &DesiredUnit,
     access: &ClusterAccess,
+) -> DriverResult<AttestationCheck> {
+    attest_with(ctx, unit, |facts| {
+        let reader = reader_with(
+            &facts.location,
+            &facts.expected.publication,
+            &ctx.env,
+            budget(ctx.now, ctx.deadline),
+            access,
+            None,
+        )?;
+        reader.read(&ReadRequest {
+            deployments: &facts.expected.deployments,
+            anchors: &facts.expected.anchors,
+            concluding_absence: false,
+        })
+    })
+}
+
+/// [`attest`] with the reading made by `read` from the recorded facts: the
+/// one path from a reading to the attestations, which the test kind
+/// `FakePublication` takes with a scripted reading. The facts, the receipt's
+/// publication commit, the proof of the reading, the publication branch, and
+/// the shared rules ([`evaluate`]) are the same whoever reads.
+pub(crate) fn attest_with(
+    ctx: &ExecutionContext<'_>,
+    unit: &DesiredUnit,
+    read: impl FnOnce(&ReconcilerFacts) -> Result<Reading, ReadError>,
 ) -> DriverResult<AttestationCheck> {
     let unknown = |reason: String| Ok(AttestationCheck::Unknown { reason });
     let facts = match facts_of(unit) {
@@ -113,22 +153,7 @@ pub(super) fn attest(
             "the receipt records no PublishedTree artifact, so there is no publication to attest".to_owned(),
         );
     };
-    let reader = match reader_with(
-        &facts.location,
-        &facts.expected.publication,
-        &ctx.env,
-        budget(ctx.now, ctx.deadline),
-        access,
-        None,
-    ) {
-        Ok(reader) => reader,
-        Err(error) => return unknown(error.message),
-    };
-    let reading = match reader.read(&ReadRequest {
-        deployments: &facts.expected.deployments,
-        anchors: &facts.expected.anchors,
-        concluding_absence: false,
-    }) {
+    let reading = match read(&facts) {
         Ok(reading) => reading,
         Err(error) => return unknown(error.message),
     };
