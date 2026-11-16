@@ -393,6 +393,7 @@ pub fn teardown_readiness_preview(
                     run: None,
                     produced_in_run: &produced,
                     previous: &snapshot.desired,
+                    promotions: &snapshot.promotions,
                 },
                 &held_view,
             );
@@ -521,6 +522,11 @@ struct Evidence<'e> {
     run: Option<&'e RunId>,
     produced_in_run: &'e BTreeSet<UnitName>,
     previous: &'e BTreeMap<UnitName, DesiredUnit>,
+    /// The PromotionRecords `fromPromotion` bindings read.
+    promotions: &'e BTreeMap<
+        nyl_core::orchestration::ids::PromotionPathName,
+        nyl_core::orchestration::promotion::PromotionRecord,
+    >,
 }
 
 impl<'r, 'a> Session<'r, 'a> {
@@ -796,7 +802,7 @@ impl<'r, 'a> Session<'r, 'a> {
     /// S: chosen by the source rules, resolved, and checked for
     /// reachability. An Environment `source.revision`+`commit` lock is also
     /// checked against [`pin_refs`].
-    fn source_commit(&self) -> Result<(SourceRequest, CommitId), Finding> {
+    fn source_commit(&self, snapshot: &EnvironmentSnapshot) -> Result<(SourceRequest, CommitId), Finding> {
         if let Some(snapshot) = &self.request.worktree_source {
             if self.request.source_override.is_some() {
                 return Err(source_unavailable("--worktree and --source are mutually exclusive"));
@@ -820,10 +826,13 @@ impl<'r, 'a> Session<'r, 'a> {
             &self.request.entry_commit,
             self.request.source_override.as_deref(),
             self.request.source_recorded,
-        );
+            &snapshot.promotions,
+        )?;
         let commit = match &request {
             SourceRequest::Worktree(snapshot) => snapshot.commit.clone(),
-            SourceRequest::Entry(commit) | SourceRequest::Recorded(commit) => commit.clone(),
+            SourceRequest::Entry(commit)
+            | SourceRequest::Recorded(commit)
+            | SourceRequest::Promotion { commit, .. } => commit.clone(),
             SourceRequest::Revision(revision) | SourceRequest::Override(revision) => self.resolve_revision(revision)?,
             SourceRequest::Commit { revision, commit } => {
                 self.check_pin(commit, revision)?;
@@ -851,7 +860,7 @@ impl<'r, 'a> Session<'r, 'a> {
 
     /// Choose S, render it, and build the desired documents and graph.
     fn prepare(&self, snapshot: &EnvironmentSnapshot) -> Result<Prepared, Vec<Finding>> {
-        let (request, source_commit) = self.source_commit().map_err(|finding| vec![finding])?;
+        let (request, source_commit) = self.source_commit(snapshot).map_err(|finding| vec![finding])?;
         let worktree = self
             .resolution_worktree(&source_commit)
             .map_err(|finding| vec![finding])?;
@@ -1049,6 +1058,10 @@ impl<'r, 'a> Session<'r, 'a> {
             &stand_ins
         };
         let mut units = Self::resolution_units(prepared, held);
+        // Path-less promotion bindings of a promoted environment read only the paths that supply its source.
+        let source_paths = serde_json::to_value(&self.request.entry.spec)
+            .ok()
+            .and_then(|spec| crate::rules::sources::promoted_source_paths(&spec));
         let mut commits = BTreeMap::new();
         let mut errors: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
         let mut shadow = BTreeMap::new();
@@ -1081,6 +1094,8 @@ impl<'r, 'a> Session<'r, 'a> {
                     run: evidence.run,
                     produced_in_run: evidence.produced_in_run,
                     previous: evidence.previous,
+                    promotions: evidence.promotions,
+                    source_paths: source_paths.as_ref(),
                 };
                 resolve_unit(&view, &unit)
             };
@@ -1493,6 +1508,7 @@ fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<Blo
                 environment.as_str(),
                 reasons,
             ))
+            .chain(crate::rules::unit_state::promotion_warnings(&unit.unit.name, reasons))
             .collect(),
     )
 }
@@ -1588,6 +1604,7 @@ fn plan_into(session: &Session<'_, '_>, report: &mut EnvironmentRunReport) {
                 run: None,
                 produced_in_run: &produced,
                 previous: &snapshot.desired,
+                promotions: &snapshot.promotions,
             },
             &held_view,
         );
@@ -2631,6 +2648,7 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                     run: Some(&self.run),
                     produced_in_run: &produced,
                     previous: &snapshot.desired,
+                    promotions: &snapshot.promotions,
                 },
                 &held_view,
             );

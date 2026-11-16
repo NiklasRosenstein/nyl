@@ -229,6 +229,10 @@ pub fn get_value(
         )
     };
     let produced = BTreeSet::new();
+    let source_paths = snapshot
+        .environment
+        .as_ref()
+        .and_then(|record| crate::rules::sources::promoted_source_paths(&record.spec));
     let resolve = |desired: &BTreeMap<UnitName, DesiredUnit>| {
         resolve_reference(
             &ReferenceView {
@@ -244,6 +248,8 @@ pub fn get_value(
                 run: None,
                 produced_in_run: &produced,
                 previous: &snapshot.desired,
+                promotions: &snapshot.promotions,
+                source_paths: source_paths.as_ref(),
             },
             source,
         )

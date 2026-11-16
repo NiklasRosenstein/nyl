@@ -343,6 +343,28 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// One commit of the desired ref's first-parent history, with what only the
+/// store can tell: whether it changed this location's `desired/` documents
+/// (beneath `location.path`), which is what [`StateStore::state_commit`] asks
+/// of each commit it passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredCommit {
+    pub commit: CommitId,
+    pub message: String,
+    pub changed_desired: bool,
+}
+
+/// The first-parent histories of both state refs as one synced read of a
+/// location: the tips the logs start at, the desired log (the whole ref,
+/// newest first, each commit saying whether it changed the documents), and
+/// the observed log back past the oldest desired commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateHistory {
+    pub tips: StateTips,
+    pub desired: Vec<DesiredCommit>,
+    pub observed: Vec<LogEntry>,
+}
+
 /// How a clone's local state branch relates to the remote state ref it
 /// follows: commits only the local branch has, and commits only the remote has.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -570,6 +592,43 @@ pub trait StateStore: Send + Sync {
         Err(StateError::Unavailable(
             "this state store cannot read state history".to_owned(),
         ))
+    }
+
+    /// The histories of both state refs after one sync of the location, as
+    /// [`StateStore::snapshot`] syncs it (a stale local tracking ref never
+    /// stands for the remote), with every desired commit's
+    /// `changed_desired`. One round trip to a remote, whatever the length of
+    /// the history; [`StateStore::snapshots_at`] then reads the objects it
+    /// fetched.
+    fn history(&self, location: &StateLocation) -> StateResult<StateHistory> {
+        let tips = self.snapshot(location)?.tips;
+        let desired = self.log(location, StateSide::Desired, usize::MAX)?;
+        let observed = self.log(location, StateSide::Observed, usize::MAX)?;
+        let mut commits = Vec::with_capacity(desired.len());
+        for entry in desired {
+            let at = StateTips {
+                desired: Some(entry.commit.clone()),
+                observed: None,
+            };
+            let changed = self.state_commit(location, &at)?.as_ref() == Some(&entry.commit);
+            commits.push(DesiredCommit {
+                commit: entry.commit,
+                message: entry.message,
+                changed_desired: changed,
+            });
+        }
+        Ok(StateHistory {
+            tips,
+            desired: commits,
+            observed,
+        })
+    }
+
+    /// The states as of each of `tips`, reading only what the preceding
+    /// [`StateStore::history`] of the location made available, without
+    /// contacting the remote again.
+    fn snapshots_at(&self, location: &StateLocation, tips: &[StateTips]) -> StateResult<Vec<EnvironmentSnapshot>> {
+        tips.iter().map(|tips| self.snapshot_at(location, tips)).collect()
     }
 
     /// How the clone's local branches of `location`'s state refs relate to

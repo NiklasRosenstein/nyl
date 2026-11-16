@@ -592,6 +592,9 @@ pub fn requested_by(git_dir: &std::path::Path, runner: &str) -> String {
         .unwrap_or_else(|| runner.to_owned())
 }
 
+/// How many first-parent commits the pairing fallbacks of [`state_tips_at`] look through.
+const FALLBACK_WALK: usize = 10_000;
+
 /// The state tips as of `revision`, a state commit (`--state-revision`):
 /// that commit on the state ref whose history holds it, and on the other
 /// ref its newest commit no later than that commit, so a transition that
@@ -630,12 +633,38 @@ pub fn state_tips_at(
     let at_or_before = |tip: Option<git2::Oid>| -> Option<CommitId> {
         let mut walk = repository.revwalk().ok()?;
         walk.set_sorting(git2::Sort::TIME).ok()?;
+        walk.simplify_first_parent().ok()?;
         walk.push(tip?).ok()?;
         walk.filter_map(std::result::Result::ok)
+            .take(FALLBACK_WALK)
             .find(|candidate| {
                 repository
                     .find_commit(*candidate)
                     .is_ok_and(|commit| commit.time().seconds() <= target.time().seconds())
+            })
+            .and_then(|found| CommitId::new(found.to_string()).ok())
+    };
+    // The transition that wrote this commit wrote the other ref's commit under
+    // the same `Nyl-Run-Id`; that pairing is exact where commit times are not
+    // (a run's commits can share one second).
+    let run = target.message().ok().and_then(|message| {
+        nyl_orchestration::transition::trailer(message, "Nyl-Run-Id").map(|run| run.trim().to_owned())
+    });
+    let same_run = |tip: Option<git2::Oid>| -> Option<CommitId> {
+        let run = run.as_deref()?;
+        let mut walk = repository.revwalk().ok()?;
+        walk.simplify_first_parent().ok()?;
+        walk.push(tip?).ok()?;
+        walk.filter_map(std::result::Result::ok)
+            .take(FALLBACK_WALK)
+            .find(|candidate| {
+                repository.find_commit(*candidate).is_ok_and(|commit| {
+                    commit
+                        .message()
+                        .ok()
+                        .and_then(|message| nyl_orchestration::transition::trailer(message, "Nyl-Run-Id"))
+                        .is_some_and(|found| found.trim() == run)
+                })
             })
             .and_then(|found| CommitId::new(found.to_string()).ok())
     };
@@ -651,12 +680,12 @@ pub fn state_tips_at(
         desired: if in_desired {
             Some(named.clone())
         } else {
-            at_or_before(desired)
+            same_run(desired).or_else(|| at_or_before(desired))
         },
         observed: if in_observed {
             Some(named)
         } else {
-            at_or_before(observed)
+            same_run(observed).or_else(|| at_or_before(observed))
         },
     })
 }

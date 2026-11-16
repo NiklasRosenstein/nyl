@@ -10,6 +10,7 @@ pub mod get;
 pub mod hold;
 pub mod init;
 pub mod plan;
+pub mod promote;
 pub mod publish_tree;
 pub mod reconcile;
 pub mod recover;

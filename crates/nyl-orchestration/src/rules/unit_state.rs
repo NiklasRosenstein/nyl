@@ -46,6 +46,8 @@ pub const NO_CURRENT_RECEIPT: &str = "no-current-receipt";
 /// The stable reason of a blocker waiting for the new receipt of a producer
 /// that the plan before a multi-environment run would change.
 pub const PLANNED_CHANGE: &str = "planned-change";
+/// The stable reason of a binding waiting for a promoted value no record carries.
+pub const PROMOTION_MISSING: &str = "promotion-missing";
 /// The stable reason of a blocker waiting for a producer whose environment
 /// failed or is waiting in a multi-environment run.
 pub const PRODUCER_UNAVAILABLE: &str = "producer-unavailable";
@@ -259,11 +261,37 @@ pub(crate) fn blocked_by(reason: &BlockedReason) -> BlockedBy {
             pointer: reason.pointer.clone(),
             environment: None,
             unit: None,
-            reason: message.clone(),
+            reason: if reason.blocker.promotion_missing_of().is_some() {
+                PROMOTION_MISSING.to_owned()
+            } else {
+                message.clone()
+            },
             attestation: None,
             observation: None,
         },
     }
+}
+
+/// The `NYL-PROMOTION-MISSING` warnings of the bindings a blocked unit waits
+/// on: each names the value and the `nyl promote` that supplies it.
+pub fn promotion_warnings(unit: &UnitName, reasons: &[BlockedReason]) -> Vec<Finding> {
+    reasons
+        .iter()
+        .filter_map(|reason| reason.blocker.promotion_missing_of())
+        .map(|(value, path)| {
+            Finding::new(
+                Code::PromotionMissing,
+                format!(
+                    "unit {unit} binds promoted value {value:?}, which no PromotionRecord carries yet{}",
+                    path.as_ref().map(|path| format!(" on path {path}")).unwrap_or_default()
+                ),
+                format!(
+                    "promote a state with `nyl promote {}`, then reconcile again",
+                    path.as_deref().unwrap_or("<path>")
+                ),
+            )
+        })
+        .collect()
 }
 
 /// The suggested next action for a unit's condition: `accept` lists the
@@ -575,6 +603,7 @@ pub fn status_with_producers(
                 .extend(super::evidence::warnings(name, environment.as_str(), reasons));
             unit.warnings
                 .extend(super::observed_values::warnings(name, environment.as_str(), reasons));
+            unit.warnings.extend(promotion_warnings(name, reasons));
         }
         if let Some(condition) = condition {
             unit.message = Some(condition.message().to_owned());
@@ -1250,6 +1279,19 @@ mod tests {
         ));
         assert_eq!((other.environment, other.unit), (None, None));
         assert!(other.reason.starts_with("the deleting incarnation"));
+    }
+
+    /// A binding waiting for a promoted value has a stable reason and a coded warning.
+    #[test]
+    fn test_a_missing_promoted_value_has_a_stable_reason_and_a_coded_warning() {
+        let missing = BlockedReason::new(
+            "/variables/image",
+            Blocker::promotion_missing("webImage", Some("dev-to-prod")),
+        );
+        assert_eq!(blocked_by(&missing).reason, PROMOTION_MISSING);
+        let warnings = promotion_warnings(&name("web"), &[missing]);
+        assert_eq!(warnings[0].code, Code::PromotionMissing);
+        assert!(warnings[0].fix.contains("nyl promote dev-to-prod"));
     }
 }
 

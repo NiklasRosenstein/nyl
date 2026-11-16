@@ -6,9 +6,10 @@ See the [PromotionPath resource reference](/nyl/reference/resources/gitops.nyl/v
 
 :::note[Status]
 M6 delivers promotion in steps. The resource, its validation, `nyl get promotion-paths`,
-and the record type exist today. `nyl promote`, the evidence rules, and external
-attestations follow; until then a path validates but nothing writes records, and an
-Environment cannot yet take its source from a promotion.
+the record type, external attestations, and [`nyl promote`](/nyl/reference/cli/promote/)
+exist today, and an Environment can take its source and its bindings from a promotion
+(see the [promotion guide](/nyl/orchestration/promotion/)). The inspection commands
+and `record: source` follow.
 :::
 
 ## What a path says

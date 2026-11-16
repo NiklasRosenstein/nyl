@@ -1813,3 +1813,115 @@ fn test_guarded_reset_preserves_other_environment_on_shared_refs() {
         .observed
         .contains_key(&UnitName::new("seed").unwrap()));
 }
+
+/// `history` is one synced read: each desired commit says whether it changed
+/// the environment's documents exactly as `state_commit` answers for it
+/// (an observed-only transition does not), the observed log goes back to the
+/// oldest desired commit, and `snapshots_at` reads those states back. Catches
+/// a history whose flags disagree with `state_commit`, which would pair a run
+/// with the wrong state commit.
+#[test]
+fn test_history_flags_the_commits_that_changed_documents_as_state_commit_does() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let first = initialized(store, &location, &dev);
+        let mut second = transition(seed_changes("seed"));
+        second.message = "nyl: second\n\nNyl-Operation: reconcile\n".to_owned();
+        let tips = store.snapshot(&location).unwrap().tips;
+        let committed = store
+            .commit(&location, &dev, &tips, &second, &first.lease_version)
+            .unwrap();
+        let (_, observed_only) = unit("seed");
+        let mut third = transition(TransitionChanges {
+            observed: BTreeMap::from([(UnitName::new("seed").unwrap(), Some(observed_only))]),
+            commit_unchanged: true,
+            ..TransitionChanges::default()
+        });
+        third.message = "nyl: attest\n\nNyl-Operation: attest\n".to_owned();
+        let tips = store.snapshot(&location).unwrap().tips;
+        store
+            .commit(&location, &dev, &tips, &third, &committed.lease_version)
+            .unwrap();
+
+        let history = store.history(&location).unwrap();
+        assert_eq!(
+            history.tips,
+            store.snapshot(&location).unwrap().tips,
+            "{}",
+            subject.name
+        );
+        for commit in &history.desired {
+            let at = StateTips {
+                desired: Some(commit.commit.clone()),
+                observed: None,
+            };
+            assert_eq!(
+                commit.changed_desired,
+                store.state_commit(&location, &at).unwrap().as_ref() == Some(&commit.commit),
+                "{}: {}",
+                subject.name,
+                commit.message
+            );
+        }
+        assert_eq!(
+            history.desired.last().map(|c| c.commit.clone()),
+            first.desired,
+            "{}",
+            subject.name
+        );
+        assert!(history.observed.len() >= 2, "{}", subject.name);
+        let states = store
+            .snapshots_at(
+                &location,
+                &[StateTips {
+                    desired: committed.desired.clone(),
+                    observed: committed.observed.clone(),
+                }],
+            )
+            .unwrap();
+        assert!(
+            states[0].desired.contains_key(&UnitName::new("seed").unwrap()),
+            "{}",
+            subject.name
+        );
+    }
+}
+
+/// A clone that read the state earlier holds a stale local tracking ref once
+/// another clone writes: `history` syncs first, so its tips and logs are the
+/// remote's. Catches a promotion that reads an older state from a stale
+/// workstation and gives it a higher sequence.
+#[test]
+fn test_history_syncs_a_stale_local_tracking_ref_with_the_remote() {
+    let bare = TempDir::new().unwrap();
+    git2::Repository::init_bare(bare.path()).unwrap();
+    let url = format!("file://{}", bare.path().display());
+    let location = location(&url, "nyl/dev/desired", "nyl/dev/observed", "");
+    let dev = environment("dev");
+    let clone = |directory: &TempDir| {
+        git2::Repository::init(directory.path()).unwrap();
+        GitStateStore::new(directory.path().join(".git"), GitAuth::none(), author())
+    };
+    let (writer_dir, stale_dir) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let (writer, stale) = (clone(&writer_dir), clone(&stale_dir));
+    let first = initialized(&writer, &location, &dev);
+    // The stale clone reads once, creating its local tracking ref.
+    assert_eq!(stale.snapshot(&location).unwrap().tips.desired, first.desired);
+    let mut second = transition(seed_changes("seed"));
+    second.message = "nyl: second\n\nNyl-Operation: reconcile\n".to_owned();
+    let tips = writer.snapshot(&location).unwrap().tips;
+    let committed = writer
+        .commit(&location, &dev, &tips, &second, &first.lease_version)
+        .unwrap();
+    assert_eq!(
+        stale.log(&location, StateSide::Desired, 10).unwrap().len(),
+        1,
+        "log alone stays stale"
+    );
+    let history = stale.history(&location).unwrap();
+    assert_eq!(history.tips.desired, committed.desired);
+    assert_eq!(history.desired.len(), 2);
+    assert_eq!(history.desired[0].commit, committed.desired.unwrap());
+}

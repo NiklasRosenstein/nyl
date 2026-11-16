@@ -25,9 +25,9 @@ use std::sync::Arc;
 use git2::{Oid, Repository};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, PromotionPathName, RunId, UnitName};
 use nyl_core::orchestration::ports::{
-    Checkpoint, Clock, CommitIdentity, Committed, Coordination, Divergence, EnvironmentSnapshot, HeldLease,
-    LocalDivergence, LogEntry, RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition,
-    TransitionChanges,
+    Checkpoint, Clock, CommitIdentity, Committed, Coordination, DesiredCommit, Divergence, EnvironmentSnapshot,
+    HeldLease, LocalDivergence, LogEntry, RunState, StateError, StateHistory, StateResult, StateSide, StateStore,
+    StateTips, Transition, TransitionChanges,
 };
 use nyl_core::orchestration::promotion::{PromotionRecord, PromotionRecordDocument};
 use nyl_core::orchestration::state::{
@@ -817,6 +817,93 @@ impl StateStore for GitStateStore {
         let desired = read(tips.desired.as_ref())?;
         let observed = read(tips.observed.as_ref())?;
         snapshot_of(tips.clone(), &desired, &observed)
+    }
+
+    fn history(&self, location: &StateLocation) -> StateResult<StateHistory> {
+        let (repository, tips, desired, observed) = self.sync_commits(location)?;
+        let directory = if location.path.trim_matches('/').is_empty() {
+            "desired".to_owned()
+        } else {
+            format!("{}/desired", location.path.trim_matches('/'))
+        };
+        let documents = |commit: &git2::Commit<'_>| -> StateResult<Option<Oid>> {
+            Ok(commit
+                .tree()
+                .map_err(unavailable)?
+                .get_path(std::path::Path::new(&directory))
+                .ok()
+                .map(|entry| entry.id()))
+        };
+        // The whole desired ref, one pass: each commit's documents against its parent's.
+        let mut commits = Vec::new();
+        let mut next = desired;
+        let mut oldest_time = None;
+        while let Some(id) = next {
+            let commit = repository.find_commit(id).map_err(unavailable)?;
+            if crate::source::worktree::is_snapshot(&commit) {
+                break;
+            }
+            let parent = commit.parent(0).ok();
+            let before = match &parent {
+                Some(parent) => documents(parent)?,
+                None => None,
+            };
+            oldest_time = Some(commit.time().seconds());
+            commits.push(DesiredCommit {
+                commit: commit_id(id),
+                message: String::from_utf8_lossy(commit.message_raw_bytes()).into_owned(),
+                changed_desired: documents(&commit)? != before,
+            });
+            next = parent.map(|parent| parent.id());
+        }
+        // The observed ref back past the oldest desired commit: each run's
+        // observed commit is no older than its desired one.
+        let mut log = Vec::new();
+        let mut next = observed;
+        while let Some(id) = next {
+            let commit = repository.find_commit(id).map_err(unavailable)?;
+            if crate::source::worktree::is_snapshot(&commit)
+                || oldest_time.is_some_and(|oldest| commit.time().seconds() < oldest)
+            {
+                break;
+            }
+            log.push(LogEntry {
+                commit: commit_id(id),
+                message: String::from_utf8_lossy(commit.message_raw_bytes()).into_owned(),
+            });
+            next = commit.parent_id(0).ok();
+        }
+        Ok(StateHistory {
+            tips,
+            desired: commits,
+            observed: log,
+        })
+    }
+
+    fn snapshots_at(&self, location: &StateLocation, tips: &[StateTips]) -> StateResult<Vec<EnvironmentSnapshot>> {
+        let repository = self.open(location)?;
+        let read = |tip: Option<&CommitId>| -> StateResult<Files> {
+            let Some(tip) = tip else {
+                return Ok(Files::new());
+            };
+            let commit = oid(tip)?;
+            if repository.find_commit(commit).is_err() {
+                return Err(StateError::Unavailable(format!(
+                    "state revision {tip} is not a commit of {} or {}",
+                    location.desired_ref, location.observed_ref
+                )));
+            }
+            Ok(tree::beneath(&tree::read(&repository, Some(commit))?, &location.path))
+        };
+        tips.iter()
+            .map(|tips| {
+                snapshot_of(
+                    tips.clone(),
+                    &read(tips.desired.as_ref())?,
+                    &read(tips.observed.as_ref())?,
+                )
+            })
+            .collect()
     }
 
     fn coordination(&self, location: &StateLocation, environment: &EnvironmentName) -> StateResult<Coordination> {

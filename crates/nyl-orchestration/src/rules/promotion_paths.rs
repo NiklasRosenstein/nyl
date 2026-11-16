@@ -543,6 +543,51 @@ pub fn check_sources(
     findings
 }
 
+/// The values of `path` whose source unit the target environment also builds
+/// while one of its own `fromPromotion` bindings replaces that unit's result
+/// (`NYL-PROMOTE-REBUILT`, a warning): the target selects the unit, and a
+/// binding reads the value that unit supplies, so one result is built and
+/// the other used. A target that only selects the unit, or only binds the
+/// value, is not warned about. Contract:
+/// [Promoting an environment's source](../../../../design/promotion.md#promoting-an-environments-source).
+pub fn rebuilt(
+    path: &PromotionPath,
+    target: &EnvironmentName,
+    source: &RenderedSource,
+    readers: &[ValueReader],
+) -> Vec<(String, Finding)> {
+    let built = ownership_set(source);
+    let mut warnings = Vec::new();
+    for (name, value) in &path.spec.values {
+        let Some(unit) = value.select.unit.as_ref().filter(|unit| built.contains_key(unit)) else {
+            continue;
+        };
+        let replaces = readers.iter().any(|reader| {
+            reader.environment == *target
+                && reader.binding.value == *name
+                && reader
+                    .binding
+                    .path
+                    .as_ref()
+                    .is_none_or(|named| *named == path.metadata.name)
+        });
+        if replaces {
+            warnings.push((
+                name.clone(),
+                Finding::new(
+                    Code::PromoteRebuilt,
+                    format!(
+                        "{target} builds unit {unit}, whose result a binding to value {name:?} of path {} replaces with the source's: one result is built and the other used",
+                        path.metadata.name
+                    ),
+                    format!("remove unit {unit} from {target}'s unitSelector, or drop the binding, so one result is used"),
+                ),
+            ));
+        }
+    }
+    warnings
+}
+
 /// The `fromPromotion` bindings in the specs of each environment's selected
 /// units, with the type each place accepts where the unit's kind schema says.
 pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers: &DriverSet) -> Vec<ValueReader> {

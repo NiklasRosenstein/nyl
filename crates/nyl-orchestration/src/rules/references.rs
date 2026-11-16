@@ -37,11 +37,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::{
-    resolve_document, BindingIssue, Coded, Origin, Provided, Providers, Provision, Resolved, UnitInputSource,
+    resolve_document, BindingIssue, Coded, Origin, PromotionInputSource, Provided, Providers, Provision, Resolved,
+    UnitInputSource,
 };
 use nyl_core::orchestration::blocked::{Blocker, ProducerRef};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, JsonPointer, RunId, UnitName};
+use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_core::orchestration::state::{
     ArtifactDocument, Attestation, BlockedReason, DesiredUnit, ObservationRecord, ObservedUnit, Provenance, Readiness,
     Receipt, ReceiptProvenance,
@@ -149,6 +151,16 @@ pub struct ReferenceView<'a> {
     /// The snapshot's stored desired documents, whose provenance
     /// [`resolve_unit`] keeps where it still cites the same receipt.
     pub previous: &'a BTreeMap<UnitName, DesiredUnit>,
+    /// The PromotionRecords of the environment's desired state, which
+    /// `fromPromotion` bindings read.
+    pub promotions: &'a BTreeMap<
+        nyl_core::orchestration::ids::PromotionPathName,
+        nyl_core::orchestration::promotion::PromotionRecord,
+    >,
+    /// When the environment's source is promoted, the paths that supply it:
+    /// a binding without `path` reads only records on these, so the source
+    /// commit and the values proven with it move together.
+    pub source_paths: Option<&'a BTreeSet<String>>,
 }
 
 /// What one reference found.
@@ -395,6 +407,8 @@ pub fn resolve_foreign(
             run: None,
             produced_in_run: &none,
             previous: &nothing,
+            promotions: &BTreeMap::new(),
+            source_paths: None,
         },
         source,
     )
@@ -444,6 +458,8 @@ fn resolve_external(
         run: None,
         produced_in_run: &BTreeSet::new(),
         previous: &snapshot.desired,
+        promotions: &BTreeMap::new(),
+        source_paths: None,
     };
     let mut source = source.clone();
     source.environment = None;
@@ -612,6 +628,20 @@ struct ViewProviders<'a, 'v> {
 impl Providers for ViewProviders<'_, '_> {
     type Origin = Cited;
 
+    fn promotion(&self, _field: &str, source: &PromotionInputSource) -> Provided<Cited> {
+        if let Some(record) = self.promoted(source) {
+            return Ok(Provision::Value(Resolved {
+                value: record.values[&source.value].value.clone(),
+                origin: Cited::Literal,
+            }));
+        }
+        // Nothing was promoted yet (`NYL-PROMOTION-MISSING`): the consumer waits.
+        Ok(Provision::Blocked(Blocker::promotion_missing(
+            &source.value,
+            source.path.as_deref(),
+        )))
+    }
+
     fn unit(&self, field: &str, source: &UnitInputSource) -> Provided<Cited> {
         match resolve_reference(self.view, source) {
             Ok(ReferenceValue::Value { value, provenance }) => Ok(Provision::Value(Resolved {
@@ -621,6 +651,32 @@ impl Providers for ViewProviders<'_, '_> {
             Ok(ReferenceValue::Blocked { reason, .. }) => Ok(Provision::Blocked(reason)),
             Err(error) => Err(error.at(field).into()),
         }
+    }
+}
+
+impl ViewProviders<'_, '_> {
+    /// The record a `fromPromotion` binding reads, or why none exists yet.
+    ///
+    /// With `path`, only that path's record. Without it, the newest record
+    /// (highest `sequence`) that carries the value; in an environment whose
+    /// source is promoted, only records on its source paths count, so the
+    /// source commit and the values proven with it always move together.
+    fn promoted(&self, source: &PromotionInputSource) -> Option<&PromotionRecord> {
+        let view = self.view;
+        let records: Box<dyn Iterator<Item = &PromotionRecord>> = match &source.path {
+            Some(path) => Box::new(
+                view.promotions
+                    .values()
+                    .filter(move |record| record.path.as_str() == path),
+            ),
+            None => Box::new(view.promotions.values().filter(|record| {
+                view.source_paths
+                    .is_none_or(|paths| paths.contains(record.path.as_str()))
+            })),
+        };
+        records
+            .filter(|record| record.values.contains_key(&source.value))
+            .max_by_key(|record| record.sequence)
     }
 }
 
@@ -887,6 +943,10 @@ mod tests {
         observations: BTreeMap<UnitName, ObservationRecord>,
         now: Timestamp,
         previous: BTreeMap<UnitName, DesiredUnit>,
+        promotions: BTreeMap<
+            nyl_core::orchestration::ids::PromotionPathName,
+            nyl_core::orchestration::promotion::PromotionRecord,
+        >,
         produced_in_run: BTreeSet<UnitName>,
         observed_commit: CommitId,
         run: RunId,
@@ -913,6 +973,7 @@ mod tests {
                 observations: BTreeMap::new(),
                 now: "2026-09-24T10:00:00Z".parse().unwrap(),
                 previous: BTreeMap::new(),
+                promotions: BTreeMap::new(),
                 produced_in_run: BTreeSet::new(),
                 observed_commit: commit(COMMIT),
                 run: run(RUN_1),
@@ -958,6 +1019,8 @@ mod tests {
                 run: Some(&self.run),
                 produced_in_run: &self.produced_in_run,
                 previous: &self.previous,
+                promotions: &self.promotions,
+                source_paths: None,
             }
         }
 
@@ -1036,6 +1099,74 @@ mod tests {
                 reasons: vec![no_receipt("/variables/vpc", "network")]
             }
         );
+    }
+
+    fn promoted(path: &str, sequence: u64, values: &Value) -> PromotionRecord {
+        serde_json::from_value(json!({
+            "path": path, "sequence": sequence,
+            "from": {"environment": "dev", "run": RUN_1, "desiredCommit": "3".repeat(40)},
+            "values": values, "evidence": {"level": "published", "attestations": [], "override": null},
+            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "artifactsVerified": true,
+            "requested": {"by": "a", "identity": "local", "at": "2026-09-25T16:41:00Z"}
+        }))
+        .unwrap()
+    }
+
+    fn promoted_value(value: &str) -> Value {
+        json!({"value": value, "select": {"unit": "web-image", "input": "/repository"}})
+    }
+
+    /// A `fromPromotion` binding reads the record of its `path`; without a
+    /// path it reads the newest record that carries the value, and in a
+    /// promoted environment only records on its source paths; a value no
+    /// record carries blocks the consumer with the fix. Catches a binding
+    /// that reads another path's value, an older record winning, or a
+    /// missing promotion failing instead of waiting.
+    #[test]
+    fn test_from_promotion_bindings_read_records_and_block_without_one() {
+        let mut world = World::new();
+        for record in [
+            promoted("dev-to-prod", 1, &json!({"image": promoted_value("old")})),
+            promoted("hotfix-to-prod", 2, &json!({"image": promoted_value("hotfix")})),
+            promoted("vendor", 3, &json!({"image": promoted_value("vendor")})),
+        ] {
+            world.promotions.insert(record.path.clone(), record);
+        }
+        let read = |world: &World, source_paths: Option<&BTreeSet<String>>, reference: Value| {
+            let mut view = world.view();
+            view.source_paths = source_paths;
+            resolve_unit(&view, &consumer(&json!({"image": {"fromPromotion": reference}})))
+        };
+        let value = |resolution: Resolution| resolution.resolved_spec.map(|spec| spec["variables"]["image"].clone());
+        assert_eq!(
+            value(read(&world, None, json!({"value": "image", "path": "dev-to-prod"}))),
+            Some(json!("old"))
+        );
+        assert_eq!(
+            value(read(&world, None, json!({"value": "image"}))),
+            Some(json!("vendor"))
+        );
+        let source: BTreeSet<String> = ["dev-to-prod".to_owned(), "hotfix-to-prod".to_owned()].into();
+        assert_eq!(
+            value(read(&world, Some(&source), json!({"value": "image"}))),
+            Some(json!("hotfix")),
+            "a promoted environment's path-less binding follows its source paths"
+        );
+        let missing = read(&world, None, json!({"value": "ghost", "path": "dev-to-prod"}));
+        let Readiness::Blocked { reasons } = &missing.readiness else {
+            panic!("a value no record carries blocks");
+        };
+        let message = reasons[0].message();
+        assert!(
+            message.contains("\"ghost\"") && message.contains("dev-to-prod"),
+            "{message}"
+        );
+        assert_eq!(
+            reasons[0].blocker.promotion_missing_of(),
+            Some(("ghost".to_owned(), Some("dev-to-prod".to_owned())))
+        );
+        assert!(missing.errors.is_empty());
     }
 
     #[test]

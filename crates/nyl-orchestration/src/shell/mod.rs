@@ -13,6 +13,7 @@ pub mod local;
 pub mod operator;
 pub mod peers;
 mod progress;
+pub mod promote;
 pub mod recover;
 pub mod removal;
 pub mod run;

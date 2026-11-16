@@ -268,8 +268,12 @@ spec:
   the set at `attested`. With `changeGate: pullRequest` (M11) it opens a
   reviewable change instead.
 - Promoting a path moves all of its values together by default. Selecting a
-  subset is explicit and leaves the other values at their previously recorded
-  lineage.
+  subset (`--value`) is explicit and leaves the other values at their previously
+  recorded lineage: each carried value keeps the state it came from (the old
+  record's `from`, unless the value already names its own `state`). A path that
+  promotes the target's source moves its source commit and every value
+  together, so `--value` is refused there with `NYL-PROMOTE-SELECTOR-INVALID`,
+  and so is a name the path does not declare.
 - `plan` validates every path: missing source units, unresolvable pointers, and
   type mismatches with the target binding are reported before promotion.
   Renaming or replacing a source unit breaks future promotions until the path is

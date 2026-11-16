@@ -169,10 +169,17 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
             .map(ValidationWarning::Environment),
     );
     let units = nyl_render::gitops::units::discover_units(&inventory)?;
-    // Target bindings first: their findings name the DeploymentTarget field a
-    // publication unit's reference comes from.
-    validate_targets(&inventory).await?;
-    validate_environment_units(&inventory)?;
+    // Target bindings are checked first: their findings name the DeploymentTarget field a
+    // publication unit's reference comes from. Both run and both are reported: a target that no environment places any more (a removed
+    // Environment) fails its own check, and the path that lost its source is the cause to name.
+    match (
+        validate_targets(&inventory).await,
+        validate_environment_units(&inventory),
+    ) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+        (Err(targets), Err(units)) => return Err(NylError::config(format!("{targets}\n{units}"))),
+    }
     report.gitops = Some(GitOpsSummary {
         resources: inventory.resources.len(),
         units: units.len(),

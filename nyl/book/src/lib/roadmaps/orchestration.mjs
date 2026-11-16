@@ -124,7 +124,7 @@ export const orchestrationRoadmap = {
       needs: ['M5'],
       exitCriterion: 'Prod runs exactly the source commit and image digest dev proved, with auditable lineage; stale, missing, or mixed source evidence blocks promotion; a hotfix reaches prod through its own path, and a dev promotion without the fix is refused until the fix is merged or superseded; a value-only path promotes each value from what its consuming Application runs.',
       items: [
-        { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks, recording each promotion directly; validation rejects `changeGate: pullRequest` until M11.', done: false },
+        { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks, recording each promotion directly; validation rejects `changeGate: pullRequest` until M11.', done: true },
         { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with `record: state` and `record: source`, the whole-source evidence rule, recorded evidence for older states, artifact verification, and rollback through `--revision`.', done: false },
         { text: 'Support several paths into one environment: `source.fromPromotion.paths`, path-less bindings, the per-value supersede check with `--supersede`, and the hotfix pattern with a fifth reference scenario.', done: false },
         { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: false },

@@ -172,6 +172,10 @@ pub fn prepare(
         attestations: driver.attestations(&spec),
         readiness: Readiness::Ready,
     };
+    let source_paths = snapshot
+        .environment
+        .as_ref()
+        .and_then(|record| nyl_orchestration::rules::sources::promoted_source_paths(&record.spec));
     let resolved = resolve_unit(
         &ReferenceView {
             environments: &environments,
@@ -186,6 +190,8 @@ pub fn prepare(
             run: None,
             produced_in_run: &BTreeSet::new(),
             previous: &snapshot.desired,
+            promotions: &snapshot.promotions,
+            source_paths: source_paths.as_ref(),
         },
         &unit,
     );

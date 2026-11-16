@@ -128,6 +128,8 @@ pub(super) fn read(
         run: None,
         produced_in_run: &produced,
         previous: &snapshot.desired,
+        promotions: &snapshot.promotions,
+        source_paths: None,
     };
     let resolved = match form {
         SelectForm::Input => {

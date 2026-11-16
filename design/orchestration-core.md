@@ -742,7 +742,8 @@ spec:
   - As implemented: `releases` holds the bindings only
     orchestration can resolve: `fromUnit`, resolved through the shared
     reference resolver in both its `output` and `artifact` forms, and
-    `fromPromotion` once PromotionPath selectors exist (M6). The driver passes
+    `fromPromotion`, resolved through the same binding resolver from the
+    PromotionRecords of the target's desired state. The driver passes
     `releases` to the render as the pinned input snapshot, which takes an
     override's precedence over the binding and is checked against the
     Release's declared input types, so an unusable value fails before

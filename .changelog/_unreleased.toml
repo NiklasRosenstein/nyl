@@ -33,3 +33,27 @@ id = "288d2a8c-3024-4f49-86c0-80e34b85d2b3"
 type = "feature"
 description = "`nyl attest -e <env> [--unit <u>] --name <n> --result pass|fail [--reason …] [--url …]` records an external attestation for the unit's current receipt, or without `--unit` for the environment's current state, under the lease (`--wait-lease`). The name must be declared with `from: external` in the unit's `spec.attestations`, or in the Environment's `spec.attestations`; anything else exits 1 with `NYL-ATTESTATION-UNDECLARED`. The attester is recorded like an approver (`--attested-by`, `--attestation-source`, the approval lookup, CI, or the Git user). Recording exits 0 whether the result passes or fails; the driver form keeps exit 3 for a failing attestation. A dependent can now require an external attestation, so `NYL-ATTESTATION-EXTERNAL-UNSUPPORTED` is retired. Environment-wide attestations live in `observed/attestations.yaml`, added to format `v1` without a version bump: snapshots, `nyl state move` (when it copies documents), and `nyl state restore` carry and roll it back. A Nyl older than this release keeps the file through its transitions but cannot read or write it, its copying `state move` drops it, and its `state restore` leaves it as it is"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6c55962f-de90-4e71-9809-ed0e0a587956"
+type = "feature"
+description = "`nyl promote <path> [--value …] [--dry-run] [--reason …] [--revision …] [--state-revision …] [--evidence published] [--ignore-attestation <scope>/<name>=<reason>] [--no-verify-artifacts] [--wait-lease …]` records what the path's source environment proved as a `PromotionRecord` in the target's desired state: one desired commit under the target's lease, with a summary naming the path, sequence, and source state. It only reads the source's state. Promoting the state the path's record already names writes nothing (`outcome: unchanged`). `--dry-run` takes no lease, writes nothing, and reports the record under a top-level `record`. The record's `sequence` comes from the target's desired history, so `nyl state restore` never reuses one. Evidence that is missing, stale, or failing is exit 2 with `NYL-PROMOTE-NO-EVIDENCE`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "13a7765e-e90b-42e6-a9d4-7be6bcd0b3e3"
+type = "feature"
+description = "An Environment can take its source from a promotion (`source.fromPromotion` with `record: state`): it runs at the source commit of the newest record on its path or paths and records `sourceChosenBy: promotion` and `appliedPromotionSequence`. A path with no record yet exits 2 with `NYL-PROMOTION-MISSING`, naming `nyl promote <path>`. `{fromPromotion: {value, path?}}` bindings now resolve in unit specs and in a DeploymentTarget's `releaseInputs` through the shared binding resolver, and block their consumer until a record carries the value. `record: source` still exits 1 with `NYL-PROMOTE-UNSUPPORTED`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "65f3ea0d-9a7c-433e-bf99-1c8f168436f5"
+type = "feature"
+description = "`nyl promote` checks that every artifact a promoted value reads still exists, through the producing driver's new `verify_artifact` capability (`docker buildx imagetools inspect` for `OciImage`), and refuses a missing one with `NYL-PROMOTE-ARTIFACT-MISSING`. `--no-verify-artifacts` and a path's `verifyArtifacts: false` skip the check and the record says `artifactsVerified: false`. A kind that cannot verify warns with `NYL-PROMOTE-ARTIFACT-UNVERIFIED`; a target that also selects a unit whose result a promoted value replaces warns with `NYL-PROMOTE-REBUILT`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "d7283997-e441-42de-bda2-c4d6da0a1e8a"
+type = "fix"
+description = "`nyl validate` reports a failing DeploymentTarget compile together with invalid units and PromotionPaths instead of stopping at the target, so a path whose source Environment was removed is named next to the target that no environment places any more; `nyl get --state-revision` pairs the other state ref's commit by `Nyl-Run-Id`, so a state whose commits share a second is read whole"
+author = "@NiklasRosenstein"
