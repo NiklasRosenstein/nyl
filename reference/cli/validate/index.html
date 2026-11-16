@@ -106,8 +106,7 @@ before reading state, with the same codes: <code dir="auto">NYL-UNIT-INVALID</co
 <code dir="auto">NYL-UNIT-OWNERSHIP-OVERLAP</code>, <code dir="auto">NYL-DEPENDENCY-UNKNOWN</code>, <code dir="auto">NYL-DEPENDENCY-CYCLE</code>,
 <code dir="auto">NYL-REFERENCE-INVALID</code> for a reference to an output its producer does not
 declare or marks <code dir="auto">sensitive</code>, and <code dir="auto">NYL-ATTESTATION-UNDECLARED</code> for a <code dir="auto">dependsOn</code> entry or
-reference that requires an attestation its producer does not declare, and
-<code dir="auto">NYL-ATTESTATION-EXTERNAL-UNSUPPORTED</code> for one that requires an attestation only an external source supplies. An <code dir="auto">artifact</code>
+reference that requires an attestation its producer does not declare. An <code dir="auto">artifact</code>
 reference between units is checked only for the producer’s existence. A
 <code dir="auto">KubernetesPublication</code> unit places the DeploymentTarget its <code dir="auto">spec.target</code>
 names into that Environment. A target placed by publication units of two

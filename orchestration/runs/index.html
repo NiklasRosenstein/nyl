@@ -150,14 +150,11 @@ must be one the producer declares: the names its kind produces, such as
 <code dir="auto">observe: {}</code></a>, and the
 names in its <code dir="auto">spec.attestations</code>. Naming another is an error
 (<code dir="auto">NYL-ATTESTATION-UNDECLARED</code>), which <code dir="auto">nyl validate</code> reports too.</li>
-<li>An attestation declared with <code dir="auto">from: external</code> is supplied only by a person
-or an external system, and Nyl cannot record those yet
-(<code dir="auto">nyl attest --name … --result …</code> arrives with promotion). Requiring one,
-by name or through <code dir="auto">evidence: attested</code> on a producer that declares one, is
-an error (<code dir="auto">NYL-ATTESTATION-EXTERNAL-UNSUPPORTED</code>) rather than a consumer
-that waits forever; require the names the producer’s driver observes
-instead. <code dir="auto">nyl validate</code> reports it for producers in the same environment;
-for another environment’s producer, <code dir="auto">plan</code> and <code dir="auto">reconcile</code> do.</li>
+<li>An attestation declared with <code dir="auto">from: external</code> is supplied by a person or an
+external system with <a href="/nyl/reference/cli/detect-drift/#external-attestations"><code dir="auto">nyl attest --name … --result …</code></a>.
+Requiring one, by name or through <code dir="auto">evidence: attested</code>, keeps the consumer
+blocked as <code dir="auto">attestation-pending</code> until a pass is recorded for the producer’s
+current receipt.</li>
 <li>An attestation counts only for the receipt it names. A producer that
 executes again starts with its attestations pending, and a pass recorded
 for the earlier receipt no longer counts.</li>
@@ -543,7 +540,10 @@ are audit identities: the CI gate controls who can authorize the invocation.</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="toml"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">[approval]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">lookup</span><span style="--0:#D6DEEB;--1:#403F53"> = [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">./ci/approvers.sh</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="[approval]lookup = [&#x22;./ci/approvers.sh&#x22;]"><div></div></button></div></figure></div>
 <p>The hook runs in the project directory with <code dir="auto">NYL_ENVIRONMENT</code>,
 <code dir="auto">NYL_APPROVAL_UNITS</code> (a JSON array of explicitly approved names), and
-<code dir="auto">NYL_APPROVAL_DIGESTS</code> (a JSON object mapping names to digests or null). It
+<code dir="auto">NYL_APPROVAL_DIGESTS</code> (a JSON object mapping names to digests or null). For
+<a href="/nyl/reference/cli/detect-drift/#external-attestations"><code dir="auto">nyl attest --name</code></a> it
+also receives <code dir="auto">NYL_ATTESTATION</code> (the name) and <code dir="auto">NYL_ATTESTATION_UNIT</code> (the unit,
+empty for the environment). It
 prints <code dir="auto">{"by": ["alice"], "source": "production gate", "url": "https://ci.example/run/1"}</code>.
 Nyl records the command and result as <code dir="auto">verified</code>. An invalid response, failure,
 cancellation, or 30-second timeout stops the invocation before unit effects

@@ -155,7 +155,7 @@ Nyl never force-pushes a state ref.</p>
 <p>Inside the refs, <code dir="auto">state.yaml</code> records the location and its history,
 <code dir="auto">desired/</code> the resolved environment and each unit’s desired document, and
 <code dir="auto">observed/</code> each unit’s receipt, condition, artifacts, drift record, and
-attestations. Each operation writes at most one commit per state ref.</p>
+attestations, and, in <code dir="auto">observed/attestations.yaml</code>, the environment’s own. Each operation writes at most one commit per state ref.</p>
 <p><a href="/nyl/reference/cli/state/#nyl-state-delete"><code dir="auto">nyl state delete</code></a> keeps the
 refs: its commit removes the environment’s <code dir="auto">desired/</code> and <code dir="auto">observed/</code> files
 and leaves <code dir="auto">state.yaml</code>, whose last event <code dir="auto">state-deleted</code> marks the location
