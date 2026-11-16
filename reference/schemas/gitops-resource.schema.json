@@ -30,6 +30,9 @@
       "$ref": "environment-template.schema.json"
     },
     {
+      "$ref": "promotion-path.schema.json"
+    },
+    {
       "$ref": "release.schema.json"
     }
   ],
