@@ -47,6 +47,8 @@ pub use workload::{KubeResourceReader, ResourceReader};
 
 pub(crate) use build::build;
 #[cfg(any(test, feature = "test-kinds"))]
+pub(crate) use observe::{attest_with, observes, record_facts};
+#[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use readiness::evaluate as evaluate_teardown_readiness;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use run::publish;

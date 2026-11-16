@@ -238,7 +238,7 @@ counts them, such as `nyl: detect-drift dev (3 clean, 1 drifted)` or
 | `NYL-DRIFT-NO-RECEIPT` | The unit has no current receipt to check for drift. Run `nyl reconcile`. |
 | `NYL-DRIFT-UNKNOWN` | The driver could not tell whether the unit drifted, for example because its tool failed. Fix the cause and run `detect-drift` again. |
 | `NYL-DRIFT-UNSUPPORTED` | The unit's kind cannot detect drift, such as a Command unit without a `detectDrift` step. |
-| `NYL-ATTESTATION-FAILED` | An attestation of the unit's receipt failed. References that require the attestation stay unsatisfied until a newer one passes. |
+| `NYL-ATTESTATION-FAILED` | An attestation of the unit's receipt failed. The message ends with `: <reason>`, the driver's reason, when the driver gives one. References that require the attestation stay unsatisfied until a newer one passes. |
 | `NYL-ATTEST-NO-RECEIPT` | The unit has no current receipt to attest. Run `nyl reconcile`. |
 | `NYL-ATTEST-UNKNOWN` | The driver could not tell the results of the unit's attestations. Fix the cause and run `attest` again. |
 | `NYL-ATTEST-UNSUPPORTED` | `--unit` named a unit whose kind produces no attestations for its spec, such as a Command unit without an `attest` step. |

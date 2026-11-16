@@ -735,6 +735,11 @@ pub struct UnitCheck {
     /// Each declared observation as the read found it, by name (`observe`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub observations: BTreeMap<String, ObservationStatus>,
+    /// The driver's reason for each failing attestation in `attestations`,
+    /// shown unchanged in its warning; the report's JSON carries the
+    /// results only, and the recorded attestation keeps the reason.
+    #[serde(skip)]
+    pub reasons: BTreeMap<String, String>,
 }
 
 /// One observed value as a `nyl observe` read found it.
@@ -756,6 +761,7 @@ impl From<CheckResult> for UnitCheck {
             result,
             attestations: BTreeMap::new(),
             observations: BTreeMap::new(),
+            reasons: BTreeMap::new(),
         }
     }
 }

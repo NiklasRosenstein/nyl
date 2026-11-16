@@ -8,3 +8,7 @@ metadata:
 spec:
   applicationNamespace: argocd
   source: {path: ../applications/web}   # beside nyl/
+  # Both Releases deploy into Namespace web; the web Release's Application owns it.
+  sharedNamespaces:
+    web:
+      owner: {kind: Release, applicationGroup: web, release: web}

@@ -259,6 +259,32 @@ impl World {
         path
     }
 
+    /// Commit an edit beneath each of `paths` to `branch` outside Nyl, then
+    /// a commit that restores them, and push both: the edit commit, which
+    /// this returns, holds directories no publication holds.
+    pub fn edit_outside_nyl(&self, branch: &str, paths: &[&str]) -> String {
+        let clone = self.fresh_clone(branch);
+        let file = |path: &str| format!("{path}/edited-outside-nyl.yaml");
+        for path in paths {
+            let target = clone.join(file(path));
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, "edited: outside Nyl\n").unwrap();
+        }
+        git(&clone, &["add", "--all"]);
+        git(&clone, &["commit", "--quiet", "--message", "Edit outside Nyl"]);
+        let edit = git_output(&clone, &["rev-parse", "HEAD"]);
+        for path in paths {
+            std::fs::remove_file(clone.join(file(path))).unwrap();
+        }
+        git(&clone, &["add", "--all"]);
+        git(&clone, &["commit", "--quiet", "--message", "Restore outside Nyl"]);
+        git(
+            &clone,
+            &["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")],
+        );
+        edit
+    }
+
     /// `project.git`, for reads that need no `git` process.
     pub fn repository(&self) -> git2::Repository {
         git2::Repository::open_bare(self.bare()).expect("project.git opens")
@@ -281,6 +307,19 @@ impl World {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
             Err(format!("{revision:?} names no commit of project.git"))
+        }
+    }
+
+    /// The content of `object` (`<revision>:<path>`) in `project.git`, or why
+    /// it cannot be shown.
+    pub fn show(&self, object: &str) -> Result<String, String> {
+        let output = git_command(&self.bare(), &["show", object])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
         }
     }
 

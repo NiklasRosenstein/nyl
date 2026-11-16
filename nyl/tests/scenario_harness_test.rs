@@ -593,6 +593,96 @@ steps:
     assert!(error.contains("step 4: the armed fault never fired"), "{error}");
 }
 
+/// `argocd` steps feed the fake Argo CD, and the fake publication attests
+/// what they report through the real driver's matching: a publication
+/// running everywhere passes; an Application left on the previous
+/// publication fails `accepted` as `other-publication`; one running a
+/// revision edited outside Nyl is `unmatched`; and one that is `Degraded`
+/// fails only `healthy`. Catches a fake that judges readings by rules of its
+/// own, or a harness that resolves `runs` to the wrong publication commit.
+#[test]
+fn test_argocd_steps_attest_through_the_shared_matching() {
+    run_inline(
+        "walkthroughs/value-only-promotion",
+        "inline/fake-argocd",
+        r#"contract: design/promotion.md#kubernetes-publications
+milestone: M6
+tiers: [1]
+publication: fake
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: r1
+    exit: 0
+  # Nothing scripted: the attestation is unknown, never a failure.
+  - nyl: [attest, -e, dev]
+    exit: 2
+    expect:
+      codes: [NYL-ATTEST-UNKNOWN]
+      commits: {desired: 0, observed: 0}
+  - argocd: {target: dev, all: {runs: r1}}
+  - nyl: [attest, -e, dev]
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 1}
+  - commit: {branch: main, message: "Release 2", apply: patches/release-2}
+  - nyl: [reconcile, -e, dev]
+    id: r2
+    exit: 0
+  - argocd: {target: dev, all: {runs: r2}, releases: {web/api: {runs: r1}}}
+  - nyl: [attest, -e, dev]
+    exit: 3
+    expect:
+      codes: [NYL-ATTESTATION-FAILED]
+      messages: [other-publication]
+      commits: {desired: 0, observed: 1}
+  - argocd: {target: dev, all: {runs: r2}, releases: {web/api: {runs: unmatched}}}
+  - nyl: [attest, -e, dev]
+    exit: 3
+    expect:
+      codes: [NYL-ATTESTATION-FAILED]
+      messages: [unmatched]
+  - argocd: {target: dev, all: {runs: r2}, releases: {web/web: {runs: r2, health: Degraded}}}
+  - nyl: [attest, -e, dev]
+    exit: 3
+    expect:
+      codes: [NYL-ATTESTATION-FAILED]
+      messages: [Degraded]
+  - argocd: {target: dev, all: {runs: r2}}
+  - nyl: [attest, -e, dev]
+    exit: 0
+    expect:
+      commits: {desired: 0, observed: 1}
+"#,
+    )
+    .unwrap();
+}
+
+/// An `argocd` step naming a Release the target has no Application for
+/// fails the scenario, instead of scripting a reading nothing reads.
+#[test]
+fn test_argocd_step_naming_no_release_of_the_target_fails() {
+    let error = run_inline(
+        "walkthroughs/value-only-promotion",
+        "inline/fake-argocd-unknown-release",
+        r#"contract: design/promotion.md#kubernetes-publications
+milestone: M6
+tiers: [1]
+publication: fake
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: r1
+    exit: 0
+  - argocd: {target: dev, all: {runs: r1}, releases: {web/nope: {runs: unmatched}}}
+"#,
+    )
+    .unwrap_err();
+    assert!(error.contains("no Application for Release web/nope"), "{error}");
+}
+
 fn expect(text: &str) -> scenario::format::Expect {
     serde_saphyr::from_str(text).unwrap()
 }
@@ -1552,13 +1642,13 @@ fn test_state_placeholder_falls_back_to_the_observed_commit() {
     let observed_only = StepWrite {
         desired: None,
         observed: Some("o1".to_owned()),
-        run: None,
+        ..StepWrite::default()
     };
     assert_eq!(observed_only.state().map(String::as_str), Some("o1"));
     let both = StepWrite {
         desired: Some("d1".to_owned()),
         observed: Some("o1".to_owned()),
-        run: None,
+        ..StepWrite::default()
     };
     assert_eq!(both.state().map(String::as_str), Some("d1"));
     assert_eq!(StepWrite::default().state(), None);

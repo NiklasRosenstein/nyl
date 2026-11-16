@@ -286,6 +286,15 @@ fn test_attest_records_accepted_and_healthy_from_argocd() {
         "{}",
         degraded.stderr
     );
+    // The warning names the driver's reason, in the form the end-to-end
+    // example shows (there the workload Application is named dev-web).
+    assert!(
+        degraded.stderr.contains(
+            "attestation healthy of kubernetes in dev failed: 1 of 2 deployments are not Healthy: web is Degraded\n"
+        ),
+        "{}",
+        degraded.stderr
+    );
     let failed = tip();
 
     // Argo CD not answering is unknown: exit 2, nothing recorded.

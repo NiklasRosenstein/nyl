@@ -87,3 +87,9 @@ id = "a12a6673-a2cb-407c-8768-6fa6033d3d9c"
 type = "feature"
 description = "`nyl get promotions -e <env>` shows the record that supplies the environment's source and, for each `fromPromotion` binding of its units, the path and record it reads; `status`'s `pendingSequence` counts a newer record on any of the environment's source paths"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "0175c514-da53-4356-97f9-8807f3b98568"
+type = "improvement"
+description = "`nyl attest -e <env>` names the driver's reason in each `NYL-ATTESTATION-FAILED` warning, such as which Applications run another publication or are not Healthy, instead of only the attestation's name"
+author = "@NiklasRosenstein"

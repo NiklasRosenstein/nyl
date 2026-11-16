@@ -38,7 +38,7 @@ use crate::command::resolved_spec;
 
 pub use image::FakeImage;
 pub use infra::FakeInfra;
-pub use observer::FakeObserver;
+pub use observer::{FakeObserver, ScriptedDeployment, ScriptedReading};
 pub use publication::FakePublication;
 
 /// The real publication driver reading observed values through a [`Script`]
@@ -112,7 +112,7 @@ pub struct Script {
     entries: Arc<Mutex<ScriptEntries>>,
     /// `FakeInfra`'s execution recovery policy, when a test sets one.
     execution_policy: Arc<Mutex<Option<RecoveryPolicy>>>,
-    /// What `FakePublication`'s `observe` teardown wait sees of Argo CD.
+    /// What `FakePublication`'s `observe` teardown wait and `attest` see of Argo CD.
     observer: FakeObserver,
 }
 
@@ -121,7 +121,7 @@ impl Script {
         Self::default()
     }
 
-    /// The scripted Argo CD of `FakePublication`'s `observe` teardown wait,
+    /// The scripted Argo CD of `FakePublication`'s `observe` teardown wait and `attest`,
     /// shared by every clone of the script.
     pub fn observer(&self) -> FakeObserver {
         self.observer.clone()

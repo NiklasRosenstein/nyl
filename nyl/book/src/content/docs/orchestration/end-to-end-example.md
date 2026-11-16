@@ -599,7 +599,8 @@ kubernetes  KubernetesPublication  attested (accepted: pass, healthy: pass)
   observed: c82debd9f2a9e0e8de547b12fe5f58e8edf3bcfe
 ```
 
-A degraded Application fails `healthy` (exit 3) and keeps `accepted`. An Argo CD
+A degraded Application fails `healthy` (exit 3) and keeps `accepted`; the
+warning gives the driver's reason. An Argo CD
 that cannot be read is never recorded as a failure: with the API server, a
 rejected token is reported as expired or invalid, and the unit is `unknown`
 (exit 2) until the credential is fixed.
@@ -612,7 +613,7 @@ kubernetes  KubernetesPublication  attested (accepted: pass, healthy: fail)
   run:      01a1b0b7-d03c-7ccb-af8d-0e6b7b4b7f17
   observed: 629a967a027c4f066e74faa25a05cac340734732
 
-warning  attestation healthy of kubernetes in dev failed
+warning  attestation healthy of kubernetes in dev failed: 1 of 2 deployments are not Healthy: dev-web is Degraded
 
   Action  investigate the failing check; references that require the attestation stay unsatisfied until a newer one passes
 

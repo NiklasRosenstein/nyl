@@ -31,17 +31,23 @@ use nyl_orchestration::fault::{FaultAction, FaultInjector, FaultPoint};
 use nyl_orchestration::rules::unit_state::receipt_state;
 use nyl_orchestration::run_report::ReceiptState;
 use nyl_orchestration::testing::{FakeClock, SequentialIds};
-use nyl_units::fake::{Script, Scripted};
+use nyl_render::gitops::observation::ReconcilerFacts;
+use nyl_units::fake::{Script, Scripted, ScriptedDeployment, ScriptedReading};
+use nyl_units::kubernetes_publication::reconciler::{Health, Running};
 use nyl_units::process::ProcessRunner;
 use serde_json::Value;
 
 use super::format::{
-    placeholders, DeployExpectation, DriverOperation as StepOperation, DriverOutcome, EvidenceLevel, Expect,
-    KeepRefsExpectation, Mention, Placeholder, PointName, PromotionExpectation, ReceiptExpectation, RecordLocation,
-    Step, StepKind, UidExpectation, UnitExpectation,
+    placeholders, ApplicationHealth, ApplicationReading, ArgocdStep, DeployExpectation,
+    DriverOperation as StepOperation, DriverOutcome, EvidenceLevel, Expect, KeepRefsExpectation, Mention, Placeholder,
+    PointName, PromotionExpectation, ReceiptExpectation, RecordLocation, Step, StepKind, UidExpectation,
+    UnitExpectation,
 };
 use super::world::{git_output, World};
 use super::Loaded;
+
+/// The `runs` of an `argocd` reading that names no publication.
+const UNMATCHED: &str = "unmatched";
 
 /// The time every scenario starts at.
 pub const START: &str = "2026-09-24T10:00:00Z";
@@ -335,6 +341,8 @@ pub struct StepWrite {
     pub observed: Option<String>,
     /// The `Nyl-Run-Id` trailer of those commits.
     pub run: Option<String>,
+    /// The environment whose refs they are on.
+    pub environment: String,
 }
 
 impl StepWrite {
@@ -455,7 +463,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     .map_err(|_| format!("resume {id}: the invocation panicked"))??;
                 self.check(paused.step, step, outcome, &paused.before)?;
             }
-            StepKind::Argocd => return Err("tier 1 does not script Argo CD readings yet (M6)".to_owned()),
+            StepKind::Argocd => self.argocd(step.argocd.as_ref().expect("kind"))?,
             kind @ (StepKind::CiAdmit | StepKind::CiWorker | StepKind::CiExport) => {
                 return Err(format!("tier 1 does not run {kind:?} steps yet"));
             }
@@ -908,6 +916,184 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
         texts.iter().map(|text| self.expand(text, branch)).collect()
     }
 
+    /// An `argocd` step: script what the fake Argo CD reports for the
+    /// target's deployments. Each `runs` id becomes the publication commit
+    /// that step's receipt for the target records; `unmatched` becomes a
+    /// commit on the publication branch that edits the deployments'
+    /// directories outside Nyl, which a second commit restores, so no
+    /// publication matches it.
+    fn argocd(&self, step: &ArgocdStep) -> Result<(), String> {
+        let readings = std::iter::once((None, &step.all))
+            .chain(
+                step.releases
+                    .iter()
+                    .map(|(release, reading)| (Some(release.as_str()), reading)),
+            )
+            .collect::<Vec<_>>();
+        // The deployments the target expects, from the facts its
+        // publication unit recorded.
+        let (_, document) = self
+            .publication_units(&step.target)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "argocd: no environment has a publication unit for target {}",
+                    step.target
+                )
+            })?;
+        let facts: ReconcilerFacts = serde_json::from_value(
+            document
+                .pointer("/resolvedSpec/reconciler")
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "argocd: the publication unit of target {} records no reconciler facts: does it declare observe: {{}}?",
+                        step.target
+                    )
+                })?,
+        )
+        .map_err(|error| format!("argocd: the reconciler facts of target {}: {error}", step.target))?;
+        let expected = &facts.expected;
+        for release in step.releases.keys() {
+            if !expected
+                .deployments
+                .iter()
+                .any(|deployment| deployment.release.as_deref() == Some(release.as_str()))
+            {
+                return Err(format!(
+                    "argocd: target {} has no Application for Release {release}",
+                    step.target
+                ));
+            }
+        }
+        let mut unmatched = None;
+        if readings.iter().any(|(_, reading)| reading.runs == UNMATCHED) {
+            let paths = expected
+                .deployments
+                .iter()
+                .filter(|deployment| {
+                    let release = deployment.release.as_deref();
+                    readings
+                        .iter()
+                        .find(|(named, _)| named.is_some() && *named == release)
+                        .or(readings.first())
+                        .is_some_and(|(_, reading)| reading.runs == UNMATCHED)
+                })
+                .map(|deployment| deployment.path.as_str())
+                .collect::<Vec<_>>();
+            if paths.is_empty() {
+                return Err(format!(
+                    "argocd: no Application of target {} runs unmatched",
+                    step.target
+                ));
+            }
+            if expected.publication.url != self.world.project_url() {
+                return Err(format!(
+                    "argocd: target {} publishes to {}, not to project.git",
+                    step.target, expected.publication.url
+                ));
+            }
+            unmatched = Some(self.world.edit_outside_nyl(&expected.publication.branch, &paths));
+        }
+        let mut commits = BTreeMap::new();
+        for (_, reading) in &readings {
+            if reading.runs != UNMATCHED && !commits.contains_key(&reading.runs) {
+                commits.insert(reading.runs.clone(), self.published(&reading.runs, &step.target)?);
+            }
+        }
+        let deployment = |reading: &ApplicationReading| ScriptedDeployment {
+            running: Running::Exact(if reading.runs == UNMATCHED {
+                unmatched.clone().expect("made above")
+            } else {
+                commits[&reading.runs].clone()
+            }),
+            health: match reading.health {
+                ApplicationHealth::Healthy => Health::Healthy,
+                ApplicationHealth::Progressing => Health::Progressing,
+                ApplicationHealth::Degraded => Health::Degraded,
+                ApplicationHealth::Unknown => Health::Unknown,
+            },
+        };
+        self.shared.script.observer().set_reading(
+            &step.target,
+            ScriptedReading {
+                all: deployment(&step.all),
+                releases: step
+                    .releases
+                    .iter()
+                    .map(|(release, reading)| (release.clone(), deployment(reading)))
+                    .collect(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Every publication unit for `target`, by environment, as each
+    /// environment's desired ref holds it now: the desired documents whose
+    /// resolved spec names the target.
+    fn publication_units(&self, target: &str) -> Result<Vec<(String, Value)>, String> {
+        let bare = self.world.bare();
+        let refs = git_output(&bare, &["for-each-ref", "--format=%(refname)", "refs/heads/nyl/"]);
+        let mut found = Vec::new();
+        for reference in refs.lines().filter(|reference| reference.ends_with("/desired")) {
+            let environment = reference
+                .trim_start_matches("refs/heads/nyl/")
+                .trim_end_matches("/desired")
+                .to_owned();
+            let files = git_output(&bare, &["ls-tree", "-r", "--name-only", reference, "desired/units/"]);
+            for file in files.lines() {
+                let text = git_output(&bare, &["show", &format!("{reference}:{file}")]);
+                let document: Value =
+                    serde_saphyr::from_str(&text).map_err(|error| format!("{reference}:{file}: {error}"))?;
+                if document.pointer("/resolvedSpec/target").and_then(Value::as_str) == Some(target) {
+                    found.push((environment.clone(), document));
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// The publication commit that the receipt of `target`'s publication
+    /// unit records in the observed state the step with `id` wrote.
+    fn published(&self, id: &str, target: &str) -> Result<String, String> {
+        let write = self
+            .writes
+            .get(id)
+            .ok_or_else(|| format!("argocd runs {id}: no nyl step with that id has run"))?;
+        let observed = write
+            .observed
+            .as_ref()
+            .ok_or_else(|| format!("argocd runs {id}: the step wrote no observed-state commit"))?;
+        let (_, document) = self
+            .publication_units(target)?
+            .into_iter()
+            .find(|(environment, _)| *environment == write.environment)
+            .ok_or_else(|| {
+                format!(
+                    "argocd runs {id}: {} has no publication unit for target {target}",
+                    write.environment
+                )
+            })?;
+        let unit = document
+            .pointer("/unit/name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "argocd: a desired unit without a name".to_owned())?;
+        let text = self
+            .world
+            .show(&format!("{observed}:observed/units/{unit}/artifacts/tree.yaml"))
+            .map_err(|error| {
+                format!("argocd runs {id}: {unit} has no PublishedTree artifact in that state: {error}")
+            })?;
+        let artifact: Value =
+            serde_saphyr::from_str(&text).map_err(|error| format!("{unit}'s tree artifact: {error}"))?;
+        artifact
+            .pointer("/spec/commit")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("argocd runs {id}: {unit}'s tree artifact records no commit"))
+    }
+
     /// Remember the tips the step with `id` wrote to `environment`'s refs.
     /// Known limitation: for a paused step the tips are those at its resume, so
     /// a step that ran while it was paused and wrote to the same environment can
@@ -939,6 +1125,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 desired: desired.map(|oid| oid.to_string()),
                 observed: observed.map(|oid| oid.to_string()),
                 run,
+                environment: environment.to_owned(),
             },
         );
     }
