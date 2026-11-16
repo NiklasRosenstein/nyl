@@ -75,10 +75,13 @@ fn test_validate_reports_each_failure_with_its_code_and_fix() {
             "NYL-PROMOTE-SELECTOR-UNIT",
             "no unit named ghost",
         ),
+        // An undeclared output fails whatever driver serves the kind; pointer
+        // resolution against a kind's schema is tested in the rule, with a
+        // closed test schema, because test builds' fake drivers keep theirs open.
         (
-            "  from: {environment: dev}\n  to: {environment: prod}\n  values:\n    v:\n      select: {unit: database, input: /nope}\n",
+            "  from: {environment: dev}\n  to: {environment: prod}\n  values:\n    v:\n      select: {unit: database, output: nope}\n",
             "NYL-PROMOTE-SELECTOR-INVALID",
-            "resolves neither",
+            "declares no output \"nope\"",
         ),
         (
             "  from: {environment: dev}\n  to: {environment: prod}\n  evidence: attested\n  attestations: {environment: [release]}\n",
@@ -261,8 +264,11 @@ fn test_value_type_mismatch_is_reported() {
 fn test_reconcile_refuses_an_invalid_path_like_plan() {
     let world = World::new(&scenario::shell::shared_project());
     let checkout = checkout_with(&world, "  from: {environment: staging}\n  to: {environment: dev}\n");
-    for command in [["plan", "-e", "dev"], ["reconcile", "-e", "dev"]] {
-        nyl(&world, &checkout, &command)
+    // `reconcile` writes state commits, so it needs an identity; a CI runner's
+    // clone has none configured.
+    let reconcile = ["reconcile", "-e", "dev", "--author", "Nyl Test <test@example.invalid>"];
+    for command in [&["plan", "-e", "dev"][..], &reconcile[..]] {
+        nyl(&world, &checkout, command)
             .assert()
             .failure()
             .stderr(predicate::str::contains("NYL-PROMOTE-ENVIRONMENT-UNKNOWN"));

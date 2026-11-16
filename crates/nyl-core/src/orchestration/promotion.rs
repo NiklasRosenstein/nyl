@@ -71,6 +71,7 @@ pub struct PromotionSelect {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum PromotionFrom {
+    /// A state of the source environment.
     Environment(EnvironmentFrom),
     /// Reserved for M11.
     Target(TargetFrom),
@@ -80,9 +81,13 @@ pub enum PromotionFrom {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TargetFrom {
+    /// The DeploymentTarget the values came from.
     pub target: String,
+    /// The repository the target publishes to.
     pub repository: String,
+    /// The publication branch.
     pub branch: String,
+    /// The publication commit the values were read at.
     pub commit: CommitId,
 }
 
@@ -91,8 +96,11 @@ pub struct TargetFrom {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentFrom {
+    /// The source environment.
     pub environment: EnvironmentName,
+    /// The `Nyl-Run-Id` of the run that recorded the state.
     pub run: RunId,
+    /// The state's commit on the desired ref.
     #[serde(rename = "desiredCommit")]
     pub desired_commit: CommitId,
     /// Absent when the state has no observed commit of its own.
@@ -105,9 +113,12 @@ pub struct EnvironmentFrom {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromotedState {
+    /// The `Nyl-Run-Id` of the run that recorded the state.
     pub run: RunId,
+    /// The state's commit on the desired ref.
     #[serde(rename = "desiredCommit")]
     pub desired_commit: CommitId,
+    /// The state's commit on the observed ref; absent when it has none of its own.
     #[serde(rename = "observedCommit", default, skip_serializing_if = "Option::is_none")]
     pub observed_commit: Option<CommitId>,
 }
@@ -116,6 +127,7 @@ pub struct PromotedState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromotedUnit {
+    /// The unit's name in the source environment.
     pub name: UnitName,
     /// The incarnation; absent when the unit had none in the recorded state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,7 +138,9 @@ pub struct PromotedUnit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromotedValue {
+    /// The value as promoted.
     pub value: Value,
+    /// The path's selector the value was read with.
     pub select: PromotionSelect,
     /// The source unit; absent for a target source's value (M11) and when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,7 +160,9 @@ pub struct PromotedValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum EvidenceLevel {
+    /// The source state recorded every value.
     Published,
+    /// The required attestations also passed.
     Attested,
 }
 
@@ -156,8 +172,11 @@ pub enum EvidenceLevel {
 pub struct EvidenceAttestation {
     /// The unit name, or `environment`.
     pub scope: String,
+    /// The attestation's name.
     pub name: String,
+    /// Whether it passed.
     pub result: AttestationResult,
+    /// When it was recorded.
     pub at: Timestamp,
     /// The driver's details, such as each Application's running publication and health.
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -168,6 +187,7 @@ pub struct EvidenceAttestation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceOverride {
+    /// Why the promotion went ahead below the path's level.
     pub reason: String,
 }
 
@@ -175,7 +195,9 @@ pub struct EvidenceOverride {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionEvidence {
+    /// The level the evidence reached.
     pub level: EvidenceLevel,
+    /// The attestations the promotion relied on.
     pub attestations: Vec<EvidenceAttestation>,
     /// Written as `null` when the promotion needed no override.
     #[serde(rename = "override")]
@@ -187,9 +209,13 @@ pub struct PromotionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IgnoredAttestation {
+    /// The unit name, or `environment`.
     pub scope: String,
+    /// The attestation's name.
     pub name: String,
+    /// Why it was set aside.
     pub reason: String,
+    /// Who set it aside.
     pub by: String,
 }
 
@@ -199,8 +225,11 @@ pub struct IgnoredAttestation {
 pub struct SupersededCommit {
     /// The repository of the commit, such as a unit's source repository.
     pub repository: String,
+    /// The commit accepted as replaced.
     pub commit: CommitId,
+    /// Why it no longer needs to reach the target.
     pub reason: String,
+    /// Who accepted it.
     pub by: String,
 }
 
@@ -208,11 +237,16 @@ pub struct SupersededCommit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionRequest {
+    /// Who asked for the promotion.
     pub by: String,
+    /// How that identity was established, as for an approval.
     pub identity: ApprovalIdentity,
+    /// Where the identity came from, such as a CI provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// When the promotion was requested.
     pub at: Timestamp,
+    /// The `--reason` given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -236,16 +270,20 @@ pub struct PromotionRecord {
     pub source_commit: Option<CommitId>,
     /// The promoted values by name.
     pub values: BTreeMap<String, PromotedValue>,
+    /// The evidence the promotion rested on.
     pub evidence: PromotionEvidence,
+    /// The attestations `--ignore-attestation` set aside.
     #[serde(rename = "ignoredAttestations")]
     pub ignored_attestations: Vec<IgnoredAttestation>,
     /// The path's `coverage.excludeApplications` at promotion time.
     #[serde(rename = "excludedApplications")]
     pub excluded_applications: Vec<String>,
+    /// The commits `--supersede` accepted as replaced.
     pub superseded: Vec<SupersededCommit>,
     /// Whether the artifact check ran.
     #[serde(rename = "artifactsVerified")]
     pub artifacts_verified: bool,
+    /// Who asked for the promotion, and why.
     pub requested: PromotionRequest,
 }
 
@@ -253,8 +291,10 @@ pub struct PromotionRecord {
 /// every state document carries, both required.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PromotionRecordDocument {
+    /// The state format version.
     #[serde(rename = "apiVersion")]
     pub api_version: StateV1,
+    /// Always `PromotionRecord`.
     pub kind: PromotionRecordKind,
     #[serde(flatten)]
     pub record: PromotionRecord,
