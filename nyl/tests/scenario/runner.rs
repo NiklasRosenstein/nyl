@@ -310,6 +310,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                 .commit(step.commit.as_ref().expect("kind"), &loaded.directory),
             StepKind::Branch => self.world.branch(step.branch.as_ref().expect("kind")),
             StepKind::SquashMerge => self.world.squash_merge(step.squash_merge.as_ref().expect("kind")),
+            StepKind::Merge => self.world.merge(step.merge.as_ref().expect("kind")),
             StepKind::DeleteBranch => self.world.delete_branch(step.delete_branch.as_ref().expect("kind")),
             StepKind::Ref => {
                 let step = step.reference.as_ref().expect("kind");
@@ -343,6 +344,9 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     StepOperation::DetectDrift => DriverOperation::DetectDrift,
                     StepOperation::Teardown => DriverOperation::Teardown,
                     StepOperation::Observe => DriverOperation::Observe,
+                    StepOperation::VerifyArtifact => {
+                        return Err("tier 1 does not script verify-artifact yet (M6)".to_owned());
+                    }
                 };
                 let observe = step.operation == StepOperation::Observe;
                 let result = match step.outcome {
@@ -405,6 +409,7 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     .map_err(|_| format!("resume {id}: the invocation panicked"))??;
                 self.check(paused.step, step, outcome, &paused.before)?;
             }
+            StepKind::Argocd => return Err("tier 1 does not script Argo CD readings yet (M6)".to_owned()),
             kind @ (StepKind::CiAdmit | StepKind::CiWorker | StepKind::CiExport) => {
                 return Err(format!("tier 1 does not run {kind:?} steps yet"));
             }

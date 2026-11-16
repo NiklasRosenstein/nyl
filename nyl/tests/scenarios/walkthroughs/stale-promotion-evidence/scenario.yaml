@@ -10,6 +10,16 @@ steps:
     exit: 0
   - nyl: [reconcile, -e, prod]
     exit: 2                           # no promotion yet, so prod has no source commit
+    expect:
+      codes: [NYL-PROMOTION-MISSING]
+      messages: [nyl promote dev-to-prod]
+      commits: {desired: 0, observed: 0}
+  # Missing evidence: dev has recorded no state yet.
+  - nyl: [promote, dev-to-prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-NO-EVIDENCE]
+      commits: {desired: 0, observed: 0}
   - nyl: [reconcile, -e, dev]
     id: r1                            # every unit gets a receipt at S1
     exit: 0
@@ -26,18 +36,43 @@ steps:
       failed: [web-image]
       blocked: [kubernetes]
 
+  # The newest state fails the whole-source rule; R1's state passes.
   - nyl: [promote, dev-to-prod]
     exit: 0
     expect:
+      commits: {desired: 1, observed: 0}
       promotion:
         path: dev-to-prod
+        sequence: 1
         sourceCommit: main~1          # S1, not S2
-        from: {run: r1}
+        from: {environment: dev, run: r1}
+        values:
+          webImage:
+            equals: [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r1)%']
+        evidence: {level: published, override: false}
+      # R2's state does not reach `published` and names both units; R1's
+      # does, and prod now runs it. Newest first.
+      get:
+        args: [get, promotion-candidates, dev-to-prod]
+        json:
+          /candidates/0/desiredCommit: '%STATE(r2)%'
+          /candidates/0/level: none
+          /candidates/0/missing/0/unit: kubernetes
+          /candidates/0/missing/1/unit: web-image
+          /candidates/1/desiredCommit: '%STATE(r1)%'
+          /candidates/1/level: published
+          /candidates/1/promoted: true
   - nyl: [reconcile, -e, prod]
     exit: 0
     expect:
+      source: main~1
       executed: [kubernetes]
-      deploy: {branch: deploy, contains: ['prod/web/**']}
+      deploy:
+        branch: deploy
+        contains: ['prod/web/**']
+        mentions:
+          'prod/web/**':
+            - [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r1)%']
 
   # At attested, dev's qa attestation is required and was never recorded.
   - commit: {branch: main, message: "Require attested evidence", apply: patches/require-attested}
@@ -45,4 +80,5 @@ steps:
     exit: 2
     expect:
       codes: [NYL-PROMOTE-NO-EVIDENCE]
+      messages: [qa]
       commits: {desired: 0, observed: 0}

@@ -1,4 +1,4 @@
-// The orchestration roadmap, milestones M1 to M10, rendered on the Orchestration
+// The orchestration roadmap, milestones M1 to M11, rendered on the Orchestration
 // roadmap page. ROADMAP.md records the direction; progress lives here. Tick an
 // item in the change that ships it, and set `done` on a milestone only when
 // its exit criterion is met.
@@ -11,12 +11,12 @@ export const orchestrationRoadmap = {
   nextStep: {
     intro: 'M5 is complete: one `reconcile` builds an image, applies OpenTofu, and publishes Kubernetes manifests that consume the image digest and the infrastructure output; the same Releases render with static inputs in a target that does not use orchestration; the `KubernetesPublication` unit declares its target inline, tears down in two phases behind an owner fence, builds and diffs from `nyl build`, observes Argo CD to attest `accepted` and `healthy`, and reads observed values; EnvironmentTemplates create preview environments that expire, share one catalog, and are removed with their pull request; and all three reference scenarios pass in both tiers with the real publication driver. The Orchestration guide ends with an end-to-end example that runs locally and in GitHub Actions. Continue with M6: promotion paths.',
     steps: [
-      { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks and an optional pull-request change gate.', done: false },
+      { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks; validation rejects `changeGate: pullRequest`, which M11 adds.', done: false },
       { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: false },
       { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: false },
       { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: false },
     ],
-    outro: 'Value-only promotion, promotion from and into non-orchestrated targets, and attestation-gated paths follow in the rest of M6.',
+    outro: 'Value-only promotion and attestation-gated paths follow in the rest of M6; the [M6 plan](https://github.com/NiklasRosenstein/nyl/blob/develop/design/m6-plan.md) maps them onto pull requests. Promotion from and into non-orchestrated targets and the pull-request change gate follow in M11.',
   },
   stages: [
     {
@@ -124,15 +124,13 @@ export const orchestrationRoadmap = {
       needs: ['M5'],
       exitCriterion: 'Prod runs exactly the source commit and image digest dev proved, with auditable lineage; stale, missing, or mixed source evidence blocks promotion; a hotfix reaches prod through its own path, and a dev promotion without the fix is refused until the fix is merged or superseded; a value-only path promotes each value from what its consuming Application runs.',
       items: [
-        { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks and an optional pull-request change gate.', done: false },
+        { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks, recording each promotion directly; validation rejects `changeGate: pullRequest` until M11.', done: false },
         { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with `record: state` and `record: source`, the whole-source evidence rule, recorded evidence for older states, artifact verification, and rollback through `--revision`.', done: false },
         { text: 'Support several paths into one environment: `source.fromPromotion.paths`, path-less bindings, the per-value supersede check with `--supersede`, and the hotfix pattern with a fifth reference scenario.', done: false },
         { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: false },
         { text: 'Promote values only, such as an image digest and a Terraform source commit, across differently named units and inputs, each from the state its consumer runs.', done: false },
-        { text: 'Promote from a non-orchestrated target\'s published inputs, including a carried state file, with values verified against the recorded digests.', done: false },
-        { text: 'Promote into a target outside every environment: `to: {target}`, the record in the target\'s `spec.promotions`, `fromPromotion` resolution in tree and direct commands, and the ownership index\'s applied sequence.', done: false },
-        { text: 'Implement attestations: driver-declared names, `spec.attestations` on units and environments, `nyl attest` for environments and targets, the `published | attested` evidence levels with a path\'s per-unit `attestations`, blocking on failures with `--ignore-attestation`, and `maxAttestationAge`.', done: false },
-        { text: 'Gate promotion on fresh recorded attestations for both PromotionPath sources, sourcing each value from the publication its Application runs.', done: false },
+        { text: 'Implement attestations: driver-declared names, `spec.attestations` on units and environments, external `nyl attest --name … --result …` for a unit\'s current receipt and an environment\'s current state (environment-wide ones in `observed/attestations.yaml`), the `published | attested` evidence levels with a path\'s per-unit `attestations`, blocking on failures with `--ignore-attestation`, and `maxAttestationAge`.', done: false },
+        { text: 'Gate promotion from an environment on fresh recorded attestations, sourcing each value from the publication its Application runs.', done: false },
         { text: 'Show promotion lineage in `status`.', done: false },
       ],
     },
@@ -186,6 +184,20 @@ export const orchestrationRoadmap = {
         { text: 'Read a direct target for `nyl attest`, the `observe` teardown wait, and observed values: a `DirectReader` over the release state and rollout status, with the release-state anchor, behind the unchanged shared evaluation.', done: true },
         { text: 'Add an opt-in health wait to `KubernetesPublication` (`observe: {waitHealthy: {timeout}}`): a reconcile polls the target\'s reader with backoff on the injected clock until `healthy` passes, records the attestations, and fails retryably with `NYL-KUBERNETES-HEALTH-TIMEOUT` on the timeout, for the direct reconciler and both Argo CD access methods.', done: true },
         { text: 'Add the `nyl-e2e` crate: one scenario run direct, through Argo CD read by the Kubernetes API, and through Argo CD read by its API server, against Kind with a local registry and a local Argo CD install.', done: true },
+      ],
+    },
+    {
+      id: 'M11',
+      title: 'Promotion for non-orchestrated targets and change gates',
+      summary: 'Promotion from and into DeploymentTargets that no environment orchestrates, and promotions opened as pull requests.',
+      needs: ['M6'],
+      exitCriterion: 'A dev target that renders without orchestration feeds an orchestrated environment and a target outside every environment, each value verified against its recorded digest; a target rejects a promotion record older than the one its tree applied; and a path with `changeGate: pullRequest` opens and updates a reviewable change instead of writing the record.',
+      items: [
+        { text: 'Promote from a non-orchestrated target\'s published inputs, including a carried state file, with values verified against the recorded digests.', done: false },
+        { text: 'Promote into a target outside every environment: `to: {target}`, the record in the target\'s `spec.promotions`, `fromPromotion` resolution in tree and direct commands, and the ownership index\'s applied sequence.', done: false },
+        { text: 'Record a target\'s attestations with `nyl attest --target` in `<prefix>/_nyl/attestations.yaml`, and gate promotion from a target source on them.', done: false },
+        { text: 'Open a promotion as a pull request with `changeGate: pullRequest`, against the desired ref or, with `record: source`, against source.', done: false },
+        { text: 'Attest an earlier state with `nyl attest --state-revision` or `--revision`, with storage that keeps the current state\'s attestations intact.', done: false },
       ],
     },
   ],

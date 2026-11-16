@@ -1,0 +1,25 @@
+apiVersion: k8s.nyl/v1
+kind: Release
+metadata:
+  name: api
+  namespace: web
+spec:
+  inputs:
+    image: {type: string}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+    spec:
+      containers:
+        - name: api
+          image: '{{ inputs.image }}'

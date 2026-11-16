@@ -83,6 +83,7 @@ pub struct Step {
     pub branch: Option<BranchStep>,
     #[serde(rename = "squash-merge")]
     pub squash_merge: Option<SquashMergeStep>,
+    pub merge: Option<MergeStep>,
     #[serde(rename = "delete-branch")]
     pub delete_branch: Option<String>,
     pub clock: Option<ClockStep>,
@@ -99,6 +100,7 @@ pub struct Step {
     #[serde(rename = "ci-export")]
     pub ci_export: Option<CiExportStep>,
     pub file: Option<FileStep>,
+    pub argocd: Option<ArgocdStep>,
 
     // Modifiers.
     pub exit: Option<i32>,
@@ -116,6 +118,7 @@ pub enum StepKind {
     Commit,
     Branch,
     SquashMerge,
+    Merge,
     DeleteBranch,
     Clock,
     Nyl,
@@ -127,6 +130,7 @@ pub enum StepKind {
     CiWorker,
     CiExport,
     File,
+    Argocd,
 }
 
 impl StepKind {
@@ -134,13 +138,14 @@ impl StepKind {
     pub fn executes_from(self) -> Milestone {
         match self {
             Self::CiAdmit | Self::CiWorker | Self::CiExport => Milestone(8),
+            Self::Merge | Self::Argocd => Milestone(6),
             _ => Milestone(3),
         }
     }
 
     /// Steps that only tier 1 can run: they script fakes or the shell.
     pub fn tier_one_only(self) -> bool {
-        matches!(self, Self::Driver | Self::Fault)
+        matches!(self, Self::Driver | Self::Fault | Self::Argocd)
     }
 }
 
@@ -183,6 +188,53 @@ pub struct SquashMergeStep {
     pub into: String,
 }
 
+/// A merge commit of `branch` into `into` (`git merge --no-ff`), keeping the
+/// branch, so every commit of `branch` becomes reachable from `into`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeStep {
+    pub branch: String,
+    pub into: String,
+}
+
+/// Tier 1: what the fake Argo CD reports for a target's generated
+/// Applications from now on, read by the fake publication's `attest`
+/// through the shared matching of a reading to a publication.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArgocdStep {
+    /// The DeploymentTarget whose Applications are reported.
+    pub target: String,
+    /// What every Application of the target, the catalog Application
+    /// included, reports unless `releases` names it.
+    pub all: ApplicationReading,
+    /// Per Release (`<group>/<release>`), what its Application reports.
+    #[serde(default)]
+    pub releases: BTreeMap<String, ApplicationReading>,
+}
+
+/// One Application in an `argocd` step.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationReading {
+    /// The `id` of the earlier `nyl` step whose run published what the
+    /// Application runs (the publication commit that run's receipt for the
+    /// target records), or `unmatched` for a revision no publication matches.
+    pub runs: String,
+    /// Argo CD's live health; default `Healthy`.
+    #[serde(default)]
+    pub health: ApplicationHealth,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum ApplicationHealth {
+    #[default]
+    Healthy,
+    Progressing,
+    Degraded,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClockStep {
@@ -212,6 +264,10 @@ pub enum DriverOperation {
     /// Reads the unit's observed values; `outputs` holds the values it
     /// reports. Executes from M5.
     Observe,
+    /// Checks that an artifact of the unit's receipt still exists, as
+    /// `nyl promote` asks the producing kind's driver before recording:
+    /// `succeeded` (it exists) or `failed` (it is gone). Executes from M6.
+    VerifyArtifact,
 }
 
 impl DriverOperation {
@@ -219,8 +275,15 @@ impl DriverOperation {
     pub fn executes_from(self) -> Milestone {
         match self {
             Self::Observe => Milestone(5),
+            Self::VerifyArtifact => Milestone(6),
             _ => Milestone(3),
         }
+    }
+
+    /// Operations whose `failed` outcome is a finding, not a failed
+    /// execution, so it names no failure category.
+    fn uncategorized(self) -> bool {
+        matches!(self, Self::Observe | Self::VerifyArtifact)
     }
 }
 
@@ -522,19 +585,113 @@ pub struct KeepRefsExpectation {
     pub kept: Vec<String>,
 }
 
+/// The PromotionRecord a `promote` step wrote, read where the path keeps it
+/// (`record`), or, for `--dry-run`, the record its report shows it would
+/// write. A key that is not given is not checked.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionExpectation {
     pub path: String,
-    #[serde(rename = "sourceCommit")]
-    pub source_commit: String,
+    /// Where the record was written: `state` (default), the target
+    /// environment's `desired/promotions/<path>.yaml`, or `source`, the
+    /// Environment's `source.fromPromotion.promoted` block on the branch the
+    /// step ran at.
+    #[serde(default)]
+    pub record: RecordLocation,
+    pub sequence: Option<u64>,
+    /// The promoted source commit as a Git revision of `project.git`, or
+    /// `null` for a path that promotes only values.
+    #[serde(rename = "sourceCommit", default, deserialize_with = "present")]
+    pub source_commit: Option<Value>,
     pub from: PromotionFrom,
+    /// Exactly these values, each equal to `equals`; `state` names the step
+    /// whose run wrote the state a value-only path took the value from, when
+    /// it differs from `from`.
+    pub values: Option<BTreeMap<String, PromotedValueExpectation>>,
+    pub evidence: Option<EvidenceExpectation>,
+    /// Exactly these superseded commits, as revisions of `project.git`.
+    pub superseded: Option<Vec<SupersededExpectation>>,
+    #[serde(rename = "artifactsVerified")]
+    pub artifacts_verified: Option<bool>,
+    pub requested: Option<RequestedExpectation>,
+    /// Exactly these entries of `ignoredAttestations`.
+    #[serde(rename = "ignoredAttestations")]
+    pub ignored_attestations: Option<Vec<IgnoredAttestationExpectation>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordLocation {
+    #[default]
+    State,
+    Source,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionFrom {
+    /// The source environment; default the path's `from`.
+    pub environment: Option<String>,
+    /// The `id` of the `nyl` step whose run recorded the promoted state.
     pub run: String,
+    /// The record's `from.desiredCommit`, usually `%STATE(<id>)%`.
+    #[serde(rename = "desiredCommit")]
+    pub desired_commit: Option<String>,
+    /// The record's `from.observedCommit`, usually `%OBSERVED(<id>)%`.
+    #[serde(rename = "observedCommit")]
+    pub observed_commit: Option<String>,
+}
+
+/// The record's `requested` block, compared on the fields given.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestedExpectation {
+    pub reason: String,
+}
+
+/// One entry of the record's `ignoredAttestations`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IgnoredAttestationExpectation {
+    /// `<unit>/<name>` or `environment/<name>`.
+    pub attestation: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromotedValueExpectation {
+    /// The value: a literal, or the arguments of a `nyl get` invocation
+    /// whose value it must equal.
+    pub equals: Mention,
+    /// The `id` of the step whose run wrote the value's own state.
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceExpectation {
+    pub level: EvidenceLevel,
+    /// Whether the level was reached through an override (`--evidence published`).
+    #[serde(rename = "override")]
+    pub overridden: Option<bool>,
+    /// Exactly the attestations used, as `<unit>/<name>` or `environment/<name>`.
+    pub attestations: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvidenceLevel {
+    Published,
+    Attested,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupersededExpectation {
+    /// A revision of `project.git`, such as `release/prod~1`.
+    pub commit: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -554,6 +711,7 @@ impl Step {
             (self.commit.is_some(), StepKind::Commit),
             (self.branch.is_some(), StepKind::Branch),
             (self.squash_merge.is_some(), StepKind::SquashMerge),
+            (self.merge.is_some(), StepKind::Merge),
             (self.delete_branch.is_some(), StepKind::DeleteBranch),
             (self.clock.is_some(), StepKind::Clock),
             (self.nyl.is_some(), StepKind::Nyl),
@@ -565,6 +723,7 @@ impl Step {
             (self.ci_worker.is_some(), StepKind::CiWorker),
             (self.ci_export.is_some(), StepKind::CiExport),
             (self.file.is_some(), StepKind::File),
+            (self.argocd.is_some(), StepKind::Argocd),
         ];
         let set = kinds
             .iter()
@@ -592,7 +751,17 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
     let mut ids = BTreeMap::<String, bool>::new();
     let mut scripted = false;
     for (index, step) in scenario.steps.iter().enumerate() {
+        validate_placeholders(step, scenario.milestone, &ids)
+            .map_err(|error| format!("step {}: {error}", index + 1))?;
         validate_step(step, directory, &mut ids).map_err(|error| format!("step {}: {error}", index + 1))?;
+        let kind = step.kind()?;
+        if kind.executes_from() > scenario.milestone {
+            return Err(format!(
+                "step {}: {kind:?} runs from {}, after the scenario's milestone",
+                index + 1,
+                kind.executes_from()
+            ));
+        }
         if let Some(driver) = &step.driver {
             if driver.operation.executes_from() > scenario.milestone {
                 return Err(format!(
@@ -603,11 +772,10 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
                 ));
             }
         }
-        // driver, fault, and pause steps are tier 1 by kind, and a step that
-        // depends on one carries `tier: 1`. A scenario that also runs in tier 2
-        // marks every checked step after the first such step, since the
-        // harness cannot tell which ones depend on it.
-        let kind = step.kind()?;
+        // driver, fault, argocd, and pause steps are tier 1 by kind, and a
+        // step that depends on one carries `tier: 1`. A scenario that also
+        // runs in tier 2 marks every checked step after the first such step,
+        // since the harness cannot tell which ones depend on it.
         if scenario.tiers.contains(&2)
             && scripted
             && step.tier.is_none()
@@ -619,6 +787,12 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
             ));
         }
         scripted |= kind.tier_one_only() || step.pause.is_some();
+    }
+    // Only the test kind reads the scripted Argo CD in tier 1.
+    if scenario.publication != PublicationDrivers::Fake && scenario.steps.iter().any(|step| step.argocd.is_some()) {
+        return Err(
+            "a scenario with argocd steps runs with publication: fake, the only driver that reads them".to_owned(),
+        );
     }
     // `ids` maps each id to whether its paused invocation still awaits a resume.
     if let Some((id, _)) = ids.iter().find(|(_, awaiting)| **awaiting) {
@@ -640,6 +814,160 @@ pub fn validate_arguments(args: &[String]) -> Result<(), String> {
     nyl::cli::Cli::try_parse_from(argv)
         .map(drop)
         .map_err(|error| format!("nyl {}: {error}", args.join(" ")))
+}
+
+/// An argument placeholder, which the runner replaces before the step runs
+/// (`design/reference-scenarios.md#argument-placeholders`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placeholder {
+    /// `%STATE(<id>)%`: the desired-state commit the `nyl` step with that id
+    /// wrote (its observed-state commit when it wrote no desired one).
+    State(String),
+    /// `%OBSERVED(<id>)%`: the observed-state commit the `nyl` step with that
+    /// id wrote.
+    Observed(String),
+    /// `%COMMIT(<revision>)%`: the full commit ID of a revision of `project.git`.
+    Commit(String),
+    /// `%PLAN-DIGEST(<environment>/<unit>)%`: the `changeDigest` that
+    /// `nyl plan -e <environment> --unit <unit>` reports at the step's checkout.
+    PlanDigest { environment: String, unit: String },
+}
+
+/// The first milestone whose harness replaces argument placeholders.
+pub const PLACEHOLDERS_FROM: Milestone = Milestone(6);
+
+/// Every placeholder in `text`: `%NAME(argument)%` with an upper-case name.
+pub fn placeholders(text: &str) -> Result<Vec<Placeholder>, String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        let after = &rest[start + 1..];
+        let name_len = after
+            .find(|character: char| !(character.is_ascii_uppercase() || character == '-'))
+            .unwrap_or(after.len());
+        if name_len == 0 || !after[name_len..].starts_with('(') {
+            rest = after;
+            continue;
+        }
+        let name = &after[..name_len];
+        let close = after[name_len..]
+            .find(")%")
+            .ok_or_else(|| format!("placeholder %{name}( in {text:?} is not closed with )%"))?;
+        let argument = &after[name_len + 1..name_len + close];
+        if argument.is_empty() {
+            return Err(format!("placeholder %{name}()% in {text:?} needs an argument"));
+        }
+        found.push(match name {
+            "STATE" => Placeholder::State(argument.to_owned()),
+            "OBSERVED" => Placeholder::Observed(argument.to_owned()),
+            "COMMIT" => Placeholder::Commit(argument.to_owned()),
+            "PLAN-DIGEST" => {
+                let (environment, unit) = argument
+                    .split_once('/')
+                    .ok_or_else(|| format!("%PLAN-DIGEST({argument})% must name <environment>/<unit>"))?;
+                Placeholder::PlanDigest {
+                    environment: environment.to_owned(),
+                    unit: unit.to_owned(),
+                }
+            }
+            other => return Err(format!("unknown placeholder %{other}(…)% in {text:?}")),
+        });
+        rest = &after[name_len + close + 2..];
+    }
+    Ok(found)
+}
+
+/// The arguments of a step and its expectations that the runner substitutes
+/// placeholders in: the `nyl` arguments and every `nyl get` invocation of its
+/// `expect` (and, in [`validate_placeholders`], the string values `get.json`
+/// compares).
+fn substituted_arguments(step: &Step) -> Vec<&String> {
+    let mut arguments: Vec<&String> = step.nyl.iter().flatten().collect();
+    if let Some(expect) = &step.expect {
+        arguments.extend(expect.get.iter().flat_map(|get| &get.args));
+        for mentions in expect.deploy.iter().flat_map(|deploy| deploy.mentions.values()) {
+            for mention in mentions {
+                if let Mention::Get(args) = mention {
+                    arguments.extend(args);
+                }
+            }
+        }
+        for value in expect
+            .promotion
+            .iter()
+            .flat_map(|promotion| promotion.values.iter().flatten())
+        {
+            if let Mention::Get(args) = &value.1.equals {
+                arguments.extend(args);
+            }
+        }
+    }
+    arguments
+}
+
+/// Placeholders are replaced from M6 on, and `%STATE(<id>)%` names a `nyl`
+/// step before this one. Ids named by a step's `promotion` expectation
+/// (`from.run`, a value's `state`) and `argocd` readings must be earlier
+/// steps' too, or the step itself for `from.run`.
+fn validate_placeholders(step: &Step, milestone: Milestone, ids: &BTreeMap<String, bool>) -> Result<(), String> {
+    // The string values a `get` expectation compares, and the commits a
+    // `promotion` expectation names, are substituted too.
+    let mut compared = Vec::new();
+    for get in step.expect.iter().flat_map(|expect| expect.get.iter()) {
+        compared.extend(get.value.iter().filter_map(Value::as_str).map(str::to_owned));
+        compared.extend(
+            get.json
+                .iter()
+                .flatten()
+                .filter_map(|(_, value)| value.as_str().map(str::to_owned)),
+        );
+    }
+    if let Some(promotion) = step.expect.as_ref().and_then(|expect| expect.promotion.as_ref()) {
+        compared.extend(promotion.from.desired_commit.iter().cloned());
+        compared.extend(promotion.from.observed_commit.iter().cloned());
+    }
+    for argument in substituted_arguments(step).into_iter().chain(&compared) {
+        let found = placeholders(argument)?;
+        if !found.is_empty() && milestone < PLACEHOLDERS_FROM {
+            return Err(format!(
+                "placeholders run from {PLACEHOLDERS_FROM}, after the scenario's milestone: {argument:?}"
+            ));
+        }
+        for placeholder in found {
+            if let Placeholder::State(id) | Placeholder::Observed(id) = &placeholder {
+                if !ids.contains_key(id) {
+                    return Err(format!("{placeholder:?}: no earlier nyl step has that id"));
+                }
+            }
+        }
+    }
+    if let Some(promotion) = step.expect.as_ref().and_then(|expect| expect.promotion.as_ref()) {
+        let own = step.id.as_ref() == Some(&promotion.from.run);
+        if !own && !ids.contains_key(&promotion.from.run) {
+            return Err(format!(
+                "promotion from.run {:?}: no nyl step has that id",
+                promotion.from.run
+            ));
+        }
+        for ignored in promotion.ignored_attestations.iter().flatten() {
+            if ignored.attestation.split('/').count() != 2 {
+                return Err(format!(
+                    "ignoredAttestations {:?} must be <unit>/<name> or environment/<name>",
+                    ignored.attestation
+                ));
+            }
+        }
+        for (name, value) in promotion.values.iter().flatten() {
+            if let Some(state) = &value.state {
+                if !ids.contains_key(state) {
+                    return Err(format!(
+                        "promotion value {name}: state {state:?} names no earlier nyl step"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_contract(contract: &str, repository_root: &Path) -> Result<(), String> {
@@ -742,17 +1070,23 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
         StepKind::Driver => {
             let driver = step.driver.as_ref().expect("kind");
             let observe = driver.operation == DriverOperation::Observe;
-            // An observation that could not be read has a reason, never a
-            // failure category: it does not fail the unit.
-            let categorized = driver.outcome == DriverOutcome::Failed && !observe;
+            // An observation that could not be read, or an artifact that is
+            // gone, has a reason, never a failure category: it does not fail
+            // the unit.
+            let categorized = driver.outcome == DriverOutcome::Failed && !driver.operation.uncategorized();
             if categorized != (driver.category.is_some() && driver.retryable.is_some()) {
                 return Err(
-                    "a failed driver outcome other than observe's, and only that, names its category and retryable"
+                    "a failed driver outcome other than observe's and verify-artifact's, and only that, names its category and retryable"
                         .to_owned(),
                 );
             }
             if observe && matches!(driver.outcome, DriverOutcome::Uncertain | DriverOutcome::Drifted) {
                 return Err("an observe outcome is succeeded, pending, or failed".to_owned());
+            }
+            if driver.operation == DriverOperation::VerifyArtifact
+                && !matches!(driver.outcome, DriverOutcome::Succeeded | DriverOutcome::Failed)
+            {
+                return Err("a verify-artifact outcome is succeeded or failed".to_owned());
             }
             if (driver.outcome == DriverOutcome::Pending) && !observe {
                 return Err("only an observe outcome can be pending".to_owned());
@@ -808,6 +1142,20 @@ fn validate_step(step: &Step, directory: &Path, ids: &mut BTreeMap<String, bool>
                     "file path {:?} must be relative to %SCENARIO_TMP% and stay inside it",
                     file.path
                 ));
+            }
+        }
+        StepKind::Argocd => {
+            let argocd = step.argocd.as_ref().expect("kind");
+            for (release, reading) in std::iter::once((&"*".to_owned(), &argocd.all)).chain(&argocd.releases) {
+                if release != "*" && release.split('/').count() != 2 {
+                    return Err(format!("argocd release {release:?} must be <group>/<release>"));
+                }
+                if reading.runs != "unmatched" && !ids.contains_key(&reading.runs) {
+                    return Err(format!(
+                        "argocd runs {:?}: no earlier nyl step has that id, and it is not unmatched",
+                        reading.runs
+                    ));
+                }
             }
         }
         StepKind::CiWorker => {

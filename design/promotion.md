@@ -1,6 +1,11 @@
 # Promotion and health evidence
 
-**Status:** M1 contract for M5–M6. See [ROADMAP.md](../ROADMAP.md), the
+**Status:** M1 contract for M5–M6 and M11, with the decisions of the
+[M6 plan](m6-plan.md#open-decisions) folded in. M6 implements promotion
+between environments; DeploymentTargets as promotion sources and targets,
+`nyl attest --target`, `changeGate: pullRequest`, and attesting an earlier
+state follow in M11, and until then validation rejects them with
+`NYL-PROMOTE-UNSUPPORTED`, naming M11. See [ROADMAP.md](../ROADMAP.md), the
 [orchestration core contract](orchestration-core.md), which defines the state
 promotion reads, and the [Release inputs contract](release-inputs.md), which
 defines the bindings promotion feeds.
@@ -18,12 +23,12 @@ values from one recorded state into another environment's desired state.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `from` | `{environment}` or `{target}` | required | The source: a declared Environment, never a template instance, or a DeploymentTarget (see [Promotion sources](#promotion-sources)) |
-| `to` | `{environment}` or `{target}` | required | The target environment, whose desired state holds the records, or a DeploymentTarget outside every environment, whose source holds them (see [Promoting into a target](#promoting-into-a-target)) |
+| `from` | `{environment}` or `{target}` | required | The source: a declared Environment, never a template instance, or (M11) a DeploymentTarget (see [Promotion sources](#promotion-sources)) |
+| `to` | `{environment}` or `{target}` | required | The target environment, whose desired state holds the records, or (M11) a DeploymentTarget outside every environment, whose source holds them (see [Promoting into a target](#promoting-into-a-target)) |
 | `evidence` | `published` \| `attested` | `published` | The level every covered unit and the source must reach (see [Promotion paths](#promotion-paths)) |
 | `attestations` | `{units: {<unit>: [name]}, environment: [name]}` | the level's default | Replaces the required attestations per scope; with `published`, adds requirements |
 | `maxAttestationAge` | duration | none | Older attestations do not count |
-| `changeGate` | `none` \| `pullRequest` | `none` | `pullRequest` opens a reviewable change instead of writing the record |
+| `changeGate` | `none` \| `pullRequest` | `none` | `pullRequest` (M11) opens a reviewable change instead of writing the record |
 | `verifyArtifacts` | boolean | `true` | Check that every promoted artifact still exists before recording |
 | `coverage.applicationGroups` | list of names | every group | Narrows the Applications that count toward a source promotion's publication attestations; never what moves |
 | `coverage.excludeApplications` | list of Application names | none | Applications knowingly accepted as unhealthy; they leave the aggregate for this path and are listed in each record |
@@ -57,14 +62,16 @@ target environment's desired state, `desired/promotions/<path>.yaml`, or, with
 `record: source`, into the Environment's `source.fromPromotion.promoted` block
 (see [Promoting an environment's source](#promoting-an-environments-source)).
 Each promotion replaces the path's record; Git history keeps earlier ones.
+The record has one shape wherever it is kept: in desired state, in an
+Environment's `promoted` block, and (M11) in a target's `spec.promotions`.
 
 | Field | Meaning |
 | --- | --- |
 | `path` | The PromotionPath that wrote it |
 | `sequence` | Integer that increases with every promotion into the target environment, on any path; "newest" always means the highest `sequence` |
-| `from` | The source state: `{environment, run, desiredCommit, observedCommit}`, or for a target source `{target, repository, branch, commit}` |
+| `from` | The source state: `{environment, run, desiredCommit, observedCommit}`, or for a target source `{target, repository, branch, commit}`. For a path that promotes only values, the newest state any value came from |
 | `sourceCommit` | The source commit of that state, present when the path promotes the target's source or a value's lineage includes one |
-| `values.<name>` | `{value, select, unit: {name, uid}, executionKey or inputDigest, state}`; `state` is present when a value-only path took the value from another state than `from` |
+| `values.<name>` | `{value, select, unit: {name, uid}, executionKey or inputDigest, state}`; `state` (`{run, desiredCommit, observedCommit}`) is present when a value-only path took the value from another state than `from` |
 | `evidence` | `{level, attestations: [{scope, name, result, at, details}], override: {reason} \| null}`; `details` are the driver's, such as each Application's running publication and health |
 | `ignoredAttestations` | `[{scope, name, reason, by}]` from `--ignore-attestation` |
 | `excludedApplications` | The path's `coverage.excludeApplications` at promotion time |
@@ -76,15 +83,34 @@ Resolution of `fromPromotion` reads only records. `desired/environment.yaml`
 records the highest `sequence` a run applied, so a run refuses an older
 `record: source` block, as described below.
 
+`desired/promotions/<path>.yaml` is a file the state layout of format `v1`
+always listed, added without a version change. A Nyl older than the release
+that writes it keeps the file through its transitions but cannot act on it:
+it refuses an environment whose source is `fromPromotion`, and must not run
+`reconcile` in an environment whose bindings read promotions. Its
+`state move`, when it copies documents rather than history, does not carry
+the file, and its `state restore` leaves the file as it is.
+
 ### Exit categories
 
 `nyl promote` uses the core contract's exit categories:
 
 | Exit | When |
 | --- | --- |
-| 0 | The record was written, or the pull request opened or updated |
-| 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact |
+| 0 | The record was written, or (M11) the pull request opened or updated; or the path's record already names the chosen state and values and supplies every value of the target, so nothing was written (`outcome: unchanged`) |
+| 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), or a form M6 does not support yet (`NYL-PROMOTE-UNSUPPORTED`) |
 | 2 | Nothing was written because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), or the target's lease is held |
+
+Other codes of the promotion rules: `NYL-PROMOTION-MISSING` (exit 2 of a
+`reconcile` or `plan`: an environment's `fromPromotion` source, or a
+`fromPromotion` binding, whose path has no record yet; the fix names `nyl
+promote <path>`); `NYL-PROMOTION-SEQUENCE-OLDER` (exit 1: a `record: source`
+block, or (M11) a target's record, with a lower `sequence` than the one
+applied; the fix names `nyl promote <path> --revision`);
+`NYL-PROMOTE-EVIDENCE-OVERRIDE` (a warning: `--evidence published` below the
+path's level, recorded as an override); and `NYL-PROMOTE-UNCHECKED` (a
+warning: a value without a known source commit, which the supersede check
+cannot check).
 
 `nyl promote` takes the target environment's lease, because it writes the
 target's desired state; it only reads the source's state, and never takes the
@@ -109,7 +135,7 @@ spec:
   from: {environment: dev}
   to: {environment: staging}
   evidence: attested           # published | attested
-  changeGate: pullRequest      # or: none
+  changeGate: none             # pullRequest from M11
   values:
     webImage:
       select: {unit: kubernetes, input: /releases/platform~1web/image}
@@ -164,7 +190,11 @@ spec:
   and a name its scope does not declare. Drift detection writes no receipt
   and attests nothing.
 - A failing attestation for a state blocks its promotion on every path,
-  whether or not the path requires it. A later passing attestation of the same
+  whether or not the path requires it. For a path that promotes only values,
+  a publication unit's `accepted` and `healthy` are judged per covered
+  Application from their details (see [Coverage](#kubernetes-publications)):
+  an aggregate that fails only because Applications run different
+  publications of the source does not block it. A later passing attestation of the same
   name clears it; `nyl promote --ignore-attestation <unit>/<name>=<reason>`
   (or `environment/<name>`) overrides it, and the PromotionRecord keeps the
   reason.
@@ -193,16 +223,26 @@ spec:
     consuming Application or unit runs, which may differ between values when
     manual syncs left Applications at different revisions. Each value is then
     one its consumer really ran; the PromotionRecord lists each value's state.
+    A value selected as a publication unit's input of a Release,
+    `{unit: <publication>, input: /releases/<group>~1<release>/…}`, is
+    consumed by that Release's Application; any other selector is consumed
+    by the producing unit itself, so its value comes from that unit's newest
+    receipt that meets the level.
   - `--state-revision <desired commit>` selects an exact state and
     `--revision <source commit>` the newest with that source commit, for all
-    values of the promotion. Promoting an older state than the evidence level
-    would select requires `--evidence published`, recorded as an override,
-    for example to roll back.
+    values of the promotion. An explicitly chosen state reaches `attested`
+    through the attestations recorded for it (see
+    [Promoting an environment's source](#promoting-an-environments-source));
+    only when those do not reach the path's level, such as attestations
+    older than `maxAttestationAge`, does it need `--evidence published`,
+    recorded as an override, for example to roll back. A commit the clone
+    lacks is fetched from the source repository like a recorded source
+    commit.
 - `nyl promote dev-to-staging [--value …]` writes a
   PromotionRecord into the target environment's desired state: per value, its
   selector, the source unit's identity and incarnation, the source revision it
   came from, and its receipt or input digest; plus the attestations that proved
-  the set at `attested`. With `changeGate: pullRequest` it opens a
+  the set at `attested`. With `changeGate: pullRequest` (M11) it opens a
   reviewable change instead.
 - Promoting a path moves all of its values together by default. Selecting a
   subset is explicit and leaves the other values at their previously recorded
@@ -259,8 +299,17 @@ spec:
   - Without flags, at `published`, the newest state in which every unit the
     target also selects has a current receipt.
   - Without flags, at `attested`, the newest state whose required
-    attestations all passed; for publication units, what the newest recorded
-    attestations show running, and mixed revisions block.
+    attestations all passed. Environment-wide attestations and those of units
+    other than publications name a state or a receipt, so an older state
+    whose attestations passed qualifies. A publication unit's newest
+    attestation says what runs now: the state is the one it shows running,
+    and when it shows a mix of revisions the promotion is refused, without
+    falling back to an older state whose attestations once passed, because
+    they no longer describe what runs.
+  - When the chosen state and its values are what the path's record already
+    names, and that record supplies every value of the target, `nyl promote`
+    writes nothing and exits 0 (`outcome: unchanged`). Otherwise, such as
+    after another path recorded since, it is a promotion like any other.
   - `--revision <source commit>` takes the newest qualifying state with that
     source commit, and `--state-revision <desired commit>` takes exactly one.
     An explicitly chosen state satisfies `attested` through attestations
@@ -295,10 +344,10 @@ spec:
   `observe` declares no attestations and is satisfied by its receipt.
 - `record` decides where the PromotionRecord lives. With `record: state`, the
   default, it is written into the target's desired state, as a pull request
-  against the desired ref under `changeGate: pullRequest`. With
+  against the desired ref under `changeGate: pullRequest` (M11). With
   `record: source`, `nyl promote` writes it into the Environment's own
   `source` block, as a pull request against source under
-  `changeGate: pullRequest`:
+  `changeGate: pullRequest` (M11):
 
   ```yaml
   source:
@@ -310,13 +359,30 @@ spec:
         path: dev-to-prod              # the path that supplied it, when `paths` lists several
         sourceCommit: 3e7b9c…
         from: {environment: dev, run: 0b8f6c1e-…, desiredCommit: 77aa…, observedCommit: 41f0…}
-        values: {webImage: registry.example.com/web@sha256:4f0c…}
-        evidence: {level: attested, attestations: [kubernetes/accepted, kubernetes/healthy], at: 2026-09-25T16:40:00Z}
+        values:
+          webImage:
+            value: registry.example.com/web@sha256:4f0c…
+            select: {unit: web-image, artifact: image, pointer: /reference}
+            unit: {name: web-image, uid: 2b90…}
+            executionKey: sha256:…
+        evidence:
+          level: attested
+          attestations:
+            - {scope: kubernetes, name: accepted, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}
+            - {scope: kubernetes, name: healthy, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}
+          override: null
+        ignoredAttestations: []
+        excludedApplications: []
         artifactsVerified: true
         superseded: []                 # commits replaced with --supersede, with reasons
+        requested: {by: …, identity: …, source: …, at: 2026-09-25T16:41:00Z, reason: …}
   ```
 
-  The source commit and its values are then one reviewed change. The block is part of `source`, so it is read from the
+  The source commit and its values are then one reviewed change. Without a
+  change gate, `nyl promote` commits the block to the branch the entry
+  worktree has checked out and pushes it fast-forward only; a detached HEAD
+  is refused with the fix to check out a branch, and a concurrent change is
+  a refused push that the job retries. The block is part of `source`, so it is read from the
   entry worktree like the rest of that field, and validation rejects a block
   that does not match the source state it names. `source-locks` never touches
   it.
@@ -374,10 +440,13 @@ decided when `nyl promote` writes, by the supersede check:
 
 - **Rule.** Before writing a value on path P, `nyl promote` requires the
   value's source commit to contain the source commit of every record for that
-  value that another path wrote since P last promoted it. A commit contains
-  another when that commit is its ancestor, or when a commit with the same
-  changes (`git patch-id`, as `git cherry` uses) is, so clean cherry-picks and
-  single-commit squash merges pass.
+  value that another path wrote since P last promoted it. A commit V contains
+  a commit R when every commit reachable from R and not from V, merge
+  commits aside, has a commit with the same changes (`git patch-id`) in V's
+  history since their merge base: `git cherry V R` lists none with `+`. An
+  ancestor is contained, and so are clean cherry-picks and single-commit
+  squash merges; a squash of several commits is equivalent to none of them.
+  The commits it lists are the missing ones the refusal names.
 - **Source commit of a value.** A promoted source commit, such as an
   environment's source or a unit's `webSource`, is its own. An artifact or
   output has the source commits that its producing receipt's desired unit
@@ -405,7 +474,7 @@ decided when `nyl promote` writes, by the supersede check:
   full commit ID is accepted when it exists in only one of them.
 - **Record.** The PromotionRecord lists every superseded commit with its
   repository URL, its reason, and who gave it, never the range, and a pull
-  request under `changeGate: pullRequest` shows them. A later promotion on P
+  request under `changeGate: pullRequest` (M11) shows them. A later promotion on P
   is no longer checked against them, because P has now promoted after them.
 
 ### Hotfixes
@@ -424,7 +493,8 @@ kind: Environment
 metadata: {name: prod-hotfix}
 spec:
   source: {revision: release/prod}     # cut from prod's current source commit
-  unitSelector: {matchLabels: {prod: 'true'}}
+  unitSelector: {matchLabels: {hotfix: 'true'}}   # web-image and kubernetes, on a target of its own
+  values: {target: hotfix}
 ---
 apiVersion: gitops.nyl/v1
 kind: PromotionPath
@@ -439,8 +509,13 @@ spec:
 
 - `prod-hotfix` follows the `release/prod` branch, not prod: nothing in Nyl
   points from it back to prod, so the only edge is `hotfix-to-prod` into prod.
-  It builds and runs the fix, typically on a small target of its own, because
-  it cannot publish into prod's target, and can stay idle between hotfixes.
+  It builds and runs the fix on a small target of its own, because it cannot
+  publish into prod's target, and can stay idle between hotfixes. Its own
+  label selects the units it runs: the image prod reuses (`web-image`, which
+  prod does not select) and the publication, so the path's selector names a
+  unit the source runs. A binding prod's target reads from a unit
+  `prod-hotfix` does not run, such as a database output, takes a static
+  value on the hotfix target.
   `hotfix-to-prod` promotes it with the same evidence as the regular path, and
   prod's own units keep their approvals, `requireDigest` included. Bindings do not change when the path is
   added, because path-less bindings follow whichever record supplied the
@@ -504,6 +579,8 @@ its members share, such as common values and the state repository.
 
 ### Promotion sources
 
+This section is M11; M6 rejects a target in `from`.
+
 `from` selects either an environment, as above, or a
 DeploymentTarget. A target source lets a dev target that renders from `value`,
 `fromGit`, or `fromPublication` bindings (including `carryFileFromWorktree`) feed an
@@ -548,6 +625,8 @@ spec:
 
 ### Promoting into a target
 
+This section is M11; M6 rejects a target in `to`.
+
 A DeploymentTarget that belongs to no environment is a promotion target of its
 own. It has no desired state, so its records live in its source, as
 `record: source` does for an environment:
@@ -574,8 +653,12 @@ spec:
     dev-to-production:
       sequence: 4                    # increases with every promotion into this target
       from: {target: dev, repository: https://git.example.com/deploy.git, branch: deploy/dev, commit: 9c1e…}
-      values: {webImage: {value: registry.example.com/web@sha256:4f0c…, inputDigest: sha256:…}}
-      evidence: {level: attested, attestations: [dev/accepted, dev/healthy]}   # each with its details
+      values:
+        webImage:
+          value: registry.example.com/web@sha256:4f0c…
+          select: {input: /releases/platform~1web/image}
+          inputDigest: sha256:…
+      evidence: {level: attested, attestations: [{scope: dev, name: accepted, result: pass, at: …, details: {…}}, {scope: dev, name: healthy, result: pass, at: …, details: {…}}], override: null}
       artifactsVerified: true
       superseded: []
       requested: {by: …, at: 2026-09-25T16:40:00Z, reason: …}
@@ -644,14 +727,20 @@ so every source writes the same record:
 - **External attestations.** `nyl attest -e <env> [--unit <u>] --name <n> --result
   pass|fail [--reason …] [--url …]` records an attestation for the unit's
   current receipt, or without `--unit` for the environment's current state;
-  `--state-revision` or `--revision` attests an earlier state. It refuses names
+  attesting an earlier state with `--state-revision` or `--revision` is M11,
+  because the files hold the latest attestation of the current receipt or
+  state, and an earlier state's entry would replace it. It refuses names
   the scope does not declare, so a typo cannot create evidence nobody
   requires. The attester is recorded like an approver, through the same
   identity and approval sources. `nyl attest --target <name>` writes to a
   non-orchestrated target's `_nyl/attestations.yaml`. Without `--name`,
   `nyl attest` asks the drivers instead (see the orchestration core
   contract's [Attestations](orchestration-core.md#attestations)); that form
-  is implemented, the external form and `--target` (M6) are not yet.
+  is implemented, the external form (M6) and `--target` (M11) are not yet.
+  Environment-wide attestations live in `observed/attestations.yaml`, a file
+  the observed layout of format `v1` always listed, added without a version
+  change; a Nyl older than the release that writes it keeps it but cannot
+  act on it, as for `desired/promotions/` above.
 - **Lifetime.** An attestation belongs to the receipt or state it names; a new
   receipt starts with its declared attestations pending. The newest
   attestation per name and receipt wins, and history keeps earlier ones.
@@ -777,9 +866,14 @@ nothing itself, so there is one evidence path.
   decisions use the results, and the per-Application details explain why a
   unit fell short.
 - **Manual syncs.** For a path that promotes only values, Applications synced
-  to different publications do not block promotion. Promotion blocks only when
-  a covered Application runs a revision that matches no source publication, or
-  does not meet the required attestation. A path that promotes the target's source also
+  to different publications do not block promotion: coverage is judged per
+  covered Application from the details of `accepted` and `healthy`, so a value
+  is promotable when its consuming Application is accepted (and healthy, when
+  required) for some recorded publication of the source. Promotion blocks only
+  when a covered Application runs a revision that matches no source
+  publication (`unmatched`), or another per-Application finding fails it
+  (`mixed`, `missing`, `other-source`, not Healthy when `healthy` is
+  required). A path that promotes the target's source also
   blocks on mixed revisions.
 - **Decision evidence is always recorded.** The attestations behind every
   promotion, with their details (time, Application, running revision,

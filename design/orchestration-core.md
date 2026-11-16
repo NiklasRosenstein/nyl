@@ -2828,6 +2828,16 @@ only on the observed ref; `state.yaml` exists on both. `admission.yaml` exists
 only on the admission ref, which is the desired ref unless `state.admissionRef`
 names another.
 
+`desired/promotions/<path>.yaml` and `observed/attestations.yaml` were listed
+from the start but are first written in M6; they are added to format `v1`
+without a version change. A Nyl older than that release keeps them through
+its transitions but cannot act on them: it refuses a `fromPromotion` source,
+must not run `reconcile` in an environment that uses promotion, and does not
+read environment-wide attestations. Its `state move`, when it copies
+documents rather than history, does not carry them, and its `state restore`
+leaves them as they are. The documentation of the release that writes them
+says so.
+
 Every state file is YAML. State records use `apiVersion: gitops.nyl/v1` with
 the kinds `StateRecord`, `EnvironmentRecord`, `DesiredUnit`, `PromotionRecord`,
 `ObservedUnit`, `DriftRecord`, `ObservationRecord`, `AttestationRecord`, `Lease`, `Run`, and `Signal`, plus
@@ -3084,6 +3094,12 @@ attestations:
   `--unit` is reported `unsupported` (`NYL-ATTEST-UNSUPPORTED`).
 - `nyl attest --name <n> --result pass|fail` records an external
   attestation (see the [promotion contract](promotion.md#health-evidence)).
+  It exits 0 once the result is recorded, whether it passes or fails, and 1
+  only when it cannot be recorded: the caller already knows the result, and
+  what a failing one blocks is reported by the command that reads it
+  (`promote`, or a dependent's `NYL-ATTESTATION-FAILING`). The driver form
+  determines the result itself and exits 3 on a failing attestation
+  (`NYL-ATTESTATION-FAILED`).
   Both forms run under the lease, like every state-writing operation, and
   `--wait-lease` lets a CI job wait for a running reconcile; a refused name
   exits 1. Implementation status: the driver form is implemented, including
@@ -3487,8 +3503,8 @@ run after <unit>`, and the run warns with `NYL-RUN-STOPPED` (owner:
 **Who writes desired state.** Desired state is derived deterministically from
 source and observed evidence, so the reconcile runner writes it. Review happens
 on source commits (the pull requests that change units and bindings) and on
-promotions (`changeGate: pullRequest` opens a pull request against the desired
-ref). Separate refs let that promotion review and different branch protection
+promotions (from M11, `changeGate: pullRequest` opens a pull request against
+the desired ref). Separate refs let that promotion review and different branch protection
 apply to desired state without mixing with observed commits.
 
 **Selection with `--unit`/`--units`:**
@@ -4893,7 +4909,7 @@ spec:
 | `state forget` | Drop a `retained` tombstone or a `pending-teardown` unit without touching resources | One desired and one observed commit |
 | `lease break` | Declare a lease holder gone so the next run takes over at once | The lease ref; recorded in the transition commit that imports the broken run |
 | `build` | Run a unit's `build` capability from the current worktree, outside orchestration (see [Direct builds](#direct-builds)) | Nothing in state; the artifact is published only through driver arguments (for example `-- --push`) where the kind allows it |
-| `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or a pull request under `changeGate: pullRequest` |
+| `promote` | Record a proven source state's values in the target environment (see the [promotion contract](promotion.md)) | One desired commit with the PromotionRecord, or (M11) a pull request under `changeGate: pullRequest` |
 
 All are top-level `nyl` commands. `release` is taken by Kubernetes release
 history and `delete` by source editing, so lifting a hold is `resume` and
@@ -5128,13 +5144,13 @@ The table applies to each command as follows:
 | `reconcile`, `teardown` | As the table | As the table | As the table; with `--detect-drift`, also a drift check that could not conclude (`unknown`) | As the table | As the table |
 | `plan` | The plan is complete, whatever changes it shows | Error, or `--fail-on-leaving` with a unit leaving | Incomplete: a unit is blocked, so its change cannot be planned | A driver's planning failed | — |
 | `detect-drift` | Every checked unit is clean | Error, including a check that passed its unit's deadline | A unit could not be checked: no current receipt, a kind that cannot detect drift, or `unknown` drift | Drift | — |
-| `attest` | Every attested unit's attestations pass | Error, including a check that passed its unit's deadline | A unit could not be attested: no current receipt, `--unit` named a unit whose kind does not attest, or the driver could not tell (`unknown`) | A failing attestation | — |
+| `attest` (driver form) | Every attested unit's attestations pass | Error, including a check that passed its unit's deadline | A unit could not be attested: no current receipt, `--unit` named a unit whose kind does not attest, or the driver could not tell (`unknown`) | A failing attestation | — |
 | `observe` (M5) | Every observation of every observed unit has a value | Error, including a check that passed its unit's deadline | An observation is `pending` or `failed`, a unit has no current receipt, or `--unit` named a unit whose kind cannot observe; a changed value is reported (`NYL-OBSERVATION-CHANGED`) but does not change the exit | — | — |
 | `status` | Every unit is current | Error | As the table | A unit has a `failed` condition | A unit is `uncertain`, or a run lost its lease |
 | `promote` | See the [promotion contract](promotion.md#exit-categories) | | | | |
 | `get`, `validate`, `build` | Success | Error, including a value form that would not resolve | — | `build` only: the build failed | — |
 | `exec` | The tool's own exit status once it has started; 125 when Nyl refuses before starting it (see [Operator exec](#operator-exec)) | | | | |
-| `hold`, `resume`, `recover`, `attest`, `lease break`, `state …` | Done, including a hold delivered to a running run and a `recover` import that left units uncertain | Error or refusal, including `state delete --teardown` after a failed or uncertain teardown | The lease is held or broken (`NYL-LEASE-BROKEN`), `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
+| `hold`, `resume`, `recover`, `attest --name … --result` (external form), `lease break`, `state …` | Done, including a hold delivered to a running run and a `recover` import that left units uncertain | Error or refusal, including `state delete --teardown` after a failed or uncertain teardown | The lease is held or broken (`NYL-LEASE-BROKEN`), `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
 
 `--output json` prints the operation's typed report, the same one that renders
 tables and the transition commit summary:
@@ -5273,7 +5289,9 @@ recorded receipts for every unit. A later run R2 at S2 changed `web-image`,
 whose build failed, so the state R2 wrote has a new `web-image` desired
 document without a receipt for its execution key, and `kubernetes` blocked.
 Prod's source is `fromPromotion`, so before the first promotion
-`reconcile -e prod` exits 2 and names `nyl promote`.
+`reconcile -e prod` exits 2 and names `nyl promote`, and `nyl promote
+dev-to-prod` exits 2 with `NYL-PROMOTE-NO-EVIDENCE`, because dev has
+recorded no state: missing evidence.
 `nyl promote dev-to-prod`, with `evidence: published`, considers dev's
 recorded states, the transition commit pairs, newest first. The state R2 wrote
 fails: `web-image`, whose artifact the path selects, has no receipt for its
@@ -5281,15 +5299,45 @@ new execution key, and `kubernetes`, which prod also selects, is blocked
 without a current receipt, so the whole-source rule rejects it. The state R1
 wrote passes. The PromotionRecord
 therefore carries S1 and R1's image digest, names R1's desired and observed
-commits as `from`, and the command exits 0; `reconcile -e prod` then
-publishes prod with R1's image, exit 0. `nyl get promotion-candidates
-dev-to-prod` shows R2's state as not reaching `published` and names
-`web-image` and `kubernetes`. With `evidence: attested`, a state must also
+commits as `from`, records `published` evidence, and is one desired commit
+on prod's state; the command exits 0. `nyl get promotion-candidates
+dev-to-prod` lists R2's state first, at no level, naming `kubernetes` and
+`web-image`, and R1's state at `published`, as what prod now runs.
+`reconcile -e prod` then runs at S1 and publishes prod with R1's image,
+exit 0. With `evidence: attested`, a state must also
 have every required attestation passing for it, such as dev's
 environment-wide `qa`; when no recorded state reaches the level, `nyl
-promote` writes nothing, names what lacks evidence in the newest state, and
-exits 2 with `NYL-PROMOTE-NO-EVIDENCE`. The walkthrough runs from M6.
+promote` writes nothing, names what lacks evidence in the newest state
+(`qa`), and exits 2 with `NYL-PROMOTE-NO-EVIDENCE`. The walkthrough runs from M6.
 ([`stale-promotion-evidence`](../nyl/tests/scenarios/walkthroughs/stale-promotion-evidence/scenario.yaml))
+
+**Value-only promotion (M6).** Dev publishes two Releases, `web` and `api`,
+through `kubernetes` with `observe: {}`. `dev-to-staging` promotes only
+values, each selected as the publication unit's resolved input of the
+Release that consumes it; `dev-to-prod` promotes dev's source with the same
+values. After R2, Argo CD runs R2's publication for `web` and still R1's for
+`api`: `nyl attest` records `accepted` failing for R2's receipt, with
+`other-publication` for `api` in its details. `nyl promote dev-to-staging`
+nevertheless takes `webImage` from R2's state and `apiImage` from R1's, the
+states their Applications run, and the record names `apiImage`'s own state.
+`nyl promote dev-to-prod` refuses with `NYL-PROMOTE-NO-EVIDENCE`, because one
+source commit must fit every value and what runs is mixed; with
+`--state-revision` naming R1's state it promotes R1 on the attestations
+recorded for it. Once `api` runs R2 too, both paths promote R2. An
+Application that runs no publication of dev (`unmatched`) or is `Degraded`
+blocks the value-only path as well. The walkthrough runs from M6.
+([`value-only-promotion`](../nyl/tests/scenarios/walkthroughs/value-only-promotion/scenario.yaml))
+
+**A promotion recorded in source (M6).** Prod's `source.fromPromotion` sets
+`record: source`, so `nyl promote dev-to-prod` writes the PromotionRecord into
+prod's Environment as a commit on `main`, with `sequence` 1, and leaves prod's
+state alone; `reconcile -e prod` runs at the promoted commit and records the
+sequence it applied. After a second promotion, a reconcile from a checkout
+made before it reads the sequence-1 block, refuses with
+`NYL-PROMOTION-SEQUENCE-OLDER`, writes nothing, and names `nyl promote
+dev-to-prod --revision`; the rollback is that new promotion, with sequence 3.
+The walkthrough runs from M6.
+([`promotion-record-source`](../nyl/tests/scenarios/walkthroughs/promotion-record-source/scenario.yaml))
 
 **Deletion.** `cache` and its only consumer `worker` are removed from source;
 `cache` has a teardown step and therefore the default `Teardown` policy,

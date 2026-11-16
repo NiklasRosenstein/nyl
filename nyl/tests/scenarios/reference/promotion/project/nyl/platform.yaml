@@ -1,0 +1,120 @@
+# Reference scenario 4 (design/reference-scenarios.md): dev builds the image
+# and runs from its worktree; prod runs only source commits dev proved, with
+# the image digest dev built and its own infrastructure and approvals.
+apiVersion: gitops.nyl/v1
+kind: GitRepository
+metadata:
+  name: platform
+spec:
+  repoURL: '%PROJECT_URL%'
+  publishURL: '%PROJECT_URL%'
+---
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: dev
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]
+    clusterScopedKinds: [core/Namespace]
+---
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: prod
+spec:
+  destination:
+    server: https://prod.example.invalid
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]
+    clusterScopedKinds: [core/Namespace]
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: dev
+spec:
+  reconciler: {argocd: {}}
+  clusterRef: {name: dev}
+  applicationGroupSelector:
+    matchLabels: {app: web}
+  catalogApplication:
+    syncPolicy: {automated: {prune: true}}
+  publication:
+    repositoryRef: {name: platform}
+    revision: deploy
+    pathPrefix: dev
+  releaseInputs:
+    web/web:
+      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+---
+apiVersion: k8s.gitops.nyl/v1
+kind: DeploymentTarget
+metadata:
+  name: prod
+spec:
+  reconciler: {argocd: {}}
+  clusterRef: {name: prod}
+  applicationGroupSelector:
+    matchLabels: {app: web}
+  catalogApplication:
+    syncPolicy: {automated: {prune: true}}
+  publication:
+    repositoryRef: {name: platform}
+    revision: deploy
+    pathPrefix: prod
+  releaseInputs:
+    web/web:
+      # Path-less: from the record that supplied prod's source.
+      image: {fromPromotion: {value: webImage}}
+      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: dev
+spec:
+  unitSelector:
+    matchLabels: {dev: 'true'}
+  values:
+    target: dev
+    backendDir: '%SCENARIO_TMP%/tofu'
+    approval: auto
+  state:
+    repositoryRef: {name: platform}
+  allowUnprotectedSource: true
+  attestations: [qa]                  # recorded by people with `nyl attest --name qa`
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata:
+  name: prod
+spec:
+  source:
+    fromPromotion: {path: dev-to-prod}
+  unitSelector:
+    matchLabels: {prod: 'true'}       # no web-image: prod reuses dev's
+  values:
+    target: prod
+    backendDir: '%SCENARIO_TMP%/tofu'
+    approval: {mode: manual, bind: plan, requireDigest: true}
+  state:
+    repositoryRef: {name: platform}
+---
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata:
+  name: dev-to-prod
+spec:
+  from: {environment: dev}
+  to: {environment: prod}
+  evidence: attested
+  maxAttestationAge: 1h
+  values:
+    webImage:
+      select: {unit: web-image, artifact: image, pointer: /reference}

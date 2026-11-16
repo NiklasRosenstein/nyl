@@ -1,0 +1,2 @@
+Cache-Control: no-store
+Cache-Size: 64m
