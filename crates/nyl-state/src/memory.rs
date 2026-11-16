@@ -182,9 +182,7 @@ fn apply_side(
         for (path, record) in &changes.promotions {
             match record {
                 Some(record) => {
-                    directory
-                        .promotions
-                        .insert(path.clone(), record.clone().into_document());
+                    directory.promotions.insert(path.clone(), record.clone());
                 }
                 None => {
                     directory.promotions.remove(path);

@@ -594,6 +594,7 @@ fn reconcile(
             Disposition::Reconcile { extend: false } => {}
         }
     }
+    session.check_promotion_paths(wiring)?;
     let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: args.concurrency,

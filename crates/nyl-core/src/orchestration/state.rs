@@ -1219,7 +1219,7 @@ pub fn state_document_schemas() -> BTreeMap<String, serde_json::Value> {
         (
             API_VERSION_GITOPS,
             "promotion-record",
-            schema::<super::promotion::PromotionRecord>("PromotionRecord"),
+            schema::<super::promotion::PromotionRecordDocument>("PromotionRecord"),
         ),
         (API_VERSION_GITOPS, "lease", schema::<Lease>("Lease")),
         (API_VERSION_GITOPS, "run", schema::<Run>("Run")),

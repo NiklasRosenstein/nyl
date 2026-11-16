@@ -77,7 +77,10 @@ target environment's desired state, `desired/promotions/<path>.yaml`, or, with
 Each promotion replaces the path's record; Git history keeps earlier ones.
 The record has one shape wherever it is kept (`apiVersion` and `kind` are
 written in the state file and left out of a block that sits in a resource): in desired state, in an
-Environment's `promoted` block, and (M11) in a target's `spec.promotions`.
+Environment's `promoted` block, and (M11) in a target's `spec.promotions`. The
+shape already holds M11's target source (`from: {target, repository, branch,
+commit}`, and a value without a source `unit`), so M11 changes no format; M6 never
+writes it, and a reader loads it.
 
 | Field | Meaning |
 | --- | --- |
@@ -665,17 +668,23 @@ spec:
       image: {fromPromotion: {path: dev-to-production, value: webImage}}
   promotions:                        # written by nyl promote, never by hand
     dev-to-production:
+      path: dev-to-production        # the one PromotionRecord shape, as in state
       sequence: 4                    # increases with every promotion into this target
       from: {target: dev, repository: https://git.example.com/deploy.git, branch: deploy/dev, commit: 9c1e…}
       values:
         webImage:
           value: registry.example.com/web@sha256:4f0c…
           select: {input: /releases/platform~1web/image}
-          inputDigest: sha256:…
-      evidence: {level: attested, attestations: [{scope: dev, name: accepted, result: pass, at: …, details: {…}}, {scope: dev, name: healthy, result: pass, at: …, details: {…}}], override: null}
-      artifactsVerified: true
+          inputDigest: sha256:…      # `unit: {name, uid}` appears when the value has a source unit
+      evidence:
+        level: attested
+        attestations: [{scope: dev, name: accepted, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}, {scope: dev, name: healthy, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}]
+        override: null
+      ignoredAttestations: []
+      excludedApplications: []
       superseded: []
-      requested: {by: …, at: 2026-09-25T16:40:00Z, reason: …}
+      artifactsVerified: true
+      requested: {by: …, identity: verified, source: …, at: 2026-09-25T16:40:00Z, reason: …}
 ```
 
 - **Record.** `spec.promotions.<path>` holds the path's PromotionRecord with

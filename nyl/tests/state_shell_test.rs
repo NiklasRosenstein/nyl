@@ -204,7 +204,9 @@ fn seed_promotion(world: &World, location: &StateLocation, path: &str, sequence:
         "path": path, "sequence": sequence,
         "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "desiredCommit": COMMIT},
         "sourceCommit": COMMIT,
-        "evidence": {"level": "published", "override": null}, "artifactsVerified": true,
+        "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
+        "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+        "artifactsVerified": true,
         "requested": {"by": "alice", "identity": "local", "at": "2026-09-24T10:00:00Z"}
     }))
     .unwrap();
@@ -642,6 +644,32 @@ fn test_state_restore_rolls_promotion_records_back() {
         assert_eq!(
             sequences(&world, &location),
             BTreeMap::from([("dev-to-prod".to_owned(), 1)]),
+            "{}",
+            world.name
+        );
+    }
+}
+
+/// `state init --fresh` makes every unit a new incarnation but keeps the
+/// promotion records, which are lineage. Catches a fresh start that drops them.
+#[test]
+fn test_state_init_fresh_keeps_promotion_records() {
+    for world in worlds() {
+        let context = world.context();
+        let location = world.dev();
+        state::init(&context, &dev(), &location, false, &requested());
+        seed_unit(&world, &location, "seed", json!({"state": "active"}));
+        seed_promotion(&world, &location, "dev-to-prod", 6);
+        let report = state::init(&context, &dev(), &location, true, &requested());
+        assert_eq!(report.outcome, Outcome::Done, "{}: {report:?}", world.name);
+        assert!(
+            world.store.snapshot(&location).unwrap().desired.is_empty(),
+            "{}",
+            world.name
+        );
+        assert_eq!(
+            sequences(&world, &location),
+            BTreeMap::from([("dev-to-prod".to_owned(), 6)]),
             "{}",
             world.name
         );

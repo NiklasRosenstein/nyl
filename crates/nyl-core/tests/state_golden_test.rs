@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nyl_core::orchestration::promotion::PromotionRecord;
+use nyl_core::orchestration::promotion::PromotionRecordDocument;
 use nyl_core::orchestration::state::{
     ArtifactDocument, AttestationRecord, BlockedReason, DesiredUnit, DriftRecord, EnvironmentRecord, Lease,
     ObservationRecord, ObservedUnit, Readiness, Run, Signal, StateRecord,
@@ -360,6 +360,29 @@ fn samples() -> Vec<(&'static str, Value)> {
         }),
     ));
     samples.push((
+        // Reserved for M11: a target source and a value without a source unit.
+        // M6 never writes it, but a reader must load it.
+        "promotion-record-target-source.v1.yaml",
+        json!({
+            "apiVersion": "gitops.nyl/v1", "kind": "PromotionRecord",
+            "path": "dev-to-production", "sequence": 4,
+            "from": {"target": "dev", "repository": "https://git.example.com/deploy.git", "branch": "deploy/dev", "commit": COMMIT},
+            "values": {
+                "webImage": {
+                    "value": "registry.example.com/web@sha256:4f0c000000000000000000000000000000000000000000000000000000000001",
+                    "select": {"input": "/releases/platform~1web/image"},
+                    "inputDigest": KEY
+                }
+            },
+            "evidence": {"level": "attested", "attestations": [
+                {"scope": "dev", "name": "accepted", "result": "pass", "at": "2026-09-25T16:40:00Z"}
+            ], "override": null},
+            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "artifactsVerified": true,
+            "requested": {"by": "alice", "identity": "local", "at": "2026-09-25T16:40:00Z", "reason": "Release 3"}
+        }),
+    ));
+    samples.push((
         // A value-only path: no source commit, a value from another state, and an override.
         "promotion-record-value-only.v1.yaml",
         json!({
@@ -414,7 +437,7 @@ fn render(name: &str, sample: &Value) -> String {
         "Lease" => typed::<Lease>(name, sample),
         "Run" => typed::<Run>(name, sample),
         "Signal" => typed::<Signal>(name, sample),
-        "PromotionRecord" => typed::<PromotionRecord>(name, sample),
+        "PromotionRecord" => typed::<PromotionRecordDocument>(name, sample),
         other => panic!("no type for kind {other}"),
     }
 }
@@ -465,13 +488,13 @@ fn test_promotion_records_reject_unknown_format_versions_and_kinds() {
         .unwrap()
         .1;
     record["apiVersion"] = json!("gitops.nyl/v2");
-    let error = serde_json::from_value::<PromotionRecord>(record.clone())
+    let error = serde_json::from_value::<PromotionRecordDocument>(record.clone())
         .unwrap_err()
         .to_string();
     assert!(error.contains("upgrade Nyl"), "{error}");
     record["apiVersion"] = json!("gitops.nyl/v1");
     record["kind"] = json!("Run");
-    assert!(serde_json::from_value::<PromotionRecord>(record).is_err());
+    assert!(serde_json::from_value::<PromotionRecordDocument>(record).is_err());
 }
 
 /// Catches a reader that accepts a newer format of a kind whose fields it

@@ -108,6 +108,8 @@ fn world() -> World {
 fn run(world: &World, paths: &[PromotionPath], readers: &[ValueReader]) -> Vec<Finding> {
     check(&PathChecks {
         paths,
+        known: paths,
+        only: None,
         declared: &world.declared,
         sources: &world.sources,
         drivers: &drivers(),
@@ -124,10 +126,10 @@ fn codes(findings: &[Finding]) -> Vec<Code> {
     findings.iter().map(|finding| finding.code).collect()
 }
 
-fn reader(environment: Option<&str>, path: Option<&str>, value: &str, expected: Option<ValueType>) -> ValueReader {
+fn reader(environment: &str, path: Option<&str>, value: &str, expected: Option<ValueType>) -> ValueReader {
     ValueReader {
-        location: "unit web of Environment prod at \"/replicas\"".to_owned(),
-        environment: environment.map(environment_name),
+        location: format!("unit web of Environment {environment} at \"/replicas\""),
+        environment: environment_name(environment),
         binding: PromotionInputSource {
             value: value.to_owned(),
             path: path.map(str::to_owned),
@@ -278,10 +280,10 @@ fn test_value_types_must_fit_every_reading_binding() {
     })))];
     let world = world();
     let readers = [
-        reader(Some("prod"), Some("dev-to-prod"), "replicas", Some(ValueType::Integer)),
-        reader(Some("prod"), None, "replicas", Some(ValueType::Number)),
-        reader(Some("prod"), None, "replicas", Some(ValueType::String)),
-        reader(None, Some("dev-to-prod"), "image", Some(ValueType::Boolean)),
+        reader("prod", Some("dev-to-prod"), "replicas", Some(ValueType::Integer)),
+        reader("prod", None, "replicas", Some(ValueType::Number)),
+        reader("prod", None, "replicas", Some(ValueType::String)),
+        reader("prod", Some("dev-to-prod"), "image", Some(ValueType::Boolean)),
     ];
     let findings = run(&world, &paths, &readers);
     assert_eq!(codes(&findings), [Code::PromoteValueType], "{findings:?}");
@@ -332,11 +334,11 @@ fn test_bindings_name_declared_paths_and_values() {
         json!({"replicas": {"select": {"unit": "web", "input": "/replicas"}}}),
     ))];
     let readers = [
-        reader(Some("prod"), Some("dev-to-prod"), "replicas", None),
-        reader(Some("prod"), None, "replicas", None),
-        reader(Some("prod"), Some("dev-to-prod"), "nope", None),
-        reader(Some("prod"), Some("other-path"), "replicas", None),
-        reader(Some("dev"), None, "replicas", None),
+        reader("prod", Some("dev-to-prod"), "replicas", None),
+        reader("prod", None, "replicas", None),
+        reader("prod", Some("dev-to-prod"), "nope", None),
+        reader("prod", Some("other-path"), "replicas", None),
+        reader("dev", None, "replicas", None),
     ];
     let findings = run(&world(), &paths, &readers);
     assert_eq!(codes(&findings), [Code::PromoteBindingUnknown; 3], "{findings:?}");
@@ -351,7 +353,9 @@ fn test_bindings_name_declared_paths_and_values() {
         findings[1]
     );
     assert!(
-        findings[2].message.contains("no PromotionPath into its environment"),
+        findings[2]
+            .message
+            .contains("no PromotionPath into Environment dev declares"),
         "{}",
         findings[2]
     );
@@ -377,11 +381,207 @@ fn test_unit_readers_find_bindings_with_the_type_their_field_accepts() {
         .unwrap();
     assert_eq!(replicas.binding.path.as_deref(), Some("dev-to-prod"));
     assert_eq!(replicas.expected, Some(ValueType::Integer));
-    assert_eq!(replicas.environment, Some(environment("prod")));
+    assert_eq!(replicas.environment, environment("prod"));
     let nested = readers.iter().find(|reader| reader.binding.value == "other").unwrap();
     assert_eq!(
         nested.expected, None,
         "a field the schema does not know has no type to check"
     );
     assert!(nested.location.contains("/extra/list/0"));
+}
+
+fn named(name: &str, from: &str, to: &str, values: &[&str]) -> PromotionPath {
+    let mut path = path(json!({
+        "from": {"environment": from}, "to": {"environment": to},
+        "values": values.iter().map(|value| ((*value).to_owned(), json!({"select": {"unit": "web", "input": "/replicas"}}))).collect::<serde_json::Map<_, _>>()
+    }));
+    path.metadata.name = name.to_owned();
+    path
+}
+
+/// A chain dev -> staging -> prod: staging reads its own path, prod reads the
+/// next one. Catches checking a binding against only the paths of the
+/// environment being planned.
+#[test]
+fn test_a_chain_resolves_every_binding_against_all_paths() {
+    let mut world = world();
+    let staging = world.sources[&environment("prod")].clone();
+    world.sources.insert(environment("staging"), staging);
+    world.declared.insert(environment("staging"));
+    let paths = [
+        named("dev-to-staging", "dev", "staging", &["replicas"]),
+        named("staging-to-prod", "staging", "prod", &["replicas"]),
+    ];
+    let readers = [
+        reader("staging", Some("dev-to-staging"), "replicas", None),
+        reader("prod", Some("staging-to-prod"), "replicas", None),
+        reader("prod", None, "replicas", None),
+    ];
+    // Only the first path is checked (as `plan -e dev` does), against all of them.
+    let findings = check(&PathChecks {
+        paths: &paths[..1],
+        known: &paths,
+        only: None,
+        declared: &world.declared,
+        sources: &world.sources,
+        drivers: &drivers(),
+        readers: &readers,
+    });
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+/// A binding that names a path reads only a path into its own environment.
+#[test]
+fn test_a_named_path_must_promote_into_the_readers_environment() {
+    let mut world = world();
+    let staging = world.sources[&environment("prod")].clone();
+    world.sources.insert(environment("staging"), staging);
+    world.declared.insert(environment("staging"));
+    let paths = [
+        named("dev-to-staging", "dev", "staging", &["replicas"]),
+        named("dev-to-prod", "dev", "prod", &["replicas"]),
+    ];
+    let findings = run(
+        &world,
+        &paths,
+        &[reader("staging", Some("dev-to-prod"), "replicas", None)],
+    );
+    assert_eq!(codes(&findings), [Code::PromoteBindingUnknown], "{findings:?}");
+    assert!(
+        findings[0]
+            .message
+            .contains("promotes into prod, not into Environment staging"),
+        "{}",
+        findings[0]
+    );
+    assert!(findings[0].message.contains("dev-to-staging"), "{}", findings[0]);
+}
+
+/// In an environment whose source is promoted from several paths, every
+/// source path must define the values path-less bindings read, and only the
+/// source paths count; otherwise one path defining it suffices.
+#[test]
+fn test_every_source_path_defines_what_path_less_bindings_read() {
+    let mut world = world();
+    let mut prod = world.sources[&environment("prod")].clone();
+    prod.environment = serde_json::from_value(json!({
+        "apiVersion": "gitops.nyl/v1", "kind": "Environment", "metadata": {"name": "prod"},
+        "spec": {"source": {"fromPromotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}}
+    }))
+    .unwrap();
+    world.sources.insert(environment("prod"), prod);
+    world
+        .sources
+        .insert(environment("hotfix"), world.sources[&environment("dev")].clone());
+    world.declared.insert(environment("hotfix"));
+    let paths = [
+        named("dev-to-prod", "dev", "prod", &["replicas", "image"]),
+        named("hotfix-to-prod", "hotfix", "prod", &["replicas"]),
+    ];
+    let readers = [
+        reader("prod", None, "replicas", None),
+        reader("prod", None, "image", None),
+    ];
+    let findings = run(&world, &paths, &readers);
+    assert_eq!(codes(&findings), [Code::PromoteBindingUnknown], "{findings:?}");
+    assert!(
+        findings[0].message.contains("\"image\"") && findings[0].message.contains("hotfix-to-prod"),
+        "{}",
+        findings[0]
+    );
+    assert!(
+        findings[0].message.contains("every source path must"),
+        "{}",
+        findings[0]
+    );
+
+    // A path outside the source paths does not count for a path-less binding.
+    let outside = [
+        named("dev-to-prod", "dev", "prod", &["replicas"]),
+        named("hotfix-to-prod", "hotfix", "prod", &["replicas"]),
+        named("vendor-to-prod", "dev", "prod", &["vendor"]),
+    ];
+    let findings = run(&world, &outside, &[reader("prod", None, "vendor", None)]);
+    assert_eq!(codes(&findings), [Code::PromoteBindingUnknown], "{findings:?}");
+}
+
+/// `source.fromPromotion` names declared paths that promote into the environment.
+#[test]
+fn test_a_promoted_source_names_paths_into_its_environment() {
+    let mut world = world();
+    let mut prod = world.sources[&environment("prod")].clone();
+    prod.environment = serde_json::from_value(json!({
+        "apiVersion": "gitops.nyl/v1", "kind": "Environment", "metadata": {"name": "prod"},
+        "spec": {"source": {"fromPromotion": {"paths": ["dev-to-prod", "ghost", "prod-to-dev"]}}}
+    }))
+    .unwrap();
+    world.sources.insert(environment("prod"), prod);
+    let paths = [
+        named("dev-to-prod", "dev", "prod", &[]),
+        named("prod-to-dev", "prod", "dev", &[]),
+    ];
+    let findings = run(&world, &paths, &[]);
+    assert_eq!(codes(&findings), [Code::PromoteBindingUnknown; 2], "{findings:?}");
+    assert!(
+        findings[0].message.contains("ghost") && findings[0].message.contains("does not declare"),
+        "{}",
+        findings[0]
+    );
+    assert!(
+        findings[1].message.contains("prod-to-dev") && findings[1].message.contains("promotes into dev"),
+        "{}",
+        findings[1]
+    );
+}
+
+/// A malformed selector parses and is reported with its code, whether or not
+/// the source environment is declared.
+#[test]
+fn test_malformed_selectors_are_findings_not_parse_errors() {
+    let mut world = world();
+    let paths = [path(json!({
+        "from": {"environment": "dev"}, "to": {"environment": "prod"},
+        "values": {
+            "none": {"select": {"unit": "web"}},
+            "badPointer": {"select": {"unit": "web", "input": "replicas"}}
+        }
+    }))];
+    let findings = run(&world, &paths, &[]);
+    assert_eq!(codes(&findings), [Code::PromoteSelectorInvalid; 2], "{findings:?}");
+    assert!(findings[0].message.contains("badPointer") || findings[1].message.contains("badPointer"));
+    world.declared.clear();
+    let findings = run(&world, &paths, &[]);
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.code == Code::PromoteSelectorInvalid)
+            .count(),
+        2,
+        "{findings:?}"
+    );
+}
+
+/// A command working on one environment checks that environment's bindings
+/// only: a broken binding of a partner environment is for its own commands.
+#[test]
+fn test_only_checks_the_bindings_of_one_environment() {
+    let world = world();
+    let paths = [named("dev-to-prod", "dev", "prod", &["replicas"])];
+    let readers = [reader("prod", None, "ghost", None), reader("dev", None, "ghost", None)];
+    let check_for = |only: Option<&EnvironmentName>| {
+        check(&PathChecks {
+            paths: &paths,
+            known: &paths,
+            only,
+            declared: &world.declared,
+            sources: &world.sources,
+            drivers: &drivers(),
+            readers: &readers,
+        })
+    };
+    assert_eq!(check_for(None).len(), 2);
+    let prod = environment("prod");
+    let findings = check_for(Some(&prod));
+    assert_eq!(codes(&findings), [Code::PromoteBindingUnknown]);
+    assert!(findings[0].message.contains("Environment prod"), "{}", findings[0]);
 }

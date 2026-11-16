@@ -151,24 +151,7 @@ fn plan(
     Stop,
 > {
     let session = Session::open(&args.path, &args.environment[0])?;
-    // The PromotionPaths that touch this environment are checked before it is planned.
-    let paths = crate::orchestration::promotion::findings_for(
-        &session.inventory,
-        &session.resolved.name,
-        wiring.drivers,
-        &session.renderer(),
-    )?;
-    if let Some(first) = paths.first() {
-        let mut finding = first.clone();
-        if paths.len() > 1 {
-            finding.message = format!(
-                "{} (and {} more finding(s); `nyl validate` lists them all)",
-                finding.message,
-                paths.len() - 1
-            );
-        }
-        return Err(Stop::Finding(finding));
-    }
+    session.check_promotion_paths(wiring)?;
     let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: nyl_orchestration::shell::run::DEFAULT_CONCURRENCY,

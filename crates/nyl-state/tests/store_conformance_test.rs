@@ -847,6 +847,7 @@ fn promotion_record(path: &str, sequence: u64) -> nyl_core::orchestration::promo
                  "desiredCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a"},
         "sourceCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a",
         "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
+        "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
         "artifactsVerified": true,
         "requested": {"by": "alice", "identity": "local", "at": "2026-09-24T10:00:00Z"}
     }))
@@ -888,7 +889,6 @@ fn test_promotion_records_round_trip_on_the_desired_ref_and_survive_other_transi
         );
         let snapshot = store.snapshot(&location).unwrap();
         let record = &snapshot.promotions[&path];
-        assert!(record.is_document(), "{}: written as a state document", subject.name);
         assert_eq!(record.sequence, 1, "{}", subject.name);
 
         // A transition of a unit leaves the record alone.

@@ -52,6 +52,9 @@ executes again at the next reconcile. It is also the way to start over at a
 location whose state was deleted with [`nyl state delete`](#nyl-state-delete):
 a plain `state init` there exits 1 with `NYL-STATE-DELETED`.
 
+`nyl state init --fresh` starts every unit over but keeps the environment's
+PromotionRecords: they are lineage, not unit state.
+
 `--template <name>` creates the environment as an instance of an
 [EnvironmentTemplate](/nyl/orchestration/resource-guides/environment-template/)
 instead of an Environment, with `--param <name>=<value>` (repeatable) for its

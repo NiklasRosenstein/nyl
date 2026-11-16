@@ -257,16 +257,21 @@ impl PromotionSelect {
         }
     }
 
-    /// Check the form and the syntax of each pointer.
-    pub fn validate(&self, field: &str) -> Result<()> {
-        self.form()
-            .map_err(|reason| CoreError::config(format!("{field} {reason}")))?;
+    /// Why the selector is malformed: no single form, or a pointer that is
+    /// not RFC 6901. Reported as `NYL-PROMOTE-SELECTOR-INVALID` by the path
+    /// rules, so a malformed selector parses and `nyl get` still lists the path.
+    pub fn shape_problem(&self) -> Option<String> {
+        if let Err(reason) = self.form() {
+            return Some(format!("the selector {reason}"));
+        }
         for (name, pointer) in [("input", &self.input), ("pointer", &self.pointer)] {
             if let Some(pointer) = pointer {
-                crate::json_pointer::validate(&format!("{field}.{name}"), pointer)?;
+                if let Err(error) = crate::json_pointer::validate(&format!("select.{name}"), pointer) {
+                    return Some(error.to_string());
+                }
             }
         }
-        Ok(())
+        None
     }
 }
 
@@ -277,10 +282,11 @@ impl PromotionPath {
             .map_err(|error| CoreError::config(format!("PromotionPath metadata.name: {error}")))
     }
 
-    /// What is checked from the resource alone: envelope, name, endpoints,
-    /// selector forms and pointer syntax, and value names. Unsupported forms
-    /// are valid here and reported by [`Self::unsupported`], so
-    /// `nyl get promotion-paths` lists them.
+    /// What is checked from the resource alone: envelope, name, endpoints, and
+    /// value names. Unsupported forms ([`Self::unsupported`]) and malformed
+    /// selectors ([`PromotionSelect::shape_problem`]) are valid here and
+    /// reported as findings with their codes, so `nyl get promotion-paths`
+    /// lists the path.
     pub fn validate(&self) -> Result<()> {
         if self.api_version != API_VERSION_GITOPS {
             return Err(CoreError::config(format!(
@@ -310,16 +316,10 @@ impl PromotionPath {
                 "spec.maxAttestationAge must be longer than zero; omit it for no limit",
             ));
         }
-        for (name, value) in &self.spec.values {
+        for name in self.spec.values.keys() {
             if name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == '/') {
                 return Err(CoreError::config(format!(
                     "spec.values key {name:?} must be a name without whitespace or '/'"
-                )));
-            }
-            value.select.validate(&format!("spec.values.{name}.select"))?;
-            if value.select.form() == Ok(SelectForm::TargetInput) && self.spec.from.environment.is_some() {
-                return Err(CoreError::config(format!(
-                    "spec.values.{name}.select names no unit; a selector without `unit` reads a target source's Release input"
                 )));
             }
         }
@@ -400,19 +400,20 @@ mod tests {
         }
     }
 
+    /// A malformed selector still parses; its shape problem names why.
     #[test]
     fn test_selector_forms_and_pointers_are_checked() {
         let value = |select: serde_json::Value| {
             let mut spec = base();
             spec["values"] = json!({"v": {"select": select}});
-            path(spec)
+            path(spec).unwrap().spec.values["v"].select.shape_problem()
         };
         for good in [
             json!({"unit": "k8s", "input": "/releases/a~1b/image"}),
             json!({"unit": "db", "output": "connection", "pointer": "/host"}),
             json!({"unit": "img", "artifact": "image", "kind": "container-image", "pointer": "/reference"}),
         ] {
-            value(good).unwrap();
+            assert_eq!(value(good), None);
         }
         for (bad, message) in [
             (json!({"unit": "u"}), "names none of input, output, and artifact"),
@@ -421,12 +422,11 @@ mod tests {
                 "sets input and output together",
             ),
             (json!({"unit": "u", "artifact": "a"}), "needs a `pointer`"),
-            (json!({"unit": "u", "input": "a"}), "spec.values.v.select.input"),
+            (json!({"unit": "u", "input": "a"}), "select.input"),
             (json!({"output": "o"}), "needs the `unit`"),
-            (json!({"input": "/a"}), "names no unit"),
         ] {
-            let error = value(bad).unwrap_err().to_string();
-            assert!(error.contains(message), "{message}: {error}");
+            let problem = value(bad).unwrap_or_default();
+            assert!(problem.contains(message), "{message}: {problem}");
         }
     }
 

@@ -1786,12 +1786,6 @@ pub fn check_promotion_record(
     record: &Value,
     lookups: &PromotionLookups<'_>,
 ) -> Result<(), String> {
-    // A PromotionRecord resource keeps its fields in `spec`; the block of an
-    // Environment's source holds them directly.
-    let record = match record.get("spec") {
-        Some(spec) if record.get("kind").and_then(Value::as_str) == Some("PromotionRecord") && spec.is_object() => spec,
-        _ => record,
-    };
     let mut problems = Problems::default();
     problems.compare("path", Value::String(expected.path.clone()), record.get("path"));
     if let Some(sequence) = expected.sequence {

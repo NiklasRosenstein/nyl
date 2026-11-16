@@ -3,11 +3,16 @@
 //! Contract: [PromotionRecord](../../../../design/promotion.md#promotionrecord).
 //!
 //! One record shape is used wherever a record is kept (decision D4 of the M6
-//! plan): `desired/promotions/<path>.yaml` in an environment's state, where
-//! the document carries `apiVersion: gitops.nyl/v1` and `kind:
-//! PromotionRecord`, and the `source.fromPromotion.promoted` block of an
-//! Environment with `record: source`, where both are left out because the
-//! block's place in the resource gives them. `desired/promotions/` is a file
+//! plan): [`PromotionRecord`] is the shape. In `desired/promotions/<path>.yaml`
+//! it is wrapped as a [`PromotionRecordDocument`] with `apiVersion:
+//! gitops.nyl/v1` and `kind: PromotionRecord`, both required; in the
+//! `source.fromPromotion.promoted` block of an Environment with `record:
+//! source` it stands alone, and the markers are rejected there.
+//!
+//! The shape reserves M11's target source: [`PromotionFrom::Target`] and a value
+//! without a source unit. M6 never writes them, and validation and `nyl promote`
+//! refuse a target (`NYL-PROMOTE-UNSUPPORTED`), but a reader loads a record that
+//! has them, so M11 changes no format. `desired/promotions/` is a file
 //! the state layout of format `v1` always listed; adding the file changed no
 //! version (decision F1 of the M6 plan).
 //!
@@ -61,11 +66,31 @@ pub struct PromotionSelect {
     pub pointer: Option<String>,
 }
 
-/// The source state a record promotes: one transition commit pair of the
-/// source environment, pushed together with one `Nyl-Run-Id`.
+/// The source state a record promotes: an environment's, or (M11, never
+/// written by M6) a DeploymentTarget's publication commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PromotionFrom {
+    Environment(EnvironmentFrom),
+    /// Reserved for M11.
+    Target(TargetFrom),
+}
+
+/// A target source: the publication commit the values came from. Reserved for M11.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PromotionFrom {
+pub struct TargetFrom {
+    pub target: String,
+    pub repository: String,
+    pub branch: String,
+    pub commit: CommitId,
+}
+
+/// One transition commit pair of the source environment, pushed together
+/// with one `Nyl-Run-Id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentFrom {
     pub environment: EnvironmentName,
     pub run: RunId,
     #[serde(rename = "desiredCommit")]
@@ -103,7 +128,9 @@ pub struct PromotedUnit {
 pub struct PromotedValue {
     pub value: Value,
     pub select: PromotionSelect,
-    pub unit: PromotedUnit,
+    /// The source unit; absent for a target source's value (M11) and when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<PromotedUnit>,
     /// The receipt the value came from, for an output or artifact selector.
     #[serde(rename = "executionKey", default, skip_serializing_if = "Option::is_none")]
     pub execution_key: Option<ExecutionKey>,
@@ -149,10 +176,10 @@ pub struct EvidenceOverride {
 #[serde(deny_unknown_fields)]
 pub struct PromotionEvidence {
     pub level: EvidenceLevel,
-    #[serde(default)]
     pub attestations: Vec<EvidenceAttestation>,
     /// Written as `null` when the promotion needed no override.
-    #[serde(rename = "override", default)]
+    #[serde(rename = "override")]
+    #[schemars(required)]
     pub override_: Option<EvidenceOverride>,
 }
 
@@ -193,15 +220,11 @@ pub struct PromotionRequest {
 /// What `nyl promote` records about one promotion on one path.
 ///
 /// Each promotion replaces the path's record; Git history keeps earlier ones.
-/// `apiVersion` and `kind` are written in `desired/promotions/<path>.yaml`
-/// and left out of the `promoted` block of an Environment's source.
+/// In an Environment's `source.fromPromotion.promoted` block it stands alone;
+/// in state it is a [`PromotionRecordDocument`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionRecord {
-    #[serde(rename = "apiVersion", default, skip_serializing_if = "Option::is_none")]
-    pub api_version: Option<StateV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<PromotionRecordKind>,
     /// The PromotionPath that wrote the record.
     pub path: PromotionPathName,
     /// Increases with every promotion into the target environment, on any path; the highest is the newest.
@@ -212,15 +235,13 @@ pub struct PromotionRecord {
     #[serde(rename = "sourceCommit", default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
     /// The promoted values by name.
-    #[serde(default)]
     pub values: BTreeMap<String, PromotedValue>,
     pub evidence: PromotionEvidence,
-    #[serde(rename = "ignoredAttestations", default)]
+    #[serde(rename = "ignoredAttestations")]
     pub ignored_attestations: Vec<IgnoredAttestation>,
     /// The path's `coverage.excludeApplications` at promotion time.
-    #[serde(rename = "excludedApplications", default)]
+    #[serde(rename = "excludedApplications")]
     pub excluded_applications: Vec<String>,
-    #[serde(default)]
     pub superseded: Vec<SupersededCommit>,
     /// Whether the artifact check ran.
     #[serde(rename = "artifactsVerified")]
@@ -228,18 +249,24 @@ pub struct PromotionRecord {
     pub requested: PromotionRequest,
 }
 
-impl PromotionRecord {
-    /// The record as a state document: with `apiVersion` and `kind`.
-    #[must_use]
-    pub fn into_document(mut self) -> Self {
-        self.api_version = Some(StateV1);
-        self.kind = Some(PromotionRecordKind);
-        self
-    }
+/// `desired/promotions/<path>.yaml`: a [`PromotionRecord`] with the markers
+/// every state document carries, both required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PromotionRecordDocument {
+    #[serde(rename = "apiVersion")]
+    pub api_version: StateV1,
+    pub kind: PromotionRecordKind,
+    #[serde(flatten)]
+    pub record: PromotionRecord,
+}
 
-    /// Whether the record carries the markers a state document has.
-    pub fn is_document(&self) -> bool {
-        self.api_version.is_some() && self.kind.is_some()
+impl From<PromotionRecord> for PromotionRecordDocument {
+    fn from(record: PromotionRecord) -> Self {
+        Self {
+            api_version: StateV1,
+            kind: PromotionRecordKind,
+            record,
+        }
     }
 }
 
@@ -251,36 +278,91 @@ mod tests {
         serde_json::json!({
             "path": "dev-to-prod", "sequence": 3,
             "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "desiredCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a"},
-            "values": {}, "evidence": {"level": "published", "override": null},
+            "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
+            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
             "artifactsVerified": true,
             "requested": {"by": "alice", "identity": "local", "at": "2026-09-25T16:41:00Z"}
         })
     }
 
-    /// The block of an Environment's source and the state document share one
-    /// shape: only the markers differ, and the empty lists are always written.
+    /// The block of an Environment's source rejects the state markers, the
+    /// state document requires them, and the lists are written when empty.
     #[test]
-    fn test_one_shape_with_markers_only_in_the_document() {
+    fn test_block_and_document_differ_only_in_the_markers() {
         let block: PromotionRecord = serde_json::from_value(sample()).unwrap();
-        assert!(!block.is_document());
         let written = serde_json::to_value(&block).unwrap();
-        assert!(written.get("apiVersion").is_none());
-        for list in ["ignoredAttestations", "excludedApplications", "superseded"] {
-            assert_eq!(written[list], serde_json::json!([]), "{list}");
-        }
-        assert_eq!(written["evidence"]["override"], Value::Null);
-        let document = serde_json::to_value(block.into_document()).unwrap();
-        assert_eq!(document["apiVersion"], "gitops.nyl/v1");
-        assert_eq!(document["kind"], "PromotionRecord");
+        assert_eq!(written, sample());
+        let mut marked = sample();
+        marked["apiVersion"] = "gitops.nyl/v1".into();
+        marked["kind"] = "PromotionRecord".into();
+        assert!(
+            serde_json::from_value::<PromotionRecord>(marked.clone()).is_err(),
+            "the block takes no markers"
+        );
+        let document: PromotionRecordDocument = serde_json::from_value(marked).unwrap();
+        assert_eq!(document.record, block);
+        assert_eq!(
+            serde_json::to_value(PromotionRecordDocument::from(block)).unwrap()["kind"],
+            "PromotionRecord"
+        );
+        assert!(
+            serde_json::from_value::<PromotionRecordDocument>(sample()).is_err(),
+            "a document needs its markers"
+        );
     }
 
     #[test]
     fn test_record_rejects_other_formats_and_unknown_fields() {
-        let mut other = sample();
-        other["apiVersion"] = "gitops.nyl/v2".into();
-        assert!(serde_json::from_value::<PromotionRecord>(other).is_err());
+        let mut document = sample();
+        document["apiVersion"] = "gitops.nyl/v2".into();
+        document["kind"] = "PromotionRecord".into();
+        let error = serde_json::from_value::<PromotionRecordDocument>(document)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upgrade Nyl"), "{error}");
         let mut unknown = sample();
         unknown["surprise"] = true.into();
         assert!(serde_json::from_value::<PromotionRecord>(unknown).is_err());
+    }
+
+    /// The shape reserves M11's target source: a reader loads it, and it round-trips.
+    #[test]
+    fn test_a_target_source_record_loads() {
+        let mut target = sample();
+        target["from"] = serde_json::json!({"target": "dev", "repository": "https://example.invalid/deploy.git", "branch": "deploy/dev", "commit": "9c1e9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a"});
+        target["values"] = serde_json::json!({"webImage": {"value": "x", "select": {"input": "/releases/platform~1web/image"}, "inputDigest": "sha256:0"}});
+        let record: PromotionRecord = serde_json::from_value(target.clone()).unwrap();
+        assert!(matches!(record.from, PromotionFrom::Target(_)));
+        assert!(record.values["webImage"].unit.is_none());
+        assert_eq!(serde_json::to_value(&record).unwrap(), target);
+    }
+
+    /// The published schema requires what the writer always writes.
+    #[test]
+    fn test_schema_requires_the_always_written_fields() {
+        let schema = serde_json::to_value(schemars::schema_for!(PromotionRecord)).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        for field in [
+            "values",
+            "ignoredAttestations",
+            "excludedApplications",
+            "superseded",
+            "evidence",
+            "requested",
+        ] {
+            assert!(required.contains(&field.into()), "{field}: {required:?}");
+        }
+        let evidence = &schema["$defs"]["PromotionEvidence"]["required"];
+        assert!(evidence.as_array().unwrap().contains(&"override".into()), "{evidence}");
+        assert!(
+            evidence.as_array().unwrap().contains(&"attestations".into()),
+            "{evidence}"
+        );
+        let document = serde_json::to_value(schemars::schema_for!(PromotionRecordDocument)).unwrap();
+        let text = document.to_string();
+        assert!(
+            text.contains("apiVersion") && text.contains("PromotionRecord"),
+            "{text}"
+        );
     }
 }

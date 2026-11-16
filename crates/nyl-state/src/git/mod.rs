@@ -29,7 +29,7 @@ use nyl_core::orchestration::ports::{
     LocalDivergence, LogEntry, RunState, StateError, StateResult, StateSide, StateStore, StateTips, Transition,
     TransitionChanges,
 };
-use nyl_core::orchestration::promotion::PromotionRecord;
+use nyl_core::orchestration::promotion::{PromotionRecord, PromotionRecordDocument};
 use nyl_core::orchestration::state::{
     Attestation, AttestationRecord, DesiredUnit, Lease, ObservationRecord, ObservedUnit, Run, Signal, StateLocation,
     StateRecord,
@@ -543,13 +543,14 @@ fn promotions(files: &Files) -> StateResult<BTreeMap<PromotionPathName, Promotio
             continue;
         };
         let name = PromotionPathName::new(name).map_err(|error| StateError::Corrupt(format!("{path}: {error}")))?;
-        let record: PromotionRecord = from_yaml(path, bytes)?;
-        if !record.is_document() || record.path != name {
+        let document: PromotionRecordDocument = from_yaml(path, bytes)?;
+        if document.record.path != name {
             return Err(StateError::Corrupt(format!(
-                "{path}: a promotion record is a PromotionRecord document of the path its file names"
+                "{path}: a promotion record is a PromotionRecord document of the path its file names, not {}",
+                document.record.path
             )));
         }
-        records.insert(name, record);
+        records.insert(name, document.record);
     }
     Ok(records)
 }
@@ -605,7 +606,7 @@ fn apply_changes(files: &mut Files, changes: &TransitionChanges, desired: bool, 
         for (path, record) in &changes.promotions {
             let file = format!("{PROMOTIONS_DIR}{path}.yaml");
             match record {
-                Some(record) => files.insert(file, to_yaml(&record.clone().into_document())?),
+                Some(record) => files.insert(file, to_yaml(&PromotionRecordDocument::from(record.clone()))?),
                 None => files.remove(&file),
             };
         }
@@ -1848,4 +1849,29 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
         version,
         foreign: false,
     })
+}
+
+#[cfg(test)]
+mod promotion_file_tests {
+    use super::*;
+
+    const RECORD: &str = "path: dev-to-prod\nsequence: 1\nfrom:\n  environment: dev\n  run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90\n  desiredCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a\nvalues: {}\nevidence:\n  level: published\n  attestations: []\n  override: null\nignoredAttestations: []\nexcludedApplications: []\nsuperseded: []\nartifactsVerified: true\nrequested:\n  by: alice\n  identity: local\n  at: \"2026-09-25T16:41:00Z\"\n";
+    const MARKERS: &str = "apiVersion: gitops.nyl/v1\nkind: PromotionRecord\n";
+
+    fn files(name: &str, text: String) -> Files {
+        Files::from([(format!("{PROMOTIONS_DIR}{name}.yaml"), text.into_bytes())])
+    }
+
+    /// A record file is a PromotionRecord document of the path its file
+    /// names. Catches a store that reads a hand-edited file without its
+    /// markers, or one copied under another path's name, as that path's record.
+    #[test]
+    fn test_a_promotion_file_needs_its_markers_and_its_own_path_name() {
+        let read = promotions(&files("dev-to-prod", format!("{MARKERS}{RECORD}"))).unwrap();
+        assert_eq!(read.len(), 1);
+        let unmarked = promotions(&files("dev-to-prod", RECORD.to_owned()));
+        assert!(matches!(unmarked, Err(StateError::Corrupt(_))), "{unmarked:?}");
+        let misnamed = promotions(&files("hotfix-to-prod", format!("{MARKERS}{RECORD}"))).unwrap_err();
+        assert!(misnamed.to_string().contains("hotfix-to-prod.yaml"), "{misnamed}");
+    }
 }

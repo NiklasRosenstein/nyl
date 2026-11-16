@@ -1,0 +1,33 @@
+apiVersion: gitops.nyl/v1
+kind: PromotionRecord
+path: dev-to-production
+sequence: 4
+from:
+  target: dev
+  repository: https://git.example.com/deploy.git
+  branch: deploy/dev
+  commit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
+values:
+  webImage:
+    value: >-
+      registry.example.com/web@sha256:4f0c000000000000000000000000000000000000000000000000000000000001
+    select:
+      input: /releases/platform~1web/image
+    inputDigest: sha256:9f2c000000000000000000000000000000000000000000000000000000000001
+evidence:
+  level: attested
+  attestations:
+  - scope: dev
+    name: accepted
+    result: pass
+    at: "2026-09-25T16:40:00Z"
+  override: null
+ignoredAttestations: []
+excludedApplications: []
+superseded: []
+artifactsVerified: true
+requested:
+  by: alice
+  identity: local
+  at: "2026-09-25T16:40:00Z"
+  reason: Release 3

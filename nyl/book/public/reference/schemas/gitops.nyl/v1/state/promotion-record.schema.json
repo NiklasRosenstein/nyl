@@ -31,6 +31,38 @@
       "description": "A full, lowercase, 40-character Git commit ID.",
       "type": "string"
     },
+    "EnvironmentFrom": {
+      "additionalProperties": false,
+      "description": "One transition commit pair of the source environment, pushed together\nwith one `Nyl-Run-Id`.",
+      "properties": {
+        "desiredCommit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentName"
+        },
+        "observedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when the state has no observed commit of its own."
+        },
+        "run": {
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "environment",
+        "run",
+        "desiredCommit"
+      ],
+      "type": "object"
+    },
     "EnvironmentName": {
       "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
       "type": "string"
@@ -72,19 +104,6 @@
         "attested"
       ],
       "type": "string"
-    },
-    "EvidenceOverride": {
-      "additionalProperties": false,
-      "description": "Why a promotion went ahead below the path's evidence level.",
-      "properties": {
-        "reason": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "reason"
-      ],
-      "type": "object"
     },
     "ExecutionKey": {
       "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
@@ -203,14 +222,21 @@
           "description": "Present when a value-only path took the value from another state than `from`."
         },
         "unit": {
-          "$ref": "#/$defs/PromotedUnit"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotedUnit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source unit; absent for a target source's value (M11) and when unknown."
         },
         "value": true
       },
       "required": [
         "value",
-        "select",
-        "unit"
+        "select"
       ],
       "type": "object"
     },
@@ -219,7 +245,6 @@
       "description": "The evidence a promotion rested on.",
       "properties": {
         "attestations": {
-          "default": [],
           "items": {
             "$ref": "#/$defs/EvidenceAttestation"
           },
@@ -229,54 +254,37 @@
           "$ref": "#/$defs/EvidenceLevel"
         },
         "override": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EvidenceOverride"
-            },
-            {
-              "type": "null"
+          "additionalProperties": false,
+          "description": "Written as `null` when the promotion needed no override.",
+          "properties": {
+            "reason": {
+              "type": "string"
             }
+          },
+          "required": [
+            "reason"
           ],
-          "default": null,
-          "description": "Written as `null` when the promotion needed no override."
+          "type": "object"
         }
       },
       "required": [
-        "level"
+        "level",
+        "attestations",
+        "override"
       ],
       "type": "object"
     },
     "PromotionFrom": {
-      "additionalProperties": false,
-      "description": "The source state a record promotes: one transition commit pair of the\nsource environment, pushed together with one `Nyl-Run-Id`.",
-      "properties": {
-        "desiredCommit": {
-          "$ref": "#/$defs/CommitId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentFrom"
         },
-        "environment": {
-          "$ref": "#/$defs/EnvironmentName"
-        },
-        "observedCommit": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CommitId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Absent when the state has no observed commit of its own."
-        },
-        "run": {
-          "$ref": "#/$defs/RunId"
+        {
+          "$ref": "#/$defs/TargetFrom",
+          "description": "Reserved for M11."
         }
-      },
-      "required": [
-        "environment",
-        "run",
-        "desiredCommit"
       ],
-      "type": "object"
+      "description": "The source state a record promotes: an environment's, or (M11, never\nwritten by M6) a DeploymentTarget's publication commit."
     },
     "PromotionPathName": {
       "description": "A PromotionPath's `metadata.name`, which names its record file\n`desired/promotions/<path>.yaml`. A Kubernetes DNS label.",
@@ -405,6 +413,31 @@
       ],
       "type": "object"
     },
+    "TargetFrom": {
+      "additionalProperties": false,
+      "description": "A target source: the publication commit the values came from. Reserved for M11.",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "repository",
+        "branch",
+        "commit"
+      ],
+      "type": "object"
+    },
     "Uid": {
       "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
       "type": "string"
@@ -415,18 +448,10 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
-  "description": "What `nyl promote` records about one promotion on one path.\n\nEach promotion replaces the path's record; Git history keeps earlier ones.\n`apiVersion` and `kind` are written in `desired/promotions/<path>.yaml`\nand left out of the `promoted` block of an Environment's source.",
+  "description": "`desired/promotions/<path>.yaml`: a [`PromotionRecord`] with the markers\nevery state document carries, both required.",
   "properties": {
     "apiVersion": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/StateV1"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/StateV1"
     },
     "artifactsVerified": {
       "description": "Whether the artifact check ran.",
@@ -436,7 +461,6 @@
       "$ref": "#/$defs/PromotionEvidence"
     },
     "excludedApplications": {
-      "default": [],
       "description": "The path's `coverage.excludeApplications` at promotion time.",
       "items": {
         "type": "string"
@@ -448,21 +472,13 @@
       "description": "The source state; for a path that promotes only values, the newest state any value came from."
     },
     "ignoredAttestations": {
-      "default": [],
       "items": {
         "$ref": "#/$defs/IgnoredAttestation"
       },
       "type": "array"
     },
     "kind": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/PromotionRecordKind"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/PromotionRecordKind"
     },
     "path": {
       "$ref": "#/$defs/PromotionPathName",
@@ -489,7 +505,6 @@
       "description": "The source commit of that state, present when the path promotes the target's source or a value's lineage includes one."
     },
     "superseded": {
-      "default": [],
       "items": {
         "$ref": "#/$defs/SupersededCommit"
       },
@@ -499,16 +514,21 @@
       "additionalProperties": {
         "$ref": "#/$defs/PromotedValue"
       },
-      "default": {},
       "description": "The promoted values by name.",
       "type": "object"
     }
   },
   "required": [
+    "apiVersion",
+    "kind",
     "path",
     "sequence",
     "from",
+    "values",
     "evidence",
+    "ignoredAttestations",
+    "excludedApplications",
+    "superseded",
     "artifactsVerified",
     "requested"
   ],

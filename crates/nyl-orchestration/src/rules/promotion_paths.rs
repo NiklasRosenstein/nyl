@@ -95,9 +95,9 @@ fn is_reference(fields: &serde_json::Map<String, Value>) -> bool {
 pub struct ValueReader {
     /// Where the binding is, for messages.
     pub location: String,
-    /// The environment that reads the value, when known: path-less bindings
-    /// then look only at the paths into it.
-    pub environment: Option<EnvironmentName>,
+    /// The environment that reads the value: a binding can read only a path
+    /// into it.
+    pub environment: EnvironmentName,
     pub binding: PromotionInputSource,
     /// The type the place accepts, when known.
     pub expected: Option<ValueType>,
@@ -105,7 +105,15 @@ pub struct ValueReader {
 
 /// What [`check`] reads.
 pub struct PathChecks<'a> {
+    /// The paths to check.
     pub paths: &'a [PromotionPath],
+    /// Every path the project declares, which bindings and sources resolve
+    /// against: a command that checks the paths touching one environment
+    /// still resolves a binding against all of them.
+    pub known: &'a [PromotionPath],
+    /// Check only the bindings and the promoted source of this environment,
+    /// as a command working on one environment does; `None` checks them all.
+    pub only: Option<&'a EnvironmentName>,
     /// The declared Environments: instances of an EnvironmentTemplate are not among them.
     pub declared: &'a BTreeSet<EnvironmentName>,
     /// Each environment's units rendered from the worktree.
@@ -121,7 +129,20 @@ pub fn check(inputs: &PathChecks<'_>) -> Vec<Finding> {
         findings.extend(path.unsupported());
         findings.extend(check_path(inputs, path));
     }
-    findings.extend(check_bindings(inputs.paths, inputs.readers));
+    let readers = inputs
+        .readers
+        .iter()
+        .filter(|reader| inputs.only.is_none_or(|only| *only == reader.environment))
+        .cloned()
+        .collect::<Vec<_>>();
+    findings.extend(check_bindings(inputs.known, inputs.sources, &readers));
+    let declared = inputs
+        .declared
+        .iter()
+        .filter(|environment| inputs.only.is_none_or(|only| only == *environment))
+        .cloned()
+        .collect();
+    findings.extend(check_sources(inputs.known, &declared, inputs.sources));
     findings
 }
 
@@ -152,12 +173,24 @@ fn check_path(inputs: &PathChecks<'_>, path: &PromotionPath) -> Vec<Finding> {
         ));
     }
 
+    for (value_name, value) in &path.spec.values {
+        if let Some(problem) = value.select.shape_problem() {
+            findings.push(Finding::new(
+                Code::PromoteSelectorInvalid,
+                format!("PromotionPath {name} value {value_name:?}: {problem}"),
+                "set exactly one selector form: `{unit, input}`, `{unit, output, pointer?}`, or `{unit, artifact, kind?, pointer}`, with RFC 6901 pointers",
+            ));
+        }
+    }
     let mut value_types: BTreeMap<&str, Option<ValueType>> = BTreeMap::new();
     let mut covered: BTreeSet<String> = BTreeSet::new();
     if let Some(source) = endpoints.get("from").and_then(|from| inputs.sources.get(from)) {
         let from = &path.spec.from.environment.clone().unwrap_or_default();
         for (value_name, value) in &path.spec.values {
             let at = format!("PromotionPath {name} value {value_name:?}");
+            if value.select.shape_problem().is_some() {
+                continue;
+            }
             match select_type(inputs, source, from, &value.select, &at) {
                 Ok(found) => {
                     if let Some(unit) = &value.select.unit {
@@ -349,11 +382,10 @@ fn check_reader(
     let name = path.metadata.name.as_str();
     let binding = &reader.binding;
     // Which path a binding means: the one it names, else any path into the reading environment.
-    let means_this = match (&binding.path, &reader.environment) {
-        (Some(named), _) => named == name,
-        (None, Some(environment)) => endpoints.get("to") == Some(environment),
-        (None, None) => true,
-    };
+    let means_this = match &binding.path {
+        Some(named) => named == name,
+        None => true,
+    } && endpoints.get("to") == Some(&reader.environment);
     if !means_this || !path.spec.values.contains_key(&binding.value) {
         return Vec::new();
     }
@@ -380,52 +412,133 @@ fn check_reader(
     )]
 }
 
-/// The problems of every `fromPromotion` binding against the declared paths:
-/// a path or a value that does not exist. Reported once per binding, not per path.
-pub fn check_bindings(paths: &[PromotionPath], readers: &[ValueReader]) -> Vec<Finding> {
+/// The paths an environment's `source.fromPromotion` names, if its source is promoted.
+fn source_paths(source: &RenderedSource) -> Option<Vec<String>> {
+    let promoted = source.environment.spec.source.as_ref()?.from_promotion.as_ref()?;
+    Some(promoted.path.iter().chain(&promoted.paths).cloned().collect())
+}
+
+/// Whether every `fromPromotion` binding can be supplied: Contract:
+/// [Several paths into one environment](../../../../design/promotion.md#several-paths-into-one-environment).
+///
+/// - A binding that names a `path` reads only that path, which must exist,
+///   promote into the binding's environment, and declare the value.
+/// - A path-less binding reads the newest record into its environment that
+///   carries the value. In an environment whose source is promoted, only the
+///   source paths count, and every one of them must define the value, so the
+///   source commit and the values proven with it always move together;
+///   otherwise some path into the environment must define it.
+pub fn check_bindings(
+    paths: &[PromotionPath],
+    sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    readers: &[ValueReader],
+) -> Vec<Finding> {
+    let into = |environment: &EnvironmentName| {
+        paths
+            .iter()
+            .filter(|path| path.spec.to.environment.as_deref() == Some(environment.as_str()))
+            .collect::<Vec<_>>()
+    };
+    let list = |paths: &[&PromotionPath]| {
+        if paths.is_empty() {
+            "none".to_owned()
+        } else {
+            paths
+                .iter()
+                .map(|path| path.metadata.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
     let mut findings = Vec::new();
     for reader in readers {
-        let binding = &reader.binding;
-        let candidates = paths
-            .iter()
-            .filter(|path| match (&binding.path, &reader.environment) {
-                (Some(named), _) => *named == path.metadata.name,
-                (None, Some(environment)) => path.spec.to.environment.as_deref() == Some(environment.as_str()),
-                (None, None) => true,
-            })
-            .collect::<Vec<_>>();
-        let declares = candidates
-            .iter()
-            .any(|path| path.spec.values.contains_key(&binding.value));
-        if declares {
-            continue;
-        }
-        let known = paths
-            .iter()
-            .map(|path| path.metadata.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let message = match &binding.path {
-            Some(named) if !paths.iter().any(|path| path.metadata.name == *named) => format!(
-                "{} reads value {:?} of PromotionPath {named}, which the project does not declare (it declares: {})",
-                reader.location,
-                binding.value,
-                if known.is_empty() { "none" } else { &known }
-            ),
-            Some(named) => format!(
-                "{} reads value {:?} of PromotionPath {named}, which declares no such value",
-                reader.location, binding.value
-            ),
-            None => format!(
-                "{} reads value {:?}, which no PromotionPath into its environment declares",
-                reader.location, binding.value
-            ),
+        let (binding, environment) = (&reader.binding, &reader.environment);
+        let value = &binding.value;
+        let fix = "declare the value under `values` of a PromotionPath into the environment, or correct the binding's `path` and `value`";
+        let problem = if let Some(named) = &binding.path {
+            match paths.iter().find(|path| path.metadata.name == *named) {
+                None => Some(format!(
+                    "{} reads value {value:?} of PromotionPath {named}, which the project does not declare (it declares: {})",
+                    reader.location,
+                    list(&paths.iter().collect::<Vec<_>>())
+                )),
+                Some(path) if path.spec.to.environment.as_deref() != Some(environment.as_str()) => Some(format!(
+                    "{} reads value {value:?} of PromotionPath {named}, which promotes into {}, not into Environment {environment}, so it would never have a record there (paths into {environment}: {})",
+                    reader.location,
+                    path.spec.to.environment.as_deref().unwrap_or("a target"),
+                    list(&into(environment))
+                )),
+                Some(path) if !path.spec.values.contains_key(value) => Some(format!(
+                    "{} reads value {value:?} of PromotionPath {named}, which declares no such value",
+                    reader.location
+                )),
+                Some(_) => None,
+            }
+        } else {
+            let candidates = match sources.get(environment).and_then(source_paths) {
+                Some(names) => names
+                    .iter()
+                    .filter_map(|name| paths.iter().find(|path| path.metadata.name == *name))
+                    .collect::<Vec<_>>(),
+                None => into(environment),
+            };
+            let promoted = sources.get(environment).and_then(source_paths).is_some();
+            let defines = |path: &&PromotionPath| path.spec.values.contains_key(value);
+            if promoted {
+                candidates.iter().find(|path| !defines(path)).map(|path| {
+                    format!(
+                        "{} reads value {value:?} without a path, but PromotionPath {} of Environment {environment}'s promoted source does not define it; every source path must (checked: {})",
+                        reader.location,
+                        path.metadata.name,
+                        list(&candidates)
+                    )
+                })
+            } else if candidates.iter().any(defines) {
+                None
+            } else {
+                Some(format!(
+                    "{} reads value {value:?}, which no PromotionPath into Environment {environment} declares (checked: {})",
+                    reader.location,
+                    list(&candidates)
+                ))
+            }
         };
-        findings.push(Finding::new(
-            Code::PromoteBindingUnknown,
-            message,
-            "declare the value under `values` of the PromotionPath, or correct the binding's `path` and `value`",
-        ));
+        findings.extend(problem.map(|message| Finding::new(Code::PromoteBindingUnknown, message, fix)));
+    }
+    findings
+}
+
+/// The paths a promoted `source.fromPromotion` names: each must exist and
+/// promote into the environment whose source it is.
+pub fn check_sources(
+    paths: &[PromotionPath],
+    declared: &BTreeSet<EnvironmentName>,
+    sources: &BTreeMap<EnvironmentName, RenderedSource>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (environment, source) in sources
+        .iter()
+        .filter(|(environment, _)| declared.contains(*environment))
+    {
+        for name in source_paths(source).unwrap_or_default() {
+            let message = match paths.iter().find(|path| path.metadata.name == name) {
+                None => format!(
+                    "Environment {environment} takes its source from PromotionPath {name}, which the project does not declare"
+                ),
+                Some(path) if path.spec.to.environment.as_deref() != Some(environment.as_str()) => format!(
+                    "Environment {environment} takes its source from PromotionPath {name}, which promotes into {}, so the source would never have a record",
+                    path.spec.to.environment.as_deref().unwrap_or("a target")
+                ),
+                Some(_) => continue,
+            };
+            findings.push(Finding::new(
+                Code::PromoteBindingUnknown,
+                message,
+                format!(
+                    "name PromotionPaths whose `to` is {environment} in `source.fromPromotion`, or declare the path"
+                ),
+            ));
+        }
     }
     findings
 }
@@ -441,7 +554,7 @@ pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers
             walk(spec, "", &mut |pointer, binding| {
                 readers.push(ValueReader {
                     location: format!("unit {unit} of Environment {environment} at {pointer:?}"),
-                    environment: Some(environment.clone()),
+                    environment: environment.clone(),
                     binding,
                     expected: driver.and_then(|driver| match schema_type_at(driver, pointer) {
                         SchemaType::Known(found) => Some(found),
