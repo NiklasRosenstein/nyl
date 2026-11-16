@@ -3094,6 +3094,12 @@ attestations:
   `--unit` is reported `unsupported` (`NYL-ATTEST-UNSUPPORTED`).
 - `nyl attest --name <n> --result pass|fail` records an external
   attestation (see the [promotion contract](promotion.md#health-evidence)).
+  It exits 0 once the result is recorded, whether it passes or fails, and 1
+  only when it cannot be recorded: the caller already knows the result, and
+  what a failing one blocks is reported by the command that reads it
+  (`promote`, or a dependent's `NYL-ATTESTATION-FAILING`). The driver form
+  determines the result itself and exits 3 on a failing attestation
+  (`NYL-ATTESTATION-FAILED`).
   Both forms run under the lease, like every state-writing operation, and
   `--wait-lease` lets a CI job wait for a running reconcile; a refused name
   exits 1. Implementation status: the driver form is implemented, including
@@ -5138,13 +5144,13 @@ The table applies to each command as follows:
 | `reconcile`, `teardown` | As the table | As the table | As the table; with `--detect-drift`, also a drift check that could not conclude (`unknown`) | As the table | As the table |
 | `plan` | The plan is complete, whatever changes it shows | Error, or `--fail-on-leaving` with a unit leaving | Incomplete: a unit is blocked, so its change cannot be planned | A driver's planning failed | — |
 | `detect-drift` | Every checked unit is clean | Error, including a check that passed its unit's deadline | A unit could not be checked: no current receipt, a kind that cannot detect drift, or `unknown` drift | Drift | — |
-| `attest` | Every attested unit's attestations pass | Error, including a check that passed its unit's deadline | A unit could not be attested: no current receipt, `--unit` named a unit whose kind does not attest, or the driver could not tell (`unknown`) | A failing attestation | — |
+| `attest` (driver form) | Every attested unit's attestations pass | Error, including a check that passed its unit's deadline | A unit could not be attested: no current receipt, `--unit` named a unit whose kind does not attest, or the driver could not tell (`unknown`) | A failing attestation | — |
 | `observe` (M5) | Every observation of every observed unit has a value | Error, including a check that passed its unit's deadline | An observation is `pending` or `failed`, a unit has no current receipt, or `--unit` named a unit whose kind cannot observe; a changed value is reported (`NYL-OBSERVATION-CHANGED`) but does not change the exit | — | — |
 | `status` | Every unit is current | Error | As the table | A unit has a `failed` condition | A unit is `uncertain`, or a run lost its lease |
 | `promote` | See the [promotion contract](promotion.md#exit-categories) | | | | |
 | `get`, `validate`, `build` | Success | Error, including a value form that would not resolve | — | `build` only: the build failed | — |
 | `exec` | The tool's own exit status once it has started; 125 when Nyl refuses before starting it (see [Operator exec](#operator-exec)) | | | | |
-| `hold`, `resume`, `recover`, `attest`, `lease break`, `state …` | Done, including a hold delivered to a running run and a `recover` import that left units uncertain | Error or refusal, including `state delete --teardown` after a failed or uncertain teardown | The lease is held or broken (`NYL-LEASE-BROKEN`), `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
+| `hold`, `resume`, `recover`, `attest --name … --result` (external form), `lease break`, `state …` | Done, including a hold delivered to a running run and a `recover` import that left units uncertain | Error or refusal, including `state delete --teardown` after a failed or uncertain teardown | The lease is held or broken (`NYL-LEASE-BROKEN`), `state init --template` is at `maxInstances`, or `state delete --teardown` waits as `teardown` does | — | — |
 
 `--output json` prints the operation's typed report, the same one that renders
 tables and the transition commit summary:

@@ -787,9 +787,9 @@ environment that exists and 1 for one that does not.
 
 ## Scenario 4: promotion to prod
 
-Scenario 4's step 12 assumes that recording a failing attestation exits 3,
-as the driver form does; that is decision D14 of the
-[M6 plan](m6-plan.md#open-decisions), still open.
+Scenario 4's step 12 records a failing external attestation, which exits 0
+(decision D14 of the [M6 plan](m6-plan.md#open-decisions)); the promotion it
+then blocks exits 2.
 
 `reference/promotion` runs a project of its own: scenario 1's dev units
 (`network`, `database`, `web-image`, `kubernetes`), and prod, whose source is

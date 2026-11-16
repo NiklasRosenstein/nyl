@@ -251,9 +251,8 @@ steps:
     expect:
       executed: [web-image, kubernetes]
   - nyl: [attest, -e, dev, --name, qa, --result, fail, --reason, "Checkout flow broken"]
-    exit: 3                           # a failing attestation, as for the driver form (D14)
+    exit: 0                           # recording a failing result succeeds (D14)
     expect:
-      codes: [NYL-ATTESTATION-FAILED]
       commits: {desired: 0, observed: 1}
   - nyl: [promote, dev-to-prod, --revision, '%COMMIT(main)%']
     exit: 2
