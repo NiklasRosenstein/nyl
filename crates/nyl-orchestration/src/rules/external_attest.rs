@@ -94,6 +94,38 @@ fn undeclared(scope: &str, name: &str, declared: &[String], elsewhere: bool, fix
     Finding::new(Code::AttestationUndeclared, message, fix)
 }
 
+impl External {
+    /// `source: {external: {by, identity, source, url}}`.
+    fn source(&self) -> Value {
+        let mut external = json!({
+            "by": self.attester.by,
+            "identity": self.attester.identity,
+        });
+        if let Some(source) = &self.attester.source {
+            external["source"] = json!(source);
+        }
+        if let Some(url) = &self.url {
+            external["url"] = json!(url);
+        }
+        json!({ "external": external })
+    }
+
+    fn attestation(&self, subject: Option<ArtifactUnit>, key: String, now: Timestamp) -> Attestation {
+        Attestation {
+            api_version: StateV1,
+            kind: AttestationKind,
+            name: self.name.clone(),
+            unit: subject,
+            execution_key: key,
+            result: self.result,
+            at: now,
+            source: self.source(),
+            reason: self.reason.clone(),
+            details: Value::Null,
+        }
+    }
+}
+
 /// The attestation set of the unit's current receipt, or of the
 /// environment's current state when `unit` is `None`, with `request`
 /// recorded at `now`.
@@ -104,121 +136,111 @@ pub fn record(
     request: &External,
     now: Timestamp,
 ) -> Result<Recording, Finding> {
-    let source = {
-        let mut external = json!({
-            "by": request.attester.by,
-            "identity": request.attester.identity,
-        });
-        if let Some(source) = &request.attester.source {
-            external["source"] = json!(source);
-        }
-        if let Some(url) = &request.url {
-            external["url"] = json!(url);
-        }
-        json!({ "external": external })
-    };
-    let attestation = |subject: Option<ArtifactUnit>, key: String| Attestation {
-        api_version: StateV1,
-        kind: AttestationKind,
-        name: request.name.clone(),
-        unit: subject,
-        execution_key: key,
-        result: request.result,
-        at: now,
-        source: source.clone(),
-        reason: request.reason.clone(),
-        details: Value::Null,
-    };
     match unit {
-        Some(unit) => {
-            let desired = snapshot.desired.get(unit).ok_or_else(|| {
-                Finding::new(
-                    Code::UnitUnknown,
-                    format!("--unit {unit} names no unit in the state of {environment}"),
-                    format!("list the environment's units with `nyl get units -e {environment}`"),
-                )
-            })?;
-            let declared = external_names(&desired.spec);
-            if !declared.contains(&request.name) {
-                let elsewhere = desired.attestations.contains(&request.name)
-                    || super::evidence::declared(desired).contains(&request.name);
-                return Err(undeclared(
-                    &format!("unit {unit}"),
-                    &request.name,
-                    &declared,
-                    elsewhere,
-                    &format!("{unit}'s `spec.attestations`"),
-                ));
-            }
-            let observed = snapshot.observed.get(unit);
-            let receipt = observed
-                .filter(|_| receipt_is_current(desired, observed))
-                .and_then(|observed| observed.receipt.as_ref())
-                .ok_or_else(|| {
-                    Finding::new(
-                        Code::AttestNoReceipt,
-                        format!("unit {unit} has no current receipt in {environment} to attest"),
-                        format!("run `nyl reconcile -e {environment} --unit {unit}`, then record the attestation"),
-                    )
-                })?;
-            let key = receipt.execution_key.to_string();
-            let subject = desired.unit.uid.clone().map(|uid| ArtifactUnit {
-                environment: environment.clone(),
-                name: unit.clone(),
-                uid,
-            });
-            // An earlier receipt's attestations no longer describe the unit.
-            let mut set: BTreeMap<String, Attestation> = snapshot
-                .attestations
-                .get(unit)
-                .into_iter()
-                .flatten()
-                .filter(|(_, stored)| stored.execution_key == key)
-                .map(|(name, stored)| (name.clone(), stored.clone()))
-                .collect();
-            set.insert(request.name.clone(), attestation(subject, key));
-            Ok(Recording::Unit {
-                unit: unit.clone(),
-                set,
-            })
-        }
-        None => {
-            let commit = snapshot
-                .tips
-                .desired
-                .as_ref()
-                .filter(|_| snapshot.environment.is_some())
-                .ok_or_else(|| {
-                    Finding::new(
-                        Code::AttestNoReceipt,
-                        format!("{environment} has no recorded state to attest: nothing was reconciled yet"),
-                        format!("run `nyl reconcile -e {environment}`, then record the attestation"),
-                    )
-                })?;
-            let declared: Vec<String> = snapshot
-                .environment
-                .as_ref()
-                .and_then(|record| record.spec.get("attestations"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-            if !declared.contains(&request.name) {
-                return Err(undeclared(
-                    &format!("environment {environment}"),
-                    &request.name,
-                    &declared,
-                    false,
-                    &format!("the Environment's `spec.attestations`"),
-                ));
-            }
-            let mut set = snapshot.environment_attestations.clone();
-            set.insert(request.name.clone(), attestation(None, commit.to_string()));
-            Ok(Recording::Environment { set })
-        }
+        Some(unit) => record_unit(environment, snapshot, unit, request, now),
+        None => record_environment(environment, snapshot, request, now),
     }
+}
+
+fn record_unit(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    unit: &UnitName,
+    request: &External,
+    now: Timestamp,
+) -> Result<Recording, Finding> {
+    let desired = snapshot.desired.get(unit).ok_or_else(|| {
+        Finding::new(
+            Code::UnitUnknown,
+            format!("--unit {unit} names no unit in the state of {environment}"),
+            format!("list the environment's units with `nyl get units -e {environment}`"),
+        )
+    })?;
+    let declared = external_names(&desired.spec);
+    if !declared.contains(&request.name) {
+        let elsewhere =
+            desired.attestations.contains(&request.name) || super::evidence::declared(desired).contains(&request.name);
+        return Err(undeclared(
+            &format!("unit {unit}"),
+            &request.name,
+            &declared,
+            elsewhere,
+            &format!("{unit}'s `spec.attestations`"),
+        ));
+    }
+    let observed = snapshot.observed.get(unit);
+    let receipt = observed
+        .filter(|_| receipt_is_current(desired, observed))
+        .and_then(|observed| observed.receipt.as_ref())
+        .ok_or_else(|| {
+            Finding::new(
+                Code::AttestNoReceipt,
+                format!("unit {unit} has no current receipt in {environment} to attest"),
+                format!("run `nyl reconcile -e {environment} --unit {unit}`, then record the attestation"),
+            )
+        })?;
+    let key = receipt.execution_key.to_string();
+    let subject = desired.unit.uid.clone().map(|uid| ArtifactUnit {
+        environment: environment.clone(),
+        name: unit.clone(),
+        uid,
+    });
+    // An earlier receipt's attestations no longer describe the unit.
+    let mut set: BTreeMap<String, Attestation> = snapshot
+        .attestations
+        .get(unit)
+        .into_iter()
+        .flatten()
+        .filter(|(_, stored)| stored.execution_key == key)
+        .map(|(name, stored)| (name.clone(), stored.clone()))
+        .collect();
+    set.insert(request.name.clone(), request.attestation(subject, key, now));
+    Ok(Recording::Unit {
+        unit: unit.clone(),
+        set,
+    })
+}
+
+fn record_environment(
+    environment: &EnvironmentName,
+    snapshot: &EnvironmentSnapshot,
+    request: &External,
+    now: Timestamp,
+) -> Result<Recording, Finding> {
+    let commit = snapshot
+        .tips
+        .desired
+        .as_ref()
+        .filter(|_| snapshot.environment.is_some())
+        .ok_or_else(|| {
+            Finding::new(
+                Code::AttestNoReceipt,
+                format!("{environment} has no recorded state to attest: nothing was reconciled yet"),
+                format!("run `nyl reconcile -e {environment}`, then record the attestation"),
+            )
+        })?;
+    let declared: Vec<String> = snapshot
+        .environment
+        .as_ref()
+        .and_then(|record| record.spec.get("attestations"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    if !declared.contains(&request.name) {
+        return Err(undeclared(
+            &format!("environment {environment}"),
+            &request.name,
+            &declared,
+            false,
+            "the Environment's `spec.attestations`",
+        ));
+    }
+    let mut set = snapshot.environment_attestations.clone();
+    set.insert(request.name.clone(), request.attestation(None, commit.to_string(), now));
+    Ok(Recording::Environment { set })
 }
 
 #[cfg(test)]

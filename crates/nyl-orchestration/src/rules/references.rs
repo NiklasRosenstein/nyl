@@ -1459,23 +1459,20 @@ mod tests {
     #[test]
     fn test_cross_environment_depends_on_rejects_unmeetable_attestations_before_the_receipt_check() {
         let world = producer_without_receipt();
-        for (entry, code, text) in [(
-            json!({"environment": "infra", "unit": "network", "attestations": ["helthy"]}),
-            Code::AttestationUndeclared,
-            "requires attestation \"helthy\" of unit network",
-        )] {
-            let unit = desired("smoke", "Command", json!({ "dependsOn": [entry] }), "smoke");
-            let resolution = resolve_unit(&world.view(), &unit);
-            assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
-            assert!(
-                resolution.errors[0].message.starts_with("spec.dependsOn[0] ")
-                    && resolution.errors[0].message.contains(text),
-                "{:?}",
-                resolution.errors
-            );
-            assert_eq!(resolution.errors[0].code, code);
-            assert_eq!(resolution.readiness, Readiness::Ready, "nothing waits on an error");
-        }
+        let entry = json!({"environment": "infra", "unit": "network", "attestations": ["helthy"]});
+        let unit = desired("smoke", "Command", json!({ "dependsOn": [entry] }), "smoke");
+        let resolution = resolve_unit(&world.view(), &unit);
+        assert_eq!(resolution.errors.len(), 1, "{:?}", resolution.errors);
+        assert!(
+            resolution.errors[0].message.starts_with("spec.dependsOn[0] ")
+                && resolution.errors[0]
+                    .message
+                    .contains("requires attestation \"helthy\" of unit network"),
+            "{:?}",
+            resolution.errors
+        );
+        assert_eq!(resolution.errors[0].code, Code::AttestationUndeclared);
+        assert_eq!(resolution.readiness, Readiness::Ready, "nothing waits on an error");
         // A name the driver observes still waits for the receipt, as before.
         let unit = desired(
             "smoke",
