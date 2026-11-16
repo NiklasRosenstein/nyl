@@ -29,11 +29,7 @@ pub const REACHED: Milestone = Milestone(6);
 /// so none is skipped silently: every reached scenario runs, or is pending.
 /// [`runnable`] applies it, and every runner (tier 1 with each publication
 /// driver, and tier 2) selects its scenarios through that one function.
-pub const PENDING: [(&str, &str); 5] = [
-    (
-        "reference/promotion",
-        "m6/inspect: promote, attest, and the promotion reports",
-    ),
+pub const PENDING: [(&str, &str); 3] = [
     (
         "reference/hotfix",
         "m6/supersede: hotfix paths and NYL-PROMOTE-SUPERSEDES",
@@ -41,10 +37,6 @@ pub const PENDING: [(&str, &str); 5] = [
     (
         "walkthroughs/promotion-record-source",
         "m6/record-source: record: source on the Environment",
-    ),
-    (
-        "walkthroughs/stale-promotion-evidence",
-        "m6/inspect: promote, attest, and the promotion reports",
     ),
     (
         "walkthroughs/value-only-promotion",

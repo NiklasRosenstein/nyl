@@ -528,3 +528,266 @@ fn test_attested_promotion_reads_attestations_recorded_for_older_states() {
     assert_eq!(record["evidence"]["attestations"][0]["scope"], "environment");
     assert_eq!(record["evidence"]["attestations"][0]["name"], "qa");
 }
+
+impl Promote {
+    fn get(&self, args: &[&str]) -> nyl::orchestration::run::CommandOutcome {
+        let mut full = vec!["get"];
+        full.extend_from_slice(args);
+        full.extend(["-o", "json"]);
+        self.shell.invoke(&full)
+    }
+}
+
+/// `get states` lists the source's recorded states newest first, each with
+/// its commits and the attestations recorded for it, including one recorded
+/// for an older state after a newer run; it writes nothing. Catches states
+/// listed oldest first, attestations read from the current files only, and
+/// an inspection that touches state.
+#[test]
+fn test_get_states_lists_recorded_states_with_their_attestations() {
+    let harness = Promote::new();
+    let attested = harness.shell.invoke(&[
+        "attest", "-e", "dev", "--name", "qa", "--result", "pass", "--reason", "QA ok",
+    ]);
+    assert_eq!(attested.exit, 0, "{}", attested.stderr);
+    let first = harness.shell.tip(DEV_DESIRED);
+    harness.release("2");
+    let second = harness.shell.tip(DEV_DESIRED);
+    let tips = [DEV_DESIRED, DEV_OBSERVED].map(|reference| harness.shell.tip(reference));
+
+    let states = harness.get(&["states", "-e", "dev"]);
+    assert_eq!(states.exit, 0, "{}", states.stderr);
+    assert_eq!(states.report["kind"], "StatesReport");
+    let listed = states.report["states"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0]["desiredCommit"], second);
+    assert_eq!(listed[1]["desiredCommit"], first);
+    assert_eq!(
+        listed[0]["attestations"],
+        serde_json::json!([]),
+        "nobody attested the new state"
+    );
+    assert_eq!(listed[1]["attestations"][0]["scope"], "environment");
+    assert_eq!(listed[1]["attestations"][0]["name"], "qa");
+    assert_eq!(listed[1]["attestations"][0]["result"], "pass");
+    assert_eq!(listed[1]["attestations"][0]["reason"], "QA ok");
+    assert!(listed[0]["sourceCommit"].is_string());
+    assert!(listed[0]["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|unit| unit["receipt"] == true));
+    assert_eq!(
+        tips,
+        [DEV_DESIRED, DEV_OBSERVED].map(|reference| harness.shell.tip(reference))
+    );
+
+    let text = harness.shell.invoke(&["get", "states", "-e", "dev"]);
+    assert_eq!(text.exit, 0, "{}", text.stderr);
+    assert!(text.stdout.starts_with(&format!("{second}\n")), "{}", text.stdout);
+    assert!(text.stdout.contains("environment/qa pass at"), "{}", text.stdout);
+}
+
+/// `get promotion-candidates` judges every state as `nyl promote` does: the
+/// state it marks `selected` is the one the dry run would record, at the
+/// path's level; before any state reaches it, it shows `nyl promote`'s own
+/// refusal and still exits 0; after the promotion the recorded state is
+/// `promoted`. Catches a second implementation of the evidence rule that
+/// disagrees with `promote`.
+#[test]
+fn test_promotion_candidates_agree_with_promote() {
+    let harness = Promote::new();
+    let refused = harness.get(&["promotion-candidates", "attested"]);
+    assert_eq!(refused.exit, 0, "{}", refused.stderr);
+    assert_eq!(refused.report["evidence"], "attested");
+    assert_eq!(refused.report["refusal"]["code"], "NYL-PROMOTE-NO-EVIDENCE");
+    let candidate = &refused.report["candidates"][0];
+    assert_eq!(candidate["level"], "published");
+    assert_eq!(candidate["eligible"], false);
+    assert_eq!(candidate["selected"], false);
+    assert_eq!(candidate["missing"][0]["attestation"], "qa");
+    assert_eq!(candidate["missing"][0]["reason"], "pending");
+    assert!(candidate["missing"][0].get("unit").is_none(), "environment-wide");
+    assert!(candidate["values"]["webImage"]
+        .as_str()
+        .unwrap()
+        .starts_with("registry.invalid:5000/web@sha256:"));
+
+    let dry = harness.promote(&["dev-to-prod", "--dry-run"]);
+    let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    assert_eq!(candidates.exit, 0, "{}", candidates.stderr);
+    assert!(candidates.report.get("refusal").is_none());
+    let selected = &candidates.report["candidates"][0];
+    assert_eq!(selected["selected"], true);
+    assert_eq!(selected["promoted"], false);
+    assert_eq!(selected["desiredCommit"], dry.report["record"]["from"]["desiredCommit"]);
+    assert_eq!(selected["sourceCommit"], dry.report["record"]["sourceCommit"]);
+    assert_eq!(
+        selected["values"]["webImage"],
+        dry.report["record"]["values"]["webImage"]["value"]
+    );
+
+    assert_eq!(harness.promote(&["dev-to-prod"]).exit, 0);
+    harness.release("2");
+    let after = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    let listed = after.report["candidates"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        (&listed[0]["selected"], &listed[0]["promoted"]),
+        (&true.into(), &false.into())
+    );
+    assert_eq!(
+        (&listed[1]["selected"], &listed[1]["promoted"]),
+        (&false.into(), &true.into())
+    );
+
+    let unknown = harness.shell.invoke(&["get", "promotion-candidates", "nowhere"]);
+    assert_eq!(unknown.exit, 1);
+    assert!(
+        unknown.stderr.contains("NYL-PROMOTE-BINDING-UNKNOWN"),
+        "{}",
+        unknown.stderr
+    );
+}
+
+/// `get promotions` shows the current record of each path, newest first,
+/// the one prod's last run applied, and every promotion in prod's history,
+/// including a record a later promotion replaced; `status` shows the lineage
+/// of what prod runs, and a newer record waiting for its run. Catches
+/// lineage read from a record no run applied, and history lost with the
+/// replaced record.
+#[test]
+fn test_get_promotions_and_status_show_lineage() {
+    let harness = Promote::new();
+    let none = harness.get(&["promotions", "-e", "prod"]);
+    assert_eq!(none.exit, 0, "{}", none.stderr);
+    assert_eq!(none.report["promotions"], serde_json::json!([]));
+
+    let first = harness.promote(&["dev-to-prod", "--reason", "Release 1"]);
+    assert_eq!(first.exit, 0, "{}", first.stderr);
+    let first_from = first.report["record"]["from"]["desiredCommit"].clone();
+    let applied = harness.shell.invoke(&["reconcile", "-e", "prod"]);
+    assert_eq!(applied.exit, 0, "{}", applied.stderr);
+    let status = harness.shell.invoke(&["status", "-e", "prod", "-o", "json"]);
+    let lineage = &status.report["environments"][0]["promotion"];
+    assert_eq!(lineage["path"], "dev-to-prod");
+    assert_eq!(lineage["sequence"], 1);
+    assert_eq!(lineage["sourceCommit"], first.report["record"]["sourceCommit"]);
+    assert_eq!(lineage["from"]["environment"], "dev");
+    assert_eq!(lineage["from"]["desiredCommit"], first_from);
+    assert!(lineage.get("pendingSequence").is_none());
+    let text = harness.shell.invoke(&["status", "-e", "prod"]);
+    assert!(
+        text.stdout.contains("promoted: dev-to-prod #1 from dev run"),
+        "{}",
+        text.stdout
+    );
+    let running = |report: &serde_json::Value| -> Vec<serde_json::Value> {
+        report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|candidate| candidate["running"] == true)
+            .map(|candidate| candidate["desiredCommit"].clone())
+            .collect()
+    };
+    let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    assert_eq!(
+        running(&candidates.report),
+        std::slice::from_ref(&first_from),
+        "prod runs #1's state"
+    );
+
+    harness.release("2");
+    let second = harness.promote(&["dev-to-prod", "--reason", "Release 2"]);
+    assert_eq!(second.exit, 0, "{}", second.stderr);
+    let status = harness.shell.invoke(&["status", "-e", "prod", "-o", "json"]);
+    let lineage = &status.report["environments"][0]["promotion"];
+    assert_eq!(lineage["sequence"], 1, "prod still runs #1");
+    assert!(lineage.get("from").is_none(), "#1's record was replaced");
+    assert_eq!(lineage["pendingSequence"], 2);
+    let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    assert!(
+        running(&candidates.report).is_empty(),
+        "#1's record was replaced: nothing names what prod runs"
+    );
+
+    let promotions = harness.get(&["promotions", "-e", "prod"]);
+    assert_eq!(promotions.exit, 0, "{}", promotions.stderr);
+    assert_eq!(
+        promotions.report["applied"],
+        serde_json::json!({"path": "dev-to-prod", "sequence": 1})
+    );
+    assert_eq!(promotions.report["promotions"][0]["sequence"], 2);
+    assert_eq!(promotions.report["promotions"][0]["path"], "dev-to-prod");
+    let history = promotions.report["history"].as_array().unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| entry["sequence"].clone())
+            .collect::<Vec<_>>(),
+        [2, 1]
+    );
+    assert_eq!(history[1]["from"]["desiredCommit"], first_from);
+    assert_eq!(history[1]["reason"], "Release 1");
+    assert!(history[1]["commit"].is_string());
+}
+
+/// A target that keeps its record in its source (`record: source`) is not
+/// supported yet: `nyl promote` and `nyl get promotion-candidates` refuse it
+/// alike, so inspection never shows a promotion that cannot be made.
+#[test]
+fn test_record_source_targets_are_refused_by_promote_and_candidates() {
+    let environments = ENVIRONMENTS.replace(
+        "source: {fromPromotion: {path: dev-to-prod}}",
+        "source: {fromPromotion: {path: dev-to-prod, record: source}}",
+    );
+    let harness = Promote::of(&environments, UNITS, true);
+    let promoted = harness.promote(&["dev-to-prod", "--dry-run"]);
+    let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    for outcome in [&promoted, &candidates] {
+        assert_eq!(outcome.exit, 1, "{}", outcome.stderr);
+        assert!(outcome.stderr.contains("NYL-PROMOTE-UNSUPPORTED"), "{}", outcome.stderr);
+    }
+}
+
+/// Two environments that share a desired ref (`spec.state.path`) share its
+/// history, but not their promotions: a promotion into one neither raises
+/// the other's sequence nor appears in its `get promotions` history.
+/// Catches sequences and histories read from every `promote` commit on the
+/// ref.
+#[test]
+fn test_environments_sharing_a_ref_keep_their_own_promotions() {
+    let shared = |name: &str| {
+        format!("  state: {{desiredRef: nyl/shared/desired, observedRef: nyl/shared/observed, path: {name}}}\n")
+    };
+    let environments = ENVIRONMENTS
+        .replace(
+            "  source: {fromPromotion: {path: dev-to-prod}}\n",
+            &format!("  source: {{fromPromotion: {{path: dev-to-prod}}}}\n{}", shared("prod")),
+        )
+        .replace("metadata: {name: values}\nspec:\n  from: {environment: dev}\n  to: {environment: prod}", "metadata: {name: values}\nspec:\n  from: {environment: dev}\n  to: {environment: staging}")
+        + &format!(
+            "---\napiVersion: gitops.nyl/v1\nkind: Environment\nmetadata: {{name: staging}}\nspec:\n  unitSelector: {{matchLabels: {{staging: 'true'}}}}\n  allowUnprotectedSource: true\n{}",
+            shared("staging")
+        );
+    let harness = Promote::of(&environments, UNITS, true);
+    assert_eq!(harness.shell.invoke(&["state", "init", "-e", "staging"]).exit, 0);
+    for _ in 0..2 {
+        let staged = harness.promote(&["values"]);
+        assert_eq!(staged.exit, 0, "{}", staged.stderr);
+        harness.release(&format!("{}", staged.report["record"]["sequence"]));
+    }
+    let promoted = harness.promote(&["dev-to-prod"]);
+    assert_eq!(promoted.exit, 0, "{}", promoted.stderr);
+    assert_eq!(
+        promoted.report["record"]["sequence"], 1,
+        "staging's promotions are not prod's"
+    );
+    let promotions = harness.get(&["promotions", "-e", "prod"]);
+    let history = promotions.report["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0]["path"], "dev-to-prod");
+    let staging = harness.get(&["promotions", "-e", "staging"]);
+    assert_eq!(staging.report["history"].as_array().unwrap().len(), 2);
+}

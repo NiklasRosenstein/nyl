@@ -7,6 +7,7 @@ pub mod delete;
 pub mod diff;
 pub mod diff_tree;
 pub mod get;
+pub mod get_promotion;
 pub mod hold;
 pub mod init;
 pub mod plan;

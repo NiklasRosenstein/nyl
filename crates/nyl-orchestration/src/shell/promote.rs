@@ -85,7 +85,8 @@ pub fn promote(context: &RunContext<'_>, request: &RunRequest, options: &Promote
     super::run::off_runtime(|| promote_in(context, request, options))
 }
 
-fn source_of(path: &PromotionPath) -> Option<EnvironmentName> {
+/// The path's source environment; `None` for a target source (M11).
+pub fn source_of(path: &PromotionPath) -> Option<EnvironmentName> {
     path.spec
         .from
         .environment
@@ -153,20 +154,15 @@ fn body(
     let target = &request.environment;
     let location = &request.location;
     let store = base.store;
-    let snapshot = store.snapshot(location).map_err(|error| store_error(target, &error))?;
-    check_record(store, snapshot.record.as_ref(), target, location)?;
-    let source_location = request.environments.get(source).ok_or_else(|| {
-        request.environment_errors.get(source).cloned().unwrap_or_else(|| {
-            Finding::new(
-                Code::PromoteEnvironmentUnknown,
-                format!(
-                    "the source environment {source} of path {} is not declared",
-                    options.path.metadata.name
-                ),
-                "declare the Environment, or correct the path's `spec.from`",
-            )
-        })
-    })?;
+    // The order of `read_path`, with the invocation's own checks before the
+    // source is read.
+    let snapshot = read_target(store, target, location)?;
+    let source_location = source_location(
+        &request.environments,
+        &request.environment_errors,
+        source,
+        &options.path.metadata.name,
+    )?;
 
     // The values to promote: a subset narrows the path, leaving the rest at their lineage.
     let mut path = options.path.clone();
@@ -212,7 +208,7 @@ fn body(
     let history = read_history(store, source_location, source, &options.select)?;
     let target_history = store.history(location).map_err(|error| store_error(target, &error))?;
     // PR 8 adds the sequence of a `record: source` block here.
-    let history_sequence = next_sequence(&target_history, &snapshot, []);
+    let history_sequence = next_sequence(&target_history, &snapshot, target, []);
     let input = PromotionInput {
         path: &path,
         source,
@@ -456,6 +452,61 @@ fn unverified_warning(check: &ArtifactCheck, why: &str) -> Finding {
     )
 }
 
+/// What a promotion along a path reads, for `nyl get promotion-candidates`
+/// (and `nyl promote`, which reads the same two parts with its own checks
+/// between them): the target's current state, whose records
+/// the decision compares with, and the source's recorded states.
+pub struct PathReading {
+    /// The target environment's snapshot.
+    pub snapshot: EnvironmentSnapshot,
+    /// The source environment's recorded states, newest first.
+    pub history: Vec<RecordedState>,
+}
+
+/// Read what a promotion decides on: the target's snapshot (its state must
+/// exist) and the source's recorded states for `select`. Two syncs, one per
+/// environment, whatever the length of the history.
+pub fn read_path(
+    store: &dyn StateStore,
+    (target, target_location): (&EnvironmentName, &StateLocation),
+    (source, source_location): (&EnvironmentName, &StateLocation),
+    select: &Selection,
+) -> Result<PathReading, Finding> {
+    let snapshot = read_target(store, target, target_location)?;
+    let history = read_history(store, source_location, source, select)?;
+    Ok(PathReading { snapshot, history })
+}
+
+/// The target's snapshot; its state must exist.
+pub fn read_target(
+    store: &dyn StateStore,
+    target: &EnvironmentName,
+    location: &StateLocation,
+) -> Result<EnvironmentSnapshot, Finding> {
+    let snapshot = store.snapshot(location).map_err(|error| store_error(target, &error))?;
+    check_record(store, snapshot.record.as_ref(), target, location)?;
+    Ok(snapshot)
+}
+
+/// Where the path's source environment keeps its state, or why it cannot be
+/// read: the finding its location resolved with, or an undeclared source.
+pub fn source_location<'a>(
+    environments: &'a BTreeMap<EnvironmentName, StateLocation>,
+    errors: &BTreeMap<EnvironmentName, Finding>,
+    source: &EnvironmentName,
+    path: &str,
+) -> Result<&'a StateLocation, Finding> {
+    environments.get(source).ok_or_else(|| {
+        errors.get(source).cloned().unwrap_or_else(|| {
+            Finding::new(
+                Code::PromoteEnvironmentUnknown,
+                format!("the source environment {source} of path {path} is not declared"),
+                "declare the Environment, or correct the path's `spec.from`",
+            )
+        })
+    })
+}
+
 /// The recorded states of `environment` at `location`, newest first, with the
 /// documents at each and the attestations recorded for it, and the history
 /// they were read from.
@@ -483,8 +534,21 @@ pub fn read_history(
     environment: &EnvironmentName,
     select: &Selection,
 ) -> Result<Vec<RecordedState>, Finding> {
+    let history = store
+        .history(location)
+        .map_err(|error| store_error(environment, &error))?;
+    states_of(store, location, environment, &history, select)
+}
+
+/// [`read_history`] over a history already read, without another sync.
+pub fn states_of(
+    store: &dyn StateStore,
+    location: &StateLocation,
+    environment: &EnvironmentName,
+    history: &StateHistory,
+    select: &Selection,
+) -> Result<Vec<RecordedState>, Finding> {
     let error = |error| store_error(environment, &error);
-    let history = store.history(location).map_err(error)?;
     let entries: Vec<DesiredEntry> = history
         .desired
         .iter()
@@ -651,16 +715,19 @@ fn attestations_of(
 /// summary, including those whose records `state restore` removed, so the
 /// sequence never repeats. The current records, the sequence the environment
 /// record says a run applied, and `others` (a `record: source` block's, PR 8)
-/// count too, for state moved without its history.
+/// count too, for state moved without its history. Environments that share
+/// a desired ref (`spec.state.path`) share its history, so only promotions
+/// into `environment` count.
 pub fn next_sequence(
     history: &StateHistory,
     snapshot: &EnvironmentSnapshot,
+    environment: &EnvironmentName,
     others: impl IntoIterator<Item = u64>,
 ) -> u64 {
     history
         .desired
         .iter()
-        .filter_map(|commit| recorded_sequence(&commit.message))
+        .filter_map(|commit| recorded_sequence(&commit.message, environment))
         .chain(snapshot.promotions.values().map(|record| record.sequence))
         .chain(
             snapshot
@@ -673,13 +740,24 @@ pub fn next_sequence(
         .map_or(1, |highest| highest + 1)
 }
 
-/// The sequence a `promote` transition commit's summary records.
-pub fn recorded_sequence(message: &str) -> Option<u64> {
+/// The sequence a `promote` transition commit into `environment` records.
+pub fn recorded_sequence(message: &str, environment: &EnvironmentName) -> Option<u64> {
+    recorded_summary(message, environment)?.get("sequence")?.as_u64()
+}
+
+/// The `promotion` summary of a `promote` transition commit into
+/// `environment`: its path, sequence, source commit, and source state, as
+/// `promote` writes it. A commit whose `Nyl-Environment` names another
+/// environment sharing the ref is not one.
+pub fn recorded_summary(message: &str, environment: &EnvironmentName) -> Option<Value> {
     if trailer(message, "Nyl-Operation") != Some("promote") {
         return None;
     }
+    if trailer(message, "Nyl-Environment").is_some_and(|name| name.trim() != environment.as_str()) {
+        return None;
+    }
     let line = message.lines().find_map(|line| line.strip_prefix("promotion: "))?;
-    serde_json::from_str::<Value>(line).ok()?.get("sequence")?.as_u64()
+    serde_json::from_str::<Value>(line).ok().filter(Value::is_object)
 }
 
 #[cfg(test)]
@@ -687,7 +765,17 @@ mod tests {
     use super::*;
 
     fn message(operation: &str, extra: &str) -> String {
-        format!("nyl: {operation} prod\n\nunits: {{}}\n{extra}\n\nNyl-Operation: {operation}\nNyl-Run-Id: r\n")
+        message_for(operation, extra, "prod")
+    }
+
+    fn message_for(operation: &str, extra: &str, environment: &str) -> String {
+        format!(
+            "nyl: {operation} {environment}\n\nunits: {{}}\n{extra}\n\nNyl-Operation: {operation}\nNyl-Run-Id: r\nNyl-Environment: {environment}\n"
+        )
+    }
+
+    fn prod() -> EnvironmentName {
+        EnvironmentName::new("prod").unwrap()
     }
 
     /// The sequence comes from the summary of `promote` commits only: a
@@ -697,10 +785,46 @@ mod tests {
     #[test]
     fn test_recorded_sequence_reads_promote_summaries_only() {
         let summary = "promotion: {\"path\":\"dev-to-prod\",\"sequence\":7}";
-        assert_eq!(recorded_sequence(&message("promote", summary)), Some(7));
-        assert_eq!(recorded_sequence(&message("reconcile", summary)), None);
-        assert_eq!(recorded_sequence(&message("promote", "promotion: nonsense")), None);
-        assert_eq!(recorded_sequence(&message("promote", "")), None);
+        assert_eq!(recorded_sequence(&message("promote", summary), &prod()), Some(7));
+        assert_eq!(recorded_sequence(&message("reconcile", summary), &prod()), None);
+        assert_eq!(
+            recorded_sequence(&message("promote", "promotion: nonsense"), &prod()),
+            None
+        );
+        assert_eq!(recorded_sequence(&message("promote", ""), &prod()), None);
+    }
+
+    /// Environments that share a desired ref (`spec.state.path`) share its
+    /// history: a promotion into another of them never raises this
+    /// environment's sequence. Catches a sequence that skips numbers, or
+    /// one taken from a neighbour's history.
+    #[test]
+    fn test_next_sequence_counts_only_this_environments_promotions() {
+        let commit = |message: String| nyl_core::orchestration::ports::DesiredCommit {
+            commit: CommitId::new("a".repeat(40)).unwrap(),
+            message,
+            changed_desired: true,
+        };
+        let history = StateHistory {
+            desired: vec![
+                commit(message_for(
+                    "promote",
+                    "promotion: {\"path\":\"to-staging\",\"sequence\":9}",
+                    "staging",
+                )),
+                commit(message(
+                    "promote",
+                    "promotion: {\"path\":\"dev-to-prod\",\"sequence\":2}",
+                )),
+            ],
+            ..StateHistory::default()
+        };
+        assert_eq!(next_sequence(&history, &EnvironmentSnapshot::default(), &prod(), []), 3);
+        let staging = EnvironmentName::new("staging").unwrap();
+        assert_eq!(
+            next_sequence(&history, &EnvironmentSnapshot::default(), &staging, []),
+            10
+        );
     }
 
     use std::collections::BTreeMap;

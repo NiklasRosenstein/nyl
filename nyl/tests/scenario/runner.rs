@@ -2219,7 +2219,17 @@ fn takes_json_output(args: &[String]) -> bool {
         Some("build" | "exec") => false,
         Some("get") => matches!(
             args.get(1).map(String::as_str),
-            Some("unit" | "units" | "output" | "artifact" | "observation" | "artifacts")
+            Some(
+                "unit"
+                    | "units"
+                    | "output"
+                    | "artifact"
+                    | "observation"
+                    | "artifacts"
+                    | "states"
+                    | "promotion-candidates"
+                    | "promotions"
+            )
         ),
         _ => true,
     }

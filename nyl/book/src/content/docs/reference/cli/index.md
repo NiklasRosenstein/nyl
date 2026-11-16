@@ -36,6 +36,7 @@ closely related pair.
   - [`observe`](/nyl/reference/cli/observe/) - Read and record the observed values of current receipts, for jobs that hold the read credentials
   - [`teardown`](/nyl/reference/cli/teardown/) - Tear units down, or every unit, and confirm a publication's removal
   - [`promote`](/nyl/reference/cli/promote/) - Record what one environment proved as a promotion record in another
+  - [`get states and promotions`](/nyl/reference/cli/get-promotions/) - List an environment's recorded states and promotion records, and judge a path's candidates as promote would
   - [`hold and resume`](/nyl/reference/cli/hold/) - Freeze a unit so reconcile changes nothing about it, and lift the hold
   - [`recover`](/nyl/reference/cli/recover/) - Clear a unit's uncertain or failed condition, or accept a checkpointed result
   - [`exec`](/nyl/reference/cli/exec/) - Run a held unit's native tool with recorded repair context

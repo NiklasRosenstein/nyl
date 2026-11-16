@@ -5092,11 +5092,17 @@ nyl get artifact web-image/image -e dev --pointer /reference   # pointer relativ
 
 nyl get environments
 nyl get promotion-paths
-nyl get promotions -e staging      # PromotionRecords with each value's source and evidence
+nyl get promotions -e staging      # PromotionRecords with each value's source and evidence, and their history
+nyl get states -e dev              # recorded states with their evidence, newest first
+nyl get promotion-candidates dev-to-prod   # dev's states judged as nyl promote judges them
 ```
 
 - Tables join desired and observed state for reading. `-o yaml` and `-o json`
-  return the exact persisted documents, never a synthesized merge.
+  return the exact persisted documents, never a synthesized merge. The
+  promotion forms `states`, `promotion-candidates`, and `promotions` are
+  reports instead (`StatesReport`, `PromotionCandidatesReport`,
+  `PromotionsReport`), because they judge or join history rather than show
+  one document.
 - `nyl get output <unit>/<output>`, `nyl get observation <unit>/<name>`, and
   `nyl get artifact <unit>/<name> --pointer …` return single values for scripts and resolve exactly like the
   matching `fromUnit` reference: the same pointer base (inside the artifact's

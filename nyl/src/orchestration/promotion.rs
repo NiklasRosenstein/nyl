@@ -136,3 +136,119 @@ pub fn as_error(findings: &[Finding]) -> NylError {
             .join("\n")
     ))
 }
+
+/// The PromotionPath `name` with both ends resolved, as `nyl promote` and
+/// `nyl get promotion-candidates` take it, or why neither can use it: no
+/// such path, a form M6 does not support, or an end that names no
+/// environment.
+pub fn promotable_path(
+    inventory: &GitOpsInventory,
+    name: &str,
+) -> std::result::Result<(PromotionPath, String, String), Finding> {
+    use nyl_core::orchestration::codes::Code;
+    use nyl_core::resources::promotion::ChangeGate;
+    let Some(path) = declared_paths(inventory)
+        .into_iter()
+        .find(|path| path.metadata.name == name)
+    else {
+        return Err(Finding::new(
+            Code::PromoteBindingUnknown,
+            format!("the project declares no PromotionPath {name:?}"),
+            "list the declared paths with `nyl get promotion-paths`",
+        ));
+    };
+    if path.spec.change_gate != ChangeGate::None || path.spec.from.target.is_some() || path.spec.to.target.is_some() {
+        return Err(Finding::new(
+            Code::PromoteUnsupported,
+            format!(
+                "path {name} uses changeGate: pullRequest or a DeploymentTarget as its source or target, which M11 delivers"
+            ),
+            "use environments at both ends and `changeGate: none`",
+        ));
+    }
+    let (Some(source), Some(target)) = (path.spec.from.environment.clone(), path.spec.to.environment.clone()) else {
+        return Err(Finding::new(
+            Code::PromoteEnvironmentUnknown,
+            format!("path {name} names no source or target environment"),
+            "set `spec.from.environment` and `spec.to.environment`",
+        ));
+    };
+    Ok((path, source, target))
+}
+
+/// What a path's target contributes to judging the source's states: the
+/// units it selects, which the whole-source rule covers, as the entry
+/// worktree renders them (not at each candidate's source commit); whether its
+/// source is promoted along the path; and the `NYL-PROMOTE-REBUILT` warnings.
+pub struct TargetView {
+    pub target_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
+    pub promotes_source: bool,
+    pub rebuilt: Vec<(String, Finding)>,
+}
+
+/// The [`TargetView`] of `path` from the target's session, the one way
+/// `nyl promote` and `nyl get promotion-candidates` both take it. A target
+/// that keeps its record in its source (`record: source`) is refused with
+/// `NYL-PROMOTE-UNSUPPORTED` until that form is supported, by both.
+pub fn target_view(
+    session: &super::session::Session,
+    drivers: &DriverSet,
+    path: &PromotionPath,
+) -> std::result::Result<TargetView, Finding> {
+    use nyl_core::orchestration::codes::Code;
+    let entry = session.entry()?;
+    // `record: source` writes a block into the Environment's source, which is a later change.
+    if entry
+        .spec
+        .source
+        .as_ref()
+        .and_then(|source| source.from_promotion.as_ref())
+        .is_some_and(|promoted| promoted.record.as_deref() == Some("source"))
+    {
+        return Err(Finding::new(
+            Code::PromoteUnsupported,
+            format!(
+                "Environment {} keeps its promotion record in its source (`record: source`), which is not supported yet",
+                session.resolved.name
+            ),
+            "remove `record: source`: the record then lives in the environment's state",
+        ));
+    }
+    let promotes_source = entry
+        .spec
+        .source
+        .as_ref()
+        .and_then(|source| source.from_promotion.as_ref())
+        .is_some_and(|promoted| {
+            promoted
+                .path
+                .iter()
+                .chain(&promoted.paths)
+                .any(|name| *name == path.metadata.name)
+        });
+    let target = session.resolved.name.clone();
+    let commit = session.entry_commit()?;
+    let rendered = session
+        .renderer()
+        .render(&session.inventory.worktree_root, &target, &commit)
+        .map_err(|error| {
+            Finding::new(
+                Code::SourceUnavailable,
+                format!("cannot render the units of {target}: {error}"),
+                "correct the environment's unit declarations; `nyl validate` reports them",
+            )
+        })?;
+    let readers = promotion_paths::unit_readers(&BTreeMap::from([(target.clone(), rendered.clone())]), drivers);
+    let rebuilt = promotion_paths::rebuilt(path, &target, &rendered, &readers);
+    let target_units = rendered
+        .units
+        .iter()
+        .filter(|(_, unit)| unit.selected)
+        .map(|(name, _)| name.clone())
+        .collect();
+    Ok(TargetView {
+        target_units,
+        promotes_source,
+        rebuilt,
+    })
+}

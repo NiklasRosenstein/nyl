@@ -227,6 +227,7 @@ export default defineConfig({
                   "reference/cli/observe",
                   "reference/cli/teardown",
                   "reference/cli/promote",
+                  "reference/cli/get-promotions",
                   "reference/cli/hold",
                   "reference/cli/recover",
                   "reference/cli/exec",

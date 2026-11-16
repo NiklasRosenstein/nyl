@@ -199,6 +199,28 @@ pub enum InstanceAction {
     Busy,
 }
 
+/// The promotion an environment's source commit came from, as `status`
+/// shows it.
+///
+/// Contract: [Promoting an environment's source](../../../../design/promotion.md#promoting-an-environments-source).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotionLineage {
+    /// The PromotionPath whose record supplied the source commit.
+    pub path: String,
+    /// The record's sequence the last run applied.
+    pub sequence: u64,
+    /// The source commit the environment runs.
+    pub source_commit: CommitId,
+    /// The source state the applied record promoted; absent when the path's
+    /// record has since been replaced by a newer one no run applied yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<nyl_core::orchestration::promotion::PromotionFrom>,
+    /// The sequence of the path's newer record that the next run applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_sequence: Option<u64>,
+}
+
 /// One environment of a report.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,6 +244,10 @@ pub struct EnvironmentRunReport {
     /// Credential-free origin URL, or local checkout path when it has no origin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_repository: Option<String>,
+    /// For `status`, the lineage of an environment whose source commit a
+    /// promotion chose ([`crate::rules::promotion::lineage`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PromotionLineage>,
     /// Units leaving the ownership set; never filtered by `--unit`.
     pub leaving: Vec<LeavingUnit>,
     pub units: BTreeMap<UnitName, UnitReport>,
@@ -271,6 +297,7 @@ impl EnvironmentRunReport {
             run: None,
             source_commit: None,
             source_repository: None,
+            promotion: None,
             state_repository: None,
             state_local_path: None,
             leaving: Vec::new(),

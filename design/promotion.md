@@ -364,11 +364,27 @@ spec:
   `--no-verify-artifacts` skips the check, for runners without registry
   access; the record then says `artifactsVerified: false`.
 - Inspection: `nyl get states -e <env>` lists an environment's recorded states
-  with source commit, results, publication, and recorded attestations;
+  with their commits and source commit, which units have a current receipt
+  and the names of the artifacts those receipts list, and the recorded
+  attestations;
   `nyl get promotion-candidates <path>` evaluates the path's source states
-  against the path, showing the level each reaches or why not, the values it
-  would carry, and which one the target runs now; `nyl promote … --dry-run`
-  shows the chosen state and the exact change without writing anything.
+  against the path with the rules and the reading of state `nyl promote`
+  uses (a value-only path per value, as `nyl promote` selects a state per
+  value), showing the level each reaches (up to the path's) or why not, the
+  values it would carry, the state `nyl promote` would take now or the code
+  it would refuse with, which one the path's record names, and which one
+  the target runs now. It does not verify artifacts, so it cannot report
+  `NYL-PROMOTE-ARTIFACT-MISSING`. `nyl promote
+  … --dry-run` shows the chosen state and the exact change without writing
+  anything. `nyl get promotions -e <env>` lists the environment's records and
+  every promotion in its desired history, and `status` shows the lineage of
+  what a promoted environment runs: the applied record's path, sequence, and
+  source commit, the source state it promoted while that record is still
+  the path's current one, and the sequence of a newer record no run applied
+  yet (`status` reads only the current snapshot, so a replaced record's
+  source state is shown by `nyl get promotions` instead).
+  Each reads a history after one sync, so its round trips to the state
+  remote do not grow with the history.
 - Evidence covers the whole source, not only the selected values: in that
   state, every unit the target environment also selects has a current
   receipt, and at `attested` every such unit's required attestations pass for

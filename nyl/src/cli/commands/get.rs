@@ -20,6 +20,7 @@ use nyl_orchestration::run_report::UnitReport;
 use nyl_orchestration::shell::inspect::{self, GetValue};
 use serde_json::{json, Value};
 
+use super::get_promotion::{self, GetCandidatesArgs, GetHistoryArgs, HistoryForm};
 use crate::cli::table::{render as render_table, Cell};
 use crate::orchestration::project::{declared, state_tips_at};
 use crate::orchestration::run::{CommandOutcome, Wiring};
@@ -86,6 +87,15 @@ enum GetCommand {
     Observation(GetValueArgs),
     /// Get the artifacts of the units' latest receipts.
     Artifacts(GetStateArgs),
+    /// Get an environment's recorded states, newest first, with the attestations recorded for each.
+    #[command(alias = "state")]
+    States(GetHistoryArgs),
+    /// Evaluate a PromotionPath's source states as nyl promote would: the level each reaches or what it lacks.
+    #[command(name = "promotion-candidates", alias = "promotion-candidate")]
+    PromotionCandidates(GetCandidatesArgs),
+    /// Get an environment's PromotionRecords, the one its source runs, and every promotion in its history.
+    #[command(alias = "promotion")]
+    Promotions(GetHistoryArgs),
 }
 
 #[derive(Args, Debug)]
@@ -248,6 +258,9 @@ pub fn run(args: &GetArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
                 value_form(value, ValueKind::Observation, env, snapshot, wiring.clock.now())
             })
         }
+        GetCommand::States(states) => get_promotion::history(HistoryForm::States, states),
+        GetCommand::PromotionCandidates(candidates) => get_promotion::candidates(candidates, wiring),
+        GetCommand::Promotions(promotions) => get_promotion::history(HistoryForm::Promotions, promotions),
         GetCommand::Artifacts(artifacts) => {
             let environment = required_environment(&artifacts.state, "get artifacts")?;
             state_form(&artifacts.path, environment, &artifacts.state, |snapshot, _| {
