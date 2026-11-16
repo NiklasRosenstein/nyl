@@ -26,6 +26,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ids::{EnvironmentName, UnitName};
 
+/// The text of a blocker waiting for a promoted value.
+const PROMOTION_MISSING_TEXT: &str = "no PromotionRecord carries value ";
+
 /// The producer a blocker names: a unit of the consumer's own environment, or
 /// of another one.
 ///
@@ -159,6 +162,29 @@ impl Blocker {
             .or_else(|| parse_no_current_receipt(text))
             .or_else(|| parse_multi_environment(text))
             .unwrap_or_else(|| Self::other(text))
+    }
+
+    /// A `fromPromotion` binding whose value no record carries yet
+    /// (`NYL-PROMOTION-MISSING`). It is stored as [`Self::Other`]: the
+    /// persisted form gains no variant, and [`Self::promotion_missing_of`]
+    /// is the only reader of its text.
+    pub fn promotion_missing(value: &str, path: Option<&str>) -> Self {
+        Self::other(match path {
+            Some(path) => format!("{PROMOTION_MISSING_TEXT}{value:?} on path {path} yet"),
+            None => format!("{PROMOTION_MISSING_TEXT}{value:?} yet"),
+        })
+    }
+
+    /// The value and optional path of a blocker made by
+    /// [`Self::promotion_missing`].
+    pub fn promotion_missing_of(&self) -> Option<(String, Option<String>)> {
+        let Self::Other { message } = self else {
+            return None;
+        };
+        let rest = message.strip_prefix(PROMOTION_MISSING_TEXT)?.strip_prefix('"')?;
+        let (value, rest) = rest.split_once('"')?;
+        let path = rest.strip_prefix(" on path ")?.strip_suffix(" yet");
+        (path.is_some() || rest == " yet").then(|| (value.to_owned(), path.map(str::to_owned)))
     }
 
     /// The human text of the blocker, the one place it is written.

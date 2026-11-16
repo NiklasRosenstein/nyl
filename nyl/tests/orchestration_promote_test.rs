@@ -27,6 +27,7 @@ metadata: {name: dev}
 spec:
   unitSelector: {matchLabels: {dev: 'true'}}
   allowUnprotectedSource: true
+  attestations: [qa]
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -42,6 +43,17 @@ metadata: {name: dev-to-prod}
 spec:
   from: {environment: dev}
   to: {environment: prod}
+  values:
+    webImage:
+      select: {unit: web-image, artifact: image, pointer: /reference}
+---
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata: {name: attested}
+spec:
+  from: {environment: dev}
+  to: {environment: prod}
+  evidence: attested
   values:
     webImage:
       select: {unit: web-image, artifact: image, pointer: /reference}
@@ -77,6 +89,19 @@ spec:
   command: [sh, -c, 'true']
 ";
 
+/// prod's own unit, which binds the promoted image.
+const BINDER: &str = "---
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata:
+  name: binder
+  labels: {prod: 'true'}
+spec:
+  command: [sh, -c, 'true']
+  values:
+    image: {fromPromotion: {value: webImage}}
+";
+
 struct Promote {
     shell: shell::Harness,
     _project: TempDir,
@@ -97,14 +122,14 @@ impl Promote {
     }
 
     fn with(reconciled: bool) -> Self {
-        Self::of(ENVIRONMENTS, reconciled)
+        Self::of(ENVIRONMENTS, &format!("{UNITS}{BINDER}"), reconciled)
     }
 
-    fn of(environments: &str, reconciled: bool) -> Self {
+    fn of(environments: &str, units: &str, reconciled: bool) -> Self {
         let project = project(&[
             shell::NYL_TOML,
             ("nyl/environments.yaml", environments),
-            ("nyl/units.yaml", UNITS),
+            ("nyl/units.yaml", units),
             ("services/web/Dockerfile", "FROM scratch\n"),
         ]);
         let shell = shell::Harness::new(project.path(), true);
@@ -243,6 +268,10 @@ fn test_a_dry_run_writes_nothing_and_reports_the_record() {
     let dry = harness.promote(&["dev-to-prod", "--dry-run"]);
     assert_eq!(dry.exit, 0, "{}", dry.stderr);
     assert_eq!(dry.report["dryRun"], true);
+    assert_eq!(
+        dry.report["outcome"], "done",
+        "a dry run that would write is not `unchanged`"
+    );
     assert_eq!(dry.report["record"]["path"], "dev-to-prod");
     assert_eq!(dry.report["record"]["sequence"], 1);
     assert!(dry.report.get("commits").is_none());
@@ -407,6 +436,19 @@ fn test_value_promotes_a_subset_and_keeps_the_rest() {
     );
     assert!(values["repository"].is_object());
     assert_eq!(subset.report["record"]["sequence"], 2);
+    // The carried value names the state the old record took it from.
+    assert_eq!(
+        values["webImage"]["state"]["desiredCommit"],
+        first.report["record"]["from"]["desiredCommit"]
+    );
+    assert_eq!(
+        values["webImage"]["state"]["run"],
+        first.report["record"]["from"]["run"]
+    );
+    assert!(
+        values["repository"]["state"].is_null(),
+        "the promoted value is from `from`"
+    );
     let unknown = harness.promote(&["values", "--value", "nope"]);
     assert_eq!(unknown.exit, 1);
     assert!(
@@ -416,17 +458,73 @@ fn test_value_promotes_a_subset_and_keeps_the_rest() {
     );
     let source = harness.promote(&["dev-to-prod", "--value", "webImage"]);
     assert_eq!(source.exit, 1);
-    assert!(source.stderr.contains("NYL-PROMOTE-UNSUPPORTED"), "{}", source.stderr);
+    assert!(
+        source.stderr.contains("NYL-PROMOTE-SELECTOR-INVALID"),
+        "{}",
+        source.stderr
+    );
 }
 
-/// A target that also selects the unit a value reads builds its own result:
-/// the promotion succeeds and warns (`NYL-PROMOTE-REBUILT`) naming the unit.
-/// Catches a promoted value silently replacing what the target builds.
+/// A target warns (`NYL-PROMOTE-REBUILT`) only when it builds the unit a
+/// value reads and one of its own bindings replaces that unit's result: with
+/// the binding the promotion succeeds and warns naming the unit; building the
+/// unit without binding its value, or binding without building, does not.
+/// Catches a warning for every shared unit, and a silent double result.
 #[test]
-fn test_a_target_that_builds_the_promoted_unit_is_warned() {
-    let harness = Promote::of(&ENVIRONMENTS.replace("{prod: 'true'}", "{dev: 'true'}"), true);
+fn test_a_target_that_builds_and_binds_the_promoted_unit_is_warned() {
+    let both = UNITS.replace(
+        "labels: {dev: 'true'}
+spec:
+  context",
+        "labels: {dev: 'true', prod: 'true'}
+spec:
+  context",
+    );
+    assert_ne!(both, UNITS);
+    let harness = Promote::of(ENVIRONMENTS, &format!("{both}{BINDER}"), true);
     let promoted = harness.promote(&["dev-to-prod"]);
     assert_eq!(promoted.exit, 0, "{}", promoted.stderr);
     assert!(promoted.stderr.contains("NYL-PROMOTE-REBUILT"), "{}", promoted.stderr);
     assert!(promoted.stderr.contains("web-image"), "{}", promoted.stderr);
+    // Builds it, binds nothing.
+    let harness = Promote::of(ENVIRONMENTS, &both, true);
+    let building = harness.promote(&["dev-to-prod"]);
+    assert_eq!(building.exit, 0, "{}", building.stderr);
+    assert!(!building.stderr.contains("NYL-PROMOTE-REBUILT"), "{}", building.stderr);
+    // Binds it, builds nothing: the ordinary setup.
+    let harness = Promote::new();
+    let binding = harness.promote(&["dev-to-prod"]);
+    assert!(!binding.stderr.contains("NYL-PROMOTE-REBUILT"), "{}", binding.stderr);
+}
+
+/// At `attested` the environment's `qa` must pass for the state: without it
+/// the promotion is exit 2 and says what is missing; recorded for a state,
+/// it still counts after a later run replaced the current file, because the
+/// walk of the observed history finds it, and the newer state without it
+/// is passed over. Catches evidence read from the current files only, which
+/// would refuse the proven state, or accept one nobody attested.
+#[test]
+fn test_attested_promotion_reads_attestations_recorded_for_older_states() {
+    let harness = Promote::new();
+    let refused = harness.promote(&["attested"]);
+    assert_eq!(refused.exit, 2, "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("NYL-PROMOTE-NO-EVIDENCE") && refused.stderr.contains("qa"),
+        "{}",
+        refused.stderr
+    );
+    let attested = harness
+        .shell
+        .invoke(&["attest", "-e", "dev", "--name", "qa", "--result", "pass"]);
+    assert_eq!(attested.exit, 0, "{}", attested.stderr);
+    let proven = harness.shell.tip(DEV_DESIRED);
+    harness.release("2");
+    assert_ne!(harness.shell.tip(DEV_DESIRED), proven);
+    let promoted = harness.promote(&["attested"]);
+    assert_eq!(promoted.exit, 0, "{}", promoted.stderr);
+    let record = &promoted.report["record"];
+    assert_eq!(record["from"]["desiredCommit"], proven, "the state qa was recorded for");
+    assert_eq!(record["evidence"]["level"], "attested");
+    assert_eq!(record["evidence"]["attestations"][0]["scope"], "environment");
+    assert_eq!(record["evidence"]["attestations"][0]["name"], "qa");
 }

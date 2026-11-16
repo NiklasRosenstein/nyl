@@ -1059,14 +1059,9 @@ impl<'r, 'a> Session<'r, 'a> {
         };
         let mut units = Self::resolution_units(prepared, held);
         // Path-less promotion bindings of a promoted environment read only the paths that supply its source.
-        let source_paths: Option<BTreeSet<String>> = self
-            .request
-            .entry
-            .spec
-            .source
-            .as_ref()
-            .and_then(|source| source.from_promotion.as_ref())
-            .map(|promoted| promoted.path.iter().chain(&promoted.paths).cloned().collect());
+        let source_paths = serde_json::to_value(&self.request.entry.spec)
+            .ok()
+            .and_then(|spec| crate::rules::sources::promoted_source_paths(&spec));
         let mut commits = BTreeMap::new();
         let mut errors: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
         let mut shadow = BTreeMap::new();
@@ -1513,6 +1508,7 @@ fn blocked_report(environment: &EnvironmentName, unit: &DesiredUnit) -> (Vec<Blo
                 environment.as_str(),
                 reasons,
             ))
+            .chain(crate::rules::unit_state::promotion_warnings(&unit.unit.name, reasons))
             .collect(),
     )
 }

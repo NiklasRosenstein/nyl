@@ -175,6 +175,25 @@ pub fn promoted_record<'a>(
         })
 }
 
+/// The promotion paths that supply an environment's source, from its
+/// Environment spec (the declared one or the one an environment record
+/// keeps): `None` unless `source.fromPromotion` is set. A `fromPromotion`
+/// binding without `path` reads only records on these paths, so every
+/// resolution of references, run, `get`, or direct command, derives them
+/// here.
+pub fn promoted_source_paths(environment_spec: &Value) -> Option<std::collections::BTreeSet<String>> {
+    let promoted = environment_spec.pointer("/source/fromPromotion")?;
+    let single = promoted.get("path").and_then(Value::as_str).map(str::to_owned);
+    let several = promoted
+        .get("paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned);
+    Some(single.into_iter().chain(several).collect())
+}
+
 /// Refuse source forms the entry-repository resolver cannot represent.
 pub fn unsupported_source(entry: &Environment) -> Option<Finding> {
     let source = entry.spec.source.as_ref()?;

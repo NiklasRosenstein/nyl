@@ -214,7 +214,7 @@ scenario step yet; each gets one, or rule tests only, in the PR named:
   PR 11.
 - `NYL-PROMOTE-UNCHECKED` (a value without a known source commit) and
   repository-qualified `--supersede web:S1..c3d4`: PR 9, rule tests.
-- The declared type of the Release input a `fromPromotion` binding in a DeploymentTarget's `releaseInputs` fills, and the fields of an artifact a selector reads: PR 3 compares only what it can know from rendered units (a literal, a declared output's type, the kind's schema at a pointer, and the field a unit binding replaces). PR 6 reads Release declarations when it resolves target bindings and checks artifacts against the receipt, so both belong there.
+- The declared type of the Release input a `fromPromotion` binding in a DeploymentTarget's `releaseInputs` fills, and the fields of an artifact a selector reads: PR 3 compares only what it can know from rendered units (a literal, a declared output's type, the kind's schema at a pointer, and the field a unit binding replaces). PR 6 did not add them: a Release input's declared type is known to the publication side, and an artifact's fields to the producing kind, so the checks need a driver-owned contract for field types (the engine may not name `/releases/…` layouts or artifact kinds). They move to a follow-up change after PR 11 that adds it.
 - A target environment that rebuilds a unit its `fromPromotion` bindings
   replace (the warning and the "rebuilt" record): PR 6.
 - `nyl promote` while the target's lease is held (exit 2): PR 6, shell test.

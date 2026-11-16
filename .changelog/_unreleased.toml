@@ -55,5 +55,5 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "d7283997-e441-42de-bda2-c4d6da0a1e8a"
 type = "fix"
-description = "`nyl validate` reports invalid units and PromotionPaths before it compiles the DeploymentTargets, so a path whose source Environment was removed is named instead of the target that no environment places any more; `nyl get --state-revision` pairs the other state ref's commit by `Nyl-Run-Id`, so a state whose commits share a second is read whole"
+description = "`nyl validate` reports a failing DeploymentTarget compile together with invalid units and PromotionPaths instead of stopping at the target, so a path whose source Environment was removed is named next to the target that no environment places any more; `nyl get --state-revision` pairs the other state ref's commit by `Nyl-Run-Id`, so a state whose commits share a second is read whole"
 author = "@NiklasRosenstein"

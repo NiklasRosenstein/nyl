@@ -781,9 +781,22 @@ impl Driver for OciImageDriver {
             ToolExit::Exited { code: 0, .. } => ArtifactStatus::Present,
             ToolExit::Exited { stderr, .. } => {
                 let text = String::from_utf8_lossy(&stderr);
+                let lower = text.to_ascii_lowercase();
                 let first = text.lines().next().unwrap_or("").trim();
-                ArtifactStatus::Missing {
-                    reason: format!("docker buildx imagetools inspect {reference} failed: {first}"),
+                // Only the registry saying the manifest is not there is a missing image;
+                // authentication, network, and a missing buildx say nothing about it.
+                if lower.contains("manifest unknown")
+                    || lower.contains("not found")
+                    || lower.contains("name unknown")
+                    || lower.contains("no such manifest")
+                {
+                    ArtifactStatus::Missing {
+                        reason: format!("docker buildx imagetools inspect {reference} failed: {first}"),
+                    }
+                } else {
+                    return Err(DriverError::before_effects(format!(
+                        "cannot check the published image {reference}; check registry access and docker buildx: {first}"
+                    )));
                 }
             }
             ToolExit::NotStarted { reason } => {
@@ -1245,6 +1258,16 @@ mod tests {
             .verify_artifact(&verification(&Missing, temp.path(), &ctx), &desired, &image)
             .unwrap_err();
         assert!(error.to_string().contains("docker not installed"));
+        // Authentication and network failures are not a missing image either.
+        *docker.inspection.lock().unwrap() = Some(ToolExit::Exited {
+            code: 1,
+            stdout: Vec::new(),
+            stderr: b"unauthorized: authentication required".to_vec(),
+        });
+        let error = OciImageDriver
+            .verify_artifact(&verification(&docker, temp.path(), &ctx), &desired, &image)
+            .unwrap_err();
+        assert!(error.to_string().contains("unauthorized"), "{error}");
     }
 
     #[test]

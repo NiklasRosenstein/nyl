@@ -636,16 +636,10 @@ impl Providers for ViewProviders<'_, '_> {
             }));
         }
         // Nothing was promoted yet (`NYL-PROMOTION-MISSING`): the consumer waits.
-        let fix_path = source.path.clone().unwrap_or_else(|| "<path>".to_owned());
-        Ok(Provision::Blocked(Blocker::other(format!(
-            "no PromotionRecord carries value {:?}{} yet (NYL-PROMOTION-MISSING); run `nyl promote {fix_path}`",
-            source.value,
-            source
-                .path
-                .as_ref()
-                .map(|path| format!(" on path {path}"))
-                .unwrap_or_default(),
-        ))))
+        Ok(Provision::Blocked(Blocker::promotion_missing(
+            &source.value,
+            source.path.as_deref(),
+        )))
     }
 
     fn unit(&self, field: &str, source: &UnitInputSource) -> Provided<Cited> {
@@ -1165,8 +1159,12 @@ mod tests {
         };
         let message = reasons[0].message();
         assert!(
-            message.contains("NYL-PROMOTION-MISSING") && message.contains("nyl promote dev-to-prod"),
+            message.contains("\"ghost\"") && message.contains("dev-to-prod"),
             "{message}"
+        );
+        assert_eq!(
+            reasons[0].blocker.promotion_missing_of(),
+            Some(("ghost".to_owned(), Some("dev-to-prod".to_owned())))
         );
         assert!(missing.errors.is_empty());
     }

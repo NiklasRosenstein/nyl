@@ -592,6 +592,9 @@ pub fn requested_by(git_dir: &std::path::Path, runner: &str) -> String {
         .unwrap_or_else(|| runner.to_owned())
 }
 
+/// How many first-parent commits the pairing fallbacks of [`state_tips_at`] look through.
+const FALLBACK_WALK: usize = 10_000;
+
 /// The state tips as of `revision`, a state commit (`--state-revision`):
 /// that commit on the state ref whose history holds it, and on the other
 /// ref its newest commit no later than that commit, so a transition that
@@ -630,8 +633,10 @@ pub fn state_tips_at(
     let at_or_before = |tip: Option<git2::Oid>| -> Option<CommitId> {
         let mut walk = repository.revwalk().ok()?;
         walk.set_sorting(git2::Sort::TIME).ok()?;
+        walk.simplify_first_parent().ok()?;
         walk.push(tip?).ok()?;
         walk.filter_map(std::result::Result::ok)
+            .take(FALLBACK_WALK)
             .find(|candidate| {
                 repository
                     .find_commit(*candidate)
@@ -648,8 +653,10 @@ pub fn state_tips_at(
     let same_run = |tip: Option<git2::Oid>| -> Option<CommitId> {
         let run = run.as_deref()?;
         let mut walk = repository.revwalk().ok()?;
+        walk.simplify_first_parent().ok()?;
         walk.push(tip?).ok()?;
         walk.filter_map(std::result::Result::ok)
+            .take(FALLBACK_WALK)
             .find(|candidate| {
                 repository.find_commit(*candidate).is_ok_and(|commit| {
                     commit

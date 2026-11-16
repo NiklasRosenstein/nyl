@@ -60,7 +60,7 @@ pub struct PromoteArgs {
     #[arg(long)]
     pub reason: Option<String>,
 
-    /// Promote the newest qualifying state of the source that ran this source commit (a commit ID, or a revision of this repository).
+    /// Promote the newest qualifying state of the source that ran this source commit: a full commit ID (used as given, not fetched), or a branch or tag name of this repository; a short SHA is rejected.
     #[arg(long, conflicts_with = "state_revision")]
     pub revision: Option<String>,
 
@@ -199,6 +199,7 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
 
 /// The invocation resolved against the declaration: what to promote and who
 /// asks, and the identity that writes the commit (none for a dry run).
+#[allow(clippy::too_many_lines)] // Selection, identity, then the target's rendering, in the order the options resolve.
 fn prepare(
     args: &PromoteArgs,
     wiring: &Wiring<'_>,
@@ -256,6 +257,23 @@ fn prepare(
         reason: args.reason.clone(),
     };
     let entry = session.entry()?;
+    // `record: source` writes a block into the Environment's source, which is a later change.
+    if entry
+        .spec
+        .source
+        .as_ref()
+        .and_then(|source| source.from_promotion.as_ref())
+        .is_some_and(|promoted| promoted.record.as_deref() == Some("source"))
+    {
+        return Err(Finding::new(
+            Code::PromoteUnsupported,
+            format!(
+                "Environment {} keeps its promotion record in its source (`record: source`), which is not supported yet",
+                session.resolved.name
+            ),
+            "remove `record: source`: the record then lives in the environment's state",
+        ));
+    }
     let promotes_source = entry
         .spec
         .source
@@ -281,6 +299,11 @@ fn prepare(
                 "correct the environment's unit declarations; `nyl validate` reports them",
             )
         })?;
+    let readers = nyl_orchestration::rules::promotion_paths::unit_readers(
+        &BTreeMap::from([(target.clone(), rendered.clone())]),
+        wiring.drivers,
+    );
+    let rebuilt = nyl_orchestration::rules::promotion_paths::rebuilt(path, &target, &rendered, &readers);
     let target_units: BTreeSet<UnitName> = rendered
         .units
         .iter()
@@ -297,6 +320,7 @@ fn prepare(
             verify_artifacts: path.spec.verify_artifacts && !args.no_verify_artifacts,
             dry_run: args.dry_run,
             target_units,
+            rebuilt,
             promotes_source,
             requested,
         },

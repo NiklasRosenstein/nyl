@@ -26,8 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ArtifactStatus, Supported, VerificationContext};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress};
-use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateSide, StateStore, StateTips, TransitionChanges};
-use nyl_core::orchestration::promotion::{PromotionFrom, PromotionRecord, PromotionRequest};
+use nyl_core::orchestration::ports::{
+    EnvironmentSnapshot, LogEntry, StateHistory, StateStore, StateTips, TransitionChanges,
+};
+use nyl_core::orchestration::promotion::{PromotedState, PromotionFrom, PromotionRecord, PromotionRequest};
 use nyl_core::orchestration::state::{Operation, StateLocation};
 use nyl_core::resources::promotion::PromotionPath;
 use serde_json::{json, Value};
@@ -44,10 +46,10 @@ use crate::rules::promotion::{
 };
 use crate::transition::{trailer, Trailers, TransitionSummary};
 
-/// How many commits of each state ref the history reads.
-pub const HISTORY_COMMITS: usize = 500;
 /// How many recorded states of the source a promotion considers, newest first.
 pub const HISTORY_STATES: usize = 100;
+/// How many states `--revision` searches for its source commit, newest first.
+pub const HISTORY_REVISION_STATES: usize = 1000;
 
 /// What one `nyl promote` asks.
 // Independent switches of the command line, as its options list them.
@@ -66,8 +68,12 @@ pub struct PromoteOptions {
     /// unless `--no-verify-artifacts`.
     pub verify_artifacts: bool,
     pub dry_run: bool,
-    /// The units the target environment also selects.
+    /// The units the target environment also selects, as its entry worktree
+    /// renders them (not at each candidate's source commit).
     pub target_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
+    /// `NYL-PROMOTE-REBUILT` warnings by value name
+    /// ([`crate::rules::promotion_paths::rebuilt`]).
+    pub rebuilt: Vec<(String, Finding)>,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
     /// Who asks and why, recorded like an approval.
@@ -167,7 +173,7 @@ fn body(
     if !options.values.is_empty() {
         if options.promotes_source {
             return Err(Finding::new(
-                Code::PromoteUnsupported,
+                Code::PromoteSelectorInvalid,
                 format!(
                     "path {} promotes the source of {target}: its source commit and every value move together, so --value cannot select a subset",
                     path.metadata.name
@@ -203,8 +209,10 @@ fn body(
         }
     }
 
-    let history = read_history(store, source_location, source)?;
-    let history_sequence = next_sequence(store, location, &snapshot)?;
+    let history = read_history(store, source_location, source, &options.select)?;
+    let target_history = store.history(location).map_err(|error| store_error(target, &error))?;
+    // PR 8 adds the sequence of a `record: source` block here.
+    let history_sequence = next_sequence(&target_history, &snapshot, []);
     let input = PromotionInput {
         path: &path,
         source,
@@ -241,24 +249,13 @@ fn body(
         ));
     }
     let mut record = promotion.record;
-    // A target that also selects a unit a value reads builds that unit itself:
-    // the value then replaces a result the target would produce anyway.
-    for (name, value) in &record.values {
-        if let Some(unit) = value
-            .unit
-            .as_ref()
-            .filter(|unit| options.target_units.contains(&unit.name))
-        {
-            report.warnings.push(Finding::new(
-                Code::PromoteRebuilt,
-                format!(
-                    "{target} selects unit {}, which value {name:?} reads from {source}: {target} builds its own result, and a binding to value {name:?} replaces it with {source}'s",
-                    unit.name
-                ),
-                format!("remove unit {} from {target}'s unitSelector, or drop the binding, so one result is used", unit.name),
-            ));
-        }
-    }
+    report.warnings.extend(
+        options
+            .rebuilt
+            .iter()
+            .filter(|(name, _)| record.values.contains_key(name))
+            .map(|(_, finding)| finding.clone()),
+    );
 
     // Artifacts still exist where their receipts say they do.
     if options.verify_artifacts {
@@ -269,14 +266,31 @@ fn body(
     // Values the subset left alone stay at their lineage.
     if !options.values.is_empty() {
         if let Some(existing) = snapshot.promotions.get(&path_key) {
+            // A carried value keeps the state it came from: the old record's `from`,
+            // unless the value already names its own.
+            let carried_from = match &existing.from {
+                PromotionFrom::Environment(from) => Some(PromotedState {
+                    run: from.run.clone(),
+                    desired_commit: from.desired_commit.clone(),
+                    observed_commit: from.observed_commit.clone(),
+                }),
+                PromotionFrom::Target(_) => None,
+            };
             for (name, value) in &existing.values {
-                record.values.entry(name.clone()).or_insert_with(|| value.clone());
+                record.values.entry(name.clone()).or_insert_with(|| {
+                    let mut carried = value.clone();
+                    if carried.state.is_none() {
+                        carried.state.clone_from(&carried_from);
+                    }
+                    carried
+                });
             }
         }
     }
     report.record = Some(record.clone());
     let Some(held) = held else {
-        // A dry run: the record it would write.
+        // A dry run: the record it would write, which is `done` work not done.
+        report.outcome = Outcome::Done;
         return Ok(());
     };
 
@@ -443,12 +457,16 @@ fn unverified_warning(check: &ArtifactCheck, why: &str) -> Finding {
 }
 
 /// The recorded states of `environment` at `location`, newest first, with the
-/// documents at each and the attestations recorded for it.
+/// documents at each and the attestations recorded for it, and the history
+/// they were read from.
 ///
-/// - A state is a transition commit pair (`recorded_states`): the desired
-///   commits' log, with whether each changed the environment's documents,
-///   which is what [`StateStore::state_commit`] answers for that commit, and
-///   the observed log.
+/// - The history is read once, after the sync every read of state does
+///   ([`StateStore::history`]): a stale local tracking ref never stands for
+///   the remote, which could otherwise promote an older state under a higher
+///   sequence. Everything below reads the objects that sync fetched.
+/// - A state is a transition commit pair (`recorded_states`) over the whole
+///   desired log, whose commits already say whether they changed the
+///   environment's documents, and the observed log.
 /// - The documents are read as of the state's commits. A run that wrote no
 ///   observed commit left the observed side as it read it (its
 ///   `Nyl-Read-Observed` trailer).
@@ -456,76 +474,87 @@ fn unverified_warning(check: &ArtifactCheck, why: &str) -> Finding {
 ///   observed commit to the tip: a later `nyl attest` names this state's
 ///   receipts or desired commit, and a later run drops them from the current
 ///   files, but history keeps them.
+/// - Without an explicit choice the newest [`HISTORY_STATES`] states are read;
+///   `--state-revision` reads just the named state, however old, and
+///   `--revision` every state back to [`HISTORY_REVISION_STATES`].
 pub fn read_history(
     store: &dyn StateStore,
     location: &StateLocation,
     environment: &EnvironmentName,
+    select: &Selection,
 ) -> Result<Vec<RecordedState>, Finding> {
     let error = |error| store_error(environment, &error);
-    let desired_log = store
-        .log(location, StateSide::Desired, HISTORY_COMMITS)
-        .map_err(error)?;
-    let observed_log = store
-        .log(location, StateSide::Observed, HISTORY_COMMITS)
-        .map_err(error)?;
-    let mut entries = Vec::with_capacity(desired_log.len());
-    for entry in &desired_log {
-        let tips = StateTips {
-            desired: Some(entry.commit.clone()),
-            observed: None,
-        };
-        let changed = store
-            .state_commit(location, &tips)
-            .map_err(error)?
-            .is_some_and(|commit| commit == entry.commit);
-        entries.push(DesiredEntry {
-            entry: entry.clone(),
-            changed_desired: changed,
-        });
+    let history = store.history(location).map_err(error)?;
+    let entries: Vec<DesiredEntry> = history
+        .desired
+        .iter()
+        .map(|commit| DesiredEntry {
+            entry: LogEntry {
+                commit: commit.commit.clone(),
+                message: commit.message.clone(),
+            },
+            changed_desired: commit.changed_desired,
+        })
+        .collect();
+    let desired_log: Vec<LogEntry> = entries.iter().map(|entry| entry.entry.clone()).collect();
+    let mut refs = recorded_states(environment, &entries, &history.observed);
+    match select {
+        Selection::Newest => refs.truncate(HISTORY_STATES),
+        Selection::SourceRevision(_) => refs.truncate(HISTORY_REVISION_STATES),
+        Selection::StateRevision(commit) => refs.retain(|state| state.desired_commit == *commit),
     }
-    let mut refs = recorded_states(environment, &entries, &observed_log);
-    refs.truncate(HISTORY_STATES);
+    let observed_log = &history.observed;
 
-    // The attestations of every observed commit that can hold some, newest first.
+    // The attestations of every observed commit that can hold some, newest
+    // first, read in batches of objects the sync fetched.
     let writes_attestations = |message: &str| {
         trailer(message, "Nyl-Operation")
             .is_none_or(|operation| ["reconcile", "recover", "attest"].contains(&operation))
     };
-    let mut attested: Vec<(CommitId, EnvironmentSnapshot)> = Vec::new();
+    let position = |commit: &CommitId| observed_log.iter().position(|entry| &entry.commit == commit);
     let oldest = refs
         .iter()
         .filter_map(|state| start_commit(state, &desired_log))
-        .filter_map(|commit| observed_log.iter().position(|entry| entry.commit == commit))
+        .filter_map(|commit| position(&commit))
         .max();
+    let mut attested: Vec<(usize, EnvironmentSnapshot)> = Vec::new();
     if let Some(oldest) = oldest {
-        for entry in observed_log[..=oldest]
-            .iter()
-            .filter(|entry| writes_attestations(&entry.message))
-        {
-            let tips = StateTips {
-                desired: None,
-                observed: Some(entry.commit.clone()),
-            };
-            attested.push((entry.commit.clone(), store.snapshot_at(location, &tips).map_err(error)?));
+        let wanted: Vec<usize> = (0..=oldest)
+            .filter(|index| writes_attestations(&observed_log[*index].message))
+            .collect();
+        for batch in wanted.chunks(32) {
+            let tips: Vec<StateTips> = batch
+                .iter()
+                .map(|index| StateTips {
+                    desired: None,
+                    observed: Some(observed_log[*index].commit.clone()),
+                })
+                .collect();
+            let snapshots = store.snapshots_at(location, &tips).map_err(error)?;
+            attested.extend(batch.iter().copied().zip(snapshots.into_iter().map(attestations_only)));
         }
     }
 
-    let mut states = Vec::with_capacity(refs.len());
-    for state in refs {
-        let start = start_commit(&state, &desired_log);
-        let tips = StateTips {
+    let starts: Vec<Option<CommitId>> = refs.iter().map(|state| start_commit(state, &desired_log)).collect();
+    let tips: Vec<StateTips> = refs
+        .iter()
+        .zip(&starts)
+        .map(|(state, start)| StateTips {
             desired: Some(state.desired_commit.clone()),
             observed: start.clone(),
-        };
-        let snapshot = store.snapshot_at(location, &tips).map_err(error)?;
-        let from = start
-            .as_ref()
-            .and_then(|commit| observed_log.iter().position(|entry| &entry.commit == commit));
-        let attestations = match from {
+        })
+        .collect();
+    let mut snapshots = Vec::with_capacity(tips.len());
+    for batch in tips.chunks(16) {
+        snapshots.extend(store.snapshots_at(location, batch).map_err(error)?);
+    }
+    let mut states = Vec::with_capacity(refs.len());
+    for ((state, start), snapshot) in refs.into_iter().zip(starts).zip(snapshots) {
+        let attestations = match start.as_ref().and_then(position) {
             Some(from) => {
                 let newer: Vec<&EnvironmentSnapshot> = attested
                     .iter()
-                    .filter(|(commit, _)| observed_log.iter().position(|entry| &entry.commit == commit) <= Some(from))
+                    .filter(|(index, _)| *index <= from)
                     .map(|(_, snapshot)| snapshot)
                     .collect();
                 attestations_of(&snapshot, &state.desired_commit, &newer)
@@ -541,6 +570,16 @@ pub fn read_history(
         });
     }
     Ok(states)
+}
+
+/// A snapshot reduced to the attestations it holds, so a long walk keeps
+/// nothing else in memory.
+fn attestations_only(snapshot: EnvironmentSnapshot) -> EnvironmentSnapshot {
+    EnvironmentSnapshot {
+        attestations: snapshot.attestations,
+        environment_attestations: snapshot.environment_attestations,
+        ..EnvironmentSnapshot::default()
+    }
 }
 
 /// The observed commit a state's documents are read at: the run's own, or the
@@ -608,27 +647,30 @@ fn attestations_of(
 }
 
 /// The sequence the next record takes: one above the highest ever recorded
-/// into the environment. The desired history holds every promotion's summary,
-/// including those whose records `state restore` removed, so the sequence
-/// never repeats; the current records count too, for state moved without its
-/// history.
+/// into the environment. The whole desired history holds every promotion's
+/// summary, including those whose records `state restore` removed, so the
+/// sequence never repeats. The current records, the sequence the environment
+/// record says a run applied, and `others` (a `record: source` block's, PR 8)
+/// count too, for state moved without its history.
 pub fn next_sequence(
-    store: &dyn StateStore,
-    location: &StateLocation,
+    history: &StateHistory,
     snapshot: &EnvironmentSnapshot,
-) -> Result<u64, Finding> {
-    let log = store
-        .log(location, StateSide::Desired, HISTORY_COMMITS * 4)
-        .map_err(|error| {
-            Finding::new(
-                Code::StateUnavailable,
-                format!("cannot read the promotion history of the target: {error}"),
-                "check access to the state repository",
-            )
-        })?;
-    let from_history = log.iter().filter_map(|entry| recorded_sequence(&entry.message)).max();
-    let from_records = snapshot.promotions.values().map(|record| record.sequence).max();
-    Ok(from_history.max(from_records).map_or(1, |highest| highest + 1))
+    others: impl IntoIterator<Item = u64>,
+) -> u64 {
+    history
+        .desired
+        .iter()
+        .filter_map(|commit| recorded_sequence(&commit.message))
+        .chain(snapshot.promotions.values().map(|record| record.sequence))
+        .chain(
+            snapshot
+                .environment
+                .as_ref()
+                .and_then(|record| record.applied_promotion_sequence),
+        )
+        .chain(others)
+        .max()
+        .map_or(1, |highest| highest + 1)
 }
 
 /// The sequence a `promote` transition commit's summary records.
@@ -659,5 +701,142 @@ mod tests {
         assert_eq!(recorded_sequence(&message("reconcile", summary)), None);
         assert_eq!(recorded_sequence(&message("promote", "promotion: nonsense")), None);
         assert_eq!(recorded_sequence(&message("promote", "")), None);
+    }
+
+    use std::collections::BTreeMap;
+
+    use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
+    use nyl_core::orchestration::state::{ArtifactUnit, Attestation, AttestationKind, AttestationResult, StateV1};
+    use serde_json::Value;
+
+    use crate::rules::fixtures::{desired, key, name, observed, receipt};
+
+    fn attestation(
+        unit: Option<&str>,
+        uid: &str,
+        execution_key: &str,
+        result: AttestationResult,
+        reason: &str,
+    ) -> Attestation {
+        Attestation {
+            api_version: StateV1,
+            kind: AttestationKind,
+            name: "qa".to_owned(),
+            unit: unit.map(|unit| ArtifactUnit {
+                environment: EnvironmentName::new("dev").unwrap(),
+                name: UnitName::new(unit).unwrap(),
+                uid: nyl_core::orchestration::ids::Uid::new(uid).unwrap(),
+            }),
+            execution_key: execution_key.to_owned(),
+            result,
+            at: "2026-09-25T12:00:00Z".parse().unwrap(),
+            source: Value::Null,
+            reason: Some(reason.to_owned()),
+            details: Value::Null,
+        }
+    }
+
+    fn holding(unit: Option<(&str, Attestation)>, environment: Option<Attestation>) -> EnvironmentSnapshot {
+        let mut snapshot = EnvironmentSnapshot::default();
+        if let Some((unit, attestation)) = unit {
+            snapshot
+                .attestations
+                .insert(name(unit), BTreeMap::from([("qa".to_owned(), attestation)]));
+        }
+        if let Some(attestation) = environment {
+            snapshot.environment_attestations.insert("qa".to_owned(), attestation);
+        }
+        snapshot
+    }
+
+    /// The attestations of a state are the newest entry, among the observed
+    /// snapshots at and after its commit, that names its receipt and
+    /// incarnation (units) or its desired commit (environment): an entry for
+    /// another receipt, another incarnation, or another state never counts,
+    /// and an attestation recorded after a later run still does. Catches a
+    /// walk that counts evidence of the wrong receipt or state, which would
+    /// let a failing or unattested state pass.
+    #[test]
+    fn test_attestations_of_a_state_name_its_receipt_incarnation_and_commit() {
+        let mut state = EnvironmentSnapshot::default();
+        let svc = desired("svc", "Command", serde_json::json!({}), "svc");
+        let uid = svc.unit.uid.clone().unwrap().to_string();
+        state.desired.insert(name("svc"), svc);
+        state.observed.insert(
+            name("svc"),
+            observed(
+                "svc",
+                "Command",
+                Some(receipt("svc", serde_json::json!({}), Vec::new())),
+            ),
+        );
+        let state_key = key("svc").to_string();
+        let commit = CommitId::new("d".repeat(40)).unwrap();
+        let other_uid = "00000000-0000-7000-8000-0000000000ff";
+        let newest = holding(
+            Some((
+                "svc",
+                attestation(Some("svc"), &uid, &state_key, AttestationResult::Fail, "newest"),
+            )),
+            Some(attestation(
+                None,
+                &uid,
+                &"e".repeat(40),
+                AttestationResult::Pass,
+                "another state",
+            )),
+        );
+        // Later runs replaced the receipt: entries for it do not count.
+        let other_key = holding(
+            Some((
+                "svc",
+                attestation(
+                    Some("svc"),
+                    &uid,
+                    key("svc-2").as_ref(),
+                    AttestationResult::Pass,
+                    "other receipt",
+                ),
+            )),
+            None,
+        );
+        let other_incarnation = holding(
+            Some((
+                "svc",
+                attestation(Some("svc"), other_uid, &state_key, AttestationResult::Pass, "other uid"),
+            )),
+            None,
+        );
+        let recorded = holding(
+            Some((
+                "svc",
+                attestation(
+                    Some("svc"),
+                    &uid,
+                    &state_key,
+                    AttestationResult::Pass,
+                    "for this receipt",
+                ),
+            )),
+            Some(attestation(
+                None,
+                &uid,
+                commit.as_str(),
+                AttestationResult::Pass,
+                "for this commit",
+            )),
+        );
+        let found = attestations_of(&state, &commit, &[&newest, &other_key, &other_incarnation, &recorded]);
+        // The newest entry that names the receipt wins, failing or not.
+        let unit = &found.units[&name("svc")]["qa"];
+        assert_eq!(unit.reason.as_deref(), Some("newest"));
+        assert_eq!(unit.result, AttestationResult::Fail);
+        assert_eq!(found.environment["qa"].reason.as_deref(), Some("for this commit"));
+        // Without the newest entry, the others are skipped and the recorded one counts.
+        let found = attestations_of(&state, &commit, &[&other_key, &other_incarnation, &recorded]);
+        assert_eq!(
+            found.units[&name("svc")]["qa"].reason.as_deref(),
+            Some("for this receipt")
+        );
     }
 }

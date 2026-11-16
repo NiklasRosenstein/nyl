@@ -123,7 +123,8 @@ mod tests {
 ///
 /// Contract: [Exit categories](../../../../design/promotion.md#exit-categories).
 /// `record` is the PromotionRecord that was written, that already stood
-/// (`outcome: unchanged`), or, with `--dry-run`, that would be written.
+/// (`outcome: unchanged`), or, with `--dry-run`, that would be written (then
+/// `outcome: done` with `dryRun: true`, and no commits).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PromoteReport {
     #[serde(rename = "apiVersion")]
@@ -197,7 +198,8 @@ impl PromoteReport {
         let mut text = String::new();
         let status = match (self.outcome, self.dry_run) {
             (Outcome::Refused, _) => "refused",
-            (_, true) => "dry run, nothing written",
+            (Outcome::Done, true) => "dry run, nothing written",
+            (Outcome::Unchanged, true) => "dry run, unchanged",
             (Outcome::Done, false) => "promoted",
             (Outcome::Unchanged, false) => "unchanged, nothing written",
         };
