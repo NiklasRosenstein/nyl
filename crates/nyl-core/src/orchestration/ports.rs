@@ -687,6 +687,17 @@ pub enum SourceRepository {
     Url(String),
 }
 
+/// A commit of a record's history whose changes a value's history lacks
+/// ([`SourceResolver::missing_commits`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingCommit {
+    pub commit: CommitId,
+    /// The first line of its message.
+    pub subject: String,
+    /// Whether it has no parent, so no `<commit>^` names the history before it.
+    pub root: bool,
+}
+
 /// A failure of source operations.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -797,6 +808,54 @@ pub trait SourceResolver: Send + Sync {
     }
     /// The repository's default branch, the default of `protectedRefs`.
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String>;
+    /// The commits reachable from `record` and not from `value` that have
+    /// no patch-equivalent commit in `value`'s history since their merge
+    /// base, oldest first, merge commits skipped: `git cherry <value>
+    /// <record>`'s `+` lines. Empty means `value` contains `record`.
+    /// Contract: [Several paths into one environment](../../../../design/promotion.md#several-paths-into-one-environment),
+    /// "Rule". A resolver that cannot compare histories says so.
+    fn missing_commits(
+        &self,
+        repository: &SourceRepository,
+        value: &CommitId,
+        record: &CommitId,
+    ) -> SourceResult<Vec<MissingCommit>> {
+        let _ = (repository, value, record);
+        Err(SourceError(
+            "this source resolver cannot compare commit histories".to_owned(),
+        ))
+    }
+    /// Whether `commit` is available for history questions, fetched like a
+    /// recorded commit when it is missing; `false` when it cannot be found.
+    fn fetch_commit(&self, repository: &SourceRepository, commit: &CommitId) -> SourceResult<bool> {
+        let _ = (repository, commit);
+        Err(SourceError("this source resolver cannot fetch commits".to_owned()))
+    }
+    /// Whether the entry clone is shallow, so histories end early and
+    /// [`Self::missing_commits`] cannot be trusted.
+    fn is_shallow(&self) -> bool {
+        false
+    }
+    /// Whether `ancestor` is `of` or an ancestor of it; `false` when either
+    /// is not available.
+    fn is_ancestor(&self, repository: &SourceRepository, ancestor: &CommitId, of: &CommitId) -> SourceResult<bool> {
+        let _ = repository;
+        Ok(ancestor == of)
+    }
+    /// The commits a revision range names, newest first: `A..B` every commit
+    /// reachable from `B` and not from `A`, any other revision exactly one.
+    fn commits_in(&self, repository: &SourceRepository, range: &str) -> SourceResult<Vec<CommitId>> {
+        let _ = (repository, range);
+        Err(SourceError("this source resolver cannot resolve ranges".to_owned()))
+    }
+    /// The credential-free URL a record names the repository by: a URL
+    /// repository's own, and for this repository its `origin`, when it has one.
+    fn repository_url(&self, repository: &SourceRepository) -> Option<String> {
+        match repository {
+            SourceRepository::This => None,
+            SourceRepository::Url(url) => Some(url.clone()),
+        }
+    }
     /// Keep `commit` fetchable with the keep ref `reference` of this
     /// repository, a ref of its own for this commit that is never moved:
     /// created when absent, left alone when it already names `commit`, and an

@@ -115,7 +115,7 @@ the file, and its `state restore` leaves the file as it is.
 | Exit | When |
 | --- | --- |
 | 0 | The record was written, or (M11) the pull request opened or updated; or the path's record already names the chosen state and values and supplies every value of the target, so nothing was written (`outcome: unchanged`) |
-| 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a form M6 does not support yet (`NYL-PROMOTE-UNSUPPORTED`), or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`) |
+| 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a form M6 does not support yet (`NYL-PROMOTE-UNSUPPORTED`), a shallow entry clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`) |
 | 2 | Nothing was written because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), the target's lease is held, or the push of a `record: source` commit was refused because the branch moved (`NYL-PROMOTE-SOURCE-REJECTED`) |
 
 Other codes of the promotion rules: `NYL-PROMOTION-MISSING` (exit 2 of a
@@ -137,8 +137,11 @@ the fast-forward push because the branch moved, and the commit is undone;
 the fix is to update the checkout and promote again);
 `NYL-PROMOTE-EVIDENCE-OVERRIDE` (a warning: `--evidence published` below the
 path's level, recorded as an override); and `NYL-PROMOTE-UNCHECKED` (a
-warning: a value without a known source commit, which the supersede check
-cannot check).
+warning: a value without a known source commit, or a record whose commit
+cannot be fetched, which the supersede check cannot check);
+`NYL-PROMOTE-SHALLOW-CLONE` (exit 1: the supersede check needs the full
+history, so a shallow entry clone is refused; the fix is `git fetch
+--unshallow`, or `fetch-depth: 0` with `actions/checkout`).
 
 `nyl promote` takes the target environment's lease, because it writes the
 target's desired state; it only reads the source's state, and never takes the
@@ -518,28 +521,65 @@ decided when `nyl promote` writes, by the supersede check:
   hotfix cannot replace the hotfixed image even on a path that promotes only
   digests. Commits are compared within their own repository. A value without a
   known source commit, such as an image from outside Nyl or a command output,
-  is listed as unchecked by `nyl promote` and `plan`. A subset promotion checks
-  only the values it writes.
+  is listed as unchecked (`NYL-PROMOTE-UNCHECKED`) by `nyl promote`, and by
+  `plan` once the value-only work (M6 plan, row 11) adds that listing. A
+  subset promotion checks only the values it writes. Commits are paired by
+  the source field they came from (an image's main context with the other
+  image's main context), and with any commit of the repository only when no
+  field matches.
 - **Refusal.** A refused promotion writes nothing and exits 2 with
   `NYL-PROMOTE-SUPERSEDES`, because nothing failed: the promote job succeeds
   once the missing commits are merged. The message lists the missing commits
-  per repository and a range to copy: "`S5` is missing 2 commits from
-  `hotfix-to-prod`: `S1..c3d4` (a1b2 fix pool size, c3d4 bump timeout); merge
-  them or pass `--supersede S1..c3d4=<reason>`".
+  per repository in topological order and the entries to copy, with full
+  commit IDs: "`S5` is missing 2 commits from `hotfix-to-prod`: a1b2 fix
+  pool size, c3d4 bump timeout; merge them or pass `--supersede
+  a1b2…^..c3d4…=<reason>`". When the oldest missing commit is a root, which
+  has no parent, each missing commit is an entry of its own. A shallow entry
+  clone cannot answer the check and is refused with
+  `NYL-PROMOTE-SHALLOW-CLONE` (exit 1), whose fix is `git fetch
+  --unshallow` or `fetch-depth: 0`.
 - **Override.** `--supersede <commit or range>[=<reason>]` accepts that the
   promotion replaces those commits, because the change was made differently
   or is dropped on purpose. It is repeatable; an entry without its own reason
   takes `--reason`, and an entry with neither is rejected. Ranges are Git
   ranges resolved at promotion; commits in them that are not missing are
   ignored, and a missing commit no entry covers keeps the promotion refused.
-  When the refusal involves several repositories, an entry is qualified with
-  the repository, `--supersede web:S1..c3d4=<reason>`, by GitRepository name
-  or, for an inline repository, the name the refusal prints; an unqualified
-  full commit ID is accepted when it exists in only one of them.
+  An entry may be qualified with its repository, `--supersede
+  web:S1..c3d4=<reason>`, by its name (below) or a URL that normalizes to
+  its URL; the refusal prints the qualifier for every repository but the
+  project's own when only that one is involved. An unqualified entry belongs
+  to the one repository whose missing commits it names (all repositories
+  share the entry clone's objects, so a commit ID resolves in each); one
+  that names missing commits in several must be qualified.
+- **Unfetchable records.** A record's commit that cannot be fetched, such as
+  from a deleted branch, is unchecked (`NYL-PROMOTE-UNCHECKED`, naming the
+  record), not a refusal; `--supersede <full commit ID>=<reason>` naming
+  it records that the promotion replaces it. Commits are fetched into the
+  entry clone without reading their files.
 - **Record.** The PromotionRecord lists every superseded commit with its
   repository URL, its reason, and who gave it, never the range, and a pull
   request under `changeGate: pullRequest` (M11) shows them. A later promotion on P
   is no longer checked against them, because P has now promoted after them.
+  A repository is named, in the record, in refusals, and as a qualifier, by
+  the GitRepository whose URL matches its URL, else by its normalized URL;
+  the project's own repository by its `origin` URL, or `project` without
+  one. A URL is normalized without credentials, scheme, trailing `.git` and
+  `/`, with `git@host:org/r` as `host/org/r` and the host lowercased, so
+  `https://Git.example/org/r.git` and `git@git.example:org/r` are both
+  `git.example/org/r`.
+- **Which records.** The records are the target's current ones and those its
+  desired history holds at each `promote` commit, so one `state restore`
+  removed still counts. With `record: source`, earlier blocks are commits in
+  source, and only the current block counts, so the two modes can differ
+  after another path rolled back: with `record: state` a promotion is still
+  checked against the rolled-back record, with `record: source` it is not.
+  "Since P last promoted" counts P's records from history too. A record
+  whose commit is an ancestor of a newer record of the same path is not
+  checked on its own. A record's value has the source commits its producing
+  unit resolved in the state the record names, read from the source
+  environment's state history; a state that history no longer holds, or an
+  environment no longer declared, leaves the value unchecked, and any other
+  failure to read state is an error.
 
 ### Hotfixes
 
@@ -573,7 +613,8 @@ spec:
 
 - `prod-hotfix` follows the `release/prod` branch, not prod: nothing in Nyl
   points from it back to prod, so the only edge is `hotfix-to-prod` into prod.
-  It builds and runs the fix on a small target of its own, because it cannot
+  It builds and runs the fix on a small target of its own, on a Cluster or
+  Argo CD instance of its own, because it cannot
   publish into prod's target, and can stay idle between hotfixes. Its own
   label selects the units it runs: the image prod reuses (`web-image`, which
   prod does not select) and the publication, so the path's selector names a

@@ -153,7 +153,8 @@ impl ExitCategory {
             | Code::InstanceRemovalPending
             | Code::PromotionMissing
             | Code::PromoteNoEvidence
-            | Code::PromoteSourceRejected => Self::Incomplete,
+            | Code::PromoteSourceRejected
+            | Code::PromoteSupersedes => Self::Incomplete,
             Code::LeaseLost | Code::RunCancelled | Code::RunUnimported => Self::Uncertain,
             _ => Self::Error,
         }

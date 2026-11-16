@@ -150,9 +150,24 @@ pub fn source_request(
     })
 }
 
+/// The record that supplies a promoted source: the newest, by `sequence`,
+/// on `paths` that carries a source commit. Every reader that asks which
+/// record supplies the source takes it here.
+pub fn source_supplier<'a, P: AsRef<str>>(
+    records: impl IntoIterator<Item = &'a PromotionRecord>,
+    paths: &[P],
+) -> Option<&'a PromotionRecord> {
+    records
+        .into_iter()
+        .filter(|record| {
+            record.source_commit.is_some() && paths.iter().any(|path| path.as_ref() == record.path.as_str())
+        })
+        .max_by_key(|record| record.sequence)
+}
+
 /// The newest record, by `sequence`, on the paths `promoted` names that
-/// carries a source commit. None is `NYL-PROMOTION-MISSING`, whose fix names
-/// `nyl promote <path>`.
+/// carries a source commit ([`source_supplier`]). None is
+/// `NYL-PROMOTION-MISSING`, whose fix names `nyl promote <path>`.
 pub fn promoted_record<'a>(
     environment: &str,
     promoted: &nyl_core::resources::environment::PromotedSource,
@@ -164,23 +179,51 @@ pub fn promoted_record<'a>(
         .map(String::as_str)
         .chain(promoted.paths.iter().map(String::as_str))
         .collect();
-    promotions
-        .values()
-        .filter(|record| paths.contains(&record.path.as_str()) && record.source_commit.is_some())
-        .max_by_key(|record| record.sequence)
-        .ok_or_else(|| {
-            Finding::new(
-                Code::PromotionMissing,
-                format!(
-                    "Environment {environment} takes its source from promotion path {}, which has no record yet",
-                    paths.join(", ")
-                ),
-                format!(
-                    "promote a state into it with `nyl promote {}`",
-                    paths.first().copied().unwrap_or_default()
-                ),
-            )
-        })
+    source_supplier(promotions.values(), &paths).ok_or_else(|| {
+        Finding::new(
+            Code::PromotionMissing,
+            format!(
+                "Environment {environment} takes its source from promotion path {}, which has no record yet",
+                paths.join(", ")
+            ),
+            format!(
+                "promote a state into it with `nyl promote {}`",
+                paths.first().copied().unwrap_or_default()
+            ),
+        )
+    })
+}
+
+/// The record a `fromPromotion` binding reads among an environment's
+/// `records`, or `None` when none supplies it yet. Every reader of a
+/// binding takes it here: the binding provider of the shared resolver and
+/// `nyl get promotions`.
+///
+/// - With `path`, that path's record, when it carries the value.
+/// - Without `path`, in an environment whose source is promoted along
+///   `source_paths`: the record that supplies the source commit (the newest
+///   on those paths that carries one, as [`promoted_record`] chooses it), so
+///   the source commit and the values proven with it move together. A value
+///   it does not carry is not taken from an older record of another path.
+/// - Without `path` otherwise, the newest record that carries the value.
+pub fn binding_supplier<'a>(
+    records: &'a BTreeMap<PromotionPathName, PromotionRecord>,
+    source_paths: Option<&std::collections::BTreeSet<String>>,
+    binding: &nyl_core::bindings::PromotionInputSource,
+) -> Option<&'a PromotionRecord> {
+    let carries = |record: &&PromotionRecord| record.values.contains_key(&binding.value);
+    if let Some(path) = &binding.path {
+        return records
+            .values()
+            .filter(|record| record.path.as_str() == path)
+            .filter(carries)
+            .max_by_key(|record| record.sequence);
+    }
+    if let Some(paths) = source_paths {
+        let paths: Vec<&String> = paths.iter().collect();
+        return source_supplier(records.values(), &paths).filter(carries);
+    }
+    records.values().filter(carries).max_by_key(|record| record.sequence)
 }
 
 /// The promotion paths that supply an environment's source, from its
@@ -360,32 +403,6 @@ pub fn promotion_records(
     };
     records.insert(block.path.clone(), block.clone());
     Ok(SourceRecords { records, check })
-}
-
-/// The records `nyl promote` compares a promotion with: [`promotion_records`],
-/// except that a `record: source` block that run would refuse (invalid, or
-/// older than what was applied) is no record, so the path then has none.
-/// Records in state on the block's paths never count, so switching an
-/// Environment from `record: state` to `record: source` writes its first
-/// block instead of finding the state's record `unchanged`.
-pub fn current_records(
-    environment: &str,
-    promoted: Option<&PromotedSource>,
-    state: &BTreeMap<PromotionPathName, PromotionRecord>,
-    applied: &Applied,
-) -> BTreeMap<PromotionPathName, PromotionRecord> {
-    promotion_records(environment, promoted, state, applied).map_or_else(
-        |_| {
-            let without = promoted.map(|promoted| PromotedSource {
-                promoted: None,
-                ..promoted.clone()
-            });
-            promotion_records(environment, without.as_ref(), state, &Applied::default())
-                .map(|read| read.records)
-                .unwrap_or_default()
-        },
-        |read| read.records,
-    )
 }
 
 /// The records a reader of `snapshot` that runs nothing shows (`status`,
@@ -1080,24 +1097,30 @@ mod tests {
         assert_eq!(finding.code, Code::PromotionRecordInvalid);
     }
 
-    /// `nyl promote` compares with the checkout's block only when a run would
-    /// take it: a block older than what was applied is no record, and a
-    /// record in state on the block's path never is one. Catches a promotion
-    /// reported `unchanged` against an old checkout's block, and one that
-    /// never writes its first block after switching from `record: state`.
+    /// `nyl promote` reads the records as a run does: after switching from
+    /// `record: state` there is no block yet, and the state's record on the
+    /// block's path does not count; a block older than what was applied is
+    /// refused, as the run refuses it. Catches a promotion reported
+    /// `unchanged` against an old checkout's block, and one that never
+    /// writes its first block after switching.
     #[test]
-    fn test_promote_compares_with_a_block_only_when_a_run_would_take_it() {
+    fn test_promote_reads_a_block_as_a_run_would() {
         let path = PromotionPathName::new("dev-to-prod").unwrap();
         let state = records(&[record("dev-to-prod", 1, Some('b'))]);
-        // Switched from `record: state`: no block yet, and the state's record does not count.
-        let switched = current_records("prod", Some(&in_source(None)), &state, &applied(1, None));
-        assert!(!switched.contains_key(&path));
-        // The checkout's block is older than what ran: no current record.
+        let switched = promotion_records("prod", Some(&in_source(None)), &state, &applied(1, None)).unwrap();
+        assert!(!switched.records.contains_key(&path));
         let old = in_source(Some(record("dev-to-prod", 2, Some('a'))));
-        assert!(!current_records("prod", Some(&old), &state, &applied(3, None)).contains_key(&path));
-        // A block a run would take is the current record.
         assert_eq!(
-            current_records("prod", Some(&old), &state, &applied(1, None))[&path].sequence,
+            promotion_records("prod", Some(&old), &state, &applied(3, None))
+                .unwrap_err()
+                .code,
+            Code::PromotionSequenceOlder
+        );
+        assert_eq!(
+            promotion_records("prod", Some(&old), &state, &applied(1, None))
+                .unwrap()
+                .records[&path]
+                .sequence,
             2
         );
     }

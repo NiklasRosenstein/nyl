@@ -120,13 +120,27 @@ spec:
     webImage:
       select: {unit: web-image, artifact: image, pointer: /reference}
 ---
+# The hotfix target's own small cluster, so its Applications never share
+# names with dev's.
+apiVersion: k8s.nyl/v1
+kind: Cluster
+metadata:
+  name: hotfix
+spec:
+  destination:
+    server: https://hotfix.example.invalid
+  kubernetes:
+    kubeVersion: 1.31.4
+    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]
+    clusterScopedKinds: [core/Namespace]
+---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
 metadata:
   name: hotfix
 spec:
   reconciler: {argocd: {}}
-  clusterRef: {name: dev}
+  clusterRef: {name: hotfix}
   applicationGroupSelector:
     matchLabels: {app: web}
   catalogApplication:

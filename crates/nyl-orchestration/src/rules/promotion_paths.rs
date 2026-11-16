@@ -612,6 +612,16 @@ pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers
     readers
 }
 
+/// The `fromPromotion` bindings of a unit's spec, by JSON Pointer, as
+/// readers find them: `nyl get promotions` lists the record each reads.
+pub fn bindings_in(spec: &Value) -> Vec<(String, PromotionInputSource)> {
+    let mut found = Vec::new();
+    walk(spec, "", &mut |pointer, binding| {
+        found.push((pointer.to_owned(), binding));
+    });
+    found
+}
+
 /// Every object of `value` whose only field is a valid `fromPromotion`.
 fn walk(value: &Value, pointer: &str, found: &mut dyn FnMut(&str, PromotionInputSource)) {
     match value {

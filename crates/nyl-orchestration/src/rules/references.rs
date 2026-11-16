@@ -655,28 +655,13 @@ impl Providers for ViewProviders<'_, '_> {
 }
 
 impl ViewProviders<'_, '_> {
-    /// The record a `fromPromotion` binding reads, or why none exists yet.
-    ///
-    /// With `path`, only that path's record. Without it, the newest record
-    /// (highest `sequence`) that carries the value; in an environment whose
-    /// source is promoted, only records on its source paths count, so the
-    /// source commit and the values proven with it always move together.
+    /// The record a `fromPromotion` binding reads
+    /// ([`super::sources::binding_supplier`]): with `path`, that path's;
+    /// without it, in an environment whose source is promoted, the record
+    /// that supplied the source commit, and otherwise the newest record that
+    /// carries the value.
     fn promoted(&self, source: &PromotionInputSource) -> Option<&PromotionRecord> {
-        let view = self.view;
-        let records: Box<dyn Iterator<Item = &PromotionRecord>> = match &source.path {
-            Some(path) => Box::new(
-                view.promotions
-                    .values()
-                    .filter(move |record| record.path.as_str() == path),
-            ),
-            None => Box::new(view.promotions.values().filter(|record| {
-                view.source_paths
-                    .is_none_or(|paths| paths.contains(record.path.as_str()))
-            })),
-        };
-        records
-            .filter(|record| record.values.contains_key(&source.value))
-            .max_by_key(|record| record.sequence)
+        super::sources::binding_supplier(self.view.promotions, self.view.source_paths, source)
     }
 }
 
@@ -1119,7 +1104,7 @@ mod tests {
 
     /// A `fromPromotion` binding reads the record of its `path`; without a
     /// path it reads the newest record that carries the value, and in a
-    /// promoted environment only records on its source paths; a value no
+    /// promoted environment the record that supplied its source; a value no
     /// record carries blocks the consumer with the fix. Catches a binding
     /// that reads another path's value, an older record winning, or a
     /// missing promotion failing instead of waiting.
@@ -1147,11 +1132,30 @@ mod tests {
             value(read(&world, None, json!({"value": "image"}))),
             Some(json!("vendor"))
         );
+        // The source paths' records carry the source commit they supply.
+        for record in world.promotions.values_mut() {
+            if record.path.as_str() != "vendor" {
+                record.source_commit = Some(CommitId::new("5".repeat(40)).unwrap());
+            }
+        }
         let source: BTreeSet<String> = ["dev-to-prod".to_owned(), "hotfix-to-prod".to_owned()].into();
         assert_eq!(
             value(read(&world, Some(&source), json!({"value": "image"}))),
             Some(json!("hotfix")),
             "a promoted environment's path-less binding follows its source paths"
+        );
+        // It follows the record that supplied the source: a value that record
+        // lacks is never taken from an older record of another source path.
+        world
+            .promotions
+            .get_mut(&nyl_core::orchestration::ids::PromotionPathName::new("hotfix-to-prod").unwrap())
+            .unwrap()
+            .values
+            .clear();
+        assert_eq!(
+            value(read(&world, Some(&source), json!({"value": "image"}))),
+            None,
+            "a path-less binding follows the supplying record"
         );
         let missing = read(&world, None, json!({"value": "ghost", "path": "dev-to-prod"}));
         let Readiness::Blocked { reasons } = &missing.readiness else {

@@ -92,6 +92,7 @@ impl StateOperationReport {
                 | Code::PromotionMissing
                 | Code::PromoteNoEvidence
                 | Code::PromoteSourceRejected
+                | Code::PromoteSupersedes
         ) {
             2
         } else {
@@ -159,6 +160,10 @@ pub struct PromoteReport {
     /// What keeps the newest candidate below the path's evidence level, for a refusal.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<PromoteGap>,
+    /// The commits of other paths' records the promotion would replace,
+    /// for a `NYL-PROMOTE-SUPERSEDES` refusal.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<PromoteMissing>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<Finding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -172,6 +177,39 @@ pub struct PromoteGap {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub message: String,
+}
+
+/// The commits of one record on another path that the promoted source
+/// commit or value lacks (`NYL-PROMOTE-SUPERSEDES`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromoteMissing {
+    /// The other path.
+    pub path: String,
+    /// The sequence of its record.
+    pub sequence: u64,
+    /// The repository, by the name a `--supersede` entry qualifies it with.
+    pub repository: String,
+    /// What must contain the commits: `source` (the target's source commit) or value names.
+    pub items: Vec<String>,
+    /// The promoted commit compared.
+    pub commit: CommitId,
+    /// The other record's commit.
+    pub record_commit: CommitId,
+    /// The `--supersede` entries that cover the missing commits, each
+    /// `[<repository>:]<range or commit>` with full commit IDs, to pass as
+    /// `--supersede <entry>=<reason>`.
+    pub supersede: Vec<String>,
+    /// The missing commits, oldest first.
+    pub commits: Vec<PromoteMissingCommit>,
+}
+
+/// One missing commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromoteMissingCommit {
+    pub commit: CommitId,
+    /// The first line of its message.
+    pub subject: String,
 }
 
 impl PromoteReport {
@@ -188,6 +226,7 @@ impl PromoteReport {
             commits: BTreeMap::new(),
             record: None,
             gaps: Vec::new(),
+            missing: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
         }
@@ -257,6 +296,34 @@ impl PromoteReport {
         }
         for gap in &self.gaps {
             let _ = writeln!(text, "  missing: {}", gap.message);
+        }
+        for missing in &self.missing {
+            let _ = writeln!(
+                text,
+                "  missing from {} #{} ({}), {}:",
+                missing.path,
+                missing.sequence,
+                missing.items.join(", "),
+                missing
+                    .supersede
+                    .iter()
+                    .map(|entry| format!("--supersede {entry}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            for commit in &missing.commits {
+                let _ = writeln!(text, "    {} {}", &commit.commit.as_str()[..12], commit.subject);
+            }
+        }
+        if let Some(record) = self.record.as_ref().filter(|record| !record.superseded.is_empty()) {
+            for superseded in &record.superseded {
+                let _ = writeln!(
+                    text,
+                    "  superseded {}: {}",
+                    &superseded.commit.as_str()[..12],
+                    superseded.reason
+                );
+            }
         }
         for (side, commit) in &self.commits {
             let _ = writeln!(text, "  {side}: {commit}");
@@ -819,6 +886,14 @@ pub struct PromotionsReport {
     /// The record the last run applied to the environment's source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied: Option<AppliedPromotion>,
+    /// The record the next run takes its source commit from, when the
+    /// environment's source is promoted: the newest on its source paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AppliedPromotion>,
+    /// Each `fromPromotion` binding of the environment's units and the record
+    /// that supplies it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<BindingSupplier>,
     /// The current record of each path, highest sequence first.
     pub promotions: Vec<PromotionRecord>,
     /// Every promotion into the environment, newest first.
@@ -826,6 +901,25 @@ pub struct PromotionsReport {
     pub exit: u8,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<Finding>,
+}
+
+/// A `fromPromotion` binding and the record it reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BindingSupplier {
+    /// The unit whose spec holds the binding; a DeploymentTarget's
+    /// `releaseInputs` are in its publication unit's spec.
+    pub unit: UnitName,
+    /// Where in the unit's spec.
+    pub pointer: String,
+    /// The promoted value it reads.
+    pub value: String,
+    /// The path the binding names; absent for a path-less binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The record that supplies it: path and sequence. Absent when no record
+    /// supplies it yet, and the unit waits (`NYL-PROMOTION-MISSING`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supplier: Option<AppliedPromotion>,
 }
 
 /// The record whose source commit the environment's last run applied, as
@@ -881,6 +975,8 @@ impl PromotionsReport {
             kind: "PromotionsReport",
             environment,
             applied: None,
+            source: None,
+            bindings: Vec::new(),
             promotions: Vec::new(),
             history: Vec::new(),
             exit: 0,
@@ -947,6 +1043,23 @@ impl PromotionsReport {
                 let _ = write!(text, ": {reason}");
             }
             text.push('\n');
+        }
+        if let Some(source) = &self.source {
+            let _ = writeln!(text, "source from {} #{}", source.path, source.sequence);
+        }
+        if !self.bindings.is_empty() {
+            let _ = writeln!(text, "bindings:");
+            for binding in &self.bindings {
+                let supplier = binding.supplier.as_ref().map_or_else(
+                    || "no record yet".to_owned(),
+                    |supplier| format!("{} #{}", supplier.path, supplier.sequence),
+                );
+                let _ = writeln!(
+                    text,
+                    "  {} {} {}: {supplier}",
+                    binding.unit, binding.pointer, binding.value
+                );
+            }
         }
         if !self.history.is_empty() {
             let _ = writeln!(text, "history, newest first:");

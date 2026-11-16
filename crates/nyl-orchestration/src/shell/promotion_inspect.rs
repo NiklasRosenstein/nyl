@@ -28,7 +28,7 @@ use super::local::check_record;
 use super::promote::{self, PathReading};
 use super::store_error;
 use crate::report::{
-    AppliedPromotion, PromotionCandidatesReport, PromotionHistoryEntry, PromotionsReport, StatesReport,
+    AppliedPromotion, BindingSupplier, PromotionCandidatesReport, PromotionHistoryEntry, PromotionsReport, StatesReport,
 };
 use crate::rules::promotion::{self, Decision, PromotionInput, Request, Selection};
 use crate::transition::trailer;
@@ -166,7 +166,10 @@ fn states_named(record: &PromotionRecord) -> Vec<CommitId> {
 }
 
 /// `nyl get promotions -e <env>`: the environment's PromotionRecords, the
-/// one its last run applied, and every promotion its desired history records.
+/// one its last run applied, the record that supplies its source and each of
+/// its units' `fromPromotion` bindings (as the binding resolver chooses it,
+/// [`crate::rules::sources::binding_supplier`], over the units' desired
+/// documents), and every promotion its desired history records.
 /// With `record: source`, `promoted` (the Environment's `source.fromPromotion`
 /// as the entry worktree declares it) supplies the path's record; its earlier
 /// records are commits in source, not in the desired history.
@@ -192,9 +195,39 @@ pub fn promotions(
             }),
             _ => None,
         });
-    let mut records: Vec<PromotionRecord> = crate::rules::sources::recorded_promotions(&snapshot, promoted)
-        .into_values()
-        .collect();
+    let recorded = crate::rules::sources::recorded_promotions(&snapshot, promoted);
+    // The paths that supply the source: as the entry worktree declares
+    // them, else as the last run kept the Environment.
+    let source_paths: Option<BTreeSet<String>> = promoted
+        .map(|promoted| promoted.path.iter().chain(&promoted.paths).cloned().collect())
+        .or_else(|| {
+            snapshot
+                .environment
+                .as_ref()
+                .and_then(|record| crate::rules::sources::promoted_source_paths(&record.spec))
+        });
+    let as_applied = |record: &PromotionRecord| AppliedPromotion {
+        path: record.path.to_string(),
+        sequence: record.sequence,
+    };
+    report.source = source_paths.as_ref().and_then(|paths| {
+        let paths: Vec<&String> = paths.iter().collect();
+        crate::rules::sources::source_supplier(recorded.values(), &paths).map(as_applied)
+    });
+    for (unit, desired) in &snapshot.desired {
+        for (pointer, binding) in crate::rules::promotion_paths::bindings_in(&desired.spec) {
+            let supplier =
+                crate::rules::sources::binding_supplier(&recorded, source_paths.as_ref(), &binding).map(as_applied);
+            report.bindings.push(BindingSupplier {
+                unit: unit.clone(),
+                pointer,
+                value: binding.value,
+                path: binding.path,
+                supplier,
+            });
+        }
+    }
+    let mut records: Vec<PromotionRecord> = recorded.into_values().collect();
     records.sort_by_key(|record| std::cmp::Reverse(record.sequence));
     report.promotions = records;
     report.history = history

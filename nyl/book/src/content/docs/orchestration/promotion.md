@@ -12,8 +12,9 @@ reads it when it reconciles.
 :::note[Status]
 M6 delivers promotion in steps. `nyl promote`, `fromPromotion` sources and
 bindings, artifact verification, `nyl get states`, `promotion-candidates`,
-and `promotions`, `status` lineage, and `record: source` work today.
-`hotfix` paths with `--supersede`, and value-only coverage follow.
+and `promotions`, `status` lineage, `record: source`, and several paths into
+one environment with the supersede check and hotfixes work today. Value-only
+coverage follows.
 :::
 
 ## The unit of promotion
@@ -48,10 +49,76 @@ nyl promote dev-to-prod --revision 3e7b9c… --evidence published --reason "Roll
 - **Bindings.** `{fromPromotion: {value: webImage}}` in a unit's spec, or in a
   DeploymentTarget's `releaseInputs`, resolves through the one binding
   resolver. With `path` it reads that path's record; without it, the newest
-  record carrying the value (in a promoted environment, only records on its
-  source paths, so the commit and the values proven with it move together). A
-  binding with no record yet blocks its unit, and the reason names
-  `nyl promote`.
+  record carrying the value. In an environment whose source is promoted, a
+  binding without `path` reads the record that supplied the source commit, so
+  the commit and the values proven with it move together: a value that record
+  lacks is never taken from an older record of another path. A binding with
+  no record yet blocks its unit, and the reason names `nyl promote`.
+
+## Hotfixes
+
+A promoted environment runs only what its source proved, so a fix that
+cannot wait for dev's unreleased work takes a path of its own. prod takes its
+source from either path, and its bindings name no path, so they follow
+whichever record supplied the source:
+
+```yaml
+# prod
+spec:
+  source:
+    fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}
+  protectedRefs: [main, 'release/*']
+---
+apiVersion: gitops.nyl/v1
+kind: Environment
+metadata: {name: prod-hotfix}
+spec:
+  source: {revision: release/prod}     # cut from what prod runs
+  unitSelector: {matchLabels: {hotfix: 'true'}}   # the image and a publication to a target on a Cluster or Argo CD instance of its own
+  attestations: [qa]
+---
+apiVersion: gitops.nyl/v1
+kind: PromotionPath
+metadata: {name: hotfix-to-prod}
+spec:
+  from: {environment: prod-hotfix}
+  to: {environment: prod}
+  evidence: attested
+  values:
+    webImage: {select: {unit: web-image, artifact: image, pointer: /reference}}
+```
+
+1. **Start.** Cut `release/prod` from the source commit prod runs
+   (`nyl status -e prod` shows it) and commit the fix there.
+2. **Try.** CI reconciles `prod-hotfix` on pushes to `release/prod`: it builds
+   the fix and deploys it to the hotfix target, where it is attested.
+3. **Ship.** `nyl promote hotfix-to-prod`, then `nyl reconcile -e prod`: prod
+   runs the fix commit with the hotfix image, and keeps its own approvals.
+4. **Merge back.** Merge `release/prod` into `main`. Until `main` contains the
+   fix, the next `nyl promote dev-to-prod` is refused with
+   `NYL-PROMOTE-SUPERSEDES`, naming the missing commits.
+5. **Clean up.** Keep `release/prod` until prod runs a commit reachable from
+   `main`: prod's source commit must stay fetchable.
+
+`nyl promote` checks that a promotion keeps what other paths promoted into
+the target since its own path last promoted: the promoted source commit and
+each value must contain the other records' commits, by their changes (as
+`git cherry` compares them). A merge commit or cherry-picks of each fix
+commit pass; a squash merge of several fix commits does not, because the
+squash has the changes of none of them on its own. The check is symmetric: a
+hotfix branch cut before a later dev promotion is refused too, and is cut
+again from what prod runs. When a fix was made differently or is dropped on
+purpose, `--supersede` records that:
+
+```bash
+nyl promote dev-to-prod --supersede '<range>=Squash-merged into main' --reason "Release 3"
+```
+
+The refusal prints the range to copy, and the record lists each superseded
+commit with its reason; [`nyl promote`](/nyl/reference/cli/promote/#superseding)
+describes the rule and its options. `nyl get promotions -e prod` shows which
+record each binding reads, and `nyl status -e prod` a hotfix that waits for
+the next reconcile.
 
 ## Inspecting promotion
 

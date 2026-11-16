@@ -37,8 +37,8 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ArtifactStatus, Supported, VerificationContext};
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress};
 use nyl_core::orchestration::ports::{
-    EnvironmentSnapshot, LogEntry, PromotionRecordWriter, RecordWriteError, StateHistory, StateStore, StateTips,
-    TransitionChanges,
+    EnvironmentSnapshot, LogEntry, PromotionRecordWriter, RecordWriteError, SourceRepository, StateHistory, StateStore,
+    StateTips, TransitionChanges,
 };
 use nyl_core::orchestration::promotion::{PromotedState, PromotionFrom, PromotionRecord, PromotionRequest};
 use nyl_core::orchestration::state::{Operation, StateLocation};
@@ -50,8 +50,9 @@ use super::lease;
 use super::local::check_record;
 use super::run::{execution_credentials, unit_timeout, RunContext, RunRequest};
 use super::store_error;
-use crate::report::{Outcome, PromoteGap, PromoteReport};
+use crate::report::{Outcome, PromoteGap, PromoteMissing, PromoteMissingCommit, PromoteReport};
 use crate::rules::freshness::receipt_is_current;
+use crate::rules::promotion::supersede::{self, Item, RecordCommits, SupersedeEntry, SupersedeRequest};
 use crate::rules::promotion::{
     self, recorded_states, ArtifactCheck, Decision, DesiredEntry, IgnoreRequest, PromotionInput, RecordedState,
     Refusal, Request, Selection, StateAttestations,
@@ -93,6 +94,12 @@ pub struct PromoteOptions {
     pub promoted: Option<PromotedSource>,
     /// Who asks and why, recorded like an approval.
     pub requested: PromotionRequest,
+    /// `--supersede`: missing commits of other paths' records accepted as
+    /// replaced.
+    pub supersede: Vec<SupersedeRequest>,
+    /// The names the project gives repositories (its GitRepositories), by
+    /// which a refusal prints them and a `--supersede` entry qualifies them.
+    pub repository_names: supersede::RepositoryNames,
 }
 
 impl PromoteOptions {
@@ -223,6 +230,8 @@ fn body(
         }
         path.spec.values.retain(|name, _| options.values.contains(name));
     }
+    // Every `--supersede` entry has a reason before anything is read.
+    supersede::require_reasons(&options.supersede, options.requested.reason.as_deref())?;
     let path_key = path.name().map_err(|error| {
         Finding::new(
             Code::PromoteSelectorInvalid,
@@ -233,12 +242,15 @@ fn body(
     // The target's current records: in state, and with `record: source` the
     // block in the entry worktree. The decision sees the path's record
     // narrowed to the values promoted: an equal subset leaves it `unchanged`.
-    let current = crate::rules::sources::current_records(
+    // A block a run would refuse (invalid, or older than what ran) refuses
+    // the promotion too.
+    let current = crate::rules::sources::promotion_records(
         target.as_str(),
         options.promoted.as_ref(),
         &snapshot.promotions,
         &crate::rules::sources::Applied::of(&snapshot),
-    );
+    )?
+    .records;
     let mut target_records = current.clone();
     if let Some(existing) = target_records.get_mut(&path_key) {
         if !options.values.is_empty() {
@@ -288,6 +300,20 @@ fn body(
         ));
     }
     let mut record = promotion.record;
+    // Nothing another path promoted since this path did is dropped.
+    record.superseded = check_supersede(
+        context,
+        request,
+        options,
+        &SupersedeInput {
+            source,
+            history: &history,
+            target_history: &target_history,
+            current: &current,
+            record: &record,
+        },
+        report,
+    )?;
     report.warnings.extend(
         options
             .rebuilt
@@ -387,6 +413,425 @@ fn body(
     report.commits.extend(commits);
     report.outcome = Outcome::Done;
     Ok(())
+}
+
+/// What the supersede check of one promotion reads.
+struct SupersedeInput<'a> {
+    source: &'a EnvironmentName,
+    /// The source's recorded states the record's values came from.
+    history: &'a [RecordedState],
+    /// The target's history, whose `promote` commits hold earlier records.
+    target_history: &'a StateHistory,
+    /// The target's current records.
+    current: &'a BTreeMap<nyl_core::orchestration::ids::PromotionPathName, PromotionRecord>,
+    /// The record the promotion would write.
+    record: &'a PromotionRecord,
+}
+
+/// The source fields of a desired unit, as its driver declares them.
+fn source_fields_of<'a>(
+    context: &'a RunContext<'_>,
+) -> impl Fn(&nyl_core::orchestration::state::DesiredUnit) -> Vec<String> + 'a {
+    |unit| {
+        context
+            .drivers
+            .get(&unit.unit.api_version, &unit.unit.kind)
+            .map(|driver| driver.source_fields(unit.resolved_spec.as_ref().unwrap_or(&unit.spec)))
+            .unwrap_or_default()
+    }
+}
+
+/// The supersede check ([`supersede`]): the commits of every record another
+/// path wrote into the target since this path last promoted each item must
+/// be contained in what this promotion writes, unless `--supersede` accepts
+/// them as replaced. Returns the superseded commits the record lists; a
+/// refusal lists what is missing in the report.
+///
+/// - Records come from the target's current records and from the desired
+///   state at each `promote` commit of its history ([`records_to_compare`]),
+///   so a record `state restore` removed still counts. A `record: source`
+///   block's earlier blocks are commits in source, not in state: only the
+///   current block counts.
+/// - A record's value has the source commits of its producing unit in the
+///   source state the record names ([`record_commits`]); a state the source
+///   environment's history no longer holds, or an environment no longer
+///   declared, leaves it unchecked (`NYL-PROMOTE-UNCHECKED`).
+/// - A shallow entry clone is refused (`NYL-PROMOTE-SHALLOW-CLONE`): its
+///   histories end early. Commits are fetched into the entry clone without
+///   reading their trees; a record's commit that cannot be fetched is
+///   unchecked unless `--supersede` names it.
+fn check_supersede(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    options: &PromoteOptions,
+    input: &SupersedeInput<'_>,
+    report: &mut PromoteReport,
+) -> Result<Vec<nyl_core::orchestration::promotion::SupersededCommit>, Finding> {
+    let target = &request.environment;
+    let record = input.record;
+    let PromotionFrom::Environment(from) = &record.from else {
+        return Ok(Vec::new());
+    };
+    let source_fields = source_fields_of(context);
+
+    // What this promotion writes, with its source commits.
+    let mut writes: BTreeMap<Item, Option<supersede::Commits>> = BTreeMap::new();
+    if let Some(commit) = &record.source_commit {
+        writes.insert(Item::Source, Some(supersede::source_commits(commit)));
+    }
+    for (name, value) in &record.values {
+        let state_commit = value
+            .state
+            .as_ref()
+            .map_or(&from.desired_commit, |state| &state.desired_commit);
+        let commits = input
+            .history
+            .iter()
+            .find(|state| state.desired_commit == *state_commit)
+            .and_then(|state| supersede::value_commits(&value.select, &state.snapshot.desired, &source_fields));
+        writes.insert(Item::Value(name.clone()), commits);
+    }
+
+    let records = records_to_compare(context, request, input, &writes)?;
+    let commits_of = record_commits(context, request, input, &records, &writes)?;
+    let mut plan = supersede::plan(&record.path, &writes, &commits_of);
+    report.warnings.extend(plan.unchecked.iter().cloned());
+    if plan.obligations.is_empty() {
+        return Ok(Vec::new());
+    }
+    if context.sources.is_shallow() {
+        return Err(Finding::new(
+            Code::PromoteShallowClone,
+            format!(
+                "the checkout is a shallow clone, so nyl promote cannot compare what path {} promotes with what other paths promoted into {target}",
+                record.path
+            ),
+            "fetch the full history (`git fetch --unshallow`, or `fetch-depth: 0` with actions/checkout) and promote again",
+        ));
+    }
+    let answers = answer_checks(context, target, &mut plan)?;
+    if answers
+        .values()
+        .all(|answer| matches!(answer, supersede::Answer::Missing(missing) if missing.is_empty()))
+    {
+        return Ok(Vec::new());
+    }
+    let entries = resolve_entries(context, options, &plan, &answers)?;
+    let judged = supersede::Judged {
+        path: &record.path,
+        source: input.source,
+        target,
+        by: &options.requested.by,
+        names: &options.repository_names,
+    };
+    match supersede::judge(&judged, &plan, &answers, &entries) {
+        Ok(accepted) => {
+            report.warnings.extend(accepted.unchecked);
+            Ok(accepted.superseded)
+        }
+        Err(refusal) => {
+            report.missing = missing_report(options, &refusal.unsatisfied);
+            Err(refusal.finding)
+        }
+    }
+}
+
+/// What a supersede refusal lists in the report.
+fn missing_report(options: &PromoteOptions, unsatisfied: &[supersede::Unsatisfied]) -> Vec<PromoteMissing> {
+    unsatisfied
+        .iter()
+        .map(|unsatisfied| PromoteMissing {
+            path: unsatisfied.path.to_string(),
+            sequence: unsatisfied.sequence,
+            repository: options.repository_names.name_of(&unsatisfied.repository),
+            items: unsatisfied.items.iter().map(ToString::to_string).collect(),
+            commit: unsatisfied.value.clone(),
+            record_commit: unsatisfied.record.clone(),
+            supersede: unsatisfied.supersede.clone(),
+            commits: unsatisfied
+                .missing
+                .iter()
+                .map(|missing| PromoteMissingCommit {
+                    commit: missing.commit.clone(),
+                    subject: missing.subject.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Answer each check of `plan`: fetch its commits into the entry clone (a
+/// promoted commit must be there; a record's may be missing, which leaves
+/// it [`supersede::Answer::Unavailable`]), drop records a newer one of the
+/// same path contains by ancestry, and ask Git for the missing commits.
+fn answer_checks(
+    context: &RunContext<'_>,
+    target: &EnvironmentName,
+    plan: &mut supersede::Plan,
+) -> Result<BTreeMap<supersede::Check, supersede::Answer>, Finding> {
+    let unreadable = |error: &dyn std::fmt::Display| {
+        Finding::new(
+            Code::SourceUnavailable,
+            format!("cannot compare the promoted commits with what other paths promoted into {target}: {error}"),
+            "make the commits fetchable from this clone (fetch the branches that carry them), then promote again",
+        )
+    };
+    // Which commits are here: a promoted commit must be; a record's may not.
+    let mut present: BTreeMap<(SourceRepository, CommitId), bool> = BTreeMap::new();
+    let mut fetch = |repository: &SourceRepository, commit: &CommitId| -> Result<bool, Finding> {
+        if let Some(known) = present.get(&(repository.clone(), commit.clone())) {
+            return Ok(*known);
+        }
+        let found = context
+            .sources
+            .fetch_commit(repository, commit)
+            .map_err(|error| unreadable(&error))?;
+        present.insert((repository.clone(), commit.clone()), found);
+        Ok(found)
+    };
+    for check in plan.checks() {
+        if !fetch(&check.repository, &check.value)? {
+            return Err(unreadable(&format!(
+                "promoted commit {} is not in this clone",
+                check.value
+            )));
+        }
+        fetch(&check.repository, &check.record)?;
+    }
+    // A newer record of the same path that descends from an older one covers it.
+    plan.prune(&|repository, older, newer| {
+        present.get(&(repository.clone(), older.clone())) == Some(&true)
+            && present.get(&(repository.clone(), newer.clone())) == Some(&true)
+            && context.sources.is_ancestor(repository, older, newer).unwrap_or(false)
+    });
+    let mut answers = BTreeMap::new();
+    for check in plan.checks() {
+        let answer = if present.get(&(check.repository.clone(), check.record.clone())) == Some(&true) {
+            supersede::Answer::Missing(
+                context
+                    .sources
+                    .missing_commits(&check.repository, &check.value, &check.record)
+                    .map_err(|error| unreadable(&error))?,
+            )
+        } else {
+            supersede::Answer::Unavailable
+        };
+        answers.insert(check, answer);
+    }
+    Ok(answers)
+}
+
+/// The records the supersede check compares with: the target's current
+/// ones, and those at each `promote` commit of its history, this path's own
+/// included, so "since" is computed over all of them. When this path's
+/// current record carries every item the promotion writes, nothing older
+/// than it can count, and only newer history is read.
+fn records_to_compare(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    input: &SupersedeInput<'_>,
+    writes: &BTreeMap<Item, Option<supersede::Commits>>,
+) -> Result<Vec<PromotionRecord>, Finding> {
+    let store = context.base.store;
+    let target = &request.environment;
+    let record = input.record;
+    let own = input
+        .current
+        .get(&record.path)
+        .filter(|own| {
+            writes.keys().all(|item| match item {
+                Item::Source => own.source_commit.is_some(),
+                Item::Value(name) => own.values.contains_key(name),
+            })
+        })
+        .map_or(0, |own| own.sequence);
+    let mut records: Vec<PromotionRecord> = input.current.values().cloned().collect();
+    let earlier: Vec<(CommitId, u64)> = input
+        .target_history
+        .desired
+        .iter()
+        .filter_map(|commit| {
+            let summary = recorded_summary(&commit.message, target)?;
+            let path = summary.get("path")?.as_str()?;
+            let sequence = summary.get("sequence")?.as_u64()?;
+            let known = records
+                .iter()
+                .any(|record| record.path.as_str() == path && record.sequence == sequence);
+            (sequence > own && !known).then(|| (commit.commit.clone(), sequence))
+        })
+        .collect();
+    for batch in earlier.chunks(16) {
+        let tips: Vec<StateTips> = batch
+            .iter()
+            .map(|(commit, _)| StateTips {
+                desired: Some(commit.clone()),
+                observed: None,
+            })
+            .collect();
+        let snapshots = store
+            .snapshots_at(&request.location, &tips)
+            .map_err(|error| store_error(target, &error))?;
+        for ((_, sequence), snapshot) in batch.iter().zip(snapshots) {
+            if let Some(found) = snapshot
+                .promotions
+                .into_values()
+                .find(|found| found.sequence == *sequence)
+            {
+                records.push(found);
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// Each record's items with their source commits, reading the source states
+/// other paths' values came from. Only a value the check compares is read:
+/// one on another path, after [`supersede::since`] for it. A state its
+/// environment's history no longer holds, or an environment no longer
+/// declared, leaves the value's commits unknown; any other failure to read
+/// state is an error.
+fn record_commits(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    input: &SupersedeInput<'_>,
+    records: &[PromotionRecord],
+    writes: &BTreeMap<Item, Option<supersede::Commits>>,
+) -> Result<Vec<RecordCommits>, Finding> {
+    let store = context.base.store;
+    let record = input.record;
+    let source_fields = source_fields_of(context);
+    // Items first, without commits, so "since" sees every record.
+    let mut commits_of: Vec<RecordCommits> = records
+        .iter()
+        .map(|other| {
+            let mut items = BTreeMap::new();
+            if let Some(commit) = &other.source_commit {
+                items.insert(Item::Source, Some(supersede::source_commits(commit)));
+            }
+            for name in other.values.keys() {
+                if writes.contains_key(&Item::Value(name.clone())) {
+                    items.insert(Item::Value(name.clone()), None);
+                }
+            }
+            RecordCommits {
+                path: other.path.clone(),
+                sequence: other.sequence,
+                items,
+            }
+        })
+        .collect();
+    let since: BTreeMap<Item, u64> = writes
+        .keys()
+        .map(|item| (item.clone(), supersede::since(&record.path, item, &commits_of)))
+        .collect();
+    let mut histories: BTreeMap<EnvironmentName, Option<BTreeSet<CommitId>>> = BTreeMap::new();
+    let mut states: BTreeMap<(EnvironmentName, CommitId), Option<EnvironmentSnapshot>> = BTreeMap::new();
+    for (other, commits) in records.iter().zip(&mut commits_of) {
+        let PromotionFrom::Environment(other_from) = &other.from else {
+            continue;
+        };
+        if other.path == record.path {
+            continue;
+        }
+        for (name, value) in &other.values {
+            let item = Item::Value(name.clone());
+            if !writes.contains_key(&item) || other.sequence <= since[&item] {
+                continue;
+            }
+            let state_commit = value
+                .state
+                .as_ref()
+                .map_or(&other_from.desired_commit, |state| &state.desired_commit);
+            let environment = &other_from.environment;
+            let key = (environment.clone(), state_commit.clone());
+            if !states.contains_key(&key) {
+                let location = request.environments.get(environment);
+                let held = match (histories.get(environment), location) {
+                    (Some(held), _) => held.clone(),
+                    (None, None) => None,
+                    (None, Some(location)) => {
+                        let history = store
+                            .history(location)
+                            .map_err(|error| store_error(environment, &error))?;
+                        Some(history.desired.into_iter().map(|commit| commit.commit).collect())
+                    }
+                };
+                histories.insert(environment.clone(), held.clone());
+                let snapshot = match (held, location) {
+                    (Some(held), Some(location)) if held.contains(state_commit) => store
+                        .snapshots_at(
+                            location,
+                            &[StateTips {
+                                desired: Some(state_commit.clone()),
+                                observed: None,
+                            }],
+                        )
+                        .map_err(|error| store_error(environment, &error))?
+                        .pop(),
+                    _ => None,
+                };
+                states.insert(key.clone(), snapshot);
+            }
+            let found = states[&key]
+                .as_ref()
+                .and_then(|snapshot| supersede::value_commits(&value.select, &snapshot.desired, &source_fields));
+            commits.items.insert(item, found);
+        }
+    }
+    Ok(commits_of)
+}
+
+/// The `--supersede` entries resolved: each in the repositories the check
+/// compares in (a qualified one in its own), keeping the repository whose
+/// missing commits it names ([`supersede::match_entry`]). A full commit ID
+/// that is not in this clone, such as a record's commit that cannot be
+/// fetched, stands for itself.
+fn resolve_entries(
+    context: &RunContext<'_>,
+    options: &PromoteOptions,
+    plan: &supersede::Plan,
+    answers: &BTreeMap<supersede::Check, supersede::Answer>,
+) -> Result<Vec<SupersedeEntry>, Finding> {
+    let wanted = supersede::wanted(plan, answers);
+    let repositories: std::collections::BTreeSet<SourceRepository> = wanted.keys().cloned().collect();
+    let mut entries = Vec::new();
+    for entry in &options.supersede {
+        let reason = entry
+            .reason
+            .clone()
+            .or_else(|| options.requested.reason.clone())
+            .unwrap_or_default();
+        let candidates: Vec<SourceRepository> =
+            match supersede::qualified(entry, &repositories, &options.repository_names)? {
+                Some(repository) => vec![repository],
+                None => repositories.iter().cloned().collect(),
+            };
+        let mut resolved = BTreeMap::new();
+        let mut errors = Vec::new();
+        for repository in candidates {
+            match context.sources.commits_in(&repository, &entry.range) {
+                Ok(commits) => {
+                    resolved.insert(repository, commits);
+                }
+                Err(_) if CommitId::new(entry.range.to_ascii_lowercase()).is_ok() => {
+                    let commit = CommitId::new(entry.range.to_ascii_lowercase()).expect("checked");
+                    resolved.insert(repository, vec![commit]);
+                }
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        if resolved.is_empty() {
+            return Err(Finding::new(
+                Code::SourceUnavailable,
+                format!("--supersede {} names no commits: {}", entry.text(), errors.join("; ")),
+                "pass a commit or a range `<from>..<to>` of the missing commits, as the refusal prints it",
+            ));
+        }
+        if let Some(entry) = supersede::match_entry(entry, reason, &resolved, &wanted, &options.repository_names)? {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
 }
 
 /// Why a `record: source` block was not committed, as the finding the

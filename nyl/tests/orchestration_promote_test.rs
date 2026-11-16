@@ -1000,6 +1000,8 @@ fn promote_with(
             at: harness.shell.clock.now(),
             reason: None,
         },
+        supersede: Vec::new(),
+        repository_names: nyl_orchestration::rules::promotion::supersede::RepositoryNames::default(),
     };
     harness.shell.with_context(&job, |context, request| {
         promote(
@@ -1121,4 +1123,108 @@ fn test_switching_to_record_source_writes_the_first_block() {
     assert_eq!(switched.report["outcome"], "done");
     assert_eq!(switched.report["record"]["sequence"], 2);
     assert!(switched.report["commits"]["source"].is_string());
+}
+
+/// prod's source from two paths out of dev, so one path can promote an
+/// older state than the other recorded.
+fn two_source_paths() -> String {
+    ENVIRONMENTS
+        .replace(
+            "source: {fromPromotion: {path: dev-to-prod}}",
+            "source: {fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}}",
+        )
+        .replace(
+            "metadata: {name: attested}\nspec:\n  from: {environment: dev}\n  to: {environment: prod}\n  evidence: attested",
+            "metadata: {name: hotfix-to-prod}\nspec:\n  from: {environment: dev}\n  to: {environment: prod}",
+        )
+}
+
+/// The supersede check end to end: after another path promoted a newer
+/// source commit, promoting an older state is refused with
+/// `NYL-PROMOTE-SUPERSEDES` (exit 2) naming the missing commit and writing
+/// nothing; a `--supersede` entry without a reason is refused with
+/// `NYL-PROMOTE-SUPERSEDE-REASON` (exit 1) before anything is read; with
+/// `--reason` the entry passes and the record lists the commit, its reason,
+/// and who gave it. Catches a promotion that silently drops a hotfix, and a
+/// reason-less supersede recorded.
+#[test]
+fn test_supersede_refuses_missing_commits_and_records_the_override() {
+    let harness = Promote::of(&two_source_paths(), &format!("{UNITS}{BINDER}"), true);
+    let older = harness.shell.tip(DEV_DESIRED);
+    harness.release("2");
+    let hotfix = harness.promote(&["hotfix-to-prod", "--reason", "Hotfix"]);
+    assert_eq!(hotfix.exit, 0, "{}", hotfix.stderr);
+    let fix = hotfix.report["record"]["sourceCommit"].as_str().unwrap().to_owned();
+
+    let before = harness.shell.tip(PROD_DESIRED);
+    let refused = harness.promote(&["dev-to-prod", "--state-revision", &older]);
+    assert_eq!(refused.exit, 2, "{}", refused.stderr);
+    assert!(refused.stderr.contains("NYL-PROMOTE-SUPERSEDES"), "{}", refused.stderr);
+    assert!(refused.stderr.contains("release 2"), "{}", refused.stderr);
+    assert!(refused.stderr.contains("hotfix-to-prod #1"), "{}", refused.stderr);
+    let missing = &refused.report["missing"][0];
+    assert_eq!(missing["path"], "hotfix-to-prod");
+    assert_eq!(missing["commits"][0]["commit"], fix.as_str());
+    assert_eq!(missing["commits"][0]["subject"], "release 2");
+    assert_eq!(harness.shell.tip(PROD_DESIRED), before, "nothing was written");
+
+    let reasonless = harness.promote(&["dev-to-prod", "--state-revision", &older, "--supersede", &fix]);
+    assert_eq!(reasonless.exit, 1, "{}", reasonless.stderr);
+    assert!(
+        reasonless.stderr.contains("NYL-PROMOTE-SUPERSEDE-REASON"),
+        "{}",
+        reasonless.stderr
+    );
+    assert_eq!(harness.shell.tip(PROD_DESIRED), before);
+
+    let accepted = harness.promote(&[
+        "dev-to-prod",
+        "--state-revision",
+        &older,
+        "--supersede",
+        &fix,
+        "--reason",
+        "Roll back the hotfix",
+    ]);
+    assert_eq!(accepted.exit, 0, "{}", accepted.stderr);
+    let superseded = &accepted.report["record"]["superseded"];
+    assert_eq!(superseded.as_array().unwrap().len(), 1, "{superseded}");
+    assert_eq!(superseded[0]["commit"], fix.as_str());
+    assert_eq!(superseded[0]["reason"], "Roll back the hotfix");
+    assert!(superseded[0]["by"].is_string());
+
+    // dev-to-prod has now promoted after the hotfix: its next promotion is
+    // no longer checked against it.
+    let newer = harness.promote(&["dev-to-prod"]);
+    assert_eq!(newer.exit, 0, "{}", newer.stderr);
+    assert_eq!(newer.report["record"]["superseded"], serde_json::json!([]));
+}
+
+/// `nyl get promotions` names the record each binding reads: a path-less
+/// binding in an environment with several source paths follows the record
+/// that supplied the source. Catches inspection that shows another record
+/// than the one a run resolves.
+#[test]
+fn test_get_promotions_shows_each_bindings_supplier() {
+    let harness = Promote::of(&two_source_paths(), &format!("{UNITS}{BINDER}"), true);
+    assert_eq!(harness.promote(&["dev-to-prod"]).exit, 0);
+    let run = harness.shell.invoke(&["reconcile", "-e", "prod"]);
+    assert_eq!(run.exit, 0, "{}", run.stderr);
+    harness.release("2");
+    assert_eq!(harness.promote(&["hotfix-to-prod", "--reason", "Hotfix"]).exit, 0);
+    let shown = harness.shell.invoke(&["get", "promotions", "-e", "prod", "-o", "json"]);
+    assert_eq!(shown.exit, 0, "{}", shown.stderr);
+    assert_eq!(
+        shown.report["source"],
+        serde_json::json!({"path": "hotfix-to-prod", "sequence": 2})
+    );
+    let bindings = shown.report["bindings"].as_array().unwrap();
+    let binder = bindings.iter().find(|binding| binding["unit"] == "binder").unwrap();
+    assert_eq!(binder["value"], "webImage");
+    assert_eq!(
+        binder["supplier"],
+        serde_json::json!({"path": "hotfix-to-prod", "sequence": 2})
+    );
+    let status = harness.shell.invoke(&["status", "-e", "prod", "-o", "json"]);
+    assert!(status.stdout.contains("\"pendingSequence\": 2"), "{}", status.stdout);
 }

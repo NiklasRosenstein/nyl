@@ -13,7 +13,7 @@ export const orchestrationRoadmap = {
     steps: [
       { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks; validation rejects `changeGate: pullRequest`, which M11 adds.', done: true },
       { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: true },
-      { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: false },
+      { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: true },
       { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
     ],
     outro: 'Value-only promotion and attestation-gated paths follow in the rest of M6; the [M6 plan](https://github.com/NiklasRosenstein/nyl/blob/develop/design/m6-plan.md) maps them onto pull requests. Promotion from and into non-orchestrated targets and the pull-request change gate follow in M11.',
@@ -126,7 +126,7 @@ export const orchestrationRoadmap = {
       items: [
         { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks, recording each promotion directly; validation rejects `changeGate: pullRequest` until M11.', done: true },
         { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with `record: state` and `record: source`, the whole-source evidence rule, recorded evidence for older states, artifact verification, and rollback through `--revision`.', done: true },
-        { text: 'Support several paths into one environment: `source.fromPromotion.paths`, path-less bindings, the per-value supersede check with `--supersede`, and the hotfix pattern with a fifth reference scenario.', done: false },
+        { text: 'Support several paths into one environment: `source.fromPromotion.paths`, path-less bindings, the per-value supersede check with `--supersede`, and the hotfix pattern with a fifth reference scenario.', done: true },
         { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
         { text: 'Promote values only, such as an image digest and a Terraform source commit, across differently named units and inputs, each from the state its consumer runs.', done: false },
         { text: 'Implement attestations: driver-declared names, `spec.attestations` on units and environments, external `nyl attest --name … --result …` for a unit\'s current receipt and an environment\'s current state (environment-wide ones in `observed/attestations.yaml`), the `published | attested` evidence levels with a path\'s per-unit `attestations`, blocking on failures with `--ignore-attestation`, and `maxAttestationAge`.', done: false },

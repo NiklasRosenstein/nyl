@@ -115,6 +115,11 @@ pub(super) fn read(
     let snapshot = &state.snapshot;
     let environments = BTreeMap::new();
     let produced = BTreeSet::new();
+    // A source state's path-less bindings read as its own runs read them.
+    let source_paths = snapshot
+        .environment
+        .as_ref()
+        .and_then(|record| crate::rules::sources::promoted_source_paths(&record.spec));
     let view = ReferenceView {
         environments: &environments,
         environment,
@@ -132,7 +137,7 @@ pub(super) fn read(
         // Deliberately not the environment's current records
         // (`shell::promote::environment_promotions`), which runs read.
         promotions: &snapshot.promotions,
-        source_paths: None,
+        source_paths: source_paths.as_ref(),
     };
     let resolved = match form {
         SelectForm::Input => {

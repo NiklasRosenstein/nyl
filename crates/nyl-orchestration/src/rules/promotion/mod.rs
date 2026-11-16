@@ -4,7 +4,7 @@
 //! Contract: [Promotion paths](../../../../../design/promotion.md#promotion-paths),
 //! [Promoting an environment's source](../../../../../design/promotion.md#promoting-an-environments-source),
 //! [Health evidence](../../../../../design/promotion.md#health-evidence), and the
-//! decisions D2, D11, and D13 (D5, D6, D7, and D8 are not here: see below) of the
+//! decisions D2, D5 ([`supersede`]), D11, and D13 (D6, D7, and D8 are not here: see below) of the
 //! [M6 plan](../../../../../design/m6-plan.md#open-decisions).
 //!
 //! [`decide`] is a pure function of the source environment's recorded states
@@ -22,6 +22,8 @@
 //! - [`lineage`]: what `status` shows of the promotion an environment runs.
 //! - [`source_block`]: a `record: source` block checked against the state it
 //!   names.
+//! - [`supersede`]: the supersede check (D5) that a promotion keeps what other
+//!   paths promoted into the target, and `--supersede`.
 //! - this module: state selection and the record.
 //!
 //! **State selection.** Without flags, the newest state whose evidence
@@ -49,8 +51,10 @@
 //! record already names and that record is the newest on the target (no other
 //! path wrote since), the decision is [`Decision::Unchanged`]. "The record
 //! supplies every value of the target" is approximated by "it is the newest
-//! record on the target": the binding suppliers of path-less bindings (PR 9)
-//! can refine it when the shell passes them in.
+//! record on the target": in an environment whose source is promoted,
+//! path-less bindings follow the record that supplies the source
+//! ([`crate::rules::sources::binding_supplier`]), which is the newest one on
+//! its source paths.
 //!
 //! **Which paths.** A path whose target takes its source from the promotion
 //! (`promotes_source`) takes the source commit and every value from one state
@@ -59,8 +63,8 @@
 //! reaches the level, `from` is the newest of those states, and a value from
 //! another state names it (D11).
 //!
-//! Not here: the next `sequence` from history (PR 6), the supersede check
-//! (PR 9), artifact verification and every other effect (PR 6; the decision
+//! Not here: the next `sequence` from history (PR 6), the supersede check's
+//! reading of commits ([`supersede`] decides; the shell asks Git), artifact verification and every other effect (PR 6; the decision
 //! lists what to verify), a `--value` subset (PR 6), and the value-only
 //! specifics of PR 11: judging a publication's `accepted` and `healthy` per
 //! covered Application (D6) and tracing an input selector to the Application
@@ -75,6 +79,7 @@ mod history;
 mod lineage;
 mod source_block;
 mod standing;
+pub mod supersede;
 mod values;
 
 #[cfg(test)]

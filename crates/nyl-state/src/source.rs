@@ -413,6 +413,28 @@ impl GitSourceResolver {
         Ok((source, oid))
     }
 
+    /// Whether `commit` is in the entry clone, fetched there as a recorded
+    /// commit is when it is missing, without checking its tree: history
+    /// questions read commits, never their files.
+    fn fetched_commit(&self, repository: &SourceRepository, commit: &CommitId) -> SourceResult<bool> {
+        let source = self.open()?;
+        let oid = Oid::from_str(commit.as_str()).map_err(|cause| git_error("invalid commit", &cause))?;
+        if !Self::commit_exists(&source, oid) {
+            self.ensure_fetched(&source, repository)?;
+            self.fetch_one(&source, repository, commit.as_str(), None);
+        }
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            self.fetch_kept(&source, commit);
+        }
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            self.fetch_from_origin(&source, commit);
+        }
+        if *repository == SourceRepository::This && !Self::commit_exists(&source, oid) {
+            self.fetch_source_ref(&source);
+        }
+        Ok(Self::commit_exists(&source, oid))
+    }
+
     /// The canonical objects directory of the entry clone, which every
     /// checkout this resolver makes borrows through its alternates file.
     fn objects_dir(source: &Repository) -> SourceResult<PathBuf> {
@@ -623,6 +645,18 @@ impl GitSourceResolver {
 
 fn is_full_commit(revision: &str) -> bool {
     revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// A commit ID, possibly abbreviated, with optional `^` and `~` suffixes,
+/// such as `a1b2c3d^` or `a1b2c3d~2`.
+fn is_commit_expression(revision: &str) -> bool {
+    let id_end = revision.find(['^', '~']).unwrap_or(revision.len());
+    let (id, suffix) = revision.split_at(id_end);
+    (4..=64).contains(&id.len())
+        && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && suffix
+            .bytes()
+            .all(|byte| byte == b'^' || byte == b'~' || byte.is_ascii_digit())
 }
 
 fn commit_id(oid: Oid) -> SourceResult<CommitId> {
@@ -955,6 +989,103 @@ impl SourceResolver for GitSourceResolver {
             return Err(error(problem));
         }
         Ok(())
+    }
+
+    fn missing_commits(
+        &self,
+        repository: &SourceRepository,
+        value: &CommitId,
+        record: &CommitId,
+    ) -> SourceResult<Vec<nyl_core::orchestration::ports::MissingCommit>> {
+        // Both commits in the entry clone, where `git cherry` runs.
+        for commit in [value, record] {
+            if !self.fetched_commit(repository, commit)? {
+                return Err(error(format!(
+                    "commit {commit} does not exist in {}",
+                    Self::describe(repository)
+                )));
+            }
+        }
+        let repo = self.open()?;
+        nyl_git::missing_commits(repo.path(), value.as_str(), record.as_str())
+            .map_err(|cause| error(cause.to_string()))?
+            .into_iter()
+            .map(|missing| {
+                Ok(nyl_core::orchestration::ports::MissingCommit {
+                    commit: CommitId::new(missing.commit).map_err(|cause| error(cause.to_string()))?,
+                    subject: missing.subject,
+                    root: missing.root,
+                })
+            })
+            .collect()
+    }
+
+    fn fetch_commit(&self, repository: &SourceRepository, commit: &CommitId) -> SourceResult<bool> {
+        self.fetched_commit(repository, commit)
+    }
+
+    fn is_shallow(&self) -> bool {
+        self.open().is_ok_and(|repo| repo.is_shallow())
+    }
+
+    fn is_ancestor(&self, repository: &SourceRepository, ancestor: &CommitId, of: &CommitId) -> SourceResult<bool> {
+        if ancestor == of {
+            return Ok(true);
+        }
+        let _ = repository;
+        let repo = self.open()?;
+        let (Ok(ancestor), Ok(of)) = (Oid::from_str(ancestor.as_str()), Oid::from_str(of.as_str())) else {
+            return Ok(false);
+        };
+        if !Self::commit_exists(&repo, ancestor) || !Self::commit_exists(&repo, of) {
+            return Ok(false);
+        }
+        repo.graph_descendant_of(of, ancestor)
+            .map_err(|cause| git_error("cannot compare commits", &cause))
+    }
+
+    fn commits_in(&self, repository: &SourceRepository, range: &str) -> SourceResult<Vec<CommitId>> {
+        let repo = self.open()?;
+        self.ensure_fetched(&repo, repository)?;
+        // Each end as a revision of the repository's own ref space. A commit
+        // ID, abbreviated or not, with `^` and `~` suffixes is read by Git
+        // directly in any repository (all share the entry clone's objects);
+        // in this repository any revision Git reads works too.
+        let end = |revision: &str| match self.resolve_revision(repository, revision) {
+            Ok(commit) => Ok(commit.as_str().to_owned()),
+            Err(_) if *repository == SourceRepository::This || is_commit_expression(revision) => {
+                Ok(revision.to_owned())
+            }
+            Err(cause) => Err(cause),
+        };
+        let resolved = match range.split_once("..") {
+            Some((from, to)) if !from.is_empty() && !to.is_empty() && !to.starts_with('.') => {
+                format!("{}..{}", end(from)?, end(to)?)
+            }
+            Some(_) => range.to_owned(),
+            None => end(range)?,
+        };
+        nyl_git::commits_in(repo.path(), &resolved)
+            .map_err(|cause| {
+                error(format!(
+                    "{range:?} names no commits of {}: {cause}",
+                    Self::describe(repository)
+                ))
+            })?
+            .into_iter()
+            .map(|commit| CommitId::new(commit).map_err(|cause| error(cause.to_string())))
+            .collect()
+    }
+
+    fn repository_url(&self, repository: &SourceRepository) -> Option<String> {
+        match repository {
+            SourceRepository::Url(url) => Some(nyl_git::sanitize_url(url)),
+            SourceRepository::This => {
+                let repo = self.open().ok()?;
+                let remote = repo.find_remote("origin").ok()?;
+                remote.url().ok().map(nyl_git::sanitize_url)
+            }
+        }
     }
 
     fn default_branch(&self, repository: &SourceRepository) -> SourceResult<String> {
