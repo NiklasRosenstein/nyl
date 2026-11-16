@@ -181,11 +181,13 @@ For Git repositories: Specifies the Git reference - branch, tag, or commit
 Defaults to true when unset.</p>
 <p><a id="field-spec.lookup"></a></p>
 <h3 id="speclookup">spec.lookup</h3>
-<p><strong>Optional</strong> · object or null</p>
+<p><strong>Optional</strong> · boolean or null</p>
 <p>Lets the chart’s Helm <code>lookup</code> read the objects of the <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Release</a> it belongs
 to, so a chart that reuses what it generated earlier, such as a Secret
 holding a CA, finds it when it renders again.</p>
-<p>Declare it as <code>lookup: {}</code>. <code>lookup</code> then reads the <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Release</a>’s objects from the
+<p>Declare it as <code>lookup: true</code>, or <code>lookup: false</code> to state that the chart must not use it
+(which silences <code>NYL-HELM-LOOKUP-UNDECLARED</code>).
+<code>lookup</code> then reads the <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Release</a>’s objects from the
 target’s last publication (or, with <code>--lookup=live</code>, from the cluster) and sees
 nothing else: any other object is absent. Without a target, or before the
 <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Release</a> is published, nothing is found and the chart generates.</p>
@@ -194,7 +196,6 @@ read-only API that Nyl serves on 127.0.0.1 for the duration of the render;
 Helm never gets a cluster or credentials. The <a href="/nyl/reference/resources/k8s.nyl/v1/cluster/">Cluster</a>’s declared Kubernetes
 version and API versions describe that API, plus the API versions of
 CustomResourceDefinitions the chart ships in <code>crds/</code>.</p>
-<p>Unknown fields are rejected.</p>
 <p><a id="field-spec.values"></a></p>
 <h3 id="specvalues">spec.values</h3>
 <p><strong>Optional</strong> · any value</p>
