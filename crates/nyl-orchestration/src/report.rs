@@ -296,8 +296,11 @@ pub struct StatesReport {
     #[serde(rename = "apiVersion")]
     pub api_version: &'static str,
     pub kind: &'static str,
+    /// The environment whose states are listed.
     pub environment: EnvironmentName,
+    /// Its recorded states, newest first.
     pub states: Vec<StateReport>,
+    /// 0 when the state was read, 1 when it could not be (see `errors`).
     pub exit: u8,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<Finding>,
@@ -332,7 +335,9 @@ pub struct StateReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateUnitReport {
+    /// The unit.
     pub name: UnitName,
+    /// Its kind, as the desired document names it.
     pub kind: String,
     /// Whether the unit has a current receipt in the state.
     pub receipt: bool,
@@ -347,9 +352,13 @@ pub struct StateUnitReport {
 pub struct StateAttestationReport {
     /// The unit, or `environment` for an environment-wide attestation.
     pub scope: String,
+    /// The attestation's name.
     pub name: String,
+    /// `pass` or `fail`.
     pub result: AttestationResult,
+    /// When it was recorded.
     pub at: Timestamp,
+    /// The reason it was recorded with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -525,7 +534,7 @@ pub struct PromotionCandidatesReport {
     /// The target environment.
     pub environment: EnvironmentName,
     /// The evidence level the path requires.
-    pub evidence: &'static str,
+    pub evidence: EvidenceLevel,
     pub candidates: Vec<CandidateReport>,
     /// Why `nyl promote` without flags would refuse, when it would.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -538,7 +547,10 @@ pub struct PromotionCandidatesReport {
 /// One candidate state.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+// Independent facts about one state, each a JSON key scripts read.
+#[allow(clippy::struct_excessive_bools)]
 pub struct CandidateReport {
+    /// The `Nyl-Run-Id` of the run that recorded the state.
     pub run: RunId,
     /// The state commit on the source's desired ref.
     pub desired_commit: CommitId,
@@ -546,22 +558,81 @@ pub struct CandidateReport {
     pub observed_commit: Option<CommitId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
-    /// The highest level the state reaches, up to the path's: `attested`,
-    /// `published`, or `none`.
-    pub level: &'static str,
-    /// Whether the state reaches the path's level.
+    /// The highest level the state reaches, up to the path's: for a
+    /// value-only path, the highest any value reaches.
+    pub level: CandidateLevel,
+    /// Whether `nyl promote` could take the state: it reaches the path's
+    /// level, or, on a value-only path, some value's consumer does
+    /// (`byValue`). A `selected` state is always eligible.
     pub eligible: bool,
     /// Whether `nyl promote` without flags would take this state now.
     pub selected: bool,
     /// Whether the path's record in the target names this state: what the
     /// target was last promoted to on this path.
     pub promoted: bool,
+    /// Whether the target runs this state now: its last run applied the
+    /// path's record that names it, and no newer record waits.
+    pub running: bool,
+    /// For a value-only path, each value judged for its consumer.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_value: BTreeMap<String, ValueCandidate>,
     /// What keeps the state below the path's level.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<MissingEvidence>,
     /// The values the state would carry, by name.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, Value>,
+}
+
+/// The level a candidate reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CandidateLevel {
+    Attested,
+    Published,
+    /// Below `published`.
+    None,
+}
+
+impl CandidateLevel {
+    fn of(level: Option<EvidenceLevel>) -> Self {
+        match level {
+            Some(EvidenceLevel::Attested) => Self::Attested,
+            Some(EvidenceLevel::Published) => Self::Published,
+            None => Self::None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attested => "attested",
+            Self::Published => "published",
+            Self::None => "none",
+        }
+    }
+}
+
+/// One value of a value-only path in one candidate state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ValueCandidate {
+    /// The level the value's consumer reaches, up to the path's.
+    pub level: CandidateLevel,
+    /// Whether it reaches the path's level, so the state can supply the value.
+    pub eligible: bool,
+}
+
+/// Why a candidate falls short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MissingReason {
+    /// A covered unit has no current receipt in the state.
+    NoReceipt,
+    /// A required attestation is not recorded for the state.
+    Pending,
+    /// A required attestation is older than `maxAttestationAge`.
+    Aged,
+    /// An attestation recorded for the state fails.
+    Failing,
 }
 
 /// One reason a candidate falls short.
@@ -574,8 +645,8 @@ pub struct MissingEvidence {
     /// The attestation, for a gap about one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attestation: Option<String>,
-    /// `no-receipt`, `pending`, `aged`, or `failing`.
-    pub reason: &'static str,
+    /// Why it falls short.
+    pub reason: MissingReason,
     pub message: String,
 }
 
@@ -585,10 +656,10 @@ impl MissingEvidence {
             unit: (gap.scope != ENVIRONMENT_SCOPE).then(|| gap.scope.clone()),
             attestation: gap.name.clone(),
             reason: match gap.kind {
-                GapKind::NoReceipt => "no-receipt",
-                GapKind::Pending => "pending",
-                GapKind::Aged => "aged",
-                GapKind::Failing => "failing",
+                GapKind::NoReceipt => MissingReason::NoReceipt,
+                GapKind::Pending => MissingReason::Pending,
+                GapKind::Aged => MissingReason::Aged,
+                GapKind::Failing => MissingReason::Failing,
             },
             message: gap.message.clone(),
         }
@@ -603,7 +674,7 @@ impl PromotionCandidatesReport {
             path: path.to_owned(),
             source,
             environment,
-            evidence: level_name(Some(evidence)),
+            evidence,
             candidates: Vec::new(),
             refusal: None,
             exit: 0,
@@ -620,35 +691,44 @@ impl PromotionCandidatesReport {
     }
 
     /// The candidates of `evaluations`, marking those `selected` (the
-    /// states the promotion would take, by desired commit) and `promoted`
-    /// (those the path's current record names).
+    /// states the promotion would take, by desired commit), `promoted`
+    /// (those the path's current record names), and `running` (those the
+    /// record the target's last run applied names).
     #[must_use]
     pub fn with_candidates(
         mut self,
         evaluations: Vec<StateEvaluation>,
-        required: EvidenceLevel,
         selected: &[CommitId],
         promoted: &[CommitId],
+        running: &[CommitId],
     ) -> Self {
         self.candidates = evaluations
             .into_iter()
-            .map(|evaluation| {
-                let eligible = matches!(
-                    (evaluation.level, required),
-                    (Some(EvidenceLevel::Attested), _) | (Some(EvidenceLevel::Published), EvidenceLevel::Published)
-                );
-                CandidateReport {
-                    selected: selected.contains(&evaluation.desired_commit),
-                    promoted: promoted.contains(&evaluation.desired_commit),
-                    level: level_name(evaluation.level),
-                    eligible,
-                    missing: evaluation.gaps.iter().map(MissingEvidence::of).collect(),
-                    run: evaluation.run,
-                    desired_commit: evaluation.desired_commit,
-                    observed_commit: evaluation.observed_commit,
-                    source_commit: evaluation.source_commit,
-                    values: evaluation.values,
-                }
+            .map(|evaluation| CandidateReport {
+                selected: selected.contains(&evaluation.desired_commit),
+                promoted: promoted.contains(&evaluation.desired_commit),
+                running: running.contains(&evaluation.desired_commit),
+                level: CandidateLevel::of(evaluation.level),
+                eligible: evaluation.eligible,
+                by_value: evaluation
+                    .by_value
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            ValueCandidate {
+                                level: CandidateLevel::of(value.level),
+                                eligible: value.eligible,
+                            },
+                        )
+                    })
+                    .collect(),
+                missing: evaluation.gaps.iter().map(MissingEvidence::of).collect(),
+                run: evaluation.run,
+                desired_commit: evaluation.desired_commit,
+                observed_commit: evaluation.observed_commit,
+                source_commit: evaluation.source_commit,
+                values: evaluation.values,
             })
             .collect();
         self
@@ -660,7 +740,10 @@ impl PromotionCandidatesReport {
         let _ = writeln!(
             text,
             "promotion-candidates {}: {} -> {}, evidence {}",
-            self.path, self.source, self.environment, self.evidence
+            self.path,
+            self.source,
+            self.environment,
+            level_name(Some(self.evidence))
         );
         if let Some(refusal) = &self.refusal {
             let _ = writeln!(
@@ -682,18 +765,30 @@ impl PromotionCandidatesReport {
             if candidate.promoted {
                 marks.push("promoted");
             }
+            if candidate.running {
+                marks.push("running");
+            }
             let marks = if marks.is_empty() {
                 String::new()
             } else {
                 format!(" ({})", marks.join(", "))
             };
-            let _ = writeln!(text, "{} {}{marks}", candidate.desired_commit, candidate.level);
+            let _ = writeln!(text, "{} {}{marks}", candidate.desired_commit, candidate.level.as_str());
             let _ = writeln!(text, "  run:     {}", candidate.run);
             if let Some(commit) = &candidate.source_commit {
                 let _ = writeln!(text, "  source:  {commit}");
             }
             for (name, value) in &candidate.values {
-                let _ = writeln!(text, "  value {name}: {}", shown(value));
+                let _ = write!(text, "  value {name}: {}", shown(value));
+                if let Some(judged) = candidate.by_value.get(name) {
+                    let _ = write!(
+                        text,
+                        " ({}{})",
+                        judged.level.as_str(),
+                        if judged.eligible { "" } else { ", not eligible" }
+                    );
+                }
+                text.push('\n');
             }
             for missing in &candidate.missing {
                 let _ = writeln!(text, "  missing: {}", missing.message);
@@ -730,11 +825,26 @@ pub struct PromotionsReport {
     pub errors: Vec<Finding>,
 }
 
-/// The path and sequence a run applied.
+/// The record whose source commit the environment's last run applied, as
+/// its `sourceChosenBy` names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AppliedPromotion {
+    /// The PromotionPath that supplied the source commit.
     pub path: String,
+    /// The sequence of the record the run applied.
     pub sequence: u64,
+}
+
+/// The source state a `promote` commit's summary names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFrom {
+    /// The source environment.
+    pub environment: EnvironmentName,
+    /// The `Nyl-Run-Id` of the run that recorded the state.
+    pub run: RunId,
+    /// The state's commit on the source's desired ref.
+    pub desired_commit: CommitId,
 }
 
 /// One promotion as its transition commit's summary records it.
@@ -743,13 +853,16 @@ pub struct AppliedPromotion {
 pub struct PromotionHistoryEntry {
     /// The `promote` transition commit on the desired ref.
     pub commit: CommitId,
+    /// The PromotionPath promoted along.
     pub path: String,
+    /// The record's sequence.
     pub sequence: u64,
+    /// The source commit the record promoted, for a path that promotes the source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<CommitId>,
     /// The source state, as the summary names it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub from: Option<Value>,
+    pub from: Option<HistoryFrom>,
     /// Who asked, from the commit's `Nyl-Requested-By`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_by: Option<String>,
@@ -986,6 +1099,7 @@ mod promotion_report_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One golden text and JSON, written out in full.
     fn test_promotion_candidates_report_golden() {
         let newer = StateEvaluation {
             run: run("0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91"),
@@ -993,6 +1107,7 @@ mod promotion_report_tests {
             observed_commit: None,
             source_commit: Some(commit("41f0000000000000000000000000000000000000")),
             level: None,
+            eligible: false,
             gaps: vec![Gap {
                 scope: "kubernetes".to_owned(),
                 name: None,
@@ -1000,6 +1115,7 @@ mod promotion_report_tests {
                 message: "unit kubernetes has no current receipt in this state".to_owned(),
             }],
             values: BTreeMap::new(),
+            by_value: BTreeMap::new(),
         };
         let older = StateEvaluation {
             run: run(RUN_1),
@@ -1007,13 +1123,21 @@ mod promotion_report_tests {
             observed_commit: Some(commit(OBSERVED)),
             source_commit: Some(commit(COMMIT)),
             level: Some(EvidenceLevel::Published),
+            eligible: true,
             gaps: Vec::new(),
             values: BTreeMap::from([("webImage".to_owned(), json!("registry.example.com/web@sha256:4f0c"))]),
+            by_value: BTreeMap::from([(
+                "webImage".to_owned(),
+                crate::rules::promotion::ValueEvaluation {
+                    level: Some(EvidenceLevel::Published),
+                    eligible: true,
+                },
+            )]),
         };
         let report = PromotionCandidatesReport::new("dev-to-prod", dev(), prod(), EvidenceLevel::Published)
             .with_candidates(
                 vec![newer, older],
-                EvidenceLevel::Published,
+                &[commit(DESIRED)],
                 &[commit(DESIRED)],
                 &[commit(DESIRED)],
             );
@@ -1025,10 +1149,10 @@ d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1 none
   run:     0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b91
   source:  41f0000000000000000000000000000000000000
   missing: unit kubernetes has no current receipt in this state
-d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 published (selected, promoted)
+d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 published (selected, promoted, running)
   run:     0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90
   source:  3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
-  value webImage: registry.example.com/web@sha256:4f0c
+  value webImage: registry.example.com/web@sha256:4f0c (published)
 "
         );
         assert_eq!(
@@ -1050,6 +1174,7 @@ d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 published (selected, promoted)
                         "eligible": false,
                         "selected": false,
                         "promoted": false,
+                        "running": false,
                         "missing": [{
                             "unit": "kubernetes",
                             "reason": "no-receipt",
@@ -1065,6 +1190,8 @@ d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 published (selected, promoted)
                         "eligible": true,
                         "selected": true,
                         "promoted": true,
+                        "running": true,
+                        "byValue": {"webImage": {"level": "published", "eligible": true}},
                         "values": {"webImage": "registry.example.com/web@sha256:4f0c"},
                     },
                 ],
@@ -1155,7 +1282,11 @@ d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 published (selected, promoted)
             path: "dev-to-prod".to_owned(),
             sequence: 1,
             source_commit: Some(commit(COMMIT)),
-            from: Some(json!({"environment": "dev", "run": RUN_1, "desiredCommit": DESIRED})),
+            from: Some(HistoryFrom {
+                environment: dev(),
+                run: run(RUN_1),
+                desired_commit: commit(DESIRED),
+            }),
             requested_by: Some("Nyl Test <test@example.invalid>".to_owned()),
             reason: Some("Release 1".to_owned()),
         }];

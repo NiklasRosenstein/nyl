@@ -128,13 +128,18 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         Ok(Decision::Unchanged(record)) => (states_named(&record), None),
         Err(refusal) => (Vec::new(), Some(refusal.finding)),
     };
-    let promoted = path
-        .name()
-        .ok()
-        .and_then(|name| snapshot.promotions.get(&name))
+    let current = path.name().ok().and_then(|name| snapshot.promotions.get(&name));
+    let promoted = current.map(states_named).unwrap_or_default();
+    // What the target runs: the path's record, when the last run applied it
+    // and no newer one waits (the lineage `status` shows).
+    let running = promotion::lineage(&snapshot)
+        .filter(|lineage| {
+            lineage.path == path.metadata.name && lineage.pending_sequence.is_none() && lineage.from.is_some()
+        })
+        .and(current)
         .map(states_named)
         .unwrap_or_default();
-    let mut report = report.with_candidates(evaluations, required, &selected, &promoted);
+    let mut report = report.with_candidates(evaluations, &selected, &promoted, &running);
     report.refusal = refusal;
     report
 }
@@ -180,23 +185,60 @@ pub fn promotions(store: &dyn StateStore, location: &StateLocation, environment:
     report.history = history
         .desired
         .iter()
-        .filter_map(|commit| history_entry(&commit.commit, &commit.message))
+        .filter_map(|commit| history_entry(&commit.commit, &commit.message, environment))
         .collect();
     report
 }
 
-/// One promotion from a `promote` transition commit, as its summary and
-/// trailers record it.
-fn history_entry(commit: &CommitId, message: &str) -> Option<PromotionHistoryEntry> {
-    let summary = promote::recorded_summary(message)?;
+/// One promotion into `environment` from a `promote` transition commit, as
+/// its summary and trailers record it. Commits of other operations, and of
+/// other environments sharing the desired ref, are none.
+fn history_entry(commit: &CommitId, message: &str, environment: &EnvironmentName) -> Option<PromotionHistoryEntry> {
+    let summary = promote::recorded_summary(message, environment)?;
     let text = |key: &str| summary.get(key).and_then(Value::as_str).map(str::to_owned);
     Some(PromotionHistoryEntry {
         commit: commit.clone(),
         path: text("path")?,
         sequence: summary.get("sequence")?.as_u64()?,
         source_commit: text("sourceCommit").and_then(|commit| CommitId::new(commit).ok()),
-        from: summary.get("from").filter(|from| !from.is_null()).cloned(),
+        from: summary
+            .get("from")
+            .and_then(|from| serde_json::from_value(from.clone()).ok()),
         requested_by: trailer(message, "Nyl-Requested-By").map(|by| by.trim().to_owned()),
         reason: trailer(message, "Nyl-Reason").map(|reason| reason.trim().to_owned()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(operation: &str, environment: &str) -> String {
+        format!(
+            "nyl: {operation} {environment} (dev-to-prod #3)\n\nunits: {{}}\npromotion: {{\"path\":\"dev-to-prod\",\"sequence\":3,\"sourceCommit\":\"{source}\",\"from\":{{\"environment\":\"dev\",\"run\":\"0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90\",\"desiredCommit\":\"{desired}\"}}}}\n\nNyl-Operation: {operation}\nNyl-Run-Id: r\nNyl-Environment: {environment}\nNyl-Requested-By: ci\nNyl-Reason: Release 3\n",
+            source = "5".repeat(40),
+            desired = "d".repeat(40),
+        )
+    }
+
+    /// The history of an environment lists its own `promote` commits only:
+    /// not other operations' commits, and not those of another environment
+    /// sharing the desired ref (`spec.state.path`). Catches a neighbour's
+    /// promotions listed as this environment's.
+    #[test]
+    fn test_history_entry_reads_only_this_environments_promotions() {
+        let commit = CommitId::new("a".repeat(40)).unwrap();
+        let prod = EnvironmentName::new("prod").unwrap();
+        let entry = history_entry(&commit, &message("promote", "prod"), &prod).unwrap();
+        assert_eq!(entry.path, "dev-to-prod");
+        assert_eq!(entry.sequence, 3);
+        assert_eq!(entry.source_commit, Some(CommitId::new("5".repeat(40)).unwrap()));
+        let from = entry.from.unwrap();
+        assert_eq!(from.environment.as_str(), "dev");
+        assert_eq!(from.desired_commit, CommitId::new("d".repeat(40)).unwrap());
+        assert_eq!(entry.requested_by.as_deref(), Some("ci"));
+        assert_eq!(entry.reason.as_deref(), Some("Release 3"));
+        assert_eq!(history_entry(&commit, &message("reconcile", "prod"), &prod), None);
+        assert_eq!(history_entry(&commit, &message("promote", "staging"), &prod), None);
+    }
 }

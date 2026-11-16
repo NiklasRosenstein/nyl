@@ -244,13 +244,41 @@ pub struct StateEvaluation {
     pub desired_commit: CommitId,
     pub observed_commit: Option<CommitId>,
     pub source_commit: Option<CommitId>,
-    /// The highest level the whole-source rule reaches, `None` below `published`.
+    /// The highest level the state reaches, up to the path's, as `nyl
+    /// promote` judges it: for a path that promotes the source, by the
+    /// whole-source rule; for a value-only path, the highest any value
+    /// reaches ([`Self::by_value`]). `None` below `published`.
     pub level: Option<EvidenceLevel>,
-    /// Why the state does not reach the path's level; empty when it does.
+    /// Whether `nyl promote` without flags could take the state: for the
+    /// whole source, it reaches the path's level; for a value-only path,
+    /// some value's consumer does, so the state can supply that value.
+    pub eligible: bool,
+    /// Why the state, or a value of a value-only path, does not reach the
+    /// path's level; empty when nothing falls short.
     pub gaps: Vec<Gap>,
     /// The values the state would carry, by name; a value the state cannot
     /// supply (its producer has no current receipt) is left out.
     pub values: BTreeMap<String, serde_json::Value>,
+    /// For a value-only path, each value judged for its consumer, as
+    /// `nyl promote` selects a state per value; empty otherwise.
+    pub by_value: BTreeMap<String, ValueEvaluation>,
+}
+
+/// One value of a value-only path judged in one state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValueEvaluation {
+    /// The highest level its consumer reaches, up to the path's.
+    pub level: Option<EvidenceLevel>,
+    /// Whether it reaches the path's level.
+    pub eligible: bool,
+}
+
+/// Whether `level` satisfies `required`.
+fn reaches(level: Option<EvidenceLevel>, required: EvidenceLevel) -> bool {
+    matches!(
+        (level, required),
+        (Some(EvidenceLevel::Attested), _) | (Some(EvidenceLevel::Published), EvidenceLevel::Published)
+    )
 }
 
 fn context<'a>(input: &'a PromotionInput<'_>, value_units: &'a BTreeSet<UnitName>) -> Context<'a> {
@@ -270,9 +298,11 @@ fn value_units(path: &PromotionPath) -> BTreeSet<UnitName> {
 /// Every candidate state of the source judged as `nyl promote` judges it,
 /// newest first, without applying the invocation's selection or ignores: a
 /// path that promotes the target's source (or no values) by the whole-source
-/// rule, a value-only path for the environment and the units its values
-/// read. The level is the highest the state reaches up to the path's own:
-/// a `published` path reports `published` or nothing.
+/// rule, a value-only path per value, for the environment and that value's
+/// consumer, as `select_values` picks a state per value. A state `decide`
+/// takes for some value is therefore always `eligible`. The level is the
+/// highest the state reaches up to the path's own: a `published` path
+/// reports `published` or nothing.
 pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
     let value_units = value_units(input.path);
     let ctx = Context {
@@ -280,39 +310,71 @@ pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
         ..context(input, &value_units)
     };
     let whole = input.promotes_source || input.path.spec.values.is_empty();
-    let consumers: BTreeSet<UnitName> = input
+    // A value-only path selects a state per value, for that value's consumer.
+    let consumers: Vec<(&String, BTreeSet<UnitName>)> = input
         .path
         .spec
         .values
-        .values()
-        .filter_map(|value| values::consumer(&value.select))
+        .iter()
+        .filter_map(|(name, value)| values::consumer(&value.select).map(|unit| (name, BTreeSet::from([unit]))))
         .collect();
-    let subject = if whole {
-        Subject::Source
-    } else {
-        Subject::Units(&consumers)
-    };
     let levels: &[EvidenceLevel] = match ctx.level() {
         EvidenceLevel::Attested => &[EvidenceLevel::Attested, EvidenceLevel::Published],
         EvidenceLevel::Published => &[EvidenceLevel::Published],
     };
+    let required = ctx.level();
     input
         .history
         .iter()
         .filter(|state| state.is_candidate())
         .map(|state| {
-            let at_path = judge(&ctx, state, &subject, ctx.level());
-            let level = levels
-                .iter()
-                .copied()
-                .find(|level| judge(&ctx, state, &subject, *level).gaps.is_empty());
+            let reach = |subject: &Subject<'_>| {
+                levels
+                    .iter()
+                    .copied()
+                    .find(|level| judge(&ctx, state, subject, *level).gaps.is_empty())
+            };
+            let mut by_value = BTreeMap::new();
+            let (level, eligible, gaps) = if whole {
+                let level = reach(&Subject::Source);
+                let gaps = judge(&ctx, state, &Subject::Source, required).gaps;
+                (level, reaches(level, required), gaps)
+            } else {
+                let mut gaps: Vec<Gap> = Vec::new();
+                for (name, units) in &consumers {
+                    let subject = Subject::Units(units);
+                    let level = reach(&subject);
+                    let eligible = reaches(level, required);
+                    if !eligible {
+                        for gap in judge(&ctx, state, &subject, required).gaps {
+                            if !gaps.contains(&gap) {
+                                gaps.push(gap);
+                            }
+                        }
+                    }
+                    by_value.insert((*name).clone(), ValueEvaluation { level, eligible });
+                }
+                gaps.sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
+                let level = if by_value
+                    .values()
+                    .any(|value| value.level == Some(EvidenceLevel::Attested))
+                {
+                    Some(EvidenceLevel::Attested)
+                } else if by_value.values().any(|value| value.level.is_some()) {
+                    Some(EvidenceLevel::Published)
+                } else {
+                    None
+                };
+                (level, by_value.values().any(|value| value.eligible), gaps)
+            };
             StateEvaluation {
                 run: state.run.clone(),
                 desired_commit: state.desired_commit.clone(),
                 observed_commit: state.observed_commit.clone(),
                 source_commit: state.source_commit().cloned(),
                 level,
-                gaps: at_path.gaps,
+                eligible,
+                gaps,
                 values: input
                     .path
                     .spec
@@ -324,6 +386,7 @@ pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
                             .map(|read| (name.clone(), read.value.value))
                     })
                     .collect(),
+                by_value,
             }
         })
         .collect()

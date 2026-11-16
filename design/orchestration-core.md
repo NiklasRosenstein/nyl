@@ -5098,7 +5098,11 @@ nyl get promotion-candidates dev-to-prod   # dev's states judged as nyl promote 
 ```
 
 - Tables join desired and observed state for reading. `-o yaml` and `-o json`
-  return the exact persisted documents, never a synthesized merge.
+  return the exact persisted documents, never a synthesized merge. The
+  promotion forms `states`, `promotion-candidates`, and `promotions` are
+  reports instead (`StatesReport`, `PromotionCandidatesReport`,
+  `PromotionsReport`), because they judge or join history rather than show
+  one document.
 - `nyl get output <unit>/<output>`, `nyl get observation <unit>/<name>`, and
   `nyl get artifact <unit>/<name> --pointer …` return single values for scripts and resolve exactly like the
   matching `fromUnit` reference: the same pointer base (inside the artifact's

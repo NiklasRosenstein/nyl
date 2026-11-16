@@ -55,9 +55,20 @@ The path's source states, newest first, judged exactly as
 target selects as its entry worktree renders them. Each state shows the level
 it reaches up to the path's own (`attested`, `published`, or `none`), what it
 lacks below the path's level, and the values it would carry. `selected` marks
-the state `nyl promote` without flags would take now, and `promoted` the state
-the path's record in the target already names. When `nyl promote` would
-refuse, the report says why, with its code, and still exits 0.
+the state `nyl promote` without flags would take now, `promoted` the state
+the path's record in the target names, and `running` the state the target
+runs now (its last run applied that record and no newer one waits). When
+`nyl promote` would refuse, the report says why, with its code, and still
+exits 0.
+
+A path that promotes only values takes each value from its own state, as
+`nyl promote` does: each value is judged for the unit it reads, and a state
+is `eligible` when it can supply some value. The text form adds each
+value's level, and `-o json` lists it under `byValue`.
+
+The candidates are judged on evidence only: artifacts are not verified, so a
+candidate whose image is gone from the registry still shows as `selected`,
+and `nyl promote` then refuses it with `NYL-PROMOTE-ARTIFACT-MISSING`.
 
 ```console
 $ nyl get promotion-candidates dev-to-prod
@@ -67,7 +78,7 @@ eed4c2359d485417a9882145d8ceb6d59378a406 published (selected)
   run:     00000000-0000-7000-9000-000000000006
   source:  cf41525d1ed208e5fb4f7e804f78de250ef37102
   value webImage: registry.invalid:5000/web@sha256:bc69a88a97d841aac5366b9cdee643b6056aeadbac6ef1a03b9ee58bbeeb0805
-bc1847b0292df2e0548131fe07c6bfd71777a2a6 published (promoted)
+bc1847b0292df2e0548131fe07c6bfd71777a2a6 published (promoted, running)
   run:     00000000-0000-7000-9000-000000000003
   source:  c966aa0c15d9c431c15728aec36d32e7adef056e
   value webImage: registry.invalid:5000/web@sha256:88e3d32b27feb6648d7e9ce25a18b1124b27849a11e8f9d5d0c1d70767567a75
@@ -77,21 +88,23 @@ bc1847b0292df2e0548131fe07c6bfd71777a2a6 published (promoted)
 `environment` (the target), `evidence` (the path's level), `refusal` (the
 finding `nyl promote` would refuse with, when it would), and `candidates[]`
 with `run`, `desiredCommit`, `observedCommit`, `sourceCommit`, `level`,
-`eligible`, `selected`, `promoted`, `values`, and `missing[]`: each with
+`eligible`, `selected`, `promoted`, `running`, `values`, `byValue` (`level`
+and `eligible` per value, for a value-only path), and `missing[]`: each with
 `unit` (absent for an environment-wide attestation), `attestation`, `reason`
 (`no-receipt`, `pending`, `aged`, or `failing`), and `message`.
 
 A path `nyl promote` refuses before it reads state, such as an unknown path
 (`NYL-PROMOTE-BINDING-UNKNOWN`), a form M6 does not support
-(`NYL-PROMOTE-UNSUPPORTED`), or a path validation rejects, is refused here the
-same way, exit 1.
+(`NYL-PROMOTE-UNSUPPORTED`, also for a target with `record: source`), or a
+path validation rejects, is refused here the same way, exit 1.
 
 ## get promotions
 
 The PromotionRecords in the environment's desired state, highest sequence
 first, the record whose source commit the environment's last run applied, and
 every promotion its desired history records, newest first, including records
-a later promotion replaced.
+a later promotion replaced. Environments that share a desired ref
+(`spec.state.path`) list only their own promotions.
 
 ```console
 $ nyl get promotions -e prod
@@ -109,7 +122,8 @@ history, newest first:
 A record the last run applied is marked `(applied)`. `-o json` prints a
 `PromotionsReport`: `promotions[]`, each the exact record state holds;
 `applied` (`path`, `sequence`); and `history[]` with the `promote` commit,
-`path`, `sequence`, `sourceCommit`, `from`, `requestedBy`, and `reason`, read
+`path`, `sequence`, `sourceCommit`, `from` (`environment`, `run`,
+`desiredCommit`), `requestedBy`, and `reason`, read
 from each commit's summary and trailers. `-o name` prints the paths.
 
 ## Options
@@ -132,5 +146,5 @@ considers.
 
 | Exit | When |
 | --- | --- |
-| 0 | The state was read, whatever it shows, including a promotion that would be refused. |
+| 0 | The state was read, whatever it shows. A refusal of `nyl promote` (such as `NYL-PROMOTE-NO-EVIDENCE`) is shown in the candidates' `refusal` and still exits 0. |
 | 1 | The state cannot be read (for example `NYL-STATE-MISSING`), or the path is refused as `nyl promote` refuses it. |

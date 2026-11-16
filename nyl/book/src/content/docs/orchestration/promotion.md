@@ -67,7 +67,9 @@ environment runs:
   `nyl promote`: the level each reaches, what it lacks (a unit without a
   current receipt, a pending, aged, or failing attestation), the values it
   would carry, the state `nyl promote` would take now (or why it would
-  refuse), and the state the path's record already names.
+  refuse), the state the path's record names, and the state prod runs now.
+  A value-only path is judged per value, as `nyl promote` takes each value
+  from its own state. Artifacts are not verified here.
   `nyl promote dev-to-prod --dry-run` then shows the exact record.
 - `nyl get promotions -e prod` lists prod's PromotionRecords, the one its
   last run applied, and every earlier promotion from prod's desired history.
@@ -83,7 +85,7 @@ eed4c2359d485417a9882145d8ceb6d59378a406 published (selected)
   run:     00000000-0000-7000-9000-000000000006
   source:  cf41525d1ed208e5fb4f7e804f78de250ef37102
   value webImage: registry.invalid:5000/web@sha256:bc69a88a97d841aac5366b9cdee643b6056aeadbac6ef1a03b9ee58bbeeb0805
-bc1847b0292df2e0548131fe07c6bfd71777a2a6 published (promoted)
+bc1847b0292df2e0548131fe07c6bfd71777a2a6 published (promoted, running)
   run:     00000000-0000-7000-9000-000000000003
   source:  c966aa0c15d9c431c15728aec36d32e7adef056e
   value webImage: registry.invalid:5000/web@sha256:88e3d32b27feb6648d7e9ce25a18b1124b27849a11e8f9d5d0c1d70767567a75

@@ -187,7 +187,9 @@ pub struct TargetView {
 }
 
 /// The [`TargetView`] of `path` from the target's session, the one way
-/// `nyl promote` and `nyl get promotion-candidates` both take it.
+/// `nyl promote` and `nyl get promotion-candidates` both take it. A target
+/// that keeps its record in its source (`record: source`) is refused with
+/// `NYL-PROMOTE-UNSUPPORTED` until that form is supported, by both.
 pub fn target_view(
     session: &super::session::Session,
     drivers: &DriverSet,
@@ -195,6 +197,23 @@ pub fn target_view(
 ) -> std::result::Result<TargetView, Finding> {
     use nyl_core::orchestration::codes::Code;
     let entry = session.entry()?;
+    // `record: source` writes a block into the Environment's source, which is a later change.
+    if entry
+        .spec
+        .source
+        .as_ref()
+        .and_then(|source| source.from_promotion.as_ref())
+        .is_some_and(|promoted| promoted.record.as_deref() == Some("source"))
+    {
+        return Err(Finding::new(
+            Code::PromoteUnsupported,
+            format!(
+                "Environment {} keeps its promotion record in its source (`record: source`), which is not supported yet",
+                session.resolved.name
+            ),
+            "remove `record: source`: the record then lives in the environment's state",
+        ));
+    }
     let promotes_source = entry
         .spec
         .source

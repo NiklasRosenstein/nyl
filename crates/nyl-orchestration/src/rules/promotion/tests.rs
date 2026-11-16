@@ -1035,3 +1035,58 @@ fn test_a_worktree_state_revision_is_named() {
         refusal.finding.message
     );
 }
+
+/// Two consumers that pass in different states: `webImage`'s consumer only
+/// in the newer state, `release`'s only in the older one. `nyl promote` takes
+/// each value from its own state, so `get promotion-candidates` must call
+/// both states eligible, judged per value. Catches candidates judged for
+/// every consumer at once, which would call a state promote selects
+/// ineligible.
+#[test]
+fn test_evaluate_judges_each_value_of_a_value_only_path_on_its_own() {
+    let mut value_case = case(
+        value_only(),
+        vec![
+            state(2, 'b', "sha256:two").without_receipt("kubernetes"),
+            state(1, 'a', "sha256:one"),
+        ],
+    );
+    value_case.promotes_source = false;
+    // web-image requires `healthy`, recorded only for the newer state's receipt.
+    for (state, image) in value_case.history.iter_mut().zip(["sha256:two", ""]) {
+        state.snapshot.desired.get_mut(&name("web-image")).unwrap().attestations = vec!["healthy".to_owned()];
+        if !image.is_empty() {
+            let seed = key(&web_image_seed(image)).to_string();
+            state.attestations.units.entry(name("web-image")).or_default().insert(
+                "healthy".to_owned(),
+                attestation("healthy", &seed, Pass, FRESH, Value::Null),
+            );
+        }
+    }
+    let promotion = value_case.promoted();
+    assert_eq!(from_run(&promotion.record), run_id(2).to_string());
+    assert_eq!(
+        promotion.record.values["release"]
+            .state
+            .as_ref()
+            .map(|state| state.run.clone()),
+        Some(run_id(1)),
+        "release comes from the older state"
+    );
+
+    let evaluations = value_case.evaluations();
+    assert!(
+        evaluations.iter().all(|evaluation| evaluation.eligible),
+        "{evaluations:?}"
+    );
+    let newer = &evaluations[0].by_value;
+    assert!(newer["webImage"].eligible);
+    assert!(!newer["release"].eligible);
+    assert_eq!(newer["release"].level, None);
+    let older = &evaluations[1].by_value;
+    assert!(!older["webImage"].eligible);
+    assert!(older["release"].eligible);
+    // What falls short is the value that is not eligible there.
+    assert!(evaluations[0].gaps.iter().any(|gap| gap.scope == "kubernetes"));
+    assert!(evaluations[1].gaps.iter().any(|gap| gap.scope == "web-image"));
+}

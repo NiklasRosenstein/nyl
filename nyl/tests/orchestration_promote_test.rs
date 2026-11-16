@@ -682,6 +682,21 @@ fn test_get_promotions_and_status_show_lineage() {
         "{}",
         text.stdout
     );
+    let running = |report: &serde_json::Value| -> Vec<serde_json::Value> {
+        report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|candidate| candidate["running"] == true)
+            .map(|candidate| candidate["desiredCommit"].clone())
+            .collect()
+    };
+    let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    assert_eq!(
+        running(&candidates.report),
+        std::slice::from_ref(&first_from),
+        "prod runs #1's state"
+    );
 
     harness.release("2");
     let second = harness.promote(&["dev-to-prod", "--reason", "Release 2"]);
@@ -691,6 +706,11 @@ fn test_get_promotions_and_status_show_lineage() {
     assert_eq!(lineage["sequence"], 1, "prod still runs #1");
     assert!(lineage.get("from").is_none(), "#1's record was replaced");
     assert_eq!(lineage["pendingSequence"], 2);
+    let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    assert!(
+        running(&candidates.report).is_empty(),
+        "#1's record was replaced: nothing names what prod runs"
+    );
 
     let promotions = harness.get(&["promotions", "-e", "prod"]);
     assert_eq!(promotions.exit, 0, "{}", promotions.stderr);
@@ -711,4 +731,63 @@ fn test_get_promotions_and_status_show_lineage() {
     assert_eq!(history[1]["from"]["desiredCommit"], first_from);
     assert_eq!(history[1]["reason"], "Release 1");
     assert!(history[1]["commit"].is_string());
+}
+
+/// A target that keeps its record in its source (`record: source`) is not
+/// supported yet: `nyl promote` and `nyl get promotion-candidates` refuse it
+/// alike, so inspection never shows a promotion that cannot be made.
+#[test]
+fn test_record_source_targets_are_refused_by_promote_and_candidates() {
+    let environments = ENVIRONMENTS.replace(
+        "source: {fromPromotion: {path: dev-to-prod}}",
+        "source: {fromPromotion: {path: dev-to-prod, record: source}}",
+    );
+    let harness = Promote::of(&environments, UNITS, true);
+    let promoted = harness.promote(&["dev-to-prod", "--dry-run"]);
+    let candidates = harness.get(&["promotion-candidates", "dev-to-prod"]);
+    for outcome in [&promoted, &candidates] {
+        assert_eq!(outcome.exit, 1, "{}", outcome.stderr);
+        assert!(outcome.stderr.contains("NYL-PROMOTE-UNSUPPORTED"), "{}", outcome.stderr);
+    }
+}
+
+/// Two environments that share a desired ref (`spec.state.path`) share its
+/// history, but not their promotions: a promotion into one neither raises
+/// the other's sequence nor appears in its `get promotions` history.
+/// Catches sequences and histories read from every `promote` commit on the
+/// ref.
+#[test]
+fn test_environments_sharing_a_ref_keep_their_own_promotions() {
+    let shared = |name: &str| {
+        format!("  state: {{desiredRef: nyl/shared/desired, observedRef: nyl/shared/observed, path: {name}}}\n")
+    };
+    let environments = ENVIRONMENTS
+        .replace(
+            "  source: {fromPromotion: {path: dev-to-prod}}\n",
+            &format!("  source: {{fromPromotion: {{path: dev-to-prod}}}}\n{}", shared("prod")),
+        )
+        .replace("metadata: {name: values}\nspec:\n  from: {environment: dev}\n  to: {environment: prod}", "metadata: {name: values}\nspec:\n  from: {environment: dev}\n  to: {environment: staging}")
+        + &format!(
+            "---\napiVersion: gitops.nyl/v1\nkind: Environment\nmetadata: {{name: staging}}\nspec:\n  unitSelector: {{matchLabels: {{staging: 'true'}}}}\n  allowUnprotectedSource: true\n{}",
+            shared("staging")
+        );
+    let harness = Promote::of(&environments, UNITS, true);
+    assert_eq!(harness.shell.invoke(&["state", "init", "-e", "staging"]).exit, 0);
+    for _ in 0..2 {
+        let staged = harness.promote(&["values"]);
+        assert_eq!(staged.exit, 0, "{}", staged.stderr);
+        harness.release(&format!("{}", staged.report["record"]["sequence"]));
+    }
+    let promoted = harness.promote(&["dev-to-prod"]);
+    assert_eq!(promoted.exit, 0, "{}", promoted.stderr);
+    assert_eq!(
+        promoted.report["record"]["sequence"], 1,
+        "staging's promotions are not prod's"
+    );
+    let promotions = harness.get(&["promotions", "-e", "prod"]);
+    let history = promotions.report["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0]["path"], "dev-to-prod");
+    let staging = harness.get(&["promotions", "-e", "staging"]);
+    assert_eq!(staging.report["history"].as_array().unwrap().len(), 2);
 }
