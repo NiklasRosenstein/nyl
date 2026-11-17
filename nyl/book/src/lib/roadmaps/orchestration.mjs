@@ -131,7 +131,7 @@ export const orchestrationRoadmap = {
         { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
         { text: 'Promote values only, such as an image digest and a Terraform source commit, across differently named units and inputs, each from the state its consumer runs.', done: true },
         { text: 'Implement attestations: driver-declared names, `spec.attestations` on units and environments, external `nyl attest --name … --result …` for a unit\'s current receipt and an environment\'s current state (environment-wide ones in `observed/attestations.yaml`), the `published | attested` evidence levels with a path\'s per-unit `attestations`, blocking on failures with `--ignore-attestation`, and `maxAttestationAge`.', done: true },
-        { text: 'Gate promotion from an environment on fresh recorded attestations, sourcing each value from the publication its Application runs.', done: true },
+        { text: 'Gate promotion from an environment on fresh recorded attestations, sourcing each value from the publication its consuming deployment runs, with per-unit `coverage` whose names `nyl validate` and `nyl plan` check against what each unit runs.', done: true },
         { text: 'Show promotion lineage in `status`.', done: true },
       ],
     },

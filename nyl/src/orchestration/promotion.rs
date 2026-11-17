@@ -8,7 +8,9 @@
 //! reads a promoted value. The renderer copies a DeploymentTarget's
 //! `releaseInputs` into the spec of the publication unit that places it, so
 //! walking the units' specs finds those bindings too, with the environment
-//! that reads them.
+//! that reads them. The units a path's `coverage` names are listed by their
+//! drivers ([`nyl_orchestration::shell::coverage`]), so their names are
+//! checked against what each unit runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,7 +53,11 @@ pub fn findings(
 /// environments its paths connect it to, as `nyl validate` does. The second
 /// list holds the warnings: the values the supersede check cannot check
 /// into `environment` (`NYL-PROMOTE-UNCHECKED`,
-/// [`promotion_paths::unchecked`]).
+/// [`promotion_paths::unchecked`]), and the coverage whose unit's
+/// deployments could not be listed (`NYL-PROMOTE-COVERAGE-UNCHECKED`,
+/// [`promotion_paths::split_unchecked`]), in whichever environment the unit
+/// is: a promotion still fails closed on such coverage, so a command does
+/// not need the listing to proceed.
 pub fn findings_for(
     inventory: &GitOpsInventory,
     environment: &EnvironmentName,
@@ -93,9 +99,16 @@ pub fn findings_for(
             sources.insert(name, source);
         }
     }
-    let findings = findings_of(inventory, &paths, &known, Some(environment), &sources, drivers);
-    let unchecked = promotion_paths::unchecked(&paths, environment, &sources, drivers);
-    Ok((findings, unchecked))
+    let (findings, mut warnings) = promotion_paths::split_unchecked(findings_of(
+        inventory,
+        &paths,
+        &known,
+        Some(environment),
+        &sources,
+        drivers,
+    ));
+    warnings.extend(promotion_paths::unchecked(&paths, environment, &sources, drivers));
+    Ok((findings, warnings))
 }
 
 fn findings_of(
@@ -112,6 +125,16 @@ fn findings_of(
         .filter_map(|environment| environment.name().ok())
         .collect();
     let readers = promotion_paths::unit_readers(sources, drivers);
+    // One render cache for the check, so units that share a target render it once.
+    let cache = tempfile::TempDir::new().ok();
+    let deployments = nyl_orchestration::shell::coverage::deployments(
+        check,
+        sources,
+        drivers,
+        &inventory.worktree_root,
+        &inventory.instances,
+        cache.as_ref().map(tempfile::TempDir::path),
+    );
     promotion_paths::check(&PathChecks {
         paths: check,
         known,
@@ -120,6 +143,7 @@ fn findings_of(
         sources,
         drivers,
         readers: &readers,
+        deployments: &deployments,
     })
 }
 

@@ -30,9 +30,10 @@ values from one recorded state into another environment's desired state.
 | `maxAttestationAge` | duration | none | Older attestations do not count |
 | `changeGate` | `none` \| `pullRequest` | `none` | `pullRequest` (M11) opens a reviewable change instead of writing the record |
 | `verifyArtifacts` | boolean | `true` | Check that every promoted artifact still exists before recording |
-| `coverage.applicationGroups` | list of names | every group | Narrows the Applications that count toward a source promotion's publication attestations; never what moves |
-| `coverage.excludeApplications` | list of Application names | none | Applications knowingly accepted as unhealthy; they leave the aggregate for this path and are listed in each record |
-| `coverage.requireApplications` | list of Application names | none | Applications that must meet the required attestations at whatever publication they run, without contributing values |
+| `coverage` | map of unit name to `{groups, exclude, require}` | `{}` | Per unit that runs as several deployments, which of them count toward its running-scoped attestations for this path (see [Coverage](#kubernetes-publications)); names are those the unit's driver lists for it |
+| `coverage.<unit>.groups` | list of group names | every group | Narrows the deployments that count toward a source promotion to those of these groups; never what moves. Refused on a path that promotes only values |
+| `coverage.<unit>.exclude` | list of deployment names | none | Deployments knowingly accepted as falling short; they leave the unit's aggregate for this path and are listed in each record |
+| `coverage.<unit>.require` | list of deployment names | none | Deployments that must meet the required attestations at whatever publication they run, without contributing values |
 | `values` | map of value name to `{select}` | `{}` | The promoted values; value names are what `fromPromotion` bindings read |
 
 A `select` names exactly one source field, with the same JSON Pointer
@@ -65,7 +66,17 @@ malformed selector), `NYL-PROMOTE-VALUE-TYPE` (a value's type does not fit a uni
 field that reads it; a Release input's declared type is not compared yet),
 `NYL-PROMOTE-BINDING-UNKNOWN` (a `fromPromotion` binding names a path or value no
 path declares), `NYL-ATTESTATION-UNDECLARED` (a required attestation its scope
-does not declare), and `NYL-PROMOTE-UNSUPPORTED`. A pointer into an optional
+does not declare), `NYL-PROMOTE-COVERAGE-UNKNOWN` (`coverage` names a unit
+the source does not declare, select, or enable, a unit whose kind runs no
+deployments, or a group or deployment the unit's driver does not list for it),
+`NYL-PROMOTE-COVERAGE-INEFFECTIVE` (a path that promotes only values sets a
+unit's `groups`, or the unit's kind has no running-scoped attestations for its
+spec, so its entry selects nothing), `NYL-PROMOTE-COVERAGE-UNCHECKED` (the
+unit's deployments could not be listed, such as when its target does not
+render; an error in `nyl validate`, a warning in the commands that work on one
+environment, because they judge another environment only by what they need),
+`NYL-UNIT-KIND-UNKNOWN` for a coverage unit whose kind no driver serves, and
+`NYL-PROMOTE-UNSUPPORTED`. A pointer into an optional
 field the rendered spec omits resolves through the kind's schema.
 
 ### PromotionRecord
@@ -89,9 +100,9 @@ writes it, and a reader loads it.
 | `from` | The source state: `{environment, run, desiredCommit, observedCommit}`, or for a target source `{target, repository, branch, commit}`. For a path that promotes only values, the newest state any value came from |
 | `sourceCommit` | The source commit of that state, present when the path promotes the target's source or a value's lineage includes one |
 | `values.<name>` | `{value, select, unit: {name, uid}, executionKey or inputDigest, state}`; `inputDigest` is the `sha256:` digest of the canonical JSON of the value an `input` selector read; `state` (`{run, desiredCommit, observedCommit}`) is present when a value-only path took the value from another state than `from` |
-| `evidence` | `{level, attestations: [{scope, name, result, at, details}], override: {reason} \| null}`; `details` are the driver's, such as each Application's running publication and health |
+| `evidence` | `{level, attestations: [{scope, name, result, at, details}], override: {reason} \| null}`; `details` are the driver's, such as each deployment's running publication and health |
 | `ignoredAttestations` | `[{scope, name, reason, by}]` from `--ignore-attestation` |
-| `excludedApplications` | The path's `coverage.excludeApplications` at promotion time |
+| `excludedDeployments` | `{<unit>: [name]}`: the deployments the path's `coverage` excluded at promotion time, by unit; units and names sorted, each name once, a unit that excludes none left out, and `{}` when nothing was excluded |
 | `superseded` | `[{repository, commit, reason, by}]` from `--supersede` |
 | `artifactsVerified` | Whether the artifact check ran |
 | `requested` | `{by, identity, source, at, reason}`, recorded like an approval |
@@ -223,8 +234,8 @@ spec:
 - A failing attestation for a state blocks its promotion on every path,
   whether or not the path requires it. For a path that promotes only values,
   a publication unit's `accepted` and `healthy` are judged per covered
-  Application from their details (see [Coverage](#kubernetes-publications)):
-  an aggregate that fails only because Applications run different
+  deployment from their details (see [Coverage](#kubernetes-publications)):
+  an aggregate that fails only because deployments run different
   publications of the source does not block it. A later passing attestation of the same
   name clears it; `nyl promote --ignore-attestation <unit>/<name>=<reason>`
   (or `environment/<name>`) overrides it, and the PromotionRecord keeps the
@@ -232,7 +243,7 @@ spec:
 - One rule selects values: promote, per value, the newest source state whose
   evidence proves the required level. Every attestation names the state it
   attests; a KubernetesPublication's `accepted` and `healthy` also name, per
-  Application, the publication it runs, so at `attested` each value comes from
+  deployment (each generated Application), the publication it runs, so at `attested` each value comes from
   what its consumer ran when it was attested.
 - `nyl promote` never observes anything itself: it reads only attestations
   recorded beforehand, so it runs from a workstation without cluster
@@ -253,12 +264,13 @@ spec:
     recorded for that state (see Choosing the state below). Mixed
     revisions block.
   - A path that promotes only values takes each value from the state its own
-    consuming Application or unit runs, which may differ between values when
-    manual syncs left Applications at different revisions. Each value is then
+    consuming deployment or unit runs, which may differ between values when
+    manual syncs left deployments at different revisions. Each value is then
     one its consumer really ran; the PromotionRecord lists each value's state.
     A value selected as a publication unit's input of a Release,
     `{unit: <publication>, input: /releases/<group>~1<release>/…}`, is
-    consumed by that Release's Application; any other selector is consumed
+    consumed by that Release's deployment (its Application), as the unit's
+    driver maps it (`Driver::input_consumer`); any other selector is consumed
     by the producing unit itself, so its value comes from that unit's newest
     receipt that meets the level. Following the consumer is the value-only
     selection rule, not an evidence requirement: it holds at `published`
@@ -270,7 +282,7 @@ spec:
     (`publicationTruncated`), the matched commit may be newer than the one
     that introduced what runs. When no recorded state published it, the
     promotion is refused with `NYL-PROMOTE-NO-EVIDENCE`, "no recorded state
-    published what <Application> runs (<commit>)", and the fix names
+    published what <deployment> runs (<commit>)", and the fix names
     `--state-revision` or publishing again.
   - `--state-revision <desired commit>` selects an exact state and
     `--revision <source commit>` the newest with that source commit, for all
@@ -361,7 +373,7 @@ spec:
     only the attestation of the unit's current receipt counts. An older
     state does not qualify through its publication attestations once a
     newer receipt of that unit exists, and a newest attestation that fails,
-    such as one that shows Applications on different publications, refuses
+    such as one that shows deployments on different publications, refuses
     the promotion with the driver's reason, without falling back to an
     older state whose attestations once passed, because they no longer
     describe what runs. The current receipt is the one the newest recorded
@@ -374,7 +386,7 @@ spec:
     publication without `observe`), nothing changes.
 
     The cost is accepted: while a newer receipt is published but its
-    Applications do not run it yet, an older state they still run cannot
+    deployments do not run it yet, an older state they still run cannot
     be promoted without flags, even if it passed. `--state-revision`
     names it explicitly, and it is then judged on the attestations recorded
     for it, as below; the refusal names that state and the flag.
@@ -426,11 +438,13 @@ spec:
   state, every unit the target environment also selects has a current
   receipt, and at `attested` every such unit's required attestations pass for
   that state. A publication unit's `accepted` and `healthy` aggregate all
-  Applications it generates: `accepted` when all of them run that
+  deployments it generates (for a KubernetesPublication, its Applications):
+  `accepted` when all of them run that
   publication, `healthy` when all are also Healthy. Mixed revisions block,
-  because one source commit must fit every value. A path's `coverage.excludeApplications` names
-  Applications it knowingly accepts as unhealthy; they leave the aggregate for
-  that path and are listed in the PromotionRecord. A publication unit without
+  because one source commit must fit every value. A path's
+  `coverage.<unit>.exclude` names deployments of that unit it knowingly
+  accepts as falling short; they leave the unit's aggregate for that path and
+  are listed in the PromotionRecord's `excludedDeployments` under the unit. A publication unit without
   `observe` declares no attestations and is satisfied by its receipt.
 - `record` decides where the PromotionRecord lives. With `record: state`, the
   default, it is written into the target's desired state, as a pull request
@@ -462,7 +476,7 @@ spec:
             - {scope: kubernetes, name: healthy, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}
           override: null
         ignoredAttestations: []
-        excludedApplications: []
+        excludedDeployments: {}
         artifactsVerified: true
         superseded: []                 # commits replaced with --supersede, with reasons
         requested: {by: …, identity: …, source: …, at: 2026-09-25T16:41:00Z, reason: …}
@@ -499,10 +513,11 @@ spec:
 - Prod-only changes, such as a replica count, reach prod with the next
   promotion of a commit that contains them. Hotfixes that cannot wait for dev
   take a path of their own (see [Hotfixes](#hotfixes)).
-- A path that promotes a source may narrow the Applications that count toward
-  its publication units' `accepted` and `healthy` to named ApplicationGroups,
-  `coverage: {applicationGroups: [web]}`. It never narrows what moves; the
-  promoted commit still carries every group's definitions.
+- A path that promotes a source may narrow the deployments that count toward
+  a unit's running-scoped attestations to named groups, such as
+  `coverage: {kubernetes: {groups: [web]}}` for a publication's
+  ApplicationGroups. It never narrows what moves; the promoted commit still
+  carries every group's definitions.
 
 ### Several paths into one environment
 
@@ -799,7 +814,7 @@ spec:
         attestations: [{scope: dev, name: accepted, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}, {scope: dev, name: healthy, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}]
         override: null
       ignoredAttestations: []
-      excludedApplications: []
+      excludedDeployments: {}
       superseded: []
       artifactsVerified: true
       requested: {by: …, identity: verified, source: …, at: 2026-09-25T16:40:00Z, reason: …}
@@ -996,33 +1011,62 @@ nothing itself, so there is one evidence path.
   different Applications run, every value names the same commit, so the audit
   trail stays a single commit; otherwise each value names the commit that last
   changed its own Application.
-- **Coverage.** For a path that promotes only values, the Applications whose
-  Releases produced the promoted values must meet the required `accepted` or
-  `healthy`, and a PromotionPath's `coverage.requireApplications` adds
-  Applications that must meet them at whatever publication they run, without
-  contributing values. For a path that promotes
-  the target's source, coverage is every Application of every publication unit
-  the target also selects, aggregated per unit as described above;
-  `coverage.applicationGroups` narrows it to the Applications of those
-  ApplicationGroups (the catalog Application belongs to none), and
-  `coverage.excludeApplications` leaves the named Applications out, so a
-  failing aggregate that only they explain does not block.
-  `applicationGroups` applies only to source paths; a value-only path
-  judges each value for its own consumer and ignores it (validation does
-  not warn about it yet). Coverage never fails open: a named group no
-  Application of the attestation belongs to, a coverage that leaves no
-  Application to judge while the attestation fails, and a
-  `requireApplications` name that no running-scoped attestation of the
-  current receipts lists (also without `observe`, and whatever the path
-  requires) refuse the promotion with `NYL-PROMOTE-NO-EVIDENCE`, naming the
-  field. Nothing checks the names earlier: validating them against the
-  Applications a target generates needs a driver contract that lists them. On a value-only
-  path, an excluded consumer must still run a publication of the source,
-  which decides the value's state, but need not meet the attestation there.
-  The per-Application judgement reads a typed verdict the driver derives
-  from its own details (`Driver::deployment_verdicts`: what each Application
-  runs, whether it meets the attestation there, and the driver's reason),
-  never the details themselves, and nothing of it is persisted.
+- **Coverage.** One publication unit has one receipt and one publication
+  commit, and runs as several deployments that each run independently, so a
+  PromotionPath's `coverage` is per unit: keyed by the unit's name, with
+  `groups`, `exclude`, and `require` naming the unit's deployments and their
+  groups as its driver lists them (`Driver::deployments`). For a
+  KubernetesPublication a deployment is a generated Argo CD Application (a
+  Release, `<group>/<release>`, on a direct target), named by the id the
+  attestation details give it, and a group is the ApplicationGroup of its
+  Release; the catalog Application belongs to none. For example:
+
+  ```yaml
+  spec:
+    coverage:
+      kubernetes:                 # the publication unit
+        groups: [web]
+        exclude: [web-batch]
+        require: [web-gateway]
+  ```
+
+  For a path that promotes only values, the deployments whose Releases
+  produced the promoted values must meet the required `accepted` or
+  `healthy`, and a unit's `require` adds deployments that must meet them at
+  whatever publication they run, without contributing values. For a path
+  that promotes the target's source, coverage is every deployment of every
+  publication unit the target also selects, aggregated per unit as described
+  above; a unit's `groups` narrows it to the deployments of those groups, and
+  its `exclude` leaves the named deployments out, so a failing aggregate that
+  only they explain does not block. An entry counts only for the unit it is
+  keyed by. `groups` applies only to source paths: a value-only path judges
+  each value for its own consumer, so validation refuses `groups` there with
+  `NYL-PROMOTE-COVERAGE-INEFFECTIVE`, as it refuses any entry of a unit
+  whose kind has no running-scoped attestations for its spec (such as a
+  publication without `observe`). `nyl validate`, `nyl plan`, `nyl reconcile`, `nyl promote`, and `nyl get promotion-candidates` check every name against what the
+  unit's driver lists for the worktree, through the same path checks, and
+  refuse a unit the source does not declare, select, or enable, a unit
+  whose kind lists no deployments, and a group or deployment the unit does
+  not run with `NYL-PROMOTE-COVERAGE-UNKNOWN`. When the driver cannot list
+  them, such as when the target does not render, the names are unchecked
+  (`NYL-PROMOTE-COVERAGE-UNCHECKED`): an error in `nyl validate`, a warning
+  in the others, which judge another environment only by what they need. A
+  KubernetesPublication lists the deployments its resolved spec recorded,
+  or renders its target for validation, with each binding orchestration
+  resolves taking a placeholder and `fromPublication` inputs read fresh or
+  from the cached branch, so it works offline.
+  Coverage still never fails open at promotion time, for what changed since:
+  a named group no deployment of the attestation belongs to, a coverage that
+  leaves no deployment to judge while the attestation fails, and a `require`
+  name that no running-scoped attestation of the unit's current receipt
+  lists (also without `observe`, and whatever the path requires) refuse the
+  promotion with `NYL-PROMOTE-NO-EVIDENCE`, naming the field. On a
+  value-only path, an excluded consumer must still run a publication of the
+  source, which decides the value's state, but need not meet the attestation
+  there. The per-deployment judgement reads a typed verdict the driver
+  derives from its own details (`Driver::deployment_verdicts`: what each
+  deployment runs, whether it meets the attestation there, and the driver's
+  reason), never the details themselves, and nothing of it is persisted.
 - **Where Application data lives.** Only a `KubernetesPublication` unit knows
   Applications, because it generated them; it records them at resolution
   (see [Reading Argo CD](#reading-argo-cd)). Its `accepted` and `healthy`
@@ -1042,8 +1086,8 @@ nothing itself, so there is one evidence path.
   (`mixed`, `missing`, `other-source`), or it is not Healthy: a recorded
   `healthy` failing for the consumer blocks its value even when the path
   requires only `accepted`, as any failing attestation blocks its state,
-  until `--ignore-attestation` sets it aside or the consumer is in
-  `coverage.excludeApplications`. A path that promotes the target's source
+  until `--ignore-attestation` sets it aside or the consumer is in its
+  unit's `coverage.<unit>.exclude`. A path that promotes the target's source
   also blocks on mixed revisions.
 - **Decision evidence is always recorded.** The attestations behind every
   promotion, with their details (time, Application, running revision,

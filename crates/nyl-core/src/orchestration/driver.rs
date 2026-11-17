@@ -246,8 +246,8 @@ pub struct AttestationOutcome {
     pub result: AttestationResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Driver-specific evidence behind the result, such as each Argo CD
-    /// Application's running publication and health; recorded unchanged.
+    /// Driver-specific evidence behind the result, such as each
+    /// deployment's running publication and health; recorded unchanged.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub details: Value,
 }
@@ -264,11 +264,11 @@ pub struct AttestationOutcome {
 /// is read and never persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentVerdict {
-    /// The deployment's name, as a PromotionPath's `coverage.excludeApplications`
-    /// and `coverage.requireApplications` name it (for Argo CD, the Application).
+    /// The deployment's name, as [`Driver::deployments`] lists it and a
+    /// PromotionPath's `coverage.<unit>.exclude` and `require` name it.
     pub name: String,
-    /// The group it belongs to, as `coverage.applicationGroups` names it;
-    /// `None` for one that belongs to no group.
+    /// The group it belongs to, as [`Driver::deployments`] lists it and
+    /// `coverage.<unit>.groups` names it; `None` for one in no group.
     pub group: Option<String>,
     /// What it runs.
     pub runs: DeploymentRuns,
@@ -278,6 +278,35 @@ pub struct DeploymentVerdict {
     /// Why it falls short, or what it runs instead of the attested receipt,
     /// in the driver's words.
     pub reason: Option<String>,
+}
+
+/// One deployment a unit runs as, as [`Driver::deployments`] lists it: the
+/// names a PromotionPath's `coverage` may use for the unit.
+///
+/// Contract: [Kubernetes publications](../../../../design/promotion.md#kubernetes-publications),
+/// "Coverage". Computed when it is read and never persisted.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Deployment {
+    /// Its name, as [`DeploymentVerdict::name`] gives it.
+    pub name: String,
+    /// The group it belongs to, as [`DeploymentVerdict::group`] gives it;
+    /// `None` for one in no group.
+    pub group: Option<String>,
+}
+
+/// What a driver may read to list the deployments of a unit as the worktree
+/// declares it ([`Driver::deployments`]): the project's files, never state,
+/// a cluster, or the process environment.
+pub struct DeploymentContext<'a> {
+    /// The worktree the unit's spec was rendered from.
+    pub worktree: &'a std::path::Path,
+    /// The worktree-rooted directory containing `nyl.toml`, such as `/nyl`.
+    pub project_dir: &'a str,
+    /// The instances of EnvironmentTemplates the caller knows.
+    pub instances: &'a super::instance::Instances,
+    /// A cache directory of the invocation's workspace, when it has one; a
+    /// driver that renders keeps nothing between calls without it.
+    pub cache_dir: Option<&'a std::path::Path>,
 }
 
 /// What a deployment runs, as a running-scoped attestation shows it.
@@ -859,12 +888,22 @@ pub trait Driver: Send + Sync {
         None
     }
     /// The deployment, as [`DeploymentVerdict::name`] names it, that consumes
-    /// the resolved input at `pointer` of `spec`, such as the Application of
+    /// the resolved input at `pointer` of `spec`, such as the deployment of
     /// the Release whose input it is; `None` when the unit itself consumes
     /// it, and by default (decision D7 of the M6 plan).
     fn input_consumer(&self, spec: &Value, pointer: &str) -> Option<String> {
         let _ = (spec, pointer);
         None
+    }
+    /// The deployments a unit of `spec` runs as, each with its group, as
+    /// [`DeploymentVerdict`] names them: what a PromotionPath's `coverage`
+    /// may name for the unit, which `nyl validate` and `nyl plan` check.
+    /// `spec` is the unit's rendered spec, or its resolved one. `Ok(None)`,
+    /// the default, says the kind does not run as separately judged
+    /// deployments, so no `coverage` may name the unit.
+    fn deployments(&self, ctx: &DeploymentContext<'_>, spec: &Value) -> DriverResult<Option<Vec<Deployment>>> {
+        let _ = (ctx, spec);
+        Ok(None)
     }
     /// The native resources a spec claims in an environment; an image tag prefix names the environment.
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope>;

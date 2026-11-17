@@ -932,7 +932,7 @@ mod tests {
             "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "desiredCommit": "3".repeat(40)},
             "sourceCommit": source.map(|c| c.to_string().repeat(40)),
             "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
-            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "ignoredAttestations": [], "excludedDeployments": {}, "superseded": [],
             "artifactsVerified": true,
             "requested": {"by": "a", "identity": "local", "at": "2026-09-25T16:41:00Z"}
         }))

@@ -136,35 +136,3 @@ spec:
   values: {target: prod}
   state:
     repositoryRef: {name: platform}
----
-# Values only: staging's source is its own, so this path moves no commit.
-# Each value names the Release that consumes it, so its Application decides
-# which dev state the value comes from.
-apiVersion: gitops.nyl/v1
-kind: PromotionPath
-metadata:
-  name: dev-to-staging
-spec:
-  from: {environment: dev}
-  to: {environment: staging}
-  evidence: attested
-  values:
-    webImage:
-      select: {unit: kubernetes, input: /releases/web~1web/image}
-    apiImage:
-      select: {unit: kubernetes, input: /releases/web~1api/image}
----
-# Source and values: one dev state, so mixed revisions block.
-apiVersion: gitops.nyl/v1
-kind: PromotionPath
-metadata:
-  name: dev-to-prod
-spec:
-  from: {environment: dev}
-  to: {environment: prod}
-  evidence: attested
-  values:
-    webImage:
-      select: {unit: kubernetes, input: /releases/web~1web/image}
-    apiImage:
-      select: {unit: kubernetes, input: /releases/web~1api/image}

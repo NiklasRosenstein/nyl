@@ -205,7 +205,7 @@ fn seed_promotion(world: &World, location: &StateLocation, path: &str, sequence:
         "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "desiredCommit": COMMIT},
         "sourceCommit": COMMIT,
         "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
-        "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+        "ignoredAttestations": [], "excludedDeployments": {}, "superseded": [],
         "artifactsVerified": true,
         "requested": {"by": "alice", "identity": "local", "at": "2026-09-24T10:00:00Z"}
     }))

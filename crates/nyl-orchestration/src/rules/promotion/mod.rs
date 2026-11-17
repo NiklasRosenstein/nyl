@@ -662,7 +662,7 @@ fn fix_for(source: &EnvironmentName, gaps: &[Gap], level: &str) -> String {
     }
     if has(GapKind::Coverage) {
         fixes.push(
-            "correct the PromotionPath's `coverage`: name Applications and ApplicationGroups as the publication's attestations list them (`nyl get states -e <source> -o yaml` shows their details)"
+            "correct the PromotionPath's `coverage`: name each unit's deployments and groups as its attestations list them (`nyl validate` checks the names against what the unit generates; `nyl get states -e <source> -o yaml` shows the attestations' details)"
                 .to_owned(),
         );
     }
@@ -824,7 +824,7 @@ fn build(
                 by: requested.by.clone(),
             })
             .collect(),
-        excluded_applications: input.path.spec.coverage.exclude_applications.clone(),
+        excluded_deployments: input.path.spec.excluded_deployments(),
         superseded: Vec::new(),
         artifacts_verified: false,
         requested: requested.clone(),

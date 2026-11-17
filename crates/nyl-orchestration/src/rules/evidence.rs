@@ -338,7 +338,7 @@ pub fn failing(
             Code::AttestationFailed,
             message,
             format!(
-                "fix what failed and record a passing attestation with {record}; until then it blocks dependents that require it and promotion of this state (on a path that promotes only values, of the values whose consuming Application it fails for)"
+                "fix what failed and record a passing attestation with {record}; until then it blocks dependents that require it and promotion of this state (on a path that promotes only values, of the values whose consuming deployment it fails for)"
             ),
         )
     };

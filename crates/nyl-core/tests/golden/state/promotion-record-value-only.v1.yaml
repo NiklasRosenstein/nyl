@@ -37,7 +37,7 @@ evidence:
   override:
     reason: rollback after incident 4711
 ignoredAttestations: []
-excludedApplications: []
+excludedDeployments: {}
 superseded: []
 artifactsVerified: false
 requested:

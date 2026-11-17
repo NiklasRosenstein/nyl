@@ -45,14 +45,15 @@ spec:
   scope, or adds requirements at `published`; `maxAttestationAge` makes older
   attestations not count.
 - `verifyArtifacts` (default `true`) checks that promoted artifacts still exist
-  before a record is written. `coverage` narrows which Applications count toward
-  a source promotion's publication attestations (`applicationGroups`,
-  `excludeApplications`) and adds Applications that must meet them without
-  contributing values (`requireApplications`); see
-  [Coverage](/nyl/orchestration/promotion/#coverage).
+  before a record is written. `coverage` is keyed by a unit that runs as
+  several deployments, such as a KubernetesPublication: per unit, it narrows
+  which deployments count toward its running-scoped attestations (`groups`,
+  `exclude`) and adds deployments that must meet them without contributing
+  values (`require`). `nyl validate` checks each name against what the unit
+  runs; see [Coverage](/nyl/orchestration/promotion/#coverage).
 - A path whose target does not take its source from it promotes values only:
   a value selected as a publication's Release input comes from the state its
-  Release's Application runs; see
+  Release's deployment runs; see
   [Value-only paths](/nyl/orchestration/promotion/#value-only-paths).
 
 ## Selecting values
@@ -89,6 +90,9 @@ environment. Every finding has a stable code and a fix:
 | `NYL-PROMOTE-VALUE-TYPE` | A value's type does not fit a unit field that reads it |
 | `NYL-PROMOTE-BINDING-UNKNOWN` | A `fromPromotion` binding names a path or value no path declares |
 | `NYL-ATTESTATION-UNDECLARED` | The path requires an attestation its unit or environment scope does not declare |
+| `NYL-PROMOTE-COVERAGE-UNKNOWN` | `coverage` names a unit the source does not declare, select, or enable, a unit whose kind runs no deployments, or a group or deployment the unit does not run; the message lists the names it has |
+| `NYL-PROMOTE-COVERAGE-INEFFECTIVE` | A path that promotes only values sets a unit's `groups`, which only a source path uses, or the unit records nothing per deployment (a KubernetesPublication without `observe`) |
+| `NYL-PROMOTE-COVERAGE-UNCHECKED` | A coverage unit's deployments cannot be listed, such as when its target does not render; an error in `nyl validate`, a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates` |
 | `NYL-PROMOTE-UNSUPPORTED` | `changeGate: pullRequest`, or a DeploymentTarget in `from` or `to`: both arrive with M11 |
 
 Types are compared when both sides are known: what a selector reads (a rendered

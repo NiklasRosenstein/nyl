@@ -258,6 +258,14 @@ impl Driver for FakePublication {
         crate::kubernetes_publication::input_consumer(spec, pointer)
     }
 
+    fn deployments(
+        &self,
+        ctx: &nyl_core::orchestration::driver::DeploymentContext<'_>,
+        spec: &Value,
+    ) -> DriverResult<Option<Vec<nyl_core::orchestration::driver::Deployment>>> {
+        crate::kubernetes_publication::deployments(&self.resource_catalogue, ctx, spec)
+    }
+
     /// None: the publication destination (repository, revision, and path
     /// prefix) belongs to the DeploymentTarget, which the spec names but
     /// does not contain, and claims are computed from the spec alone. Two

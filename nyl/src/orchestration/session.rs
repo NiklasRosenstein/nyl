@@ -500,7 +500,10 @@ impl Session {
     /// The finding returned is the first; its message counts the others, and
     /// `nyl validate` lists them all. Without one, the warnings: the values
     /// promoted into this environment that the supersede check cannot check
-    /// (`NYL-PROMOTE-UNCHECKED`), which `nyl plan` lists.
+    /// (`NYL-PROMOTE-UNCHECKED`), which `nyl plan` lists, and the coverage whose
+    /// unit's deployments could not be listed, in any environment
+    /// (`NYL-PROMOTE-COVERAGE-UNCHECKED`), which every caller reports
+    /// ([`coverage_warnings`]).
     pub fn check_promotion_paths(&self, wiring: &Wiring<'_>) -> Result<Vec<Finding>, Finding> {
         let (findings, warnings) =
             super::promotion::findings_for(&self.inventory, &self.resolved.name, wiring.drivers, &self.renderer())
@@ -557,6 +560,17 @@ impl Session {
             promotion_paths: super::promotion::declared_paths(&self.inventory),
         })
     }
+}
+
+/// The warnings of [`Session::check_promotion_paths`] that every command
+/// reports, not only `nyl plan`: coverage whose deployments could not be
+/// listed (`NYL-PROMOTE-COVERAGE-UNCHECKED`).
+pub fn coverage_warnings(warnings: &[Finding]) -> Vec<Finding> {
+    warnings
+        .iter()
+        .filter(|finding| finding.code == Code::PromoteCoverageUnchecked)
+        .cloned()
+        .collect()
 }
 
 /// Unit names as an option names them; `flag` names the option in the finding.

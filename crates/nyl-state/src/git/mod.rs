@@ -1995,7 +1995,7 @@ fn read_run(name: &str, files: &Files, version: String) -> StateResult<RunState>
 mod promotion_file_tests {
     use super::*;
 
-    const RECORD: &str = "path: dev-to-prod\nsequence: 1\nfrom:\n  environment: dev\n  run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90\n  desiredCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a\nvalues: {}\nevidence:\n  level: published\n  attestations: []\n  override: null\nignoredAttestations: []\nexcludedApplications: []\nsuperseded: []\nartifactsVerified: true\nrequested:\n  by: alice\n  identity: local\n  at: \"2026-09-25T16:41:00Z\"\n";
+    const RECORD: &str = "path: dev-to-prod\nsequence: 1\nfrom:\n  environment: dev\n  run: 0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90\n  desiredCommit: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a\nvalues: {}\nevidence:\n  level: published\n  attestations: []\n  override: null\nignoredAttestations: []\nexcludedDeployments: {}\nsuperseded: []\nartifactsVerified: true\nrequested:\n  by: alice\n  identity: local\n  at: \"2026-09-25T16:41:00Z\"\n";
     const MARKERS: &str = "apiVersion: gitops.nyl/v1\nkind: PromotionRecord\n";
 
     fn files(name: &str, text: String) -> Files {

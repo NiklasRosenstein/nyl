@@ -708,8 +708,8 @@ pub enum MissingReason {
     /// has a newer receipt, or the deployment that consumes a value runs
     /// another state's result.
     NotRunning,
-    /// The path's `coverage` names an Application or ApplicationGroup no
-    /// attestation lists, or leaves nothing to judge while it fails.
+    /// The path's `coverage` names a deployment or group no attestation of
+    /// its unit lists, or leaves nothing to judge while it fails.
     Coverage,
 }
 
@@ -1383,7 +1383,7 @@ d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 published (selected, promoted, running)
                 override_: None,
             },
             ignored_attestations: Vec::new(),
-            excluded_applications: Vec::new(),
+            excluded_deployments: BTreeMap::new(),
             superseded: Vec::new(),
             artifacts_verified: true,
             requested: PromotionRequest {

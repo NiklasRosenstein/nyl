@@ -14,7 +14,7 @@ M6 delivers promotion in steps. `nyl promote`, `fromPromotion` sources and
 bindings, artifact verification, `nyl get states`, `promotion-candidates`,
 and `promotions`, `status` lineage, `record: source`, several paths into
 one environment with the supersede check and hotfixes, value-only paths
-judged per Application, and `coverage` work today.
+judged per deployment, and `coverage` work today.
 :::
 
 ## The unit of promotion
@@ -47,7 +47,7 @@ counts them only for the publication's current receipt:
 
 - An older state does not qualify through its publication attestations once
   a newer receipt of the publication exists, even if they passed.
-- When the newest attestation fails, such as when Applications still run the
+- When the newest attestation fails, such as when deployments still run the
   previous publication or run different ones, `nyl promote` refuses with
   `NYL-PROMOTE-NO-EVIDENCE` and the driver's reason. It does not fall back to
   an older state that once passed.
@@ -57,7 +57,7 @@ counts them only for the publication's current receipt:
 - An explicitly chosen state, with `--state-revision` or `--revision`, is
   judged on the attestations recorded for it.
 
-The cost: between publishing a new receipt and its Applications running it,
+The cost: between publishing a new receipt and its deployments running it,
 the state they still run cannot be promoted without flags. The refusal names
 that state, and `--state-revision` promotes it:
 
@@ -71,18 +71,20 @@ its receipt is its evidence, and none of this applies.
 ## Value-only paths
 
 A path whose target does not take its source from it promotes values only,
-and takes each value from the state its consumer runs. A value selected as a
-publication's Release input, `{unit: kubernetes, input:
-/releases/<group>~1<release>/image}`, is consumed by that Release's
-Application; any other selector (an artifact, an output, another input) is
-consumed by the selected unit itself.
+and takes each value from the state its consumer runs. A unit's driver says
+which of the unit's deployments consumes an input: for a
+KubernetesPublication, a value selected as a Release input, `{unit:
+kubernetes, input: /releases/<group>~1<release>/image}`, is consumed by that
+Release's deployment, its Argo CD Application (or the Release itself on a
+direct target). Any other selector (an artifact, an output, another input)
+is consumed by the selected unit itself.
 
-For a value consumed by an Application, `nyl promote` reads the publication's
-current `accepted` and `healthy` per Application: the value comes from the
-state whose receipt published what that Application runs, so Applications
-that were synced to different publications by hand do not block, and the
-record names a value's own `state` when it differs from `from`. Only the
-consuming Application's own findings block its value: it runs a revision no
+For a value consumed by a deployment, `nyl promote` reads the unit's current
+`accepted` and `healthy` per deployment: the value comes from the state
+whose receipt published what that deployment runs, so deployments that were
+synced to different publications by hand do not block, and the record names
+a value's own `state` when it differs from `from`. Only the consuming
+deployment's own findings block its value: it runs a revision no
 publication explains (`unmatched`), a mix of revisions, nothing, or a recorded
 `healthy` fails for it (even when the path requires only `accepted`, as any
 failing attestation blocks). A path that promotes the target's source still
@@ -93,40 +95,62 @@ evidence requirement: it applies at `evidence: published` and under
 `--evidence published` too, whenever the publication's current receipt has a
 recorded `accepted` or `healthy`. A state is matched by the publication commit
 it published, which may be the commit the reading matched or the revision
-the Application reports running. When no recorded state published what an
-Application runs, such as after the history was cut short or a publication
+the deployment reports running. When no recorded state published what a
+deployment runs, such as after the history was cut short or a publication
 outside orchestration, the promotion is refused with "no recorded state
-published what <Application> runs (<commit>)": promote a state explicitly
+published what <deployment> runs (<commit>)": promote a state explicitly
 with `--state-revision`, or reconcile the source so it publishes again.
 
 ## Coverage
 
-`coverage` narrows or extends which Applications a promotion's publication
-attestations are judged for. It never changes what moves.
+A publication unit has one receipt and one publication commit, but runs as
+several deployments, each synced on its own. `coverage` says, per unit,
+which of its deployments a promotion judges that unit's running-scoped
+attestations (`accepted` and `healthy`) for. It never changes what moves.
+Entries are keyed by the unit's name and name deployments and groups as the
+unit's kind lists them:
 
 ```yaml
 spec:
   coverage:
-    applicationGroups: [web]              # source paths: count only these groups
-    excludeApplications: [web-batch]      # knowingly accepted as unhealthy; listed in each record
-    requireApplications: [web-gateway]    # must meet the attestations at whatever they run
+    kubernetes:                 # the publication unit
+      groups: [web]             # source paths: count only these groups
+      exclude: [web-batch]      # knowingly accepted as falling short; listed in each record
+      require: [web-gateway]    # must meet the attestations at whatever they run
 ```
 
-- `applicationGroups` and `excludeApplications` narrow a source path's
-  judgement: a failing `accepted` or `healthy` that only Applications outside
-  them explain does not block. The catalog Application belongs to no group.
-  `applicationGroups` applies only to source paths; a value-only path ignores
-  it, because it judges each value for its own consumer.
-- Coverage never fails open: a group no Application belongs to, or a
-  coverage that leaves no Application to judge while the attestation fails,
-  refuses the promotion and names the field. Names are checked when a
-  promotion runs; `nyl validate` does not check them yet.
+For a KubernetesPublication, a deployment is an Argo CD Application the
+target generates, named as the attestation details name it (its name,
+qualified by its namespace outside the Argo CD instance's), or a Release,
+`<group>/<release>`, on a direct target; a group is the ApplicationGroup of
+its Release. The catalog Application belongs to no group.
+
+- `groups` and `exclude` narrow a source path's judgement of their unit: a
+  failing `accepted` or `healthy` that only deployments outside them explain
+  does not block. An entry counts only for the unit it is keyed by.
+- `groups` applies only to source paths. A value-only path judges each value
+  for its own consumer, so `nyl validate` refuses `groups` there
+  (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); use `exclude` instead. Coverage of a
+  unit that records nothing per deployment, such as a KubernetesPublication
+  without `observe: {}`, is refused the same way.
 - On a value-only path, an excluded consumer must still run a publication of
   the source, which decides its value's state, but need not be healthy.
-- `requireApplications` adds Applications that contribute no value but must
-  meet the required attestations at whatever publication they run. A name no
-  attestation lists blocks the promotion, also for a publication without
-  `observe` and on a path that requires none of its attestations.
+- `require` adds deployments that contribute no value but must meet the
+  required attestations at whatever publication they run.
+- `nyl validate`, `nyl plan`, `nyl reconcile`, `nyl promote`, and `nyl get promotion-candidates` check every name against what the unit runs, as its kind lists
+  it for the worktree (a KubernetesPublication renders its target): a unit
+  the source does not declare, select, or enable, a unit whose kind runs no
+  deployments, and a group or deployment the unit does not run are refused
+  with `NYL-PROMOTE-COVERAGE-UNKNOWN`, which lists the names the unit has.
+  When the names cannot be listed, such as when the source's target does not
+  render, `nyl validate` fails with `NYL-PROMOTE-COVERAGE-UNCHECKED` and the
+  render error, and the other commands warn with it and carry on.
+- Coverage still never fails open when a promotion runs: a group no
+  deployment of the attestation belongs to, a coverage that leaves no
+  deployment to judge while the attestation fails, and a `require` name no
+  attestation of the unit lists (also for a publication without `observe`,
+  and on a path that requires none of its attestations) refuse the
+  promotion and name the field.
 
 ## Reading what was promoted
 
