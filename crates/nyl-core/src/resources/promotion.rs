@@ -81,9 +81,9 @@ pub struct PromotionPathSpec {
     /// Check that every promoted artifact still exists before recording. Default `true`.
     #[serde(rename = "verifyArtifacts", default = "default_true")]
     pub verify_artifacts: bool,
-    /// Which Applications count toward a source promotion's publication attestations.
-    #[serde(default, skip_serializing_if = "Coverage::is_empty")]
-    pub coverage: Coverage,
+    /// Per unit that runs as several deployments, such as a KubernetesPublication, which of them count toward its running-scoped attestations for this path: keyed by the unit's name in the source environment. `nyl validate` and `nyl plan` check every unit, group, and deployment named here against what the unit's kind lists for it. Omitted, every deployment of every unit counts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub coverage: BTreeMap<String, UnitCoverage>,
     /// The promoted values by name; the names are what `fromPromotion` bindings read.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, PromotionValue>,
@@ -158,26 +158,61 @@ impl PathAttestations {
     }
 }
 
-/// Which Applications a source promotion's publication attestations cover.
+/// Which deployments of one unit a path counts, by the names the unit's kind
+/// lists for them (for a KubernetesPublication, a deployment is an Argo CD
+/// Application, or a Release on a direct target, and a group is an
+/// ApplicationGroup).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Coverage {
-    /// Narrows the Applications that count to these ApplicationGroups; never what moves. Omitted, every group.
-    #[serde(rename = "applicationGroups", default, skip_serializing_if = "Vec::is_empty")]
-    pub application_groups: Vec<String>,
-    /// Applications knowingly accepted as unhealthy; they leave the aggregate for this path and are listed in each record.
-    #[serde(rename = "excludeApplications", default, skip_serializing_if = "Vec::is_empty")]
-    pub exclude_applications: Vec<String>,
-    /// Applications that must meet the required attestations at whatever publication they run, without contributing values.
-    #[serde(rename = "requireApplications", default, skip_serializing_if = "Vec::is_empty")]
-    pub require_applications: Vec<String>,
+pub struct UnitCoverage {
+    /// Narrows the deployments that count toward a source promotion to those of these groups; it never narrows what moves, and a deployment in no group (such as a catalog) then does not count. Omitted, every group. A path that promotes only values judges each value for its own consumer, so validation refuses `groups` there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    /// Deployments knowingly accepted as falling short: they leave the unit's aggregate for this path, and each record lists them. A value consumed by an excluded deployment must still come from a publication it runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Deployments that must meet the path's required attestations at whatever they run, without contributing values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require: Vec<String>,
 }
 
-impl Coverage {
-    pub fn is_empty(&self) -> bool {
-        self.application_groups.is_empty()
-            && self.exclude_applications.is_empty()
-            && self.require_applications.is_empty()
+impl UnitCoverage {
+    /// Whether the entry narrows which deployments count: it names groups or exclusions.
+    pub fn narrows(&self) -> bool {
+        !self.groups.is_empty() || !self.exclude.is_empty()
+    }
+
+    /// Whether `deployment`, in `group`, counts toward a whole-source judgement:
+    /// in a named group, when the entry names groups, and not excluded.
+    pub fn counts(&self, deployment: &str, group: Option<&str>) -> bool {
+        (self.groups.is_empty() || group.is_some_and(|group| self.groups.iter().any(|named| named == group)))
+            && !self.excludes(deployment)
+    }
+
+    /// Whether the entry excludes `deployment`.
+    pub fn excludes(&self, deployment: &str) -> bool {
+        self.exclude.iter().any(|name| name == deployment)
+    }
+}
+
+impl PromotionPathSpec {
+    /// The coverage of `unit`, when the path declares one.
+    pub fn unit_coverage(&self, unit: &str) -> Option<&UnitCoverage> {
+        self.coverage.get(unit)
+    }
+
+    /// The excluded deployments by unit, as a record lists them: each unit's
+    /// `exclude`, sorted, each name once; a unit that excludes none is left
+    /// out.
+    pub fn excluded_deployments(&self) -> BTreeMap<String, Vec<String>> {
+        self.coverage
+            .iter()
+            .filter(|(_, coverage)| !coverage.exclude.is_empty())
+            .map(|(unit, coverage)| {
+                let names: std::collections::BTreeSet<&String> = coverage.exclude.iter().collect();
+                (unit.clone(), names.into_iter().cloned().collect())
+            })
+            .collect()
     }
 }
 
@@ -428,6 +463,54 @@ mod tests {
             let problem = value(bad).unwrap_or_default();
             assert!(problem.contains(message), "{message}: {problem}");
         }
+    }
+
+    /// Coverage is per unit, with each deployment counted by its own unit's
+    /// entry, and the record lists each unit's exclusions under that unit,
+    /// sorted and each name once, leaving out a unit that excludes nothing.
+    /// Catches an exclusion of one unit leaking into another's aggregate.
+    #[test]
+    fn test_coverage_is_per_unit() {
+        let mut spec = base();
+        spec["coverage"] = json!({
+            "kubernetes": {"groups": ["web"], "exclude": ["web-batch"], "require": ["web-gateway"]},
+            "edge": {"exclude": ["web-batch", "edge-canary", "web-batch"]},
+            "gateway": {"require": ["gateway"]},
+        });
+        let path = path(spec).unwrap();
+        let kubernetes = path.spec.unit_coverage("kubernetes").unwrap();
+        assert!(kubernetes.narrows());
+        assert!(kubernetes.counts("web-api", Some("web")));
+        assert!(!kubernetes.counts("web-batch", Some("web")));
+        assert!(!kubernetes.counts("jobs-worker", Some("jobs")));
+        assert!(!kubernetes.counts("catalog", None));
+        let edge = path.spec.unit_coverage("edge").unwrap();
+        assert!(edge.counts("catalog", None));
+        assert!(!edge.counts("edge-canary", None));
+        assert_eq!(path.spec.unit_coverage("other"), None);
+        assert_eq!(
+            path.spec.excluded_deployments(),
+            BTreeMap::from([
+                (
+                    "edge".to_owned(),
+                    vec!["edge-canary".to_owned(), "web-batch".to_owned()]
+                ),
+                ("kubernetes".to_owned(), vec!["web-batch".to_owned()]),
+            ])
+        );
+    }
+
+    /// The unreleased flat shape is refused rather than ignored, so a path
+    /// written for it cannot silently count every deployment.
+    #[test]
+    fn test_flat_coverage_fields_are_refused() {
+        let mut spec = base();
+        spec["coverage"] = json!({"excludeApplications": ["web"]});
+        let error = path(spec).unwrap_err().to_string();
+        assert!(
+            error.contains("unknown field") || error.contains("invalid type"),
+            "{error}"
+        );
     }
 
     /// `changeGate: pullRequest` and a target endpoint parse, so they can be

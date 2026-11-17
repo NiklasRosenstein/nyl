@@ -115,9 +115,13 @@ pub fn candidates(args: &GetCandidatesArgs, wiring: &Wiring<'_>) -> Result<Comma
     };
     // What `nyl promote` refuses, inspection refuses too: a broken path
     // would be judged by rules it does not satisfy.
+    let mut coverage_warnings = Vec::new();
     let prepared = session
         .check_promotion_paths(wiring)
-        .and_then(|_| target_view(&session, &path))
+        .and_then(|warnings| {
+            coverage_warnings = crate::orchestration::session::coverage_warnings(&warnings);
+            target_view(&session, &path)
+        })
         .and_then(|view| {
             let source = EnvironmentName::new(&source).map_err(|error| {
                 Finding::new(
@@ -167,7 +171,9 @@ pub fn candidates(args: &GetCandidatesArgs, wiring: &Wiring<'_>) -> Result<Comma
         .iter()
         .map(|candidate| candidate.desired_commit.to_string());
     let mut outcome = rendered(&report, report.exit, &report.errors, report.table(), names, args.output)?;
-    prepend_warnings(&mut outcome, &session.resolved.warnings);
+    let mut warnings = session.resolved.warnings.clone();
+    warnings.extend(coverage_warnings);
+    prepend_warnings(&mut outcome, &warnings);
     Ok(outcome)
 }
 

@@ -110,7 +110,7 @@ means it stacks on that branch.
 | 9 | `m6/supersede` | Item 3: `source.fromPromotion.paths`, path-less bindings resolved from the supplying record, the per-value supersede check with `git cherry` containment (D5) in `nyl-git`, `--supersede` with ranges, qualification, and reasons, the record's `superseded`; `nyl get promotions` showing each binding's supplying path and record; `status`'s `pendingSequence` across several source paths (`paths`) | `reference/hotfix` | Rule tests for containment (ancestor, cherry-pick, single-commit squash, multi-commit squash, merge, symmetric); `nyl-git` tests for patch-ids | 6 |
 | 10 | `m6/fake-argocd` | Tier-1 Argo CD readings for `FakePublication`'s `attest`: the `argocd` step feeds the fake observer a neutral reading per target, evaluated by the shared matching, so `accepted`, `healthy`, and their details are the real rules' | Nothing alone | Fake observer tests; an inline scenario attesting `other-publication` | 2 |
 | 11 | `m6/value-only` | Items 5 and 7, and the rest of item 6 (failing attestations in `status`, a path's `attestations` with D8): value-only paths take each value from the state its consumer runs (D6, D7); a publication's running-scoped attestations count only for its current receipt, so a failing newest one blocks a source path without a fallback (D8, settled without a format change); `coverage.applicationGroups`, `excludeApplications`, `requireApplications`; per-path `attestations`; failing attestations in `status`; `plan` listing values the supersede check cannot check (`NYL-PROMOTE-UNCHECKED`), which matter most on value-only paths | `walkthroughs/value-only-promotion` | Rule tests over the drivers' typed verdicts and coverage; driver tests for the verdicts; a shell test of D8 (the 12:00/12:35 story) | 9, 10 |
-| 15 | `m6/done` | Roadmap: every M6 item ticked, `done: true`, `Closes #…`; `REACHED` stays M6 with `PENDING` empty | — | The roadmap test | 11 |
+| 15 | `m6/done` | Roadmap: every M6 item ticked, `done: true` (no open M6 issues to close); `REACHED` stays M6 with `PENDING` empty | — | The roadmap test | 11 |
 
 There is no PR 12, 13, or 14: the change gate and target promotion moved to
 M11, and this PR (PR 1) carries the roadmap change. The numbers stay so that
@@ -212,12 +212,17 @@ scenario step yet; each gets one, or rule tests only, in the PR named:
   an inline scenario or a shell test.
 - A path's `attestations` field (per-unit and environment overrides), and
   `NYL-ATTESTATION-UNDECLARED` for a path: PR 3 and PR 11, rule tests.
-- `coverage.applicationGroups`, `excludeApplications`, `requireApplications`:
-  PR 11, rule tests. Their names are checked only when a promotion runs
-  (a name no attestation lists refuses it); validating them in `validate`
-  and `plan` needs a driver contract that lists the Applications a target
-  generates, and follows later. `validate` does not warn about
-  `applicationGroups` on a value-only path, which ignores it.
+- `coverage`: PR 11 added it as flat fields (`applicationGroups`,
+  `excludeApplications`, `requireApplications`); a follow-up made it per
+  publication unit (`coverage.<unit>.{groups, exclude, require}`) with
+  neutral names. `validate`, `plan`, `reconcile`, `promote`, and
+  `get promotion-candidates` check every name against what the unit's driver
+  lists (`Driver::deployments`, `NYL-PROMOTE-COVERAGE-UNKNOWN`; a listing that
+  fails is `NYL-PROMOTE-COVERAGE-UNCHECKED`, an error only in `validate`),
+  and refuse `groups` on a value-only path and coverage of a unit without
+  running-scoped attestations (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); promotion keeps refusing a name no
+  attestation lists. Rule tests, a driver test, CLI tests, and the
+  `value-only-promotion` walkthrough's last steps.
 - `NYL-PROMOTE-UNCHECKED` (a value without a known source commit) and
   repository-qualified `--supersede web:S1..c3d4`: PR 9, rule tests.
 - The fields of an artifact a selector reads: typed since the
@@ -291,5 +296,5 @@ Validation in M6 rejects `changeGate: pullRequest` and a target in `from` or
 `to` with `NYL-PROMOTE-UNSUPPORTED` (PR 3), so a project cannot rely on a
 form that silently does nothing.
 
-The coverage options (`applicationGroups`, `excludeApplications`,
-`requireApplications`) stay in M6 (item 7) but can follow PR 11 if it grows.
+The coverage options (per unit: `groups`, `exclude`, `require`) stay in M6
+(item 7).

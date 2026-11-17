@@ -1091,7 +1091,7 @@ mod tests {
             "path": path, "sequence": sequence,
             "from": {"environment": "dev", "run": RUN_1, "desiredCommit": "3".repeat(40)},
             "values": values, "evidence": {"level": "published", "attestations": [], "override": null},
-            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "ignoredAttestations": [], "excludedDeployments": {}, "superseded": [],
             "artifactsVerified": true,
             "requested": {"by": "a", "identity": "local", "at": "2026-09-25T16:41:00Z"}
         }))

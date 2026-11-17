@@ -257,7 +257,7 @@ fn attestation(name: &str, key: &str, result: AttestationResult, recorded: &str,
 const FRESH: &str = "2026-09-25T11:30:00Z";
 const OLD: &str = "2026-09-25T08:00:00Z";
 
-/// Argo CD's reading when every Application runs publication `p`.
+/// The driver's reading when every deployment runs publication `p`.
 fn running(publication: &str) -> Value {
     json!({"deployments": [
         {"id": "web/web", "state": "accepted", "health": "Healthy", "publication": publication},
@@ -733,7 +733,7 @@ fn runs_other(deployment: &str, publication: &str) -> DeploymentVerdict {
 
 /// D8: a publication's attestations say what runs now, so only the current
 /// receipt's count. State 1 passed; state 2's newest attestation fails, as
-/// its Applications still run state 1's publication. The promotion is
+/// its deployments still run state 1's publication. The promotion is
 /// refused with the driver's reason and does not fall back to state 1,
 /// whose attestations no longer describe what runs, and the fix names
 /// `--state-revision`. Explicitly chosen, state 1 is judged on the
@@ -808,7 +808,7 @@ fn test_environment_attestations_still_take_the_newest_passing_state() {
 }
 
 /// Two values of one publication, each consumed by its Release's
-/// Application (D7).
+/// deployment (D7).
 fn per_release() -> (PromotionPath, BTreeMap<String, String>) {
     let path = path(json!({
         "evidence": "attested",
@@ -825,7 +825,7 @@ fn per_release() -> (PromotionPath, BTreeMap<String, String>) {
     (path, consumers)
 }
 
-/// D6: a value-only path judges each value for the Application that consumes
+/// D6: a value-only path judges each value for the deployment that consumes
 /// it, from the current receipt's attestations. web runs state 2's
 /// publication and api still runs state 1's, so the aggregate fails, yet
 /// each value comes from the state its consumer runs, and only a consumer's
@@ -886,7 +886,7 @@ fn test_value_only_values_follow_what_their_consumer_runs() {
 }
 
 /// A consumer that is not healthy blocks its value when `healthy` is
-/// required, and a path's `coverage.excludeApplications` accepts it at what
+/// required, and a path's `coverage.<unit>.exclude` accepts it at what
 /// it runs; the record lists the exclusion.
 #[test]
 fn test_an_unhealthy_consumer_blocks_unless_excluded() {
@@ -902,16 +902,16 @@ fn test_an_unhealthy_consumer_blocks_unless_excluded() {
         "{}",
         refusal.finding.message
     );
-    values.path.spec.coverage.exclude_applications = vec!["web".to_owned()];
+    cover(&mut values.path, "kubernetes").exclude = vec!["web".to_owned()];
     let promotion = values.promoted();
-    assert_eq!(promotion.record.excluded_applications, ["web"]);
+    assert_eq!(promotion.record.excluded_deployments, excluded("kubernetes", &["web"]));
     assert_eq!(promotion.record.values["webImage"].value, json!("sha256:one"));
 }
 
-/// Coverage for a path that promotes the source: `applicationGroups` and
-/// `excludeApplications` narrow the Applications whose findings count
-/// toward the publication's attestations, and `requireApplications` adds
-/// Applications that must meet them at whatever publication they run.
+/// Coverage for a path that promotes the source: a unit's `groups` and
+/// `exclude` narrow the deployments whose findings count toward its
+/// running-scoped attestations, and `require` adds deployments that must
+/// meet them at whatever publication they run.
 #[test]
 fn test_coverage_narrows_and_extends_the_source_judgement() {
     let jobs = verdict(
@@ -938,7 +938,7 @@ fn test_coverage_narrows_and_extends_the_source_judgement() {
         .iter()
         .all(|gap| gap.kind == GapKind::Failing && gap.scope == "kubernetes"));
     // A group the path does not cover is left out; the one it covers still counts.
-    source.path.spec.coverage.application_groups = vec!["jobs".to_owned()];
+    cover(&mut source.path, "kubernetes").groups = vec!["jobs".to_owned()];
     let refusal = source.refused();
     assert!(
         refusal.finding.message.contains("worker runs another publication"),
@@ -946,16 +946,16 @@ fn test_coverage_narrows_and_extends_the_source_judgement() {
         refusal.finding.message
     );
 
-    source.path.spec.coverage.application_groups = vec!["web".to_owned()];
+    cover(&mut source.path, "kubernetes").groups = vec!["web".to_owned()];
     assert_eq!(from_run(&source.promoted().record), run_id(1).to_string());
 
-    source.path.spec.coverage.application_groups = Vec::new();
-    source.path.spec.coverage.exclude_applications = vec!["worker".to_owned()];
+    cover(&mut source.path, "kubernetes").groups = Vec::new();
+    cover(&mut source.path, "kubernetes").exclude = vec!["worker".to_owned()];
     assert_eq!(from_run(&source.promoted().record), run_id(1).to_string());
 
     // worker runs another publication but meets `accepted` and `healthy`
-    // there, which is all `requireApplications` asks.
-    source.path.spec.coverage.require_applications = vec!["worker".to_owned()];
+    // there, which is all `require` asks.
+    cover(&mut source.path, "kubernetes").require = vec!["worker".to_owned()];
     source.promoted();
     let broken = verdict(
         "worker",
@@ -970,16 +970,69 @@ fn test_coverage_narrows_and_extends_the_source_judgement() {
         .build();
     let refusal = source.refused();
     assert!(
-        refusal.finding.message.contains("requireApplications"),
+        refusal.finding.message.contains("coverage.kubernetes.require"),
         "{}",
         refusal.finding.message
     );
-    source.path.spec.coverage.require_applications = vec!["nowhere".to_owned()];
+    cover(&mut source.path, "kubernetes").require = vec!["nowhere".to_owned()];
     let refusal = source.refused();
     assert!(
         refusal.finding.message.contains("nowhere"),
         "{}",
         refusal.finding.message
+    );
+}
+
+/// A record's `excludedDeployments` that excludes `names` of `unit` only.
+fn excluded(unit: &str, names: &[&str]) -> BTreeMap<String, Vec<String>> {
+    BTreeMap::from([(unit.to_owned(), names.iter().map(|name| (*name).to_owned()).collect())])
+}
+
+/// The path's coverage entry of `unit`, created empty when absent.
+fn cover<'p>(path: &'p mut PromotionPath, unit: &str) -> &'p mut nyl_core::resources::promotion::UnitCoverage {
+    path.spec.coverage.entry(unit.to_owned()).or_default()
+}
+
+/// Coverage is per unit: an entry counts only for the unit it is keyed by.
+/// Excluding `worker` under another unit leaves `kubernetes`'s aggregate
+/// whole, and requiring `web` under another unit is a coverage gap even
+/// though `kubernetes` lists a deployment of that name. Catches coverage
+/// that matches a name across every unit's deployments.
+#[test]
+fn test_coverage_counts_only_for_the_unit_it_names() {
+    let broken = verdict(
+        "worker",
+        "jobs",
+        DeploymentRuns::Unproven,
+        false,
+        Some("worker is missing"),
+    );
+    let history = vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH).observed(
+        Fail,
+        "p1",
+        &[runs_receipt("web"), broken],
+    )];
+    let mut source = case(attested(), history);
+    cover(&mut source.path, "web-image").exclude = vec!["worker".to_owned()];
+    assert!(source
+        .refused()
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == GapKind::Failing && gap.scope == "kubernetes"));
+    cover(&mut source.path, "kubernetes").exclude = vec!["worker".to_owned()];
+    let promotion = source.promoted();
+    // The record keeps each unit's exclusions under its own unit.
+    let mut both = excluded("kubernetes", &["worker"]);
+    both.extend(excluded("web-image", &["worker"]));
+    assert_eq!(promotion.record.excluded_deployments, both);
+    cover(&mut source.path, "web-image").require = vec!["web".to_owned()];
+    let refusal = source.refused();
+    assert!(
+        refusal.gaps.iter().any(|gap| gap.kind == GapKind::Coverage
+            && gap.scope == "web-image"
+            && gap.message.contains("coverage.web-image.require names web")),
+        "{:?}",
+        refusal.gaps
     );
 }
 
@@ -1233,17 +1286,17 @@ fn test_value_only_refusal_names_the_value_and_explicit_state_takes_all() {
 }
 
 /// The record states what the path and request say: the path, sequence,
-/// excluded Applications, who asked, and that artifacts are not yet verified.
+/// excluded deployments, who asked, and that artifacts are not yet verified.
 #[test]
 fn test_record_carries_the_request_and_the_path() {
-    let path = path(json!({"coverage": {"excludeApplications": ["batch"]}}));
+    let path = path(json!({"coverage": {"kubernetes": {"exclude": ["batch"]}}}));
     let mut case = case(path, vec![state(1, 'a', "sha256:one")]);
     case.sequence = 7;
     let promotion = case.promoted();
     let record = &promotion.record;
     assert_eq!(record.path.as_str(), "dev-to-prod");
     assert_eq!(record.sequence, 7);
-    assert_eq!(record.excluded_applications, ["batch"]);
+    assert_eq!(record.excluded_deployments, excluded("kubernetes", &["batch"]));
     assert_eq!(record.requested.by, "alice");
     assert_eq!(record.requested.reason.as_deref(), Some("Release"));
     assert!(record.superseded.is_empty());
@@ -1361,7 +1414,7 @@ fn test_evidence_published_without_a_selection_takes_the_newest_published_state(
     assert!(promotion.warnings.is_empty());
 }
 
-/// Until the per-Application judgement exists, a value-only path is blocked
+/// Until the per-deployment judgement exists, a value-only path is blocked
 /// by a failing attestation of any unit of the state, not only its consumers.
 #[test]
 fn test_value_only_path_is_blocked_by_a_failing_attestation_of_another_unit() {
@@ -1541,13 +1594,13 @@ fn without_unit(mut state: RecordedState, unit: &str) -> RecordedState {
     state
 }
 
-/// B1: `coverage.applicationGroups` never fails open. A group no
-/// Application of the attestation belongs to (a typo) is a coverage gap
-/// naming the field, and so is a coverage that leaves no Application to
+/// B1: a unit's `coverage.<unit>.groups` never fails open. A group no
+/// deployment of the attestation belongs to (a typo) is a coverage gap
+/// naming the field, and so is a coverage that leaves no deployment to
 /// judge while the attestation fails. Catches a misspelt group turning a
 /// failing `accepted` into a pass.
 #[test]
-fn test_coverage_application_groups_never_fail_open() {
+fn test_coverage_groups_never_fail_open() {
     let broken = verdict("api", "web", DeploymentRuns::Unproven, false, Some("api is unmatched"));
     let history = vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH).observed(
         Fail,
@@ -1555,43 +1608,43 @@ fn test_coverage_application_groups_never_fail_open() {
         &[runs_receipt("web"), broken],
     )];
     let mut source = case(attested(), history);
-    source.path.spec.coverage.application_groups = vec!["wbe".to_owned()];
+    cover(&mut source.path, "kubernetes").groups = vec!["wbe".to_owned()];
     let refusal = source.refused();
     assert!(refusal
         .gaps
         .iter()
-        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("coverage.applicationGroups names wbe")));
+        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("coverage.kubernetes.groups names wbe")));
     assert!(refusal.finding.fix.contains("coverage"), "{}", refusal.finding.fix);
-    // A real group whose every Application is excluded leaves nothing to judge.
-    source.path.spec.coverage.application_groups = vec!["web".to_owned()];
-    source.path.spec.coverage.exclude_applications = vec!["web".to_owned(), "api".to_owned()];
+    // A real group whose every deployment is excluded leaves nothing to judge.
+    cover(&mut source.path, "kubernetes").groups = vec!["web".to_owned()];
+    cover(&mut source.path, "kubernetes").exclude = vec!["web".to_owned(), "api".to_owned()];
     let refusal = source.refused();
     assert!(refusal
         .gaps
         .iter()
-        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("leaves no Application")));
-    // Excluding only the failing Application passes.
-    source.path.spec.coverage.exclude_applications = vec!["api".to_owned()];
+        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("leaves no deployment")));
+    // Excluding only the failing deployment passes.
+    cover(&mut source.path, "kubernetes").exclude = vec!["api".to_owned()];
     source.promoted();
 }
 
-/// S1: a `requireApplications` name no running-scoped attestation lists is
+/// S1: a `require` name no running-scoped attestation of its unit lists is
 /// a coverage gap whatever the path requires: with no reader at all, and
 /// with a path that requires only the environment's `qa`. A listed name
 /// passes there, because nothing of it is required.
 #[test]
-fn test_require_applications_needs_a_listed_application() {
+fn test_required_deployments_need_a_listed_deployment() {
     let qa_only = path(json!({"evidence": "attested", "attestations": {"units": {"kubernetes": [], "web-image": []}}}));
     let mut unobserved = case(
         qa_only.clone(),
         vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH)],
     );
-    unobserved.path.spec.coverage.require_applications = vec!["web".to_owned()];
+    cover(&mut unobserved.path, "kubernetes").require = vec!["web".to_owned()];
     let refusal = unobserved.refused();
     assert!(refusal
         .gaps
         .iter()
-        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("coverage.requireApplications names web")));
+        .any(|gap| gap.kind == GapKind::Coverage && gap.message.contains("coverage.kubernetes.require names web")));
     let mut observed = case(
         qa_only,
         vec![state(1, 'a', "sha256:one").env_attestation("qa", Pass, FRESH).observed(
@@ -1600,17 +1653,17 @@ fn test_require_applications_needs_a_listed_application() {
             &[runs_receipt("web")],
         )],
     );
-    observed.path.spec.coverage.require_applications = vec!["web".to_owned()];
+    cover(&mut observed.path, "kubernetes").require = vec!["web".to_owned()];
     observed.promoted();
-    observed.path.spec.coverage.require_applications = vec!["gateway".to_owned()];
+    cover(&mut observed.path, "kubernetes").require = vec!["gateway".to_owned()];
     assert!(observed.refused().gaps.iter().any(|gap| gap.kind == GapKind::Coverage));
 }
 
-/// S5: an explicitly chosen state on a value-only path honours
-/// `excludeApplications`: the excluded, Degraded Application leaves the
+/// S5: an explicitly chosen state on a value-only path honours its unit's
+/// `exclude`: the excluded, Degraded deployment leaves the
 /// judgement of the publication's attestations.
 #[test]
-fn test_an_explicit_value_only_state_honours_excluded_applications() {
+fn test_an_explicit_value_only_state_honours_excluded_deployments() {
     let (path, consumers) = per_release();
     let degraded = verdict("web", "web", DeploymentRuns::Receipt, false, Some("web is Degraded"));
     let history = vec![state(1, 'a', "sha256:one").observed(Fail, "p1", &[degraded, runs_receipt("api")])];
@@ -1623,7 +1676,7 @@ fn test_an_explicit_value_only_state_honours_excluded_applications() {
         .gaps
         .iter()
         .any(|gap| gap.kind == GapKind::Failing && gap.scope == "kubernetes"));
-    values.path.spec.coverage.exclude_applications = vec!["web".to_owned()];
+    cover(&mut values.path, "kubernetes").exclude = vec!["web".to_owned()];
     assert_eq!(from_run(&values.promoted().record), run_id(1).to_string());
 }
 
@@ -1631,7 +1684,7 @@ fn test_an_explicit_value_only_state_honours_excluded_applications() {
 /// newest run changed the publication but did not finish it, so the
 /// publication still has state 1's receipt, and its attestations (recorded
 /// for that receipt) say what runs: both values come from state 1, on a
-/// value-only path and judged per Application.
+/// value-only path and judged per deployment.
 #[test]
 fn test_a_failed_newest_run_keeps_the_observed_receipt_current() {
     let (path, consumers) = per_release();
@@ -1679,7 +1732,7 @@ fn path_without_values() -> PromotionPath {
 /// S3/U3: values follow what their consumer runs at every evidence level:
 /// at `published` with an observing publication, and under `--evidence
 /// published`, apiImage still comes from the state whose publication its
-/// Application runs. The gap on the newer state says so.
+/// deployment runs. The gap on the newer state says so.
 #[test]
 fn test_values_follow_their_consumer_at_published_too() {
     let (mut path, consumers) = per_release();

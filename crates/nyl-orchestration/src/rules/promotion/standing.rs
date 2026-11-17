@@ -42,19 +42,23 @@
 //!   attestations are judged for that deployment alone, from the driver's
 //!   [`DeploymentVerdict`]s of the current receipt's attestation: the state
 //!   whose receipt produced what the deployment runs qualifies when the
-//!   deployment meets the attestation there. A path's `coverage` narrows the
-//!   deployments a whole-source judgement counts (`applicationGroups`,
-//!   `excludeApplications`) and adds deployments that must meet the required
-//!   attestations at whatever they run (`requireApplications`). Without
+//!   deployment meets the attestation there. A path's `coverage` is per
+//!   unit: for each unit it names, it narrows the deployments a
+//!   whole-source judgement counts (`groups`, `exclude`) and adds
+//!   deployments that must meet the required attestations at whatever they
+//!   run (`require`), each among that unit's own deployments. Without
 //!   verdicts the attestation is judged as a whole. Which state a consumer
 //!   runs is the value-only selection rule, not an evidence requirement, so
 //!   it applies at every level. A deployment's publication matches a
 //!   state whose receipt published either the matched commit or the
 //!   revision it runs.
-//! - **Coverage never fails open.** A named group no Application of the
-//!   attestation belongs to, a coverage that leaves no Application to judge
-//!   while the attestation fails, and a `requireApplications` name no
-//!   running-scoped attestation lists are each a [`GapKind::Coverage`] gap.
+//! - **Coverage never fails open.** A named group no deployment of the
+//!   attestation belongs to, a coverage that leaves no deployment to judge
+//!   while the attestation fails, and a `require` name no running-scoped
+//!   attestation of its unit lists are each a [`GapKind::Coverage`] gap.
+//!   `nyl validate` and `nyl plan` check the names earlier, against what the
+//!   unit's driver lists ([`super::super::promotion_paths`]); these gaps stay
+//!   for what changed since.
 //!
 //! The core never reads the driver's `details`: the shell asks the driver
 //! for the typed verdicts ([`super::running`]).
@@ -69,7 +73,7 @@ use nyl_core::orchestration::ids::{CommitId, UnitName};
 use nyl_core::orchestration::promotion::EvidenceLevel;
 use nyl_core::orchestration::state::{Attestation, AttestationResult, DesiredUnit, Receipt};
 use nyl_core::orchestration::time::Timestamp;
-use nyl_core::resources::promotion::{PathEvidence, PromotionPathSpec};
+use nyl_core::resources::promotion::{PathEvidence, PromotionPathSpec, UnitCoverage};
 
 use super::history::RecordedState;
 use super::IgnoreRequest;
@@ -96,9 +100,9 @@ pub enum GapKind {
     /// has a newer receipt, whose attestations say what runs (D8), or the
     /// deployment that consumes a value runs another state's result.
     NotRunning,
-    /// The path's `coverage` cannot be judged as written: it names an
-    /// Application or ApplicationGroup no running-scoped attestation of the
-    /// current receipts lists, or leaves no Application to judge while the
+    /// The path's `coverage` cannot be judged as written: it names a
+    /// deployment or group no running-scoped attestation of the unit's
+    /// current receipt lists, or leaves no deployment to judge while the
     /// attestation fails.
     Coverage,
     /// The target runs the state's source commit, and its definitions there
@@ -316,24 +320,28 @@ impl Context<'_> {
         })
     }
 
-    fn coverage_narrows(&self) -> bool {
-        !self.spec.coverage.application_groups.is_empty() || !self.spec.coverage.exclude_applications.is_empty()
-    }
-
-    fn excluded(&self, deployment: &str) -> bool {
+    /// Whether the path's coverage of `unit` narrows which of its
+    /// deployments count.
+    fn coverage_narrows(&self, unit: &UnitName) -> bool {
         self.spec
-            .coverage
-            .exclude_applications
-            .iter()
-            .any(|name| name == deployment)
+            .unit_coverage(unit.as_str())
+            .is_some_and(UnitCoverage::narrows)
     }
 
-    /// Whether a whole-source judgement counts `verdict`: in a named group,
-    /// when the path names groups, and not excluded.
-    fn counts(&self, verdict: &DeploymentVerdict) -> bool {
-        let groups = &self.spec.coverage.application_groups;
-        (groups.is_empty() || verdict.group.as_ref().is_some_and(|group| groups.contains(group)))
-            && !self.excluded(&verdict.name)
+    /// Whether the path's coverage of `unit` excludes `deployment`.
+    fn excluded(&self, unit: &UnitName, deployment: &str) -> bool {
+        self.spec
+            .unit_coverage(unit.as_str())
+            .is_some_and(|coverage| coverage.excludes(deployment))
+    }
+
+    /// Whether a whole-source judgement counts `verdict` of `unit`: in a
+    /// group the unit's coverage names, when it names groups, and not
+    /// excluded.
+    fn counts(&self, unit: &UnitName, verdict: &DeploymentVerdict) -> bool {
+        self.spec
+            .unit_coverage(unit.as_str())
+            .is_none_or(|coverage| coverage.counts(&verdict.name, verdict.group.as_deref()))
     }
 }
 
@@ -447,7 +455,7 @@ fn used(scope: &str, name: &str, attestation: &Attestation) -> Used {
 enum Running<'a> {
     /// As a whole, for the current receipt only (D8).
     Whole,
-    /// Per deployment, counting those the path's `coverage` covers.
+    /// Per deployment, counting those the path's coverage of the unit covers.
     Coverage,
     /// For the one deployment that consumes a value.
     Consumer(&'a str),
@@ -499,7 +507,7 @@ pub(super) fn judge(
     // A failing attestation of any unit blocks the state.
     for unit in desired.keys() {
         let running = match subject {
-            Subject::Source | Subject::Units(_) if ctx.coverage_narrows() => Running::Coverage,
+            Subject::Source | Subject::Units(_) if ctx.coverage_narrows(unit) => Running::Coverage,
             Subject::Source | Subject::Units(_) => Running::Whole,
             Subject::Value {
                 unit: consumer,
@@ -510,7 +518,7 @@ pub(super) fn judge(
         judge_unit(ctx, state, level, (unit, covered.contains(unit)), running, &mut verdict);
     }
     judge_environment(ctx, state, level, &mut verdict);
-    require_applications(ctx, state, level, &mut verdict);
+    require_deployments(ctx, state, level, &mut verdict);
     verdict
         .gaps
         .sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
@@ -627,7 +635,7 @@ fn judge_unit(
 }
 
 /// A running-scoped attestation judged over the deployments the path's
-/// `coverage` counts: each must meet it at this receipt.
+/// coverage of `unit` counts: each must meet it at this receipt.
 fn judge_coverage(
     ctx: &Context<'_>,
     (unit, name): (&UnitName, &str),
@@ -640,9 +648,14 @@ fn judge_coverage(
         verdict.classify(ctx, unit.as_str(), name, None, required);
         return;
     };
-    // Every group the path names must be one of these Applications', so a
+    // Every group the path names must be one of these deployments', so a
     // misspelt group never leaves the attestation unjudged.
-    for group in &ctx.spec.coverage.application_groups {
+    let groups = ctx
+        .spec
+        .unit_coverage(unit.as_str())
+        .map(|coverage| coverage.groups.as_slice())
+        .unwrap_or_default();
+    for group in groups {
         if !verdicts
             .iter()
             .any(|deployment| deployment.group.as_ref() == Some(group))
@@ -652,19 +665,22 @@ fn judge_coverage(
                 Some(name),
                 GapKind::Coverage,
                 format!(
-                    "the path's coverage.applicationGroups names {group}, but no Application that attestation {unit}/{name} lists belongs to it"
+                    "the path's coverage.{unit}.groups names {group}, but no deployment that attestation {unit}/{name} lists belongs to it"
                 ),
             );
         }
     }
-    let counted: Vec<&DeploymentVerdict> = verdicts.iter().filter(|deployment| ctx.counts(deployment)).collect();
+    let counted: Vec<&DeploymentVerdict> = verdicts
+        .iter()
+        .filter(|deployment| ctx.counts(unit, deployment))
+        .collect();
     if counted.is_empty() && attestation.result == AttestationResult::Fail {
         verdict.gap(
             unit.as_str(),
             Some(name),
             GapKind::Coverage,
             format!(
-                "the path's coverage (applicationGroups, excludeApplications) leaves no Application of attestation {unit}/{name} to judge, and it fails{}",
+                "the path's coverage.{unit} (groups, exclude) leaves no deployment of attestation {unit}/{name} to judge, and it fails{}",
                 attestation.reason.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
             ),
         );
@@ -696,7 +712,7 @@ fn judge_coverage(
     }
     let failing = Attestation {
         result: AttestationResult::Fail,
-        reason: Some(format!("for the Applications the path covers: {}", short.join("; "))),
+        reason: Some(format!("for the deployments the path covers: {}", short.join("; "))),
         ..attestation.clone()
     };
     verdict.classify(ctx, unit.as_str(), name, Some(&failing), required);
@@ -752,7 +768,7 @@ fn judge_consumer(
         }
         return;
     };
-    let excused = ctx.excluded(deployment) && found.runs != DeploymentRuns::Unproven;
+    let excused = ctx.excluded(unit, deployment) && found.runs != DeploymentRuns::Unproven;
     if !found.meets && !excused {
         let reason = found
             .reason
@@ -857,76 +873,93 @@ fn consumer_runs_state(
     true
 }
 
-/// `coverage.requireApplications`: each named deployment must appear in a
-/// running-scoped attestation of the current receipts, and meet every
-/// required one at whatever it runs. A name no attestation lists, such as
-/// a misspelt one or one of a publication that does not observe, is a
-/// [`GapKind::Coverage`] gap, whatever the path requires.
-fn require_applications(ctx: &Context<'_>, state: &RecordedState, level: EvidenceLevel, verdict: &mut Judgement) {
-    let names = &ctx.spec.coverage.require_applications;
-    if names.is_empty() {
-        return;
-    }
+/// `coverage.<unit>.require`: each named deployment must appear in a
+/// running-scoped attestation of that unit's current receipt, and meet
+/// every required one at whatever it runs. A name no attestation of the unit
+/// lists, such as a misspelt one, one of another unit, or one of a unit
+/// that does not observe, is a [`GapKind::Coverage`] gap, whatever the path
+/// requires.
+fn require_deployments(ctx: &Context<'_>, state: &RecordedState, level: EvidenceLevel, verdict: &mut Judgement) {
     let source = ctx.running_source(state);
-    for application in names {
-        let mut listed = false;
-        for (unit, running) in &source.running {
-            let Some(desired) = source.snapshot.desired.get(unit) else {
-                continue;
-            };
-            let required = unit_required(ctx, desired, unit, level);
-            for name in &running.names {
-                let Some(found) = running
-                    .verdicts
-                    .get(name)
-                    .and_then(|verdicts| verdicts.iter().find(|verdict| &verdict.name == application))
-                else {
-                    continue;
-                };
-                let Some(attestation) = ctx.current_attestation(state, unit, name) else {
-                    continue;
-                };
-                listed = true;
-                if !required.contains(name) {
-                    continue;
-                }
-                let duplicate = verdict.used.iter().any(|known| {
-                    known.scope == unit.as_str()
-                        && known.name == *name
-                        && known.attestation.execution_key == attestation.execution_key
-                });
-                if found.meets {
-                    if !duplicate {
-                        verdict.used.push(used(unit.as_str(), name, attestation));
-                    }
-                } else if let Some(ignore) = ctx.ignore(unit.as_str(), name) {
-                    if !verdict.ignored.contains(ignore) {
-                        verdict.ignored.push(ignore.clone());
-                    }
-                } else {
-                    verdict.gap(
-                        unit.as_str(),
-                        Some(name),
-                        GapKind::Failing,
-                        format!(
-                            "attestation {unit}/{name} fails for {application}, which the path's coverage.requireApplications requires: {}",
-                            found.reason.as_deref().unwrap_or("it falls short")
-                        ),
-                    );
-                }
+    for (unit, coverage) in &ctx.spec.coverage {
+        if coverage.require.is_empty() {
+            continue;
+        }
+        let found_unit = source.running.iter().find(|(name, _)| name.as_str() == unit);
+        let desired = found_unit.and_then(|(name, _)| source.snapshot.desired.get(name).map(|desired| (name, desired)));
+        for deployment in &coverage.require {
+            let mut listed = false;
+            if let (Some((_, running)), Some((name, desired))) = (found_unit, desired) {
+                listed = require_one(ctx, state, (name, desired, running), deployment, level, verdict);
+            }
+            if !listed {
+                verdict.gap(
+                    unit,
+                    None,
+                    GapKind::Coverage,
+                    format!(
+                        "the path's coverage.{unit}.require names {deployment}, which no running-scoped attestation of unit {unit}'s current receipt lists"
+                    ),
+                );
             }
         }
-        if !listed {
+    }
+}
+
+/// One `require` name of `unit`: whether an attestation of its current
+/// receipt lists `deployment`, and, for each required one that does, the
+/// deployment's verdict.
+fn require_one(
+    ctx: &Context<'_>,
+    state: &RecordedState,
+    (unit, desired, running): (&UnitName, &DesiredUnit, &super::running::UnitRunning),
+    deployment: &str,
+    level: EvidenceLevel,
+    verdict: &mut Judgement,
+) -> bool {
+    let required = unit_required(ctx, desired, unit, level);
+    let mut listed = false;
+    for name in &running.names {
+        let Some(found) = running
+            .verdicts
+            .get(name)
+            .and_then(|verdicts| verdicts.iter().find(|verdict| verdict.name == deployment))
+        else {
+            continue;
+        };
+        let Some(attestation) = ctx.current_attestation(state, unit, name) else {
+            continue;
+        };
+        listed = true;
+        if !required.contains(name) {
+            continue;
+        }
+        let duplicate = verdict.used.iter().any(|known| {
+            known.scope == unit.as_str()
+                && known.name == *name
+                && known.attestation.execution_key == attestation.execution_key
+        });
+        if found.meets {
+            if !duplicate {
+                verdict.used.push(used(unit.as_str(), name, attestation));
+            }
+        } else if let Some(ignore) = ctx.ignore(unit.as_str(), name) {
+            if !verdict.ignored.contains(ignore) {
+                verdict.ignored.push(ignore.clone());
+            }
+        } else {
             verdict.gap(
-                ENVIRONMENT_SCOPE,
-                None,
-                GapKind::Coverage,
+                unit.as_str(),
+                Some(name),
+                GapKind::Failing,
                 format!(
-                    "the path's coverage.requireApplications names {application}, which no running-scoped attestation of the source's current receipts lists"
+                    "attestation {unit}/{name} fails for {deployment}, which the path's coverage.{unit}.require requires: {}",
+                    found.reason.as_deref().unwrap_or("it falls short")
                 ),
             );
         }
     }
+    listed
 }
 
 fn judge_environment(ctx: &Context<'_>, state: &RecordedState, level: EvidenceLevel, verdict: &mut Judgement) {

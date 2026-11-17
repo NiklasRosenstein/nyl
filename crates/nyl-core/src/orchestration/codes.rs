@@ -165,6 +165,12 @@ codes! {
     PromoteValueType => "NYL-PROMOTE-VALUE-TYPE",
     /// A `fromPromotion` binding names a path or a value no PromotionPath declares.
     PromoteBindingUnknown => "NYL-PROMOTE-BINDING-UNKNOWN",
+    /// A PromotionPath's `coverage` names a unit the source environment does not select, a unit whose kind runs no deployments, or a group or deployment the unit's driver does not list for it.
+    PromoteCoverageUnknown => "NYL-PROMOTE-COVERAGE-UNKNOWN",
+    /// A PromotionPath's `coverage` cannot take effect as written: a path that promotes only values sets `coverage.<unit>.groups`, which only a path that promotes the target's source uses, or the unit's kind attests nothing per deployment for its spec (no running-scoped attestations), so its `groups` and `exclude` select nothing and a `require` name would always refuse the promotion.
+    PromoteCoverageIneffective => "NYL-PROMOTE-COVERAGE-INEFFECTIVE",
+    /// The deployments of a unit a PromotionPath's `coverage` names could not be listed, such as when what the unit's declaration renders from cannot be read, so its names are not checked. An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`, which judge the source by what they need. A promotion still refuses a name no attestation lists.
+    PromoteCoverageUnchecked => "NYL-PROMOTE-COVERAGE-UNCHECKED",
     /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing, or a publication's running-scoped attestation that no longer describes what runs (only its current receipt's counts; `--state-revision` judges an older state on its own). Nothing was written. Exit 2.
     PromoteNoEvidence => "NYL-PROMOTE-NO-EVIDENCE",
     /// `--evidence published` promoted a state whose evidence is below the path's level; the record says so. A warning.

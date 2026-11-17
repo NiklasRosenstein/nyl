@@ -9,15 +9,14 @@ export const orchestrationRoadmap = {
   page: 'orchestration/roadmap/',
   itemNoun: 'acceptance items',
   nextStep: {
-    intro: 'M5 is complete: one `reconcile` builds an image, applies OpenTofu, and publishes Kubernetes manifests that consume the image digest and the infrastructure output; the same Releases render with static inputs in a target that does not use orchestration; the `KubernetesPublication` unit declares its target inline, tears down in two phases behind an owner fence, builds and diffs from `nyl build`, observes Argo CD to attest `accepted` and `healthy`, and reads observed values; EnvironmentTemplates create preview environments that expire, share one catalog, and are removed with their pull request; and all three reference scenarios pass in both tiers with the real publication driver. The Orchestration guide ends with an end-to-end example that runs locally and in GitHub Actions. Continue with M6: promotion paths.',
+    intro: 'M6 is complete: `nyl promote` records what one environment proved in another, as a PromotionRecord in state or with `record: source` as a fast-forward commit in the Environment; `nyl get states`, `nyl get promotion-candidates`, and `nyl get promotions` show what would be promoted and why, and `status` shows the lineage; several paths can feed one environment, and a promotion that would drop a hotfix is refused until it is merged or superseded; value-only paths take each value from the state its consumer runs; and a publication\'s attestations count only for its current receipt. Continue with M7: continuous operation and the scope decision.',
     steps: [
-      { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks; validation rejects `changeGate: pullRequest`, which M11 adds.', done: true },
-      { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: true },
-      { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: true },
-      { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
-      { text: 'Promote values only, each from the state its consuming Application runs, and gate promotion on the current receipt\'s publication attestations with `coverage`.', done: true },
+      { text: 'Evaluate a scheduled or long-running runner and its observation cadence using M3–M6 evidence.', done: false },
+      { text: 'Decide which command-unit uses warrant typed drivers, and whether to add the plugin driver protocol.', done: false },
+      { text: 'Support minimum healthy durations and flapping guards over recorded observations.', done: false },
+      { text: 'Evaluate application-level checks as promotion evidence.', done: false },
     ],
-    outro: 'Every M6 item is delivered; the closing change of the [M6 plan](https://github.com/NiklasRosenstein/nyl/blob/develop/design/m6-plan.md) confirms the exit criterion and marks M6 done. Promotion from and into non-orchestrated targets and the pull-request change gate follow in M11.',
+    outro: 'M7 ends by recording the selected direction and constraints in ROADMAP.md.',
   },
   stages: [
     {
@@ -123,7 +122,8 @@ export const orchestrationRoadmap = {
       title: 'Promotion paths',
       summary: 'Explicit promotion of proven source commits and values between environments.',
       needs: ['M5'],
-      exitCriterion: 'Prod runs exactly the source commit and image digest dev proved, with auditable lineage; stale, missing, or mixed source evidence blocks promotion; a hotfix reaches prod through its own path, and a dev promotion without the fix is refused until the fix is merged or superseded; a value-only path promotes each value from what its consuming Application runs.',
+      done: true,
+      exitCriterion: 'Prod runs exactly the source commit and image digest dev proved, with auditable lineage; stale, missing, or mixed source evidence blocks promotion; a hotfix reaches prod through its own path, and a dev promotion without the fix is refused until the fix is merged or superseded; a value-only path promotes each value from what its consumer runs. Met by the [reference scenarios](https://github.com/NiklasRosenstein/nyl/blob/develop/design/reference-scenarios.md) `reference/promotion` and `reference/hotfix` and the walkthroughs `stale-promotion-evidence`, `promotion-record-source`, and `value-only-promotion`, which all run with no scenario pending.',
       items: [
         { text: 'Implement PromotionPath, PromotionRecord, and `nyl promote` with evidence checks, recording each promotion directly; validation rejects `changeGate: pullRequest` until M11.', done: true },
         { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with `record: state` and `record: source`, the whole-source evidence rule, recorded evidence for older states, artifact verification, and rollback through `--revision`.', done: true },
@@ -131,7 +131,7 @@ export const orchestrationRoadmap = {
         { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
         { text: 'Promote values only, such as an image digest and a Terraform source commit, across differently named units and inputs, each from the state its consumer runs.', done: true },
         { text: 'Implement attestations: driver-declared names, `spec.attestations` on units and environments, external `nyl attest --name … --result …` for a unit\'s current receipt and an environment\'s current state (environment-wide ones in `observed/attestations.yaml`), the `published | attested` evidence levels with a path\'s per-unit `attestations`, blocking on failures with `--ignore-attestation`, and `maxAttestationAge`.', done: true },
-        { text: 'Gate promotion from an environment on fresh recorded attestations, sourcing each value from the publication its Application runs.', done: true },
+        { text: 'Gate promotion from an environment on fresh recorded attestations, sourcing each value from the publication its consuming deployment runs, with per-unit `coverage` whose names `nyl validate` and `nyl plan` check against what each unit runs.', done: true },
         { text: 'Show promotion lineage in `status`.', done: true },
       ],
     },

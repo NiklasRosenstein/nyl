@@ -984,7 +984,7 @@ spec:
                 "executionKey": format!("sha256:{}", "0123456789abcdef".repeat(4))
             }},
             "evidence": {"level": "published", "attestations": [], "override": null},
-            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "ignoredAttestations": [], "excludedDeployments": {}, "superseded": [],
             "artifactsVerified": true,
             "requested": {"by": "Nyl Test <test@example.invalid>", "identity": "local", "at": "2026-09-25T16:41:00Z", "reason": "Release: 1 # two"}
         }))

@@ -4,7 +4,10 @@
 # recorded `accepted` and `healthy` attestations show it, so Applications
 # synced to different publications do not block it; a path that promotes
 # dev's source blocks on the same mixed revisions, and an explicitly chosen
-# older state passes on the attestations recorded for it. The `argocd` steps
+# older state passes on the attestations recorded for it. A path's coverage,
+# keyed by the publication unit, names the deployments its driver lists:
+# `nyl validate` refuses a name the unit does not run, and an excluded
+# deployment no longer blocks the value it consumes. The `argocd` steps
 # script what the fake Argo CD reports for target dev.
 contract: design/promotion.md#kubernetes-publications
 milestone: M6
@@ -91,7 +94,7 @@ steps:
       messages: [other-publication]
       commits: {desired: 0, observed: 1}
 
-  # Values only: each value comes from what its consuming Application runs,
+  # Values only: each value comes from what its consuming deployment runs,
   # so webImage from R2 and apiImage from R1; the record names apiImage's own
   # state.
   - nyl: [promote, dev-to-staging]
@@ -204,3 +207,45 @@ steps:
       codes: [NYL-PROMOTE-NO-EVIDENCE]
       messages: [Degraded]
       commits: {desired: 0, observed: 0}
+
+  # Coverage is per publication unit and names the deployments its driver
+  # lists for it, here the dev target's Argo CD Applications. A name the
+  # unit does not run is refused before anything promotes.
+  - commit: {branch: main, message: "Exclude a misspelt deployment", apply: patches/exclude-typo}
+  - nyl: [validate]
+    exit: 1
+    expect:
+      messages: [NYL-PROMOTE-COVERAGE-UNKNOWN, coverage.kubernetes.exclude]
+
+  # R3 ships while web stays Degraded, which dev-to-staging now knowingly
+  # accepts: the excluded web Application leaves the judgement of its value,
+  # which still comes from the publication web runs, and the record lists
+  # the exclusion.
+  - commit: {branch: main, message: "Release 3, accepting a degraded web", apply: patches/release-3}
+  - nyl: [validate]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: r3
+    exit: 0
+    expect:
+      executed: [web-image, api-image, kubernetes]
+  - argocd: {target: dev, all: {runs: r3}, releases: {web/web: {runs: r3, health: Degraded}}}
+  - nyl: [attest, -e, dev]
+    exit: 3
+    expect:
+      codes: [NYL-ATTESTATION-FAILED]
+  - nyl: [promote, dev-to-staging]
+    exit: 0
+    expect:
+      commits: {desired: 1, observed: 0}
+      promotion:
+        path: dev-to-staging
+        sequence: 4
+        sourceCommit: null
+        from: {environment: dev, run: r3}
+        values:
+          webImage:
+            equals: [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r3)%']
+          apiImage:
+            equals: [get, artifact, api-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r3)%']
+        excludedDeployments: {kubernetes: [web]}

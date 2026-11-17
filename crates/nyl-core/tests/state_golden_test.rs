@@ -353,7 +353,7 @@ fn samples() -> Vec<(&'static str, Value)> {
                 "override": null
             },
             "ignoredAttestations": [{"scope": "kubernetes", "name": "healthy", "reason": "Degraded by a known outage", "by": "alice"}],
-            "excludedApplications": ["batch"],
+            "excludedDeployments": {"kubernetes": ["batch"]},
             "superseded": [{"repository": "https://example.invalid/web.git", "commit": COMMIT.replace("3e7b", "5c2d"), "reason": "replaced by 3e7b9c0", "by": "alice"}],
             "artifactsVerified": true,
             "requested": {"by": "alice", "identity": "verified", "source": "github-environment production", "at": "2026-09-25T16:41:00Z", "reason": "Release 3"}
@@ -377,7 +377,7 @@ fn samples() -> Vec<(&'static str, Value)> {
             "evidence": {"level": "attested", "attestations": [
                 {"scope": "dev", "name": "accepted", "result": "pass", "at": "2026-09-25T16:40:00Z"}
             ], "override": null},
-            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "ignoredAttestations": [], "excludedDeployments": {}, "superseded": [],
             "artifactsVerified": true,
             "requested": {"by": "alice", "identity": "local", "at": "2026-09-25T16:40:00Z", "reason": "Release 3"}
         }),
@@ -406,7 +406,7 @@ fn samples() -> Vec<(&'static str, Value)> {
             },
             "evidence": {"level": "published", "attestations": [], "override": {"reason": "rollback after incident 4711"}},
             "ignoredAttestations": [],
-            "excludedApplications": [],
+            "excludedDeployments": {},
             "superseded": [],
             "artifactsVerified": false,
             "requested": {"by": "ci", "identity": "asserted", "at": "2026-09-26T08:00:00Z"}

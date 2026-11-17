@@ -54,8 +54,8 @@ pub(crate) use observe::{attest_with, observes, record_facts};
 pub(crate) use readiness::evaluate as evaluate_teardown_readiness;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use run::publish;
-pub(crate) use run::{plan, render, resolution_inputs, teardown, unit_owner, unit_target};
-pub(crate) use running::{deployment_verdicts, input_consumer, receipt_publication, running_attestations};
+pub(crate) use run::{plan, render, render_for_validation, resolution_inputs, teardown, unit_owner, unit_target};
+pub(crate) use running::{deployment_verdicts, deployments, input_consumer, receipt_publication, running_attestations};
 pub(crate) use spec::teardown_wait;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use spec::validate_observe;

@@ -1271,3 +1271,55 @@ fn test_the_unit_schema_types_an_inline_target_as_a_deployment_target_spec() {
     );
     assert!(schema["$defs"]["TargetReconciler"].is_object(), "{schema}");
 }
+
+/// The deployments a PromotionPath's `coverage` may name for the unit: each
+/// Application the target generates, by its id, in its Release's
+/// ApplicationGroup, the catalog in none. A spec as the worktree renders it
+/// (its Release inputs still bindings) lists them from a validation render,
+/// and a resolved spec from the facts it recorded, so `nyl validate` checks
+/// the same names `nyl attest` later reports. Catches a validation that
+/// lists other names than the attestations do, or fails on unresolved
+/// bindings.
+#[test]
+fn test_deployments_are_the_targets_expected_deployments() {
+    use nyl_core::orchestration::driver::DeploymentContext;
+
+    let world = World::new();
+    let driver = real();
+    let ctx = DeploymentContext {
+        worktree: &world.work(),
+        project_dir: "/nyl",
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+        cache_dir: None,
+    };
+    let rendered = json!({
+        "target": "dev",
+        "observe": {},
+        "releases": {"web/web": {
+            "image": {"fromUnit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
+            "databaseHost": {"fromUnit": {"unit": "database", "output": "host"}},
+        }},
+    });
+    let listed = driver.deployments(&ctx, &rendered).unwrap().unwrap();
+    let groups: Vec<Option<&str>> = listed.iter().map(|deployment| deployment.group.as_deref()).collect();
+    assert_eq!(groups, [None, Some("web")], "{listed:?}");
+
+    let mut observed = spec();
+    observed["observe"] = json!({});
+    let unit = resolved_unit(&driver, &world, observed);
+    let resolved = unit.resolved_spec.as_ref().unwrap();
+    assert_eq!(driver.deployments(&ctx, resolved).unwrap().unwrap(), listed);
+    let recorded: Vec<&str> = resolved["reconciler"]["expected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|deployment| deployment["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|deployment| deployment.name.as_str())
+            .collect::<Vec<_>>(),
+        recorded
+    );
+}
