@@ -7,6 +7,48 @@ use scenario::format::{PublicationDrivers, StepKind};
 use scenario::world::World;
 use scenario::{PENDING, REACHED};
 
+/// Run `run` over every scenario on a bounded number of threads and return the
+/// failures in scenario order.
+///
+/// Each scenario builds a test world with its own Git repositories and child
+/// processes, and the tier tests run concurrently with each other, so one
+/// thread per scenario exhausts a CI runner's memory. `NYL_SCENARIO_JOBS`
+/// overrides the bound.
+fn run_bounded<'a, T: Sync>(scenarios: &'a [T], run: impl Fn(&'a T) -> Result<(), String> + Sync) -> Vec<String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let jobs = std::env::var("NYL_SCENARIO_JOBS")
+        .ok()
+        .and_then(|jobs| jobs.parse::<usize>().ok())
+        .filter(|jobs| *jobs > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|cores| (cores.get() / 2).max(1))
+                .unwrap_or(2)
+        })
+        .min(scenarios.len().max(1));
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(vec![None; scenarios.len()]);
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(scenario) = scenarios.get(index) else { break };
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(scenario)))
+                    .unwrap_or_else(|_| Err("the scenario panicked".to_owned()));
+                results.lock().unwrap_or_else(|poisoned| poisoned.into_inner())[index] = outcome.err();
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// Every reached scenario that is not pending runs in tier 1 and passes its
 /// checks.
 #[test]
@@ -19,21 +61,7 @@ fn test_reached_scenarios_pass_in_tier_one() {
         .filter(|loaded| loaded.scenario.publication != PublicationDrivers::Real)
         .collect::<Vec<_>>();
     assert!(!runnable.is_empty(), "no scenario runs in tier 1");
-    let failures = std::thread::scope(|scope| {
-        let handles = runnable
-            .iter()
-            .map(|loaded| scope.spawn(|| scenario::runner::run(loaded)))
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .filter_map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|_| Err("the scenario panicked".to_owned()))
-                    .err()
-            })
-            .collect::<Vec<_>>()
-    });
+    let failures = run_bounded(&runnable, |loaded| scenario::runner::run(loaded));
     assert!(failures.is_empty(), "failed scenarios:\n{}", failures.join("\n\n"));
 }
 
@@ -49,21 +77,7 @@ fn test_reached_scenarios_pass_in_tier_two() {
         .filter(|loaded| loaded.scenario.tiers.contains(&2))
         .collect::<Vec<_>>();
     assert!(!runnable.is_empty(), "no scenario runs in tier 2");
-    let failures = std::thread::scope(|scope| {
-        let handles = runnable
-            .iter()
-            .map(|loaded| scope.spawn(|| scenario::runner::run_binary(loaded)))
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .filter_map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|_| Err("the scenario panicked".to_owned()))
-                    .err()
-            })
-            .collect::<Vec<_>>()
-    });
+    let failures = run_bounded(&runnable, |loaded| scenario::runner::run_binary(loaded));
     assert!(
         failures.is_empty(),
         "failed binary scenarios:\n{}",
@@ -956,21 +970,7 @@ fn test_reached_scenarios_pass_in_tier_one_with_the_real_publication_driver() {
         runnable.iter().any(|loaded| loaded.name == "reference/platform"),
         "the reference platform runs against the real driver"
     );
-    let failures = std::thread::scope(|scope| {
-        let handles = runnable
-            .iter()
-            .map(|loaded| scope.spawn(|| scenario::runner::run_real_publication(loaded)))
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .filter_map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|_| Err("the scenario panicked".to_owned()))
-                    .err()
-            })
-            .collect::<Vec<_>>()
-    });
+    let failures = run_bounded(&runnable, |loaded| scenario::runner::run_real_publication(loaded));
     assert!(failures.is_empty(), "failed scenarios:\n{}", failures.join("\n\n"));
 }
 
