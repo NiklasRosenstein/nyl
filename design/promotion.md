@@ -127,7 +127,7 @@ the file, and its `state restore` leaves the file as it is.
 | --- | --- |
 | 0 | The record was written, or (M11) the pull request opened or updated; or the path's record already names the chosen state and values and supplies every value of the target, so nothing was written (`outcome: unchanged`) |
 | 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a form M6 does not support yet (`NYL-PROMOTE-UNSUPPORTED`), a shallow entry clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`) |
-| 2 | Nothing was written because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), the target's lease is held, the push of a `record: source` commit was refused because the branch moved (`NYL-PROMOTE-SOURCE-REJECTED`), or that push failed without a refusal and may have reached the remote, so no marker was written (`NYL-PROMOTE-SOURCE-UNCERTAIN`) |
+| 2 | Nothing was written to the target's state because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), the target's lease is held, the push of a `record: source` commit was refused because the branch moved (`NYL-PROMOTE-SOURCE-REJECTED`), or that push failed without a refusal and may have reached the remote, so no marker was written (`NYL-PROMOTE-SOURCE-UNCERTAIN`) |
 
 Other codes of the promotion rules: `NYL-PROMOTION-MISSING` (exit 2 of a
 `reconcile` or `plan`: an environment's `fromPromotion` source, or a
@@ -148,8 +148,9 @@ commit that last changed the block carries no signature an allowed signer
 made, or its provenance cannot be read);
 `NYL-PROMOTE-SOURCE-UNWRITABLE` (exit 1: `nyl promote` cannot commit or push
 a `record: source` block, such as from a detached HEAD, a branch ahead of its
-upstream, or a push the remote refuses for branch protection; each cause
-has its own fix); `NYL-PROMOTE-SOURCE-REJECTED` (exit 2: the remote refused
+upstream, a push the remote refuses for branch protection, or a push that
+never started because a configured credential cannot be used or `git`
+cannot run, whose commit is undone; each cause has its own fix); `NYL-PROMOTE-SOURCE-REJECTED` (exit 2: the remote refused
 the fast-forward push because the branch moved, and the commit is undone;
 the fix is to update the checkout and promote again);
 `NYL-PROMOTE-SOURCE-UNCERTAIN` (exit 2: the push of a `record: source`

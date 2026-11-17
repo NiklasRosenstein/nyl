@@ -339,8 +339,9 @@ spec:
   (`NYL-PROMOTE-SOURCE-UNWRITABLE` otherwise). Write
   `fromPromotion` in the Environment itself, in block style, one key per
   line; the rest of the file stays as written. A detached HEAD, a branch
-  ahead of its upstream, uncommitted changes to the Environment's file, or a
-  push the remote refuses for branch protection exit 1 with
+  ahead of its upstream, uncommitted changes to the Environment's file, a
+  push the remote refuses for branch protection, or a push that never
+  started (an unusable credential, a `git` that cannot run) exit 1 with
   `NYL-PROMOTE-SOURCE-UNWRITABLE`, each with its own fix. A push refused
   because the branch moved since the checkout writes nothing and exits 2
   with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout and promote again.

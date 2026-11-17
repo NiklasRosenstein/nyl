@@ -1034,11 +1034,19 @@ pub fn writer_finding(
         ),
         RecordWriteError::PushUnknown { commit, .. } => (
             Code::PromoteSourceUncertain,
-            format!("fetch the branch (`git fetch`) and check whether commit {commit} reached the remote, then {again}: once the remote has it and the checkout is at it, the block is unchanged and only the marker is written; if it did not arrive, push it (`git push`) or drop it (`git reset --keep @{{upstream}}`) first"),
+            format!("fetch the branch (`git fetch`) and check whether commit {commit} reached the remote, then {again}: once the remote has it and the checkout is at it, the block is unchanged and only the marker is written; if it did not arrive, push it (`git push`) or drop it (`git reset --keep {commit}~1`) first"),
+        ),
+        RecordWriteError::PushCredentials(_) => (
+            Code::PromoteSourceUnwritable,
+            format!("the push never started, and the commit was undone: fix the `[[git.credentials]]` entry in nyl.toml for the branch's remote, or the secret it reads, and {again}"),
+        ),
+        RecordWriteError::PushNotRun(_) => (
+            Code::PromoteSourceUnwritable,
+            format!("the push never started, and the commit was undone: make sure `git` is installed and on the PATH of this invocation, and {again}"),
         ),
         RecordWriteError::UndoFailed { commit, .. } => (
             Code::PromoteSourceUnwritable,
-            format!("nothing was pushed, but the entry worktree still holds commit {commit}: drop it (`git reset --keep @{{upstream}}`) and {again}"),
+            format!("nothing was pushed, but the entry worktree still holds commit {commit}: drop it (`git reset --keep {commit}~1`) and {again}"),
         ),
         RecordWriteError::Unsigned(_) => (
             Code::PromoteSourceUnwritable,

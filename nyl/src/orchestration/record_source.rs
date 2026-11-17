@@ -24,8 +24,10 @@
 //! - The push never forces. When the remote refuses it, the commit is undone
 //!   only while the branch still points at it, and the file is restored only
 //!   while it still holds what was written; an undo that cannot finish is
-//!   reported. A push that fails without a refusal, such as a network error,
-//!   may have reached the remote, so the commit is kept and reported
+//!   reported. A push that never reached the remote, for a credential that
+//!   cannot be used or a `git` that cannot run, is undone the same way. A
+//!   push that fails while talking to the remote, such as a network error,
+//!   may have reached it, so the commit is kept and reported
 //!   ([`RecordWriteError::PushUnknown`], which the shell reports as
 //!   `NYL-PROMOTE-SOURCE-UNCERTAIN` without writing the marker).
 
@@ -95,6 +97,25 @@ impl PromotionRecordWriter for GitRecordWriter {
     }
 
     fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError> {
+        let (ready, commit) = self.commit_locally(record, message)?;
+        let pushed = nyl_git::push_atomic(
+            &self.git_dir,
+            &ready.url,
+            &[RefUpdate {
+                remote: ready.merge.clone(),
+                new: Some(commit.clone()),
+                expected: Expect::FastForward,
+            }],
+            &self.auth,
+        );
+        self.settle(&ready, commit, pushed)
+    }
+}
+
+impl GitRecordWriter {
+    /// Write the block and commit it, checked as a run would trust it: what
+    /// a push starts from, and the promotion commit.
+    fn commit_locally(&self, record: &PromotionRecord, message: &str) -> Result<(Ready, String), RecordWriteError> {
         let identity = self
             .identity
             .as_ref()
@@ -143,16 +164,20 @@ impl PromotionRecordWriter for GitRecordWriter {
             .map_err(RecordWriteError::Failed)?;
         // A commit a run would not trust is never pushed.
         self.trusted_before_push(&ready, &commit)?;
-        let pushed = nyl_git::push_atomic(
-            &self.git_dir,
-            &ready.url,
-            &[RefUpdate {
-                remote: ready.merge.clone(),
-                new: Some(commit.clone()),
-                expected: Expect::FastForward,
-            }],
-            &self.auth,
-        );
+        Ok((ready, commit))
+    }
+
+    /// What the push of the promotion commit `commit` means. A refusal
+    /// undoes the commit, and so does a push that never reached the remote:
+    /// a credential that cannot be used, or a `git` that cannot run. Only a
+    /// push that failed while talking to the remote may have reached it, so
+    /// only that keeps the commit ([`RecordWriteError::PushUnknown`]).
+    fn settle(
+        &self,
+        ready: &Ready,
+        commit: String,
+        pushed: Result<(), nyl_git::GitError>,
+    ) -> Result<CommitId, RecordWriteError> {
         match pushed {
             Ok(()) => {
                 // The tracking ref follows, as a `git push` to the remote would move it.
@@ -165,7 +190,7 @@ impl PromotionRecordWriter for GitRecordWriter {
                     url,
                 }
                 .to_string();
-                if let Err(undo) = self.undo(&ready, &commit) {
+                if let Err(undo) = self.undo(ready, &commit) {
                     return Err(RecordWriteError::UndoFailed {
                         commit,
                         message: format!("{message}; {undo}"),
@@ -180,15 +205,26 @@ impl PromotionRecordWriter for GitRecordWriter {
                     RecordWriteError::RemoteRejected(message)
                 })
             }
-            Err(error) => Err(RecordWriteError::PushUnknown {
+            Err(error @ (nyl_git::GitError::Credentials(_) | nyl_git::GitError::Command(_))) => {
+                let message = error.to_string();
+                if let Err(undo) = self.undo(ready, &commit) {
+                    return Err(RecordWriteError::UndoFailed {
+                        commit,
+                        message: format!("{message}; {undo}"),
+                    });
+                }
+                Err(match error {
+                    nyl_git::GitError::Credentials(_) => RecordWriteError::PushCredentials(message),
+                    _ => RecordWriteError::PushNotRun(message),
+                })
+            }
+            Err(error @ nyl_git::GitError::RemoteFailed { .. }) => Err(RecordWriteError::PushUnknown {
                 commit,
                 message: error.to_string(),
             }),
         }
     }
-}
 
-impl GitRecordWriter {
     /// With `verify`, the promotion commit `commit` must be the block's last
     /// change and signed as a run requires; otherwise it is undone.
     fn trusted_before_push(&self, ready: &Ready, commit: &str) -> Result<(), RecordWriteError> {
@@ -342,15 +378,15 @@ impl GitRecordWriter {
         }
     }
 
-    /// Undo the promotion commit after a refused push: the branch moves back
-    /// only while it still points at `commit`, and the index entry and the
-    /// file are restored only while that branch is checked out and the file
-    /// holds what was written.
+    /// Undo the promotion commit after a push that was refused or never
+    /// sent: the branch moves back only while it still points at `commit`,
+    /// and the index entry and the file are restored only while that branch
+    /// is checked out and the file holds what was written.
     fn undo(&self, ready: &Ready, commit: &str) -> Result<(), String> {
         self.git(&[
             "update-ref",
             "-m",
-            "nyl: undo a promotion commit whose push was refused",
+            "nyl: undo a promotion commit whose push was refused or never sent",
             &ready.branch,
             &ready.head,
             commit,
@@ -1275,6 +1311,56 @@ spec:
         };
         assert_eq!(&git(&world.clone, &["rev-parse", "HEAD"]), commit);
         assert_eq!(git(&gone, &["rev-parse", "main"]), remote);
+    }
+
+    /// A push that never reached the remote, for a credential that cannot
+    /// be used or a `git` that cannot run, is undone like a refusal and is
+    /// no uncertain push; only a failure while talking to the remote keeps
+    /// the commit. Catches a push that certainly failed reported as one that
+    /// may have landed, with its commit left on the branch.
+    #[test]
+    fn test_a_push_that_never_started_is_undone() {
+        let world = world();
+        let writer = writer(&world);
+        let (remote, head) = (
+            git(&world.remote, &["rev-parse", "main"]),
+            git(&world.clone, &["rev-parse", "HEAD"]),
+        );
+        let cases = [
+            (
+                nyl_git::GitError::Credentials("cannot write the SSH key to a temporary file".to_owned()),
+                "credentials",
+            ),
+            (
+                nyl_git::GitError::Command("failed to run git: not found".to_owned()),
+                "command",
+            ),
+        ];
+        for (failure, label) in cases {
+            let (ready, commit) = writer.commit_locally(&record(1), "Promote dev-to-prod #1").unwrap();
+            assert_ne!(commit, head, "{label}: a commit was made");
+            let error = writer.settle(&ready, commit, Err(failure)).unwrap_err();
+            match (label, &error) {
+                ("credentials", RecordWriteError::PushCredentials(_))
+                | ("command", RecordWriteError::PushNotRun(_)) => {}
+                _ => panic!("{label}: {error:?}"),
+            }
+            untouched(&world, &remote, &head);
+        }
+
+        // A failure while talking to the remote keeps the commit.
+        let (ready, commit) = writer.commit_locally(&record(1), "Promote dev-to-prod #1").unwrap();
+        let failure = nyl_git::GitError::RemoteFailed {
+            operation: "git push".to_owned(),
+            url: "origin".to_owned(),
+            message: "connection reset".to_owned(),
+        };
+        let error = writer.settle(&ready, commit.clone(), Err(failure)).unwrap_err();
+        assert!(
+            matches!(&error, RecordWriteError::PushUnknown { commit: kept, .. } if *kept == commit),
+            "{error:?}"
+        );
+        assert_eq!(git(&world.clone, &["rev-parse", "HEAD"]), commit);
     }
 
     /// An uncommitted change to the Environment's file would ride along in
