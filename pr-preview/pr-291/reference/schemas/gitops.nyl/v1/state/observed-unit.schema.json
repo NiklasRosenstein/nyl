@@ -324,6 +324,7 @@
         "NYL-PROMOTION-RECORD-INVALID",
         "NYL-PROMOTION-RECORD-UNSIGNED",
         "NYL-PROMOTE-SOURCE-UNWRITABLE",
+        "NYL-PROMOTE-SOURCE-UNCERTAIN",
         "NYL-PROMOTE-MARKER-UNWRITTEN",
         "NYL-PROMOTE-SOURCE-REJECTED",
         "NYL-PROMOTE-SUPERSEDES",
@@ -1260,7 +1261,7 @@
       "description": "A teardown waiting after its first phase, as the observed unit records it.",
       "properties": {
         "phase": {
-          "description": "The driver's phase name, such as `applications-removed`.",
+          "description": "The driver's phase name, such as KubernetesPublication's `applications-removed`.",
           "type": "string"
         },
         "phase1Commit": {
