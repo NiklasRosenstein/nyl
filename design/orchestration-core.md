@@ -4660,7 +4660,7 @@ trait Driver {
 
 struct Capabilities {
     plan: bool, reconcile: bool, detect_drift: bool, inspect: bool, teardown: bool,
-    attest: bool,               // `nyl attest` asks the driver, such as for Argo CD acceptance and health
+    attest: bool,               // `nyl attest` asks the driver, such as whether a publication's deployments were accepted and are healthy
     observed_values: bool,      // `observe` reads declared observed values; validate_spec checks each `from`
     build: bool,               // supports `nyl build` with driver-owned arguments
     change_digest: bool,        // plan reports a digest, so `bind: plan` is allowed

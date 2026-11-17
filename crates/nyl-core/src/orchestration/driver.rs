@@ -80,8 +80,8 @@ pub struct Capabilities {
     pub detect_drift: bool,
     pub inspect: bool,
     pub teardown: bool,
-    /// `nyl attest` asks the driver to attest current receipts, such as a
-    /// publication's Argo CD acceptance and health.
+    /// `nyl attest` asks the driver to attest current receipts, such as
+    /// whether a publication's deployments were accepted and are healthy.
     pub attest: bool,
     /// Whether the kind supports `nyl build`.
     pub build: bool,
@@ -700,7 +700,7 @@ pub enum RemovalObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "completion", rename_all = "kebab-case")]
 pub enum WaitCompletion {
-    /// An observer saw the workload Applications gone (`observe`).
+    /// The driver observed that what phase 1 removes is gone (`observe`).
     Observed,
     /// The `delay` passed; removal was not observed.
     Delayed,
