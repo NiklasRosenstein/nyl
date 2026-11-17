@@ -297,7 +297,15 @@ spec:
 - **Writing.** `nyl promote dev-to-prod` writes the block, with the same
   fields as a record in state, as one commit on the branch the entry
   worktree has checked out, and pushes it to that branch's upstream
-  fast-forward only. It writes nothing to prod's state. Write
+  fast-forward only. Then, under prod's lease, it writes one marker commit
+  into prod's desired state with the same message and no record file: it
+  changes no document, so runs, `status`, and the lineage read nothing
+  from it, but its summary reserves the sequence (a checkout of another
+  branch, without the block, takes the next number) and lists the
+  promotion in `nyl get promotions`. If the marker cannot be written after
+  the push, the promotion stands, and `nyl promote` exits 1 with
+  `NYL-PROMOTE-MARKER-UNWRITTEN`; run it again to write the marker (the
+  block is `unchanged`, so nothing else is written). Write
   `fromPromotion` in the Environment itself, in block style, one key per
   line; the rest of the file stays as written. A detached HEAD, a branch
   ahead of its upstream, uncommitted changes to the Environment's file, or a
@@ -314,8 +322,10 @@ spec:
   selectors) and the state of dev it names (its run, source commit, and
   every value read again from that state). A block that does not match, or
   names a state dev's history does not hold, is refused with
-  `NYL-PROMOTION-RECORD-INVALID`. `status` and `nyl get` show the block and
-  refuse nothing. `source-locks` never touches the block.
+  `NYL-PROMOTION-RECORD-INVALID`. That check reads dev's state, so a run of
+  prod needs read access to dev's state repository, unless the block is
+  trusted by its signature (below). `status` and `nyl get` show the block
+  and refuse nothing. `source-locks` never touches the block.
 - **Sequence.** The block's `sequence` rises with every promotion into prod,
   and prod's state records the highest one a run applied. A run from an
   older checkout, such as a re-run of an old CI job, or after the promotion
@@ -328,7 +338,45 @@ spec:
 - **Inspecting.** `status`, `nyl get promotions`, and
   `nyl get promotion-candidates` show the block as the path's record. Earlier
   blocks are in the Git history of the Environment's file; `nyl get
-  promotions` lists only promotions recorded in state as its history.
+  promotions` lists every promotion in its history through the markers.
+
+### Trusting the block by its signature
+
+Without more, a run trusts a new block only after reading dev's state. When
+prod's runners should not read dev's state, or the check should rest on who
+wrote the block, name a Git `allowed_signers` file:
+
+```yaml
+source:
+  fromPromotion:
+    path: dev-to-prod
+    record: source
+    verify:
+      allowedSigners: .nyl/allowed_signers   # a local path of the project
+```
+
+```text
+# .nyl/allowed_signers
+release-bot@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA…
+```
+
+A run then finds the commit that last changed the block (`git log -L`
+over the block's lines, from the checked-out commit) and verifies it with
+`git -c gpg.ssh.allowedSignersFile=<file> verify-commit`. When the
+signature holds, the block is checked against its PromotionPath and
+trusted, and dev's state is not read. The job that runs `nyl promote`
+signs its commits with a key the file lists (`git config commit.gpgsign
+true`, `gpg.format ssh`, `user.signingkey <key>`), since the block commit
+uses your Git configuration. A run refuses with
+`NYL-PROMOTION-RECORD-UNSIGNED` (exit 1) when that commit is unsigned,
+signed by a key the file does not list, or signed with OpenPGP or X.509
+(only SSH signatures are checked against the file), and when the
+Environment's file has uncommitted changes or the allowed signers file is
+missing. A later hand edit inside the block is the block's last change and
+needs a signature of its own; an edit elsewhere in the file does not.
+Anyone who can change the allowed signers file can change whom a run
+trusts, so review it like the branch itself. Nyl never turns this on by
+itself; without `verify` the state check above applies.
 
 ## How a promotion reads the source
 

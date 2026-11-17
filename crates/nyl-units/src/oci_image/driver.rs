@@ -4,7 +4,7 @@
 //! is shared between execution-key hashing and staging, so ignored files or
 //! disposable Git worktree metadata never become unrecorded build inputs.
 use super::dockerignore::ContextFiles;
-use super::spec::{ImageContext, OciImageSpec};
+use super::spec::{ContainerImageArtifact, ImageContext, OciImageSpec, IMAGE_ARTIFACT};
 use base64::Engine;
 use nyl_core::constants::{API_VERSION_ARTIFACTS, API_VERSION_UNITS};
 use nyl_core::orchestration::driver::{
@@ -339,7 +339,7 @@ fn artifact(
         api_version: API_VERSION_ARTIFACTS.into(),
         kind: "ContainerImage".into(),
         metadata: ArtifactMetadata {
-            name: "image".into(),
+            name: IMAGE_ARTIFACT.into(),
             unit: ArtifactUnit {
                 environment: unit.unit.environment.clone(),
                 name: unit.unit.name.clone(),
@@ -562,6 +562,9 @@ impl Driver for OciImageDriver {
     }
     fn spec_schema(&self) -> schemars::Schema {
         schemars::schema_for!(OciImageSpec)
+    }
+    fn artifact_schema(&self, _spec: &Value, artifact: &str) -> Option<schemars::Schema> {
+        (artifact == IMAGE_ARTIFACT).then(|| schemars::schema_for!(ContainerImageArtifact))
     }
     fn validate_spec(&self, spec: &Value) -> Result<(), String> {
         parse(spec)
@@ -1133,6 +1136,12 @@ mod tests {
             panic!("build failed")
         };
         let image = artifacts[0].clone();
+        // The artifact is exactly what the kind declares for promotion
+        // selectors, field for field.
+        let declared: ContainerImageArtifact = serde_json::from_value(image.spec.clone()).unwrap();
+        assert_eq!(serde_json::to_value(declared).unwrap(), image.spec);
+        assert!(OciImageDriver.artifact_schema(&desired.spec, "image").is_some());
+        assert!(OciImageDriver.artifact_schema(&desired.spec, "other").is_none());
         ctx.artifacts.insert("image".into(), image.clone());
         let receipt = Receipt {
             execution_key: desired.execution_key.clone().unwrap(),

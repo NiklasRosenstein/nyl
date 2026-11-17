@@ -25,6 +25,26 @@ pub struct OciImage {
     pub spec: OciImageSpec,
 }
 
+/// The `spec` of the `ContainerImage` artifact named `image` an `OciImage`
+/// receipt lists: what a promotion selector's pointer into it reads
+/// ([`nyl_core::orchestration::driver::Driver::artifact_schema`]).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContainerImageArtifact {
+    /// The registry repository the image was pushed to.
+    pub repository: String,
+    /// The image's manifest digest, `sha256:<hex>`.
+    pub digest: String,
+    /// The image by digest, `<repository>@<digest>`.
+    pub reference: String,
+    /// The platforms built.
+    pub platforms: Vec<String>,
+    /// The tags pushed with it.
+    pub tags: Vec<String>,
+}
+
+/// The name of the artifact an image unit's receipt lists.
+pub const IMAGE_ARTIFACT: &str = "image";
+
 /// Docker Buildx inputs. Every directory context is a separately pinned Git source.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(transform = nyl_core::resources::strict::deny_additional_properties)]

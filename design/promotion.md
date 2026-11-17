@@ -129,6 +129,12 @@ not match its path (the path's source environment, its values and their
 selectors) or the source state it names, names a state the source's
 history does not hold, names a path the Environment is not promoted along,
 or reuses the applied sequence with another record);
+`NYL-PROMOTE-MARKER-UNWRITTEN` (exit 1: the `record: source` commit was
+pushed, but its marker in the target's state was not written; the promotion
+stands, and promoting again writes the marker);
+`NYL-PROMOTION-RECORD-UNSIGNED` (exit 1: with `fromPromotion.verify`, the
+commit that last changed the block carries no signature an allowed signer
+made, or its provenance cannot be read);
 `NYL-PROMOTE-SOURCE-UNWRITABLE` (exit 1: `nyl promote` cannot commit or push
 a `record: source` block, such as from a detached HEAD, a branch ahead of its
 upstream, or a push the remote refuses for branch protection; each cause
@@ -327,6 +333,7 @@ spec:
     fromPromotion:
       path: dev-to-prod
       record: state             # default; or `source`, see below
+      # verify: {allowedSigners: .nyl/allowed_signers}   # with `record: source`, see below
 ---
 apiVersion: gitops.nyl/v1
 kind: PromotionPath
@@ -414,7 +421,8 @@ spec:
   `NYL-PROMOTE-ARTIFACT-MISSING`. `nyl promote
   … --dry-run` shows the chosen state and the exact change without writing
   anything. `nyl get promotions -e <env>` lists the environment's records and
-  every promotion in its desired history, and `status` shows the lineage of
+  every promotion in its desired history (a `record: source` promotion
+  through its marker), and `status` shows the lineage of
   what a promoted environment runs: the applied record's path, sequence, and
   source commit, the source state it promoted while that record is still
   the path's current one, and the sequence of a newer record no run applied
@@ -424,7 +432,10 @@ spec:
   remote do not grow with the history.
 - Evidence covers the whole source, not only the selected values: in that
   state, every unit the target environment also selects has a current
-  receipt, and at `attested` every such unit's required attestations pass for
+  receipt (a target whose source is promoted along the path selects units
+  as its own definitions at that state's source commit say, the commit it
+  would run, not as the entry worktree has them; a commit at which they do
+  not render keeps the state out), and at `attested` every such unit's required attestations pass for
   that state. A publication unit's `accepted` and `healthy` aggregate all
   Applications it generates: `accepted` when all of them run that
   publication, `healthy` when all are also Healthy. Mixed revisions block,
@@ -483,17 +494,47 @@ spec:
     to roll back, so an old checkout never rolls prod back unreviewed.
     Reverting the promotion commit in source is refused the same way; the
     rollback is a new promotion with a higher sequence.
+  - **Marker.** After the source commit is pushed, `nyl promote` writes one
+    commit into the target's desired state under the lease it holds: the
+    same `promote` summary and trailers a `record: state` promotion writes,
+    and no `desired/promotions/<path>.yaml` file. It changes no document,
+    so it is no state commit, and `status` and the lineage read nothing
+    from it; the target's history then reserves the sequence, so a
+    checkout on another branch takes the next one, and `nyl get
+    promotions` lists the promotion in its history. The order is fixed:
+    source first, marker second. A marker that cannot be written leaves the
+    promotion standing (the pushed block is the record): `nyl promote`
+    reports `done` with the source commit and exits 1 with
+    `NYL-PROMOTE-MARKER-UNWRITTEN`, and running it again finds the block
+    `unchanged` and writes only the missing marker. `--dry-run` writes
+    neither.
+  - **Trusting the block.** By default a run that first applies a new
+    block reads the source environment's state and checks the block
+    against the state it names, so it needs read access to that state.
+    `verify: {allowedSigners: <path>}` in `source.fromPromotion` (a Git
+    `allowed_signers` file, a local path of the project) trusts the block
+    by its signature instead: the commit that last changed the block, as
+    `git log -L` follows the block's lines back from the entry commit, must
+    carry an SSH signature `git verify-commit` accepts with
+    `gpg.ssh.allowedSignersFile` set to that file. The block is still
+    checked against its path, and the source's state is not read. An
+    unsigned commit, a signature by an unlisted key, an OpenPGP or X.509
+    signature, an Environment file with uncommitted changes, or a missing
+    allowed signers file refuses with `NYL-PROMOTION-RECORD-UNSIGNED`
+    (exit 1). Nothing enables it implicitly; the allowed signers file
+    deserves the same review as the block's branch.
 - Either way, the source commit and the values sit in one record, so they
   cannot diverge. An environment that follows its entry worktree, or a
   revision, is not a promotion target for its source.
 - Before the first promotion, an environment with a `fromPromotion` source has
   no source commit, and `reconcile` exits 2 naming `nyl promote`.
-- The target may still select a unit dev also runs, such as `web-image`, and
-  rebuild it at the promoted commit instead of binding dev's result. The
-  PromotionRecord then says the result was rebuilt rather than claiming dev's
-  evidence for it, image tags include the environment, and Nyl warns only
-  when an environment builds a unit whose artifacts its `fromPromotion`
-  bindings replace.
+- The target may rebuild a unit dev also runs, such as `web-image`, at the
+  promoted commit, or bind dev's result with a `fromPromotion` binding.
+  Either is an explicit choice of the target's configuration, and Nyl does
+  not warn about either, nor about a target that does both. The
+  PromotionRecord states exactly the values it carries and the evidence for
+  them; it says nothing about what the target builds itself, whose image
+  tags include the environment.
 - A target source (`from: {target: …}`) promotes the source commit its
   publication recorded, under the same rules.
 - Prod-only changes, such as a replica count, reach prod with the next

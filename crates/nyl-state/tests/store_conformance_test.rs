@@ -1589,6 +1589,49 @@ fn test_commit_unchanged_writes_an_observed_commit_without_changes() {
     }
 }
 
+/// `commit_unchanged_desired` records the transition with a desired commit
+/// although no document changes: the marker of a `record: source`
+/// promotion. The commit changes no documents, so it is not a state commit,
+/// and the history reports it unchanged. Catches a marker dropped as an
+/// empty transition, and one that would count as a new state.
+#[test]
+fn test_commit_unchanged_desired_writes_a_desired_commit_without_changes() {
+    for subject in subjects() {
+        let store = subject.store.as_ref();
+        let location = separate(&subject);
+        let dev = environment("dev");
+        let committed = initialized(store, &location, &dev);
+        let before = store.snapshot(&location).unwrap();
+        let marker = store
+            .commit(
+                &location,
+                &dev,
+                &before.tips,
+                &transition(TransitionChanges {
+                    commit_unchanged_desired: true,
+                    ..TransitionChanges::default()
+                }),
+                &committed.lease_version,
+            )
+            .unwrap();
+        let desired = marker.desired.clone().expect("a desired commit");
+        assert_eq!(
+            marker.observed, None,
+            "{}: the observed side changed nothing",
+            subject.name
+        );
+        let after = store.snapshot(&location).unwrap();
+        assert_eq!(after.tips.desired.as_ref(), Some(&desired), "{}", subject.name);
+        assert_eq!(after.tips.observed, before.tips.observed, "{}", subject.name);
+        assert_eq!(after.desired, before.desired, "{}", subject.name);
+        if let Ok(history) = store.history(&location) {
+            let newest = &history.desired[0];
+            assert_eq!(newest.commit, desired, "{}", subject.name);
+            assert!(!newest.changed_desired, "{}: a marker is no state commit", subject.name);
+        }
+    }
+}
+
 /// Signals (Q28): a `hold` signal round-trips without a phase 1 commit, and
 /// `delete_signals` removes a run's signal ref and is a no-op without one.
 #[test]

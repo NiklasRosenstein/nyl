@@ -324,6 +324,15 @@ impl Session {
         })
     }
 
+    /// The verifier of `record: source` blocks whose Environment sets
+    /// `fromPromotion.verify`, in the entry clone.
+    pub fn block_verifier(&self) -> crate::orchestration::record_source::GitBlockVerifier<'_> {
+        crate::orchestration::record_source::GitBlockVerifier {
+            inventory: &self.inventory,
+            git_dir: self.resolved.git_dir.clone(),
+        }
+    }
+
     /// The renderer of the environment's units at a source commit.
     pub fn renderer(&self) -> UnitSourceRenderer {
         UnitSourceRenderer::new(self.entry_project_dir(), crate::resource_catalogue())
@@ -384,6 +393,7 @@ impl Session {
         let workspace = tempfile::TempDir::new().map_err(NylError::from)?;
         let base = self.context(store, wiring, identity.map(ToString::to_string));
         let secrets = crate::orchestration::secrets::ProjectSecrets::new(&self.inventory.project_root);
+        let blocks = self.block_verifier();
         let context = RunContext {
             instances: &self.inventory.instances,
             base: &base,
@@ -397,6 +407,7 @@ impl Session {
             commit_identity: identity,
             progress: wiring.progress,
             prompt: wiring.prompt,
+            promotion_blocks: Some(&blocks),
         };
         Ok(operation(&context, request))
     }

@@ -1,6 +1,7 @@
 # Walkthrough "Promoting an environment's source with `record: source`"
 # (design/promotion.md#promoting-an-environments-source): `nyl promote`
-# writes the record into prod's Environment on main instead of prod's state;
+# writes the record into prod's Environment on main instead of prod's state,
+# and only a marker commit, without a record file, into prod's state;
 # runs apply it and record its sequence, and a run from an older checkout,
 # whose block has a lower sequence, is refused and names the reviewed way
 # to roll back: a new promotion with a higher sequence.
@@ -20,11 +21,12 @@ steps:
       executed: [web-image, kubernetes]
 
   # The record is a commit on main changing prod's Environment; prod's state
-  # is untouched. The promoted source is the commit before it.
+  # gets only the marker, one desired commit that reserves the sequence. The
+  # promoted source is the commit before it.
   - nyl: [promote, dev-to-prod, --reason, "Release 1"]
     exit: 0
     expect:
-      commits: {desired: 0, observed: 0}
+      commits: {desired: 1, observed: 0}
       promotion:
         path: dev-to-prod
         record: source

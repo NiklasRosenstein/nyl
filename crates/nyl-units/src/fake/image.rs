@@ -111,6 +111,11 @@ impl Driver for FakeImage {
         }
     }
 
+    fn artifact_schema(&self, _spec: &Value, artifact: &str) -> Option<schemars::Schema> {
+        (artifact == crate::oci_image::IMAGE_ARTIFACT)
+            .then(|| schemars::schema_for!(crate::oci_image::ContainerImageArtifact))
+    }
+
     fn spec_schema(&self) -> schemars::Schema {
         schemars::json_schema!({
             "type": "object",

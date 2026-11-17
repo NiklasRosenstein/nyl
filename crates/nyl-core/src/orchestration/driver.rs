@@ -805,6 +805,17 @@ pub trait Driver: Send + Sync {
     fn recovery(&self, spec: &Value) -> RecoveryPolicies;
     /// The kind's own fields; Nyl adds the common ones.
     fn spec_schema(&self) -> schemars::Schema;
+    /// The JSON Schema of the `spec` of the artifact named `artifact` that a
+    /// receipt of `spec` lists, as far as the kind declares it; `None` when
+    /// the kind publishes no such artifact or does not describe it, and by
+    /// default. Promotion validation reads it to type a selector's `pointer`
+    /// into the artifact (`{unit, artifact, pointer}`) before any receipt
+    /// exists, so the engine never names an artifact kind or its fields.
+    /// Contract: [PromotionPath](../../../../design/promotion.md#promotionpath).
+    fn artifact_schema(&self, spec: &Value, artifact: &str) -> Option<schemars::Schema> {
+        let _ = (spec, artifact);
+        None
+    }
     /// Parse and validate a rendered spec, references still as expressions.
     fn validate_spec(&self, spec: &Value) -> std::result::Result<(), String>;
     /// Provider keys explicitly declared by this spec for driver credentials.

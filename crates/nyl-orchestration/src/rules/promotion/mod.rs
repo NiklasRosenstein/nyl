@@ -108,8 +108,8 @@ use nyl_core::resources::promotion::PromotionPath;
 pub use history::{recorded_states, DesiredEntry, RecordedState, StateAttestations, StateRef};
 pub use lineage::{lineage, lineage_with};
 pub use running::UnitRunning;
-pub use source_block::check_block;
-pub use standing::{Gap, GapKind, Judgement, Used, ENVIRONMENT_SCOPE};
+pub use source_block::{check_block, check_block_shape};
+pub use standing::{Gap, GapKind, Judgement, TargetUnits, Used, ENVIRONMENT_SCOPE};
 pub use values::ArtifactCheck;
 
 use standing::{judge, Context, Subject};
@@ -160,7 +160,8 @@ impl Selection {
         *self != Self::Newest
     }
 
-    fn admits(&self, state: &RecordedState) -> bool {
+    /// Whether the selection admits `state` as a candidate.
+    pub fn admits(&self, state: &RecordedState) -> bool {
         match self {
             Self::Newest => true,
             Self::SourceRevision(commit) => state.source_commit() == Some(commit),
@@ -189,8 +190,9 @@ pub struct PromotionInput<'a> {
     /// each and the attestations recorded for it.
     pub history: &'a [RecordedState],
     /// The units the target environment also selects: the whole-source rule
-    /// covers them.
-    pub target_units: &'a BTreeSet<UnitName>,
+    /// covers them. A target whose source is promoted along the path selects
+    /// them as its definitions at each state's source commit say.
+    pub target_units: &'a TargetUnits,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
     /// Per value name, the deployment of its selected unit that consumes it
@@ -659,6 +661,12 @@ fn fix_for(source: &EnvironmentName, gaps: &[Gap], level: &str) -> String {
         fixes.push(format!(
             "what runs decides: a publication's attestations count only for its current receipt, and a value-only path takes each value from the state its consumer runs; wait until what runs is attested (`nyl attest -e {source}`), or promote an explicitly chosen state with `--state-revision <desired commit>`, which is judged on the attestations recorded for it"
         ));
+    }
+    if has(GapKind::TargetSource) {
+        fixes.push(
+            "the target's own definitions at that source commit must render (its Environment declared, its units valid): fix them and reconcile the source again, or promote another state"
+                .to_owned(),
+        );
     }
     if has(GapKind::Coverage) {
         fixes.push(

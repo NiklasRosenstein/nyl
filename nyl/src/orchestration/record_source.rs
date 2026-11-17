@@ -32,7 +32,9 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use nyl_core::orchestration::ids::CommitId;
-use nyl_core::orchestration::ports::{Clock, CommitIdentity, PromotionRecordWriter, RecordWriteError};
+use nyl_core::orchestration::ports::{
+    BlockSignatureError, Clock, CommitIdentity, PromotionBlockVerifier, PromotionRecordWriter, RecordWriteError,
+};
 use nyl_core::orchestration::promotion::PromotionRecord;
 use nyl_git::{Expect, GitAuth, RefUpdate};
 
@@ -333,8 +335,51 @@ pub fn place_block(document: &str, record: &PromotionRecord) -> Result<String, S
     }
     let newline = if document.contains("\r\n") { "\r\n" } else { "\n" };
     let lines: Vec<&str> = document.split_inclusive('\n').collect();
-    let (from_promotion, parent) = from_promotion_line(&lines)?;
-    // The children of `fromPromotion`: where they end, their indentation, and an earlier block.
+    let FromPromotion { end, child, promoted } = scan_from_promotion(&lines)?;
+    let child = child.ok_or_else(unplaceable)?;
+    let yaml = nyl_render::yaml::serialize_yaml_document(record)
+        .map_err(|error| format!("cannot write the record as YAML: {error}"))?;
+    let pad = " ".repeat(child + 2);
+    let mut block = format!(
+        "{}promoted: # written by nyl promote, never by hand{newline}",
+        " ".repeat(child)
+    );
+    for line in yaml.lines().filter(|line| *line != "---") {
+        if !line.is_empty() {
+            block.push_str(&pad);
+            block.push_str(line);
+        }
+        block.push_str(newline);
+    }
+    let mut output = String::with_capacity(document.len() + block.len());
+    let (cut_start, cut_end) = promoted.unwrap_or((end, end));
+    for line in &lines[..cut_start] {
+        output.push_str(line);
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push_str(newline);
+    }
+    output.push_str(&block);
+    for line in &lines[cut_end..] {
+        output.push_str(line);
+    }
+    check_placed(document, &output, record)?;
+    Ok(output)
+}
+
+/// The children of a block-style `spec.source.fromPromotion`, by line index
+/// of the document.
+struct FromPromotion {
+    /// The line after its last child.
+    end: usize,
+    /// The indentation of its children; `None` when it has none.
+    child: Option<usize>,
+    /// The `promoted` block's first line and the line after its last.
+    promoted: Option<(usize, usize)>,
+}
+
+fn scan_from_promotion(lines: &[&str]) -> Result<FromPromotion, String> {
+    let (from_promotion, parent) = from_promotion_line(lines)?;
     let mut end = from_promotion + 1;
     let mut child = None;
     let mut promoted: Option<(usize, usize)> = None;
@@ -367,35 +412,7 @@ pub fn place_block(document: &str, record: &PromotionRecord) -> Result<String, S
         index += 1;
         end = index;
     }
-    let child = child.ok_or_else(unplaceable)?;
-    let yaml = nyl_render::yaml::serialize_yaml_document(record)
-        .map_err(|error| format!("cannot write the record as YAML: {error}"))?;
-    let pad = " ".repeat(child + 2);
-    let mut block = format!(
-        "{}promoted: # written by nyl promote, never by hand{newline}",
-        " ".repeat(child)
-    );
-    for line in yaml.lines().filter(|line| *line != "---") {
-        if !line.is_empty() {
-            block.push_str(&pad);
-            block.push_str(line);
-        }
-        block.push_str(newline);
-    }
-    let mut output = String::with_capacity(document.len() + block.len());
-    let (cut_start, cut_end) = promoted.unwrap_or((end, end));
-    for line in &lines[..cut_start] {
-        output.push_str(line);
-    }
-    if !output.is_empty() && !output.ends_with('\n') {
-        output.push_str(newline);
-    }
-    output.push_str(&block);
-    for line in &lines[cut_end..] {
-        output.push_str(line);
-    }
-    check_placed(document, &output, record)?;
-    Ok(output)
+    Ok(FromPromotion { end, child, promoted })
 }
 
 fn unplaceable() -> String {
@@ -512,6 +529,177 @@ pub fn writer_for(
         auth,
         git_env: Vec::new(),
     })
+}
+
+/// Verifies the signature on the commit that last changed an Environment's
+/// `record: source` block, for `source.fromPromotion.verify`
+/// ([`PromotionBlockVerifier`]). Every command that resolves an environment
+/// on the run path gets it from its session.
+pub struct GitBlockVerifier<'a> {
+    pub inventory: &'a nyl_render::gitops::GitOpsInventory,
+    /// The `.git` directory of the entry clone.
+    pub git_dir: PathBuf,
+}
+
+impl PromotionBlockVerifier for GitBlockVerifier<'_> {
+    fn verify_block(&self, environment: &str, allowed_signers: &str) -> Result<CommitId, BlockSignatureError> {
+        let unreadable = BlockSignatureError::Unreadable;
+        let resource = self
+            .inventory
+            .get(nyl_render::resources::GitOpsResourceKind::Environment, environment)
+            .ok_or_else(|| {
+                unreadable(format!(
+                    "Environment {environment} is not declared in a file of this project, so no commit changed its block"
+                ))
+            })?;
+        let signers = self
+            .inventory
+            .paths()
+            .resolve("spec.source.fromPromotion.verify.allowedSigners", allowed_signers)
+            .map_err(|error| unreadable(error.to_string()))?;
+        if !signers.is_file() {
+            return Err(unreadable(format!(
+                "the allowed signers file {allowed_signers} does not exist"
+            )));
+        }
+        BlockSignatures {
+            git_dir: self.git_dir.clone(),
+            worktree: self.inventory.worktree_root.clone(),
+            git_env: Vec::new(),
+        }
+        .verify(
+            &self.inventory.project_root.join(&resource.source_path),
+            (resource.document_index, &resource.raw_document),
+            &signers,
+        )
+    }
+}
+
+/// The Git side of [`GitBlockVerifier`], without the project's discovery.
+struct BlockSignatures {
+    git_dir: PathBuf,
+    worktree: PathBuf,
+    /// Extra environment of every `git` it runs, such as an isolated
+    /// configuration in tests; empty in production.
+    git_env: Vec<(String, String)>,
+}
+
+impl BlockSignatures {
+    /// The commit of `HEAD`'s history that last changed the `promoted`
+    /// block of the Environment in `file` (its document `index`, reading
+    /// `document`), checked with `git verify-commit` against `signers`.
+    ///
+    /// - The file must be tracked and unchanged, so the block a run reads is
+    ///   the one a commit carries.
+    /// - The commit is the newest that changed any line of the block, as
+    ///   `git log -L` follows the block's lines back from `HEAD`: a later
+    ///   hand edit inside the block is that commit, and must be signed too.
+    /// - Only an SSH signature is checked against the allowed signers file;
+    ///   an OpenPGP or X.509 signature would be checked against a keyring
+    ///   the file does not govern, so it is refused.
+    fn verify(
+        &self,
+        file: &std::path::Path,
+        (index, document): (usize, &str),
+        signers: &std::path::Path,
+    ) -> Result<CommitId, BlockSignatureError> {
+        let unreadable = BlockSignatureError::Unreadable;
+        let worktree = std::fs::canonicalize(&self.worktree).unwrap_or_else(|_| self.worktree.clone());
+        let canonical = std::fs::canonicalize(file)
+            .map_err(|error| unreadable(format!("cannot read {}: {error}", file.display())))?;
+        let relative = canonical
+            .strip_prefix(&worktree)
+            .map_err(|_| unreadable(format!("{} is outside the worktree", file.display())))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let pathspec = format!(":(literal){relative}");
+        if self.git(&["ls-files", "--error-unmatch", "--", &pathspec]).is_err() {
+            return Err(unreadable(format!(
+                "{relative} is not tracked by Git, so no commit carries its block"
+            )));
+        }
+        let changed = self
+            .git(&["status", "--porcelain", "--", &pathspec])
+            .map_err(unreadable)?;
+        if !changed.is_empty() {
+            return Err(unreadable(format!(
+                "{relative} has uncommitted changes, so the block read is not the one a commit carries"
+            )));
+        }
+        let contents =
+            std::fs::read_to_string(file).map_err(|error| unreadable(format!("cannot read {relative}: {error}")))?;
+        let start = crate::cli::resource_file::document_start(&contents, index, document)
+            .map_err(|error| unreadable(error.to_string()))?;
+        let lines: Vec<&str> = document.split_inclusive('\n').collect();
+        let (first, last) = scan_from_promotion(&lines)
+            .ok()
+            .and_then(|scan| scan.promoted)
+            .ok_or_else(|| {
+                unreadable(format!(
+                    "the Environment in {relative} has no block-style `promoted` block"
+                ))
+            })?;
+        // One-based line numbers of the block in the file.
+        let offset = contents[..start].matches('\n').count();
+        let range = format!("-L{},{}:{relative}", offset + first + 1, offset + last);
+        let log = self
+            .git(&["log", "--max-count=1", "--format=commit:%H", &range, "HEAD"])
+            .map_err(|error| unreadable(format!("cannot find the commit that last changed the block: {error}")))?;
+        let commit = log
+            .lines()
+            .find_map(|line| line.strip_prefix("commit:"))
+            .and_then(|commit| CommitId::new(commit.trim()).ok())
+            .ok_or_else(|| unreadable("no commit changed the block".to_owned()))?;
+        let object = self
+            .git(&["cat-file", "commit", commit.as_str()])
+            .map_err(|error| unreadable(format!("cannot read commit {commit}: {error}")))?;
+        let untrusted = |message: &str| BlockSignatureError::Untrusted {
+            commit: commit.clone(),
+            message: message.to_owned(),
+        };
+        let header = object.split("\n\n").next().unwrap_or_default();
+        if !header.contains("gpgsig") {
+            return Err(untrusted("it is not signed"));
+        }
+        if !header.contains("-----BEGIN SSH SIGNATURE-----") {
+            return Err(untrusted(
+                "it carries an OpenPGP or X.509 signature, which an allowed signers file does not cover; sign with an SSH key",
+            ));
+        }
+        let setting = format!(
+            "gpg.ssh.allowedSignersFile={}",
+            nyl_git::cli_path(signers).to_string_lossy()
+        );
+        let output = self
+            .run(&["-c", &setting, "verify-commit", commit.as_str()])
+            .map_err(unreadable)?;
+        if output.status.success() {
+            Ok(commit)
+        } else {
+            Err(untrusted(String::from_utf8_lossy(&output.stderr).trim()))
+        }
+    }
+
+    /// `git` bound to the entry clone and its worktree.
+    fn run(&self, args: &[&str]) -> Result<Output, String> {
+        nyl_git::repository_command(&self.git_dir)
+            .arg("--work-tree")
+            .arg(nyl_git::cli_path(&self.worktree))
+            .current_dir(&self.worktree)
+            .envs(self.git_env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+            .args(args)
+            .output()
+            .map_err(|error| format!("cannot run git: {error}"))
+    }
+
+    fn git(&self, args: &[&str]) -> Result<String, String> {
+        let output = self.run(args)?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -854,5 +1042,107 @@ spec:
         git(&world.clone, &["commit", "--quiet", "-m", "Untrack"]);
         git(&world.clone, &["push", "--quiet"]);
         assert!(matches!(write(&world).unwrap_err(), RecordWriteError::Untracked { .. }));
+    }
+
+    /// A generated SSH key and an `allowed_signers` file listing it, or
+    /// `None` when `ssh-keygen` is not installed.
+    struct Signer {
+        key: PathBuf,
+        allowed: PathBuf,
+    }
+
+    fn signer(directory: &Path, name: &str) -> Option<Signer> {
+        let key = directory.join(name);
+        let generated = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", name, "-f"])
+            .arg(&key)
+            .output();
+        match generated {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            generated => assert!(generated.unwrap().status.success(), "ssh-keygen failed"),
+        }
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let allowed = directory.join(format!("{name}.allowed_signers"));
+        std::fs::write(&allowed, format!("{name}@example.invalid {}\n", public.trim())).unwrap();
+        Some(Signer { key, allowed })
+    }
+
+    /// Commit everything staged, signed with `key` when given.
+    fn commit(clone: &Path, message: &str, key: Option<&Path>) -> String {
+        let key = key.map(|key| nyl_git::cli_path(key).to_string_lossy().into_owned());
+        let mut args = vec!["-c", "gpg.format=ssh"];
+        let setting;
+        if let Some(key) = &key {
+            setting = format!("user.signingkey={key}");
+            args.extend(["-c", &setting, "commit", "--quiet", "-S", "-m", message]);
+        } else {
+            args.extend(["commit", "--quiet", "--no-gpg-sign", "-m", message]);
+        }
+        git(clone, &args);
+        git(clone, &["rev-parse", "HEAD"])
+    }
+
+    /// `source.fromPromotion.verify` (item 11, option c2): the commit that
+    /// last changed the block must carry an SSH signature by a key the
+    /// allowed signers file lists. A later edit elsewhere in the file keeps
+    /// the signed commit as the one that changed the block; an unsigned edit
+    /// inside the block, a signature by an unlisted key, an unsigned
+    /// promotion commit, and an uncommitted change are each refused. Catches
+    /// a block trusted without a signature, or by a signature on the wrong
+    /// commit.
+    #[test]
+    fn test_block_signature_is_the_commit_that_last_changed_the_block() {
+        let root = TempDir::new().unwrap();
+        let (Some(trusted), Some(stranger)) = (signer(root.path(), "trusted"), signer(root.path(), "stranger")) else {
+            eprintln!("skipped: ssh-keygen is not installed, so no SSH signature can be made");
+            return;
+        };
+        let world = world();
+        let leading = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata: {name: dev}\nspec: {}\n---\n";
+        let document = place_block(ENVIRONMENT, &record(1)).unwrap();
+        let file = world.clone.join("prod.yaml");
+        std::fs::write(&file, format!("{leading}{document}")).unwrap();
+        git(&world.clone, &["add", "prod.yaml"]);
+        let signed = commit(&world.clone, "nyl: promote prod", Some(&trusted.key));
+        let signatures = BlockSignatures {
+            git_dir: world.clone.join(".git"),
+            worktree: world.clone.clone(),
+            git_env: isolated(),
+        };
+        let verify = |document: &str, allowed: &Path| signatures.verify(&file, (2, document), allowed);
+        assert_eq!(verify(&document, &trusted.allowed).unwrap().as_str(), signed);
+
+        // An unsigned change outside the block leaves the signed commit as its last change.
+        let annotated = document.replace("  unitSelector:", "  # reviewed\n  unitSelector:");
+        assert_ne!(annotated, document);
+        std::fs::write(&file, format!("{leading}{annotated}")).unwrap();
+        git(&world.clone, &["add", "prod.yaml"]);
+        commit(&world.clone, "Annotate", None);
+        assert_eq!(verify(&annotated, &trusted.allowed).unwrap().as_str(), signed);
+        // Not signed by a listed key.
+        let error = verify(&annotated, &stranger.allowed).unwrap_err();
+        assert!(
+            matches!(&error, BlockSignatureError::Untrusted { commit, .. } if commit.as_str() == signed),
+            "{error:?}"
+        );
+
+        // An unsigned hand edit inside the block is the block's last change.
+        let edited = annotated.replace("sequence: 1", "sequence: 2");
+        assert_ne!(edited, annotated);
+        std::fs::write(&file, format!("{leading}{edited}")).unwrap();
+        git(&world.clone, &["add", "prod.yaml"]);
+        let hand = commit(&world.clone, "Edit by hand", None);
+        let error = verify(&edited, &trusted.allowed).unwrap_err();
+        assert!(
+            matches!(&error, BlockSignatureError::Untrusted { commit, message } if commit.as_str() == hand && message.contains("not signed")),
+            "{error:?}"
+        );
+
+        // An uncommitted change is not what any commit carries.
+        std::fs::write(&file, format!("{leading}{edited}# local\n")).unwrap();
+        assert!(matches!(
+            verify(&edited, &trusted.allowed).unwrap_err(),
+            BlockSignatureError::Unreadable(_)
+        ));
     }
 }

@@ -71,8 +71,12 @@ pub struct CandidatesRequest<'a> {
     pub path: &'a PromotionPath,
     pub target: (&'a EnvironmentName, &'a StateLocation),
     pub source: (&'a EnvironmentName, &'a StateLocation),
-    /// The units the target selects, as `nyl promote` takes them.
-    pub target_units: &'a BTreeSet<UnitName>,
+    /// The units the target's entry worktree selects, which count when the
+    /// target does not run the promoted commit ([`promote::target_units`]).
+    pub entry_units: &'a BTreeSet<UnitName>,
+    /// Where the target's definitions at each candidate's source commit are
+    /// read, as `nyl promote` reads them.
+    pub target_sources: promote::TargetSources<'a>,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
     /// The target's `source.fromPromotion` as the entry worktree declares
@@ -107,6 +111,13 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
     };
     promote::read_running(request.drivers, &mut history);
     let consumers = promote::value_consumers(request.drivers, &history, path);
+    let read_units = promote::target_units(
+        &request.target_sources,
+        target,
+        (request.promotes_source, request.entry_units),
+        &history,
+        &Selection::Newest,
+    );
     // A promotion without flags. Who asks is not read by the decision's
     // choice, and the sequence is not shown: neither is recorded here.
     let ask = Request {
@@ -126,7 +137,7 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         path,
         source,
         history: &history,
-        target_units: request.target_units,
+        target_units: &read_units.units,
         promotes_source: request.promotes_source,
         consumers: &consumers,
         target_records: &records,
@@ -139,6 +150,14 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         Ok(Decision::Promote(promotion)) => (states_named(&promotion.record), None),
         Ok(Decision::Unchanged(record)) => (states_named(&record), None),
         Err(refusal) => (Vec::new(), Some(refusal.finding)),
+    };
+    // `nyl promote` refuses a state chosen over a newer one it could not read.
+    let (selected, refusal) = match selected.first() {
+        Some(chosen) => match promote::passed_over(&read_units, &history, &Selection::Newest, chosen) {
+            Some(finding) => (Vec::new(), Some(finding)),
+            None => (selected, refusal),
+        },
+        None => (selected, refusal),
     };
     let current = path.name().ok().and_then(|name| records.get(&name));
     let promoted = current.map(states_named).unwrap_or_default();

@@ -284,6 +284,16 @@ impl Driver for TestDriver {
         }
         schemars::json_schema!({})
     }
+    /// Kind `Typed` publishes an artifact `image` with a string `reference`
+    /// and an integer `size`.
+    fn artifact_schema(&self, _spec: &Value, artifact: &str) -> Option<schemars::Schema> {
+        (self.kind == "Typed" && artifact == "image").then(|| {
+            schemars::json_schema!({
+                "type": "object", "additionalProperties": false,
+                "properties": {"reference": {"type": "string"}, "size": {"type": "integer"}}
+            })
+        })
+    }
     /// Kind `Built` builds from the Git source field `/source`.
     fn source_fields(&self, _spec: &Value) -> Vec<String> {
         if self.kind == "Built" {

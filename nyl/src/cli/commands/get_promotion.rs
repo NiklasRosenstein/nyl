@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use clap::Args;
 use nyl_core::orchestration::codes::Finding;
 use nyl_core::orchestration::ids::EnvironmentName;
-use nyl_orchestration::shell::promote::source_location;
+use nyl_orchestration::shell::promote::{source_location, TargetSources};
 use nyl_orchestration::shell::promotion_inspect::{self, CandidatesRequest};
 use nyl_render::gitops::discover_gitops_inventory;
 use nyl_render::Result;
@@ -117,7 +117,7 @@ pub fn candidates(args: &GetCandidatesArgs, wiring: &Wiring<'_>) -> Result<Comma
     // would be judged by rules it does not satisfy.
     let prepared = session
         .check_promotion_paths(wiring)
-        .and_then(|_| target_view(&session, wiring.drivers, &path))
+        .and_then(|_| target_view(&session, &path))
         .and_then(|view| {
             let source = EnvironmentName::new(&source).map_err(|error| {
                 Finding::new(
@@ -141,13 +141,21 @@ pub fn candidates(args: &GetCandidatesArgs, wiring: &Wiring<'_>) -> Result<Comma
         Err(finding) => return Ok(failed(&finding)),
     };
     let store = session.store(None)?;
+    let sources = session.sources()?;
+    let renderer = session.renderer();
+    let workspace = tempfile::TempDir::new()?;
     let report = promotion_inspect::candidates(
         &store,
         &CandidatesRequest {
             path: &path,
             target: (&session.resolved.name, &session.resolved.location),
             source: (&source, source_location),
-            target_units: &view.target_units,
+            entry_units: &view.entry_units,
+            target_sources: TargetSources {
+                sources: &sources,
+                renderer: &renderer,
+                workspace: workspace.path(),
+            },
             promotes_source: view.promotes_source,
             promoted: view.promoted.as_ref(),
             now: wiring.clock.now(),
