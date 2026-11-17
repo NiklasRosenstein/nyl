@@ -337,9 +337,15 @@ signer chose, so they do not stop a signer who backdates a commit. To
 withdraw a key, remove it from the file, or list it in a revocation file
 your Git configuration names (<code dir="auto">gpg.ssh.revocationFile</code>), which
 <code dir="auto">verify-commit</code> honours.</li>
-<li><strong>Trust root.</strong> Anyone who can change the allowed signers file can change
-whom a run trusts, so review it like the branch itself. Nyl never turns
-this on by itself; without <code dir="auto">verify</code> the state check above applies.</li>
+<li><strong>Only as strong as your branch protection.</strong> A run reads the <code dir="auto">verify</code>
+setting and the allowed signers file from the same commit it checks.
+Anyone who can push to that branch can add their own key to the file, or
+point <code dir="auto">verify</code> at another file, and then sign a block of their choosing.
+So <code dir="auto">verify</code> is only as strong as the protection on the branch: protect the
+Environment’s file and the allowed signers file (for example with
+required reviews and a CODEOWNERS entry), or keep the default state check.
+Nyl never turns <code dir="auto">verify</code> on by itself; without it the state check above
+applies.</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="how-a-promotion-reads-the-source">How a promotion reads the source</h2><a class="sl-anchor-link" href="#how-a-promotion-reads-the-source"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “How a promotion reads the source”</span></a></div>
 <p><code dir="auto">nyl promote</code> reads the source environment’s state history in Git: the desired
