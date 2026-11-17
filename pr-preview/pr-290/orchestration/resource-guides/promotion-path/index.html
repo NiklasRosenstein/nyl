@@ -78,14 +78,15 @@ environment declare passes). <code dir="auto">attestations</code> replaces the r
 scope, or adds requirements at <code dir="auto">published</code>; <code dir="auto">maxAttestationAge</code> makes older
 attestations not count.</li>
 <li><code dir="auto">verifyArtifacts</code> (default <code dir="auto">true</code>) checks that promoted artifacts still exist
-before a record is written. <code dir="auto">coverage</code> narrows which Applications count toward
-a source promotion’s publication attestations (<code dir="auto">applicationGroups</code>,
-<code dir="auto">excludeApplications</code>) and adds Applications that must meet them without
-contributing values (<code dir="auto">requireApplications</code>); see
-<a href="/nyl/pr-preview/pr-290/orchestration/promotion/#coverage">Coverage</a>.</li>
+before a record is written. <code dir="auto">coverage</code> is keyed by a unit that runs as
+several deployments, such as a KubernetesPublication: per unit, it narrows
+which deployments count toward its running-scoped attestations (<code dir="auto">groups</code>,
+<code dir="auto">exclude</code>) and adds deployments that must meet them without contributing
+values (<code dir="auto">require</code>). <code dir="auto">nyl validate</code> checks each name against what the unit
+runs; see <a href="/nyl/pr-preview/pr-290/orchestration/promotion/#coverage">Coverage</a>.</li>
 <li>A path whose target does not take its source from it promotes values only:
 a value selected as a publication’s Release input comes from the state its
-Release’s Application runs; see
+Release’s deployment runs; see
 <a href="/nyl/pr-preview/pr-290/orchestration/promotion/#value-only-paths">Value-only paths</a>.</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="selecting-values">Selecting values</h2><a class="sl-anchor-link" href="#selecting-values"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Selecting values”</span></a></div>
@@ -157,7 +158,19 @@ environment. Every finding has a stable code and a fix:</p>
 
 
 
-<table><thead><tr><th>Code</th><th>Reported when</th></tr></thead><tbody><tr><td><code dir="auto">NYL-PROMOTE-ENVIRONMENT-UNKNOWN</code></td><td><code dir="auto">from</code> or <code dir="auto">to</code> is not a declared Environment (an instance of a template is not one)</td></tr><tr><td><code dir="auto">NYL-PROMOTE-SELECTOR-UNIT</code></td><td>A selector, or an <code dir="auto">attestations</code> scope, names a unit the source environment does not select or the path does not cover</td></tr><tr><td><code dir="auto">NYL-PROMOTE-SELECTOR-INVALID</code></td><td>A pointer resolves neither in the unit’s rendered spec nor in its kind’s schema, or an output is undeclared or <code dir="auto">sensitive</code></td></tr><tr><td><code dir="auto">NYL-PROMOTE-VALUE-TYPE</code></td><td>A value’s type does not fit a unit field that reads it</td></tr><tr><td><code dir="auto">NYL-PROMOTE-BINDING-UNKNOWN</code></td><td>A <code dir="auto">fromPromotion</code> binding names a path or value no path declares</td></tr><tr><td><code dir="auto">NYL-ATTESTATION-UNDECLARED</code></td><td>The path requires an attestation its unit or environment scope does not declare</td></tr><tr><td><code dir="auto">NYL-PROMOTE-UNSUPPORTED</code></td><td><code dir="auto">changeGate: pullRequest</code>, or a DeploymentTarget in <code dir="auto">from</code> or <code dir="auto">to</code>: both arrive with M11</td></tr></tbody></table>
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Code</th><th>Reported when</th></tr></thead><tbody><tr><td><code dir="auto">NYL-PROMOTE-ENVIRONMENT-UNKNOWN</code></td><td><code dir="auto">from</code> or <code dir="auto">to</code> is not a declared Environment (an instance of a template is not one)</td></tr><tr><td><code dir="auto">NYL-PROMOTE-SELECTOR-UNIT</code></td><td>A selector, or an <code dir="auto">attestations</code> scope, names a unit the source environment does not select or the path does not cover</td></tr><tr><td><code dir="auto">NYL-PROMOTE-SELECTOR-INVALID</code></td><td>A pointer resolves neither in the unit’s rendered spec nor in its kind’s schema, or an output is undeclared or <code dir="auto">sensitive</code></td></tr><tr><td><code dir="auto">NYL-PROMOTE-VALUE-TYPE</code></td><td>A value’s type does not fit a unit field that reads it</td></tr><tr><td><code dir="auto">NYL-PROMOTE-BINDING-UNKNOWN</code></td><td>A <code dir="auto">fromPromotion</code> binding names a path or value no path declares</td></tr><tr><td><code dir="auto">NYL-ATTESTATION-UNDECLARED</code></td><td>The path requires an attestation its unit or environment scope does not declare</td></tr><tr><td><code dir="auto">NYL-PROMOTE-COVERAGE-UNKNOWN</code></td><td><code dir="auto">coverage</code> names a unit the source does not declare, select, or enable, a unit whose kind runs no deployments, or a group or deployment the unit does not run; the message lists the names it has</td></tr><tr><td><code dir="auto">NYL-PROMOTE-COVERAGE-INEFFECTIVE</code></td><td>A path that promotes only values sets a unit’s <code dir="auto">groups</code>, which only a source path uses, or the unit records nothing per deployment (a KubernetesPublication without <code dir="auto">observe</code>)</td></tr><tr><td><code dir="auto">NYL-PROMOTE-COVERAGE-UNCHECKED</code></td><td>A coverage unit’s deployments cannot be listed, such as when its target does not render; an error in <code dir="auto">nyl validate</code>, a warning in <code dir="auto">plan</code>, <code dir="auto">reconcile</code>, <code dir="auto">promote</code>, and <code dir="auto">get promotion-candidates</code></td></tr><tr><td><code dir="auto">NYL-PROMOTE-UNSUPPORTED</code></td><td><code dir="auto">changeGate: pullRequest</code>, or a DeploymentTarget in <code dir="auto">from</code> or <code dir="auto">to</code>: both arrive with M11</td></tr></tbody></table>
 <p>Types are compared when both sides are known: what a selector reads (a rendered
 literal, a declared output’s type, or the kind’s schema at the pointer) against
 the field a unit’s <code dir="auto">fromPromotion</code> binding replaces. A Release input’s declared

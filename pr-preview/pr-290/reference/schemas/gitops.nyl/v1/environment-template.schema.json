@@ -366,7 +366,7 @@
           "type": "string"
         },
         "details": {
-          "description": "The driver's details, such as each Application's running publication and health."
+          "description": "The driver's details, such as each deployment's running publication and health."
         },
         "name": {
           "description": "The attestation's name.",
@@ -814,12 +814,15 @@
           "$ref": "#/$defs/PromotionEvidence",
           "description": "The evidence the promotion rested on."
         },
-        "excludedApplications": {
-          "description": "The path's `coverage.excludeApplications` at promotion time.",
-          "items": {
-            "type": "string"
+        "excludedDeployments": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
-          "type": "array"
+          "description": "The deployments the path's `coverage` excluded at promotion time,\nby unit: each unit's `exclude`, sorted, each name once. Units with\nnone are left out, so an empty map says nothing was excluded.",
+          "type": "object"
         },
         "from": {
           "$ref": "#/$defs/PromotionFrom",
@@ -879,7 +882,7 @@
         "values",
         "evidence",
         "ignoredAttestations",
-        "excludedApplications",
+        "excludedDeployments",
         "superseded",
         "artifactsVerified",
         "requested"
