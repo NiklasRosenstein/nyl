@@ -123,3 +123,9 @@ id = "a96f7920-876f-4f46-b0d4-f358aeff08a5"
 type = "feature"
 description = "`nyl status` warns with `NYL-ATTESTATION-FAILED` and the attestation's reason for every attestation that fails for what the environment runs: a unit's for its current receipt and an environment-wide one for the current state. `nyl plan` of an environment that two or more PromotionPaths promote into warns with `NYL-PROMOTE-UNCHECKED` for each value they both carry that has no known source commit, which the supersede check cannot compare"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "76b34f5f-effd-4e1b-b165-bdea559704ee"
+type = "fix"
+description = "Commands that render through the render cache, such as `nyl reconcile`, `publish-tree`, `render-tree`, and Helm chart renders, no longer read the whole `nyl` executable into memory to fingerprint it: they hash it in chunks, once per process, so peak memory no longer grows by the size of the binary (about 45 MB for a release build, several hundred megabytes for a debug build; `nyl reconcile` peaked at 310 MiB before and 37 MiB after). The fingerprint is unchanged, so existing cache entries are still reused"
+author = "@NiklasRosenstein"

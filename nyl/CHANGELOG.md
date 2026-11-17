@@ -188,13 +188,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Commands that render through the render cache, such as `nyl reconcile`,
-  `publish-tree`, `render-tree`, and Helm chart renders, no longer read the
-  whole `nyl` executable into memory to fingerprint it. They hash it in
-  small chunks, once per process, so peak memory no longer grows by the size
-  of the binary: about 45 MB for a release build and several hundred
-  megabytes for a debug build. The fingerprint is unchanged, so existing
-  cache entries are still reused.
 - A `nyl reconcile` or `nyl verify` refused before it held the lease, such as
   with `NYL-LEASE-HELD`, no longer prints an empty unit list and a run ID
   for a run that never started; the JSON report has no `run` either.
