@@ -187,8 +187,10 @@ codes! {
     PromotionRecordInvalid => "NYL-PROMOTION-RECORD-INVALID",
     /// The `record: source` block of an Environment whose `fromPromotion.verify` names an allowed signers file was last changed by a commit `git verify-commit` does not accept against it (unsigned, or signed by a key the file does not list), or its provenance cannot be read (an untracked or changed Environment file, a missing allowed signers file, a shallow history). Nothing ran. Exit 1.
     PromotionRecordUnsigned => "NYL-PROMOTION-RECORD-UNSIGNED",
-    /// `nyl promote` cannot commit or push a `record: source` block: the entry worktree has no branch checked out (detached HEAD), the branch has no upstream or commits its upstream lacks, the Environment's file is untracked or has uncommitted changes, the block cannot be placed in the Environment's own document, the Environment is not declared in a file (a template's instance), with `fromPromotion.verify` the commit would not be signed as a run requires (it is undone before the push), the remote refused the push for another reason than a moved branch (branch protection, a hook), or the push failed in a way that may have reached the remote. The message says whether anything was written; the fix is the cause's. Exit 1.
+    /// `nyl promote` cannot commit or push a `record: source` block: the entry worktree has no branch checked out (detached HEAD), the branch has no upstream or commits its upstream lacks, the Environment's file is untracked or has uncommitted changes, the block cannot be placed in the Environment's own document, the Environment is not declared in a file (a template's instance), with `fromPromotion.verify` the commit would not be signed as a run requires (it is undone before the push), the remote refused the push for another reason than a moved branch (branch protection, a hook), or the push never started because a configured Git credential cannot be used or `git` cannot run (the commit is undone). The message says whether anything was written; the fix is the cause's. Exit 1.
     PromoteSourceUnwritable => "NYL-PROMOTE-SOURCE-UNWRITABLE",
+    /// The push of a `record: source` commit failed without the remote refusing it, such as a network error after the upload, so it may or may not have reached the remote. The commit is kept on the local branch, and no marker was written into the target's state. Nothing is known to have failed: fetch the branch, check whether the commit reached the remote, and run `nyl promote` again, which writes only the marker when the pushed block is current, or promotes again. Exit 2.
+    PromoteSourceUncertain => "NYL-PROMOTE-SOURCE-UNCERTAIN",
     /// `nyl promote` pushed a `record: source` commit, but could not write its marker into the target's desired state, so the sequence is not reserved in state and `nyl get promotions` does not list the promotion. The promotion stands; running `nyl promote` again writes only the marker. Exit 1.
     PromoteMarkerUnwritten => "NYL-PROMOTE-MARKER-UNWRITTEN",
     /// The remote refused the fast-forward push of a `record: source` commit because the branch moved since the checkout (non-fast-forward). The commit was undone, so nothing was written; update the checkout and promote again. Exit 2.
@@ -257,23 +259,34 @@ codes! {
     /// A teardown proceeded, or would proceed, without everything removed:
     /// an unmet readiness requirement or an unconfirmed removal.
     TeardownIncomplete => "NYL-TEARDOWN-INCOMPLETE",
-    /// Teardown readiness: the catalog does not prune removed workload
-    /// Applications on its own, because it does not sync with pruning or its
-    /// `Prune` sync option waits for confirmation or skips them (blocking).
+    /// Teardown readiness (blocking): the target would not remove a
+    /// deployment that leaves it on its own. The KubernetesPublication
+    /// driver raises it when the catalog does not prune removed workload
+    /// Applications, because it does not sync with pruning or its `Prune`
+    /// sync option waits for confirmation or skips them. The code's name is
+    /// kept as released.
     TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
-    /// Teardown readiness: deleting an Application orphans its workloads (blocking).
+    /// Teardown readiness (blocking): removing a deployment would leave its
+    /// workloads running. The KubernetesPublication driver raises it when
+    /// deleting an Application orphans its workloads. The code's name is
+    /// kept as released.
     TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",
-    /// Teardown readiness: a resource a workload Application would delete,
-    /// whose own sync options or the Application's `syncPolicy.syncOptions`
-    /// resolve `Delete` or `Prune` to `confirm`, holds the Application's
-    /// finalizer until someone confirms the deletion in Argo CD (blocking).
-    /// An owned Namespace with the default `prunePolicy` or `deletePolicy`
-    /// of `Confirm` is the usual case.
+    /// Teardown readiness (blocking): a resource a deployment's removal
+    /// deletes waits for someone to confirm its deletion. The
+    /// KubernetesPublication driver raises it when a resource a workload
+    /// Application would delete, whose own sync options or the
+    /// Application's `syncPolicy.syncOptions` resolve `Delete` or `Prune` to
+    /// `confirm`, holds the Application's finalizer until someone confirms
+    /// the deletion in Argo CD; an owned Namespace with the default
+    /// `prunePolicy` or `deletePolicy` of `Confirm` is the usual case.
     TeardownNamespaceConfirm => "NYL-TEARDOWN-NAMESPACE-CONFIRM",
-    /// Teardown readiness: owned Namespaces remain after teardown (remnant).
+    /// Teardown readiness (remnant): resources the target owns remain after
+    /// teardown. The KubernetesPublication driver raises it for owned
+    /// Namespaces.
     TeardownNamespacesRemain => "NYL-TEARDOWN-NAMESPACES-REMAIN",
-    /// Teardown readiness: a self-managing catalog Application and its
-    /// AppProjects remain after teardown (remnant).
+    /// Teardown readiness (remnant): the target's own catalog remains after
+    /// teardown. The KubernetesPublication driver raises it for a
+    /// self-managing catalog Application and its AppProjects.
     TeardownCatalogRemains => "NYL-TEARDOWN-CATALOG-REMAINS",
     /// Teardown readiness: the unit's teardown waits for an operator to
     /// confirm the removal, so an unattended removal, such as the expiry of a

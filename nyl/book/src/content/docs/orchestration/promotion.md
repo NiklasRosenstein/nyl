@@ -339,12 +339,19 @@ spec:
   (`NYL-PROMOTE-SOURCE-UNWRITABLE` otherwise). Write
   `fromPromotion` in the Environment itself, in block style, one key per
   line; the rest of the file stays as written. A detached HEAD, a branch
-  ahead of its upstream, uncommitted changes to the Environment's file, or a
-  push the remote refuses for branch protection exit 1 with
+  ahead of its upstream, uncommitted changes to the Environment's file, a
+  push the remote refuses for branch protection, or a push that never
+  started (an unusable credential, a `git` that cannot run) exit 1 with
   `NYL-PROMOTE-SOURCE-UNWRITABLE`, each with its own fix. A push refused
   because the branch moved since the checkout writes nothing and exits 2
   with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout and promote again.
-  A promotion is never forced. The [command
+  A push that fails without a refusal, such as a network error, may have
+  reached the remote: the commit stays on the local branch, no marker is
+  written, since the record is not known to be published, and `nyl
+  promote` exits 2 with `NYL-PROMOTE-SOURCE-UNCERTAIN`. Fetch the branch,
+  check whether the commit arrived (push or drop it if not), and run it
+  again: the re-run finds the block `unchanged` and writes the marker, or
+  promotes again. A promotion is never forced. The [command
   page](/nyl/reference/cli/promote/#record-source) lists every case.
 - **Reading.** Every command that resolves prod (`plan`, `reconcile`,
   `build`, and the multi-environment runs) reads the block as the entry

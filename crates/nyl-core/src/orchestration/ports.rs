@@ -943,10 +943,19 @@ pub enum RecordWriteError {
     /// The remote refused the push for another reason, such as branch
     /// protection or a hook. The commit was undone.
     RemoteRejected(String),
+    /// The push never ran because a configured Git credential cannot be
+    /// used, such as an SSH key that cannot be written to a temporary file.
+    /// The commit was undone.
+    PushCredentials(String),
+    /// The push never ran because `git` could not be started. The commit was
+    /// undone.
+    PushNotRun(String),
     /// The push failed without saying whether the remote took it, such as a
-    /// network error after the upload. The commit is kept on the branch.
+    /// network error after the upload. The commit is kept on the branch, and
+    /// the shell writes no marker until a re-run finds the block published.
     PushUnknown { commit: String, message: String },
-    /// The push was refused, and the commit could not be undone.
+    /// The push was refused or never started, and the commit could not be
+    /// undone.
     UndoFailed { commit: String, message: String },
     /// The Environment trusts its block by signature (`verify`), and the
     /// promotion commit would not be trusted: signing is not configured, or
@@ -976,6 +985,8 @@ impl std::fmt::Display for RecordWriteError {
             | Self::Undeclared(message)
             | Self::Rejected(message)
             | Self::RemoteRejected(message)
+            | Self::PushCredentials(message)
+            | Self::PushNotRun(message)
             | Self::Unsigned(message)
             | Self::Failed(message) => formatter.write_str(message),
             Self::PushUnknown { commit, message } => {
@@ -983,7 +994,7 @@ impl std::fmt::Display for RecordWriteError {
             }
             Self::UndoFailed { commit, message } => write!(
                 formatter,
-                "the push was refused, and commit {commit} could not be undone in the entry worktree: {message}"
+                "the push was refused or never started, and commit {commit} could not be undone in the entry worktree: {message}"
             ),
         }
     }

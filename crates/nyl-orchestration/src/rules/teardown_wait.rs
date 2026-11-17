@@ -2,8 +2,8 @@
 //!
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 //! Teardown: `teardownWait` strategies `observe` (the driver reports that
-//! the workload Applications are gone within the unit's `timeout`, else
-//! uncertain with `applications-remain` or `observation-failed`), `delay`
+//! the deployments phase 1 removes are gone within the unit's `timeout`,
+//! else uncertain with `applications-remain` or `observation-failed`), `delay`
 //! (`duration` after the phase 1 commit, recorded as not observed), and
 //! `manual` (an operator's `--confirm-removed`; never keeps a run waiting).
 //! The driver reads the strategy and its defaults from the stored spec
@@ -83,9 +83,10 @@ pub enum WaitDecision {
 /// - `delay` completes as not observed at `since + duration`; before that
 ///   it polls, never past the deadline, and stops at the deadline (the wait
 ///   continues in a later run).
-/// - `observe` completes once the observer reports no workload
-///   Application, polls before the deadline, and is uncertain past it
-///   (`applications-remain`) or when the observation fails
+/// - `observe` completes once the driver reports that nothing phase 1
+///   removes remains, polls before the deadline, and is uncertain past it
+///   (`applications-remain`, a reason token kept as released, listing what
+///   the driver reports) or when the observation fails
 ///   (`observation-failed`).
 pub fn decide(inputs: &WaitInputs<'_>) -> WaitDecision {
     if let Some(signal) = inputs
@@ -128,18 +129,18 @@ pub fn decide(inputs: &WaitInputs<'_>) -> WaitDecision {
         }
         WaitStrategy::Observe => match inputs.observation {
             None => WaitDecision::Uncertain {
-                reason: "observation-failed: no Argo CD observation was made".to_owned(),
+                reason: "observation-failed: the driver made no removal observation".to_owned(),
             },
             Some(RemovalObservation::Failed(error)) => WaitDecision::Uncertain {
                 reason: format!("observation-failed: {error}"),
             },
-            Some(RemovalObservation::Remaining(applications)) if applications.is_empty() => {
+            Some(RemovalObservation::Remaining(remaining)) if remaining.is_empty() => {
                 WaitDecision::Complete(WaitCompletion::Observed)
             }
-            Some(RemovalObservation::Remaining(applications)) => {
+            Some(RemovalObservation::Remaining(remaining)) => {
                 if inputs.now >= inputs.deadline {
                     WaitDecision::Uncertain {
-                        reason: format!("applications-remain: {}", applications.join(", ")),
+                        reason: format!("applications-remain: {}", remaining.join(", ")),
                     }
                 } else {
                     poll(None)
@@ -165,7 +166,7 @@ mod tests {
 
     fn waiting() -> TeardownWaiting {
         TeardownWaiting {
-            phase: "applications-removed".to_owned(),
+            phase: "deployments-removed".to_owned(),
             reason: "phase 1 published".to_owned(),
             since: time(0),
             until: None,
@@ -314,7 +315,7 @@ mod tests {
         ));
     }
 
-    /// Catches observe completing while Applications remain, or waiting
+    /// Catches observe completing while deployments remain, or waiting
     /// forever when the observer cannot see them.
     #[test]
     fn test_observe_completes_on_removal_and_is_uncertain_otherwise() {
@@ -335,11 +336,11 @@ mod tests {
                 reason: "applications-remain: web, api".to_owned()
             }
         );
-        let failed = RemovalObservation::Failed("no credentials for the Argo CD cluster".to_owned());
+        let failed = RemovalObservation::Failed("no credentials for the reconciler".to_owned());
         assert_eq!(
             decide(&inputs(WaitStrategy::Observe, &waiting, 10, Some(&failed))),
             WaitDecision::Uncertain {
-                reason: "observation-failed: no credentials for the Argo CD cluster".to_owned()
+                reason: "observation-failed: no credentials for the reconciler".to_owned()
             }
         );
     }

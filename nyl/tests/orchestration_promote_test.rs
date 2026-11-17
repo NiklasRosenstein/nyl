@@ -1056,6 +1056,18 @@ fn test_writer_outcomes_map_to_codes_and_exits() {
             Code::PromoteSourceUnwritable,
             "commit or discard",
         ),
+        (
+            RecordWriteError::PushCredentials("git.credentials reads an unusable key".to_owned()),
+            1,
+            Code::PromoteSourceUnwritable,
+            "[[git.credentials]]",
+        ),
+        (
+            RecordWriteError::PushNotRun("failed to run git".to_owned()),
+            1,
+            Code::PromoteSourceUnwritable,
+            "make sure `git` is installed",
+        ),
     ];
     for (error, exit, code, fix) in cases {
         let writer = FakeWriter::answering(Some(error.clone()));
@@ -1291,6 +1303,46 @@ fn test_a_rerun_writes_the_missing_marker() {
     let again = harness.promote(&["dev-to-prod"]);
     assert_eq!(again.exit, 0, "{}", again.stderr);
     assert_eq!(harness.shell.tip(PROD_DESIRED), marker);
+}
+
+/// A push that fails without a refusal may have reached the remote:
+/// `NYL-PROMOTE-SOURCE-UNCERTAIN`, exit 2 (nothing is known to have
+/// failed), with the fix to fetch, check, and promote again; the outcome is
+/// `refused` with no source commit reported, and no marker is written,
+/// since the record is not known to be published. The re-run that writes
+/// the marker once the block is pushed is
+/// `test_a_rerun_writes_the_missing_marker`. Catches an uncertain push
+/// reported as a failure, or as written, and a marker for a record that
+/// may not exist.
+#[test]
+fn test_an_uncertain_push_writes_no_marker() {
+    use nyl_core::orchestration::codes::Code;
+    use nyl_core::orchestration::ports::RecordWriteError;
+    let harness = Promote::of(&record_source_environments(), &format!("{UNITS}{BINDER}"), true);
+    let prod_desired = harness.shell.tip(PROD_DESIRED);
+    let writer = FakeWriter::answering(Some(RecordWriteError::PushUnknown {
+        commit: "c".repeat(40),
+        message: "connection reset".to_owned(),
+    }));
+    let report = promote_with(&harness, Some(&writer), false);
+    assert_eq!(report.exit, 2, "{report:?}");
+    assert_eq!(report.outcome, nyl_orchestration::report::Outcome::Refused);
+    assert!(!report.commits.contains_key("source"), "{report:?}");
+    let error = &report.errors[0];
+    assert_eq!(error.code, Code::PromoteSourceUncertain);
+    assert!(error.message.contains("no marker was written"), "{}", error.message);
+    assert!(error.message.contains(&"c".repeat(40)), "{}", error.message);
+    for expected in [
+        "git fetch",
+        "reached the remote",
+        "nyl promote dev-to-prod",
+        &format!("git reset --keep {}~1", "c".repeat(40)),
+    ] {
+        assert!(error.fix.contains(expected), "{expected}: {}", error.fix);
+    }
+    assert_eq!(writer.calls(), ["commit"]);
+    assert_eq!(harness.shell.tip(PROD_DESIRED), prod_desired, "no marker");
+    assert!(harness.prod_lease_released());
 }
 
 /// After switching prod from `record: state` to `record: source`, the

@@ -87,8 +87,9 @@ except a moved branch:
 - a push the remote refuses for another reason, such as branch protection or
   a hook: the commit is undone; promoting through a pull request
   (`changeGate: pullRequest`) comes in a later milestone;
-- a push that fails without a refusal, such as a network error: the record
-  may have reached the remote, so the commit is kept; fetch and check.
+- a push that never started, because a `[[git.credentials]]` entry cannot
+  be used or `git` cannot run: the commit is undone; fix the credential or
+  the tool.
 
 A push refused because the branch moved since the checkout undoes the local
 commit and exits 2 with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout
@@ -96,6 +97,16 @@ commit and exits 2 with `NYL-PROMOTE-SOURCE-REJECTED`: update the checkout
 back only while it still points at the promotion commit, and restores the
 file only while it holds what was written; an undo that cannot finish is
 reported with the commit to drop.
+
+A push that fails without a refusal, such as a network error after the
+upload, may or may not have reached the remote. The commit stays on the
+local branch, no marker is written into the target's state, and the command
+exits 2 with `NYL-PROMOTE-SOURCE-UNCERTAIN`: nothing is known to have
+failed, and running it again is safe. Fetch the branch, check whether the
+commit reached the remote, and run `nyl promote <path>` again. When it did,
+the block is `unchanged` and only the marker is written; when it did not,
+push the commit (`git push`) or drop it (`git reset --keep <commit>~1`)
+first, since a branch ahead of its upstream is refused.
 
 ## Options
 
@@ -238,7 +249,7 @@ false`.
 | --- | --- |
 | 0 | The record was written, or the path's record already names the chosen state (`unchanged`), or the dry run found a promotion to make. |
 | 1 | A `record: source` commit was pushed but its marker in the target's state was not (`NYL-PROMOTE-MARKER-UNWRITTEN`; the promotion stands, run the command again). Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a shallow clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), a `record: source` block a run would refuse (`NYL-PROMOTION-RECORD-INVALID`, `NYL-PROMOTION-SEQUENCE-OLDER`), an unreadable commit or a `--supersede` entry that names none (`NYL-SOURCE-UNAVAILABLE`, also when a newer source state's commit cannot be checked out to read which units the target selects), or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
-| 2 | Nothing was written because evidence is missing, stale, failing, or no longer describes what runs (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the promotion would drop commits another path promoted (`NYL-PROMOTE-SUPERSEDES`, see [Superseding](#superseding)), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
+| 2 | Nothing was written to the target's state because evidence is missing, stale, failing, or no longer describes what runs (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the promotion would drop commits another path promoted (`NYL-PROMOTE-SUPERSEDES`, see [Superseding](#superseding)), the target's lease is held (`NYL-LEASE-HELD`), the remote refused the push of a `record: source` commit because the branch moved (`NYL-PROMOTE-SOURCE-REJECTED`), or that push failed without a refusal and may have reached the remote (`NYL-PROMOTE-SOURCE-UNCERTAIN`; no marker was written, run the command again once you know). |
 
 Run [`nyl reconcile`](/nyl/reference/cli/reconcile/) on the target afterwards:
 an environment that takes its source from a promotion exits 2 with
