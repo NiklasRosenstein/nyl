@@ -145,6 +145,9 @@ pub struct RunContext<'a> {
     /// The terminal of a run waiting on a teardown, when stdin is one: Enter
     /// confirms the removal.
     pub prompt: Option<&'a dyn OperatorPrompt>,
+    /// Verifies the signature of a `record: source` block whose Environment
+    /// sets `fromPromotion.verify`; without it such a block is refused.
+    pub promotion_blocks: Option<&'a dyn nyl_core::orchestration::ports::PromotionBlockVerifier>,
 }
 
 /// Which operation runs on the shared run path.
@@ -890,7 +893,7 @@ impl<'r, 'a> Session<'r, 'a> {
                 .cloned()
             },
             &self.request.promotion_paths,
-            &self.request.entry,
+            (&self.request.entry, self.context.promotion_blocks),
             snapshot,
         )
     }

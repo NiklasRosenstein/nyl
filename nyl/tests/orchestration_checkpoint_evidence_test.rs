@@ -355,6 +355,7 @@ fn recover(harness: &Harness) -> StateOperationReport {
         commit_identity: Some(&harness.identity),
         progress: None,
         prompt: None,
+        promotion_blocks: None,
     };
     recover_environment(&context, &job.request)
 }

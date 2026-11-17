@@ -201,12 +201,20 @@ pub struct TransitionChanges {
     /// lease whose import changed nothing. Contract:
     /// [Runs and leases](../../../../design/orchestration-core.md#runs-and-leases), item 8.
     pub commit_unchanged: bool,
+    /// Write the desired side's commit even when no document changes, so
+    /// the transition's message is recorded in the desired history: the
+    /// marker `nyl promote` writes into the target's state when the record
+    /// itself is kept in source (`record: source`), whose `promote` summary
+    /// reserves its sequence and lists it in `nyl get promotions`. Contract:
+    /// [Promoting an environment's source](../../../../design/promotion.md#promoting-an-environments-source).
+    pub commit_unchanged_desired: bool,
 }
 
 impl TransitionChanges {
     pub fn is_empty(&self) -> bool {
         !self.clear
             && !self.commit_unchanged
+            && !self.commit_unchanged_desired
             && self.record.is_none()
             && self.environment.is_none()
             && self.desired.is_empty()
@@ -940,6 +948,11 @@ pub enum RecordWriteError {
     PushUnknown { commit: String, message: String },
     /// The push was refused, and the commit could not be undone.
     UndoFailed { commit: String, message: String },
+    /// The Environment trusts its block by signature (`verify`), and the
+    /// promotion commit would not be trusted: signing is not configured, or
+    /// the commit is not signed by a key the allowed signers file lists.
+    /// Nothing was pushed.
+    Unsigned(String),
     /// `git` failed otherwise.
     Failed(String),
 }
@@ -963,6 +976,7 @@ impl std::fmt::Display for RecordWriteError {
             | Self::Undeclared(message)
             | Self::Rejected(message)
             | Self::RemoteRejected(message)
+            | Self::Unsigned(message)
             | Self::Failed(message) => formatter.write_str(message),
             Self::PushUnknown { commit, message } => {
                 write!(formatter, "the push of commit {commit} failed, and may have reached the remote: {message}")
@@ -985,6 +999,48 @@ pub trait PromotionRecordWriter: Send + Sync {
     fn check(&self, record: &PromotionRecord) -> Result<(), RecordWriteError>;
     /// Commit `record` as the block with `message`, push it, and return the commit.
     fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError>;
+    /// Whether the block in the entry worktree is the one its branch's
+    /// upstream carries: a branch is checked out, it is not ahead of its
+    /// upstream, and the Environment's file is unchanged. A marker is
+    /// written for an existing block only then.
+    fn published(&self) -> Result<(), RecordWriteError>;
+}
+
+/// Why the signature on a `record: source` block cannot be trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockSignatureError {
+    /// The commit that last changed the block carries no signature, or one
+    /// `git verify-commit` does not accept against the allowed signers.
+    Untrusted { commit: CommitId, message: String },
+    /// The block's provenance cannot be read: the Environment's file is
+    /// untracked or has uncommitted changes, the allowed signers file is
+    /// missing, or `git` failed.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for BlockSignatureError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Untrusted { commit, message } => write!(
+                formatter,
+                "commit {commit}, which last changed the block, has no signature by an allowed signer: {message}"
+            ),
+            Self::Unreadable(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// Checks who changed an Environment's `record: source` block last, for
+/// `source.fromPromotion.verify` (Contract: [Promoting an environment's
+/// source](../../../../design/promotion.md#promoting-an-environments-source)):
+/// the commit of the entry clone that last changed the block, as the entry
+/// worktree declares it, must carry a signature `git verify-commit` accepts
+/// against the allowed signers file. The command line implements it with
+/// Git; a run without one cannot trust a block by its signature.
+pub trait PromotionBlockVerifier: Send + Sync {
+    /// Verify the block of Environment `environment` against the allowed
+    /// signers file at the project path `allowed_signers`; the signed commit.
+    fn verify_block(&self, environment: &str, allowed_signers: &str) -> Result<CommitId, BlockSignatureError>;
 }
 
 /// One unit as an environment's source renders it.

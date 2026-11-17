@@ -469,6 +469,17 @@
             "string",
             "null"
           ]
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotedVerify"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With `record: source`, how a run trusts a `promoted` block it has not applied yet. Without it, the run reads the source environment's state and checks the block against the state it names, which needs read access to that state. With it, the run verifies instead that the commit which last changed the block is signed by a key the project's allowed signers file lists, and trusts the block without reading the source's state."
         }
       },
       "type": "object"
@@ -583,6 +594,20 @@
       "required": [
         "value",
         "select"
+      ],
+      "type": "object"
+    },
+    "PromotedVerify": {
+      "additionalProperties": false,
+      "description": "How a run trusts a `record: source` block: by the signature on the commit\nthat last changed it.",
+      "properties": {
+        "allowedSigners": {
+          "description": "A Git `allowed_signers` file (the format of `gpg.ssh.allowedSignersFile`) listing the keys whose signature on the commit that last changed the block is trusted, as a local path relative to the `nyl.toml` directory or `/`-rooted at the Git worktree. `git verify-commit` checks the signature against it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "allowedSigners"
       ],
       "type": "object"
     },

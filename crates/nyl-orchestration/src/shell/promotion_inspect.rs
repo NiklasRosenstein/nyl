@@ -71,8 +71,12 @@ pub struct CandidatesRequest<'a> {
     pub path: &'a PromotionPath,
     pub target: (&'a EnvironmentName, &'a StateLocation),
     pub source: (&'a EnvironmentName, &'a StateLocation),
-    /// The units the target selects, as `nyl promote` takes them.
-    pub target_units: &'a BTreeSet<UnitName>,
+    /// The units the target's entry worktree selects, which count when the
+    /// target does not run the promoted commit ([`promote::target_units`]).
+    pub entry_units: &'a BTreeSet<UnitName>,
+    /// Where the target's definitions at each candidate's source commit are
+    /// read, as `nyl promote` reads them.
+    pub target_sources: promote::TargetSources<'a>,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
     /// The target's `source.fromPromotion` as the entry worktree declares
@@ -122,23 +126,45 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         },
     };
     let records = crate::rules::sources::recorded_promotions(&snapshot, request.promoted);
-    let input = PromotionInput {
-        path,
-        source,
-        history: &history,
-        target_units: request.target_units,
-        promotes_source: request.promotes_source,
-        consumers: &consumers,
-        target_records: &records,
-        sequence: 0,
-        now: request.now,
-        request: &ask,
-    };
-    let evaluations = promotion::evaluate(&input);
-    let (selected, refusal) = match promotion::decide(&input) {
+    macro_rules! input {
+        ($units:expr) => {
+            PromotionInput {
+                path,
+                source,
+                history: &history,
+                target_units: $units,
+                promotes_source: request.promotes_source,
+                consumers: &consumers,
+                target_records: &records,
+                sequence: 0,
+                now: request.now,
+                request: &ask,
+            }
+        };
+    }
+    // The same lazy reading `nyl promote` takes, so the state it selects is
+    // the one `nyl promote` would take; states older than that one whose
+    // commits were not read show why.
+    let (decision, read_units) = promote::settle_target_units(
+        &request.target_sources,
+        target,
+        (request.promotes_source, request.entry_units),
+        (&history, &Selection::Newest),
+        |units| promotion::decide(&input!(units)),
+    );
+    let evaluations = promotion::evaluate(&input!(&read_units.units));
+    let (selected, refusal) = match decision {
         Ok(Decision::Promote(promotion)) => (states_named(&promotion.record), None),
         Ok(Decision::Unchanged(record)) => (states_named(&record), None),
         Err(refusal) => (Vec::new(), Some(refusal.finding)),
+    };
+    // `nyl promote` refuses a state chosen over a newer one it could not read.
+    let (selected, refusal) = match selected.first() {
+        Some(chosen) => match promote::passed_over(&read_units, &history, &Selection::Newest, chosen) {
+            Some(finding) => (Vec::new(), Some(finding)),
+            None => (selected, refusal),
+        },
+        None => (selected, refusal),
     };
     let current = path.name().ok().and_then(|name| records.get(&name));
     let promoted = current.map(states_named).unwrap_or_default();

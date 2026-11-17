@@ -40,6 +40,12 @@ pub(crate) fn replace_document(
     Ok(output)
 }
 
+/// The byte offset in `contents` where document `document_index` (one-based)
+/// starts, which must read `expected`.
+pub(crate) fn document_start(contents: &str, document_index: usize, expected: &str) -> Result<usize> {
+    Ok(selected_range(contents, document_index, expected)?.content.start)
+}
+
 pub(crate) fn remove_document(contents: &str, document_index: usize, expected: &str) -> Result<String> {
     let ranges = document_ranges(contents);
     let range = selected_range_from(&ranges, contents, document_index, expected)?;

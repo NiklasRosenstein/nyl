@@ -131,7 +131,7 @@ pub fn prepare(
         // The records a run would read, refused and checked the same way.
         if let Some(effective) = &effective {
             promotions = super::promotion::environment_promotions(
-                &entry,
+                (&entry, &resolved.git_dir),
                 &super::project::InstanceRequest::default(),
                 &store,
                 &effective.environment,

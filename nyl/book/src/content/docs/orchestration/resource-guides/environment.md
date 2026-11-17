@@ -51,6 +51,36 @@ Runs check that commit against
 commit. An EnvironmentGroup supplies these fields when the Environment omits
 them. See [Runs](/nyl/orchestration/runs/#source-commit).
 
+## A promoted source
+
+With `source.fromPromotion`, the environment runs the source commit a
+[PromotionPath](/nyl/orchestration/resource-guides/promotion-path/) recorded
+into it (see [Promotion](/nyl/orchestration/promotion/)). `record: source`
+keeps that record in the Environment's own `promoted` block, which `nyl
+promote` writes. A run that first applies a new block checks it against the
+source environment's state, so the run needs read access to that state. To
+trust the block by who committed it instead, name a Git `allowed_signers`
+file, a local path of the project:
+
+```yaml
+spec:
+  source:
+    fromPromotion:
+      path: dev-to-prod
+      record: source
+      verify:
+        allowedSigners: .nyl/allowed_signers
+```
+
+The commit that last changed the block must then carry an SSH signature by
+a key the file lists, and the run reads nothing of the source's state; see
+[Trusting the block by its signature](/nyl/orchestration/promotion/#trusting-the-block-by-its-signature).
+`verify` is accepted only with `record: source`, and needs Git 2.34 or newer,
+OpenSSH 8.2 or newer (`ssh-keygen`), and a full (not shallow) clone on every
+runner that runs the environment or promotes into it. The setting and the
+allowed signers file are read from the commit being run, so `verify` is only
+as strong as the branch protection on both files.
+
 ## Drift repair
 
 [`nyl detect-drift`](/nyl/reference/cli/detect-drift/) records whether each unit's

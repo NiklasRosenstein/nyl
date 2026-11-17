@@ -45,7 +45,25 @@ Git configuration otherwise applies, so a configured commit signature signs
 it. The commit carries only the Environment's file and is pushed to the
 branch's upstream (`branch.<name>.remote` and `branch.<name>.merge`)
 fast-forward only; the push is never forced. The report lists the commit
-under `commits.source`, and nothing is written to the target's state. The
+under `commits.source`. After the push, under the target's lease, one
+marker commit goes into the target's desired state, listed under
+`commits.desired`: the same message, and no record file. It reserves the
+sequence and lists the promotion in
+[`nyl get promotions`](/nyl/reference/cli/get-promotions/#get-promotions),
+and runs read nothing from it. When the marker cannot be written, the
+promotion stands (the block was pushed): the report says `done`, and the
+command exits 1 with `NYL-PROMOTE-MARKER-UNWRITTEN`. Update the checkout
+and run it again: while the block still names the state it would promote,
+it is `unchanged` and only the marker is written, under the re-runner's
+`Nyl-Requested-By` and `Nyl-Reason` (if a newer state qualifies by then, it
+promotes that instead). A marker is written for an existing block only
+when the branch is not ahead of its upstream and the Environment's file is
+unchanged; otherwise `NYL-PROMOTE-SOURCE-UNWRITABLE`. With
+`source.fromPromotion.verify`, the commit must be signed with SSH by a key
+the allowed signers file lists: `nyl promote` (and `--dry-run`) checks that
+commit signing is configured, and verifies the new commit before the push,
+undoing it with `NYL-PROMOTE-SOURCE-UNWRITABLE` when a run would not trust
+it ([Trusting the block by its signature](/nyl/orchestration/promotion/#trusting-the-block-by-its-signature)). The
 block in the checkout is the path's current record for
 [Unchanged](#unchanged); records in state on that path never count. A block
 a run would refuse, invalid or older than what prod applied, refuses the
@@ -99,10 +117,21 @@ reported with the commit to drop.
 ## Which units the target selects
 
 The whole-source rule covers every unit the target environment also selects.
-`nyl promote` takes that set from the target as the entry worktree renders it
-now, not as it renders at each candidate state's source commit. A unit added to
-or removed from the target's selection in source that is not yet checked out is
-judged when the checkout has it.
+A target whose source is promoted along the path runs the chosen state's
+source commit, so `nyl promote` reads that set from the target's own
+definitions at each candidate state's source commit, whatever the entry
+worktree has checked out. It reads them newest state first and stops once
+the choice is settled: each source commit it needs is checked out and the
+target rendered there once, so promoting the newest state renders one
+commit, not one per recorded state. A commit at which the target's definitions do not
+render, such as one from before the target was declared, keeps its states
+out, and the refusal names why. So does a commit this clone cannot check out
+or fetch, such as one of a deleted branch; but when that passes over a state
+newer than the one `nyl promote` would take, the promotion is refused with
+`NYL-SOURCE-UNAVAILABLE` instead, so an unreadable commit never promotes an
+older state. A target that
+runs its own source, such as one that only binds promoted values, is judged
+by the units its entry worktree selects.
 
 ## Which state
 
@@ -202,16 +231,13 @@ false`.
 - `NYL-PROMOTE-UNCHECKED`: a value, or another path's record of it, has no
   known source commit, or a record's commit cannot be fetched, so the
   [supersede check](#superseding) cannot check it.
-- `NYL-PROMOTE-REBUILT`: the target builds a unit and also binds a value that
-  unit supplies, so one result is built and the other used. Only a target that
-  does both is warned about.
 
 ## Exit codes
 
 | Exit | When |
 | --- | --- |
 | 0 | The record was written, or the path's record already names the chosen state (`unchanged`), or the dry run found a promotion to make. |
-| 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a shallow clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), a `record: source` block a run would refuse (`NYL-PROMOTION-RECORD-INVALID`, `NYL-PROMOTION-SEQUENCE-OLDER`), an unreadable commit or a `--supersede` entry that names none, or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
+| 1 | A `record: source` commit was pushed but its marker in the target's state was not (`NYL-PROMOTE-MARKER-UNWRITTEN`; the promotion stands, run the command again). Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a shallow clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), a `record: source` block a run would refuse (`NYL-PROMOTION-RECORD-INVALID`, `NYL-PROMOTION-SEQUENCE-OLDER`), an unreadable commit or a `--supersede` entry that names none (`NYL-SOURCE-UNAVAILABLE`, also when a newer source state's commit cannot be checked out to read which units the target selects), or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
 | 2 | Nothing was written because evidence is missing, stale, failing, or no longer describes what runs (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the promotion would drop commits another path promoted (`NYL-PROMOTE-SUPERSEDES`, see [Superseding](#superseding)), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
 
 Run [`nyl reconcile`](/nyl/reference/cli/reconcile/) on the target afterwards:

@@ -447,7 +447,7 @@ fn read_environment(
                 "check access to the environment’s state",
             )
         })?;
-        super::promotion::environment_promotions(inventory, request, &store, &entry, &snapshot)?
+        super::promotion::environment_promotions((inventory, &resolved.git_dir), request, &store, &entry, &snapshot)?
     } else {
         BTreeMap::new()
     };

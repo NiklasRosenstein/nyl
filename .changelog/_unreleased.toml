@@ -49,7 +49,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "65f3ea0d-9a7c-433e-bf99-1c8f168436f5"
 type = "feature"
-description = "`nyl promote` checks that every artifact a promoted value reads still exists, through the producing driver's new `verify_artifact` capability (`docker buildx imagetools inspect` for `OciImage`), and refuses a missing one with `NYL-PROMOTE-ARTIFACT-MISSING`. `--no-verify-artifacts` and a path's `verifyArtifacts: false` skip the check and the record says `artifactsVerified: false`. A kind that cannot verify warns with `NYL-PROMOTE-ARTIFACT-UNVERIFIED`; a target that also selects a unit whose result a promoted value replaces warns with `NYL-PROMOTE-REBUILT`"
+description = "`nyl promote` checks that every artifact a promoted value reads still exists, through the producing driver's new `verify_artifact` capability (`docker buildx imagetools inspect` for `OciImage`), and refuses a missing one with `NYL-PROMOTE-ARTIFACT-MISSING`. `--no-verify-artifacts` and a path's `verifyArtifacts: false` skip the check and the record says `artifactsVerified: false`. A kind that cannot verify warns with `NYL-PROMOTE-ARTIFACT-UNVERIFIED`"
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -122,6 +122,30 @@ author = "@NiklasRosenstein"
 id = "a96f7920-876f-4f46-b0d4-f358aeff08a5"
 type = "feature"
 description = "`nyl status` warns with `NYL-ATTESTATION-FAILED` and the attestation's reason for every attestation that fails for what the environment runs: a unit's for its current receipt and an environment-wide one for the current state. `nyl plan` of an environment that two or more PromotionPaths promote into warns with `NYL-PROMOTE-UNCHECKED` for each value they both carry that has no known source commit, which the supersede check cannot compare"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "3b143c7b-d629-414e-8010-0a503b6a8cef"
+type = "feature"
+description = "`nyl promote` with `record: source` also writes one marker commit into the target's desired state, under the lease it already holds, after the source commit is pushed: the same `promote` summary and trailers a `record: state` promotion writes, without a record file. Sequences are now reserved across branches, and `nyl get promotions` lists `record: source` promotions in its history; `status` and the lineage are unchanged. When the marker cannot be written the promotion still stands, and the command exits 1 with `NYL-PROMOTE-MARKER-UNWRITTEN`; running `nyl promote` again from a checkout of the pushed commit finds the block `unchanged` and writes only the marker, under the re-runner's `Nyl-Requested-By` and `Nyl-Reason`, provided the branch is not ahead of its upstream"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "bd507c1e-8a77-465c-baf7-889008c69961"
+type = "feature"
+description = "`source.fromPromotion.verify: {allowedSigners: <path>}` on an Environment with `record: source` trusts a new `promoted` block by the SSH signature on the commit that last changed it (`git verify-commit` with `gpg.ssh.allowedSignersFile` set to the project's file) instead of reading the source environment's state. An unsigned commit, a signature by an unlisted key, an OpenPGP or X.509 signature, uncommitted changes to the Environment's file, or a missing, untracked, or uncommitted allowed signers file refuse with `NYL-PROMOTION-RECORD-UNSIGNED`. A shallow clone is refused, merges credit the side commit that changed the block, and it needs Git 2.34 and OpenSSH 8.2. `nyl promote` checks that SSH commit signing is configured (also with `--dry-run`) and verifies its commit before pushing. Without `verify`, a run still checks the block against the source's state, which needs read access to it. The setting and the allowed signers file are read from the commit being run, so `verify` is only as strong as the branch protection on both"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "fa516da3-0e20-4284-80c4-77b118c4feb2"
+type = "fix"
+description = "`nyl promote` and `nyl get promotion-candidates` judge a target whose source is promoted by the units its own definitions select at each candidate's source commit, the commit it would run, instead of at the checked-out entry worktree; the commits are read newest first and only until the choice is settled, so promoting the newest state renders one. A commit at which the target's definitions do not render keeps its states out (`target-source` in the candidates report)"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "eb59c3a1-c2f9-4ca9-80ce-edb3d981951f"
+type = "feature"
+description = "Promotion validation types a selector's pointer into an artifact through the producing kind's declaration of the artifact (`OciImage`'s `ContainerImage`: `repository`, `digest`, `reference`, `platforms`, `tags`): a pointer the artifact lacks, or an artifact name the kind does not publish, is `NYL-PROMOTE-SELECTOR-INVALID`, and its type must fit the bindings that read the value (`NYL-PROMOTE-VALUE-TYPE`)"
 author = "@NiklasRosenstein"
 
 [[entries]]

@@ -326,7 +326,7 @@ fn case(path: PromotionPath, history: Vec<StateBuilder>) -> Case {
 }
 
 impl Case {
-    fn input<'a>(&'a self, targets: &'a BTreeSet<UnitName>, source: &'a EnvironmentName) -> PromotionInput<'a> {
+    fn input<'a>(&'a self, targets: &'a TargetUnits, source: &'a EnvironmentName) -> PromotionInput<'a> {
         PromotionInput {
             path: &self.path,
             source,
@@ -342,7 +342,7 @@ impl Case {
     }
 
     fn run(&self) -> Result<Decision, Refusal> {
-        let targets = BTreeSet::from([name("web-image"), name("kubernetes")]);
+        let targets = TargetUnits::Fixed(BTreeSet::from([name("web-image"), name("kubernetes")]));
         let source = dev();
         decide(&self.input(&targets, &source))
     }
@@ -362,7 +362,7 @@ impl Case {
     }
 
     fn evaluations(&self) -> Vec<StateEvaluation> {
-        let targets = BTreeSet::from([name("web-image"), name("kubernetes")]);
+        let targets = TargetUnits::Fixed(BTreeSet::from([name("web-image"), name("kubernetes")]));
         let source = dev();
         evaluate(&self.input(&targets, &source))
     }
@@ -439,12 +439,55 @@ fn test_whole_source_covers_units_the_target_selects() {
         "{}",
         refusal.finding.message
     );
-    let targets = BTreeSet::from([name("web-image")]);
+    let targets = TargetUnits::Fixed(BTreeSet::from([name("web-image")]));
     let source = dev();
     assert!(matches!(
         decide(&case.input(&targets, &source)),
         Ok(Decision::Promote(_))
     ));
+}
+
+/// A target whose source is promoted runs each state's source commit, so
+/// its definitions there decide which units the whole-source rule covers:
+/// the newest state, whose commit no longer selects `kubernetes`, qualifies
+/// although `kubernetes` has no receipt in it, where the entry worktree's
+/// selection would have passed over it. A commit whose definitions do not
+/// render keeps its state out, naming why. Catches a stale checkout judging
+/// the promoted commit by another commit's units.
+#[test]
+fn test_the_target_units_come_from_each_states_source_commit() {
+    let history = vec![
+        state(2, 'b', "sha256:two").without_receipt("kubernetes"),
+        state(1, 'a', "sha256:one"),
+    ];
+    let case = case(published(), history);
+    let source = dev();
+    let both = BTreeSet::from([name("web-image"), name("kubernetes")]);
+    let at_source = |newest: Result<BTreeSet<UnitName>, String>| {
+        TargetUnits::AtSource(BTreeMap::from([(commit('b'), newest), (commit('a'), Ok(both.clone()))]))
+    };
+    let chosen = |targets: &TargetUnits| match decide(&case.input(targets, &source)) {
+        Ok(Decision::Promote(promotion)) => from_run(&promotion.record),
+        other => panic!("expected a promotion: {other:?}"),
+    };
+    assert_eq!(chosen(&TargetUnits::Fixed(both.clone())), run_id(1).to_string());
+    assert_eq!(
+        chosen(&at_source(Ok(BTreeSet::from([name("web-image")])))),
+        run_id(2).to_string()
+    );
+    let unrenderable = at_source(Err("Environment prod is not declared".to_owned()));
+    assert_eq!(chosen(&unrenderable), run_id(1).to_string());
+    let evaluations = evaluate(&case.input(&unrenderable, &source));
+    let gap = evaluations[0]
+        .gaps
+        .iter()
+        .find(|gap| gap.kind == GapKind::TargetSource)
+        .expect("a target-source gap");
+    assert!(
+        gap.message.contains("Environment prod is not declared"),
+        "{}",
+        gap.message
+    );
 }
 
 /// At `attested`, an environment attestation nobody recorded is missing
@@ -1668,7 +1711,7 @@ fn test_a_failed_newest_run_keeps_the_observed_receipt_current() {
     // publication attestations count for it.
     let mut source = case(path_without_values(), Vec::new());
     source.history = values.history.clone();
-    let targets = BTreeSet::from([name("kubernetes")]);
+    let targets = TargetUnits::Fixed(BTreeSet::from([name("kubernetes")]));
     let dev = dev();
     let mut input = source.input(&targets, &dev);
     input.path = &source.path;
@@ -1799,7 +1842,7 @@ fn test_a_removed_publication_leaves_no_current_receipt() {
             .observed(Pass, "p1", &both)
             .build(),
     ];
-    let targets = BTreeSet::from([name("web-image"), name("kubernetes")]);
+    let targets = TargetUnits::Fixed(BTreeSet::from([name("web-image"), name("kubernetes")]));
     let dev = dev();
     let evaluations = evaluate(&removed.input(&targets, &dev));
     assert!(

@@ -66,10 +66,10 @@
 //! [`Driver::running_attestations`]: nyl_core::orchestration::driver::Driver::running_attestations
 //! [`DeploymentVerdict`]: nyl_core::orchestration::driver::DeploymentVerdict
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::orchestration::driver::{DeploymentRuns, DeploymentVerdict};
-use nyl_core::orchestration::ids::UnitName;
+use nyl_core::orchestration::ids::{CommitId, UnitName};
 use nyl_core::orchestration::promotion::EvidenceLevel;
 use nyl_core::orchestration::state::{Attestation, AttestationResult, DesiredUnit, Receipt};
 use nyl_core::orchestration::time::Timestamp;
@@ -105,6 +105,46 @@ pub enum GapKind {
     /// current receipt lists, or leaves no deployment to judge while the
     /// attestation fails.
     Coverage,
+    /// The target runs the state's source commit, and its definitions there
+    /// cannot be read (the commit cannot be checked out) or rendered: which
+    /// units it would select is unknown ([`TargetUnits::AtSource`]).
+    TargetSource,
+}
+
+/// The units the target environment selects, which the whole-source rule
+/// covers. Contract: [Promoting an environment's source](../../../../../design/promotion.md#promoting-an-environments-source),
+/// "Evidence covers the whole source".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetUnits {
+    /// The target does not run the promoted commit (its source is not
+    /// promoted along the path): the units its entry worktree selects.
+    Fixed(BTreeSet<UnitName>),
+    /// The target runs the promoted source commit, so its definitions at
+    /// that commit decide which units it selects: per source commit, those
+    /// units, or why the target's definitions there do not render. The
+    /// shell renders each candidate's commit once ([`crate::shell::promote::target_units`]).
+    AtSource(BTreeMap<CommitId, Result<BTreeSet<UnitName>, String>>),
+}
+
+impl TargetUnits {
+    /// The units the target selects when it runs `state`, or why they are unknown.
+    pub fn of(&self, state: &RecordedState) -> Result<&BTreeSet<UnitName>, String> {
+        match self {
+            Self::Fixed(units) => Ok(units),
+            Self::AtSource(by_commit) => {
+                let commit = state
+                    .source_commit()
+                    .ok_or_else(|| "the state records no source commit".to_owned())?;
+                match by_commit.get(commit) {
+                    Some(Ok(units)) => Ok(units),
+                    Some(Err(reason)) => Err(reason.clone()),
+                    None => Err(format!(
+                        "its definitions at source commit {commit} were not read, because a newer state settles what `nyl promote` takes; name the state with `--state-revision` to judge it"
+                    )),
+                }
+            }
+        }
+    }
 }
 
 /// One reason a state does not reach a level.
@@ -161,7 +201,7 @@ pub(super) struct Context<'a> {
     pub spec: &'a PromotionPathSpec,
     pub now: Timestamp,
     /// The units the target environment also selects.
-    pub target_units: &'a BTreeSet<UnitName>,
+    pub target_units: &'a TargetUnits,
     /// The units the path's value selectors read.
     pub value_units: &'a BTreeSet<UnitName>,
     pub ignores: &'a [IgnoreRequest],
@@ -434,13 +474,25 @@ pub(super) fn judge(
     let desired = &state.snapshot.desired;
     // The units whose receipts and required attestations count.
     let covered: BTreeSet<UnitName> = match subject {
-        Subject::Source => ctx
-            .target_units
-            .iter()
-            .filter(|unit| desired.contains_key(*unit))
-            .chain(ctx.value_units)
-            .cloned()
-            .collect(),
+        Subject::Source => match ctx.target_units.of(state) {
+            Ok(units) => units
+                .iter()
+                .filter(|unit| desired.contains_key(*unit))
+                .chain(ctx.value_units)
+                .cloned()
+                .collect(),
+            Err(reason) => {
+                verdict.gap(
+                    ENVIRONMENT_SCOPE,
+                    None,
+                    GapKind::TargetSource,
+                    format!(
+                        "the target runs this state's source commit, but cannot tell which units it selects there: {reason}"
+                    ),
+                );
+                ctx.value_units.clone()
+            }
+        },
         Subject::Units(units) => (*units).clone(),
         Subject::Value { unit, .. } => BTreeSet::from([(*unit).clone()]),
     };

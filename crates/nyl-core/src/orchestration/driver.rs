@@ -816,6 +816,17 @@ pub struct LocalPathField {
     pub defaults_to_project_dir: bool,
 }
 
+/// What a kind declares about one of its artifacts ([`Driver::artifact_schema`]).
+#[derive(Debug, Clone)]
+pub enum ArtifactSchema {
+    /// The kind does not describe its artifacts: anything may be there.
+    Undescribed,
+    /// The kind publishes no artifact of that name.
+    NoSuchArtifact,
+    /// The JSON Schema of the artifact's `spec`.
+    Described(schemars::Schema),
+}
+
 /// One unit kind. Built-in drivers implement it in Rust; methods for
 /// capabilities a kind lacks return [`Supported::Unsupported`].
 pub trait Driver: Send + Sync {
@@ -834,6 +845,17 @@ pub trait Driver: Send + Sync {
     fn recovery(&self, spec: &Value) -> RecoveryPolicies;
     /// The kind's own fields; Nyl adds the common ones.
     fn spec_schema(&self) -> schemars::Schema;
+    /// What the kind declares about the `spec` of the artifact named
+    /// `artifact` that a receipt of `spec` lists: its JSON Schema, that it
+    /// publishes no such artifact, or nothing ([`ArtifactSchema::Undescribed`],
+    /// the default). Promotion validation reads it to type a selector's
+    /// `pointer` into the artifact (`{unit, artifact, pointer}`) before any
+    /// receipt exists, so the engine never names an artifact kind or its
+    /// fields. Contract: [PromotionPath](../../../../design/promotion.md#promotionpath).
+    fn artifact_schema(&self, spec: &Value, artifact: &str) -> ArtifactSchema {
+        let _ = (spec, artifact);
+        ArtifactSchema::Undescribed
+    }
     /// Parse and validate a rendered spec, references still as expressions.
     fn validate_spec(&self, spec: &Value) -> std::result::Result<(), String>;
     /// Provider keys explicitly declared by this spec for driver credentials.

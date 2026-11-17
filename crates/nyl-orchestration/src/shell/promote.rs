@@ -27,23 +27,34 @@
 //!   commit holding the record and a summary. The source is only read, and
 //!   its lease never taken. `--dry-run` takes no lease and writes nothing.
 //! - **`record: source`.** A path that promotes the source of a target with
-//!   `record: source` writes no state: the record becomes the target
-//!   Environment's `source.fromPromotion.promoted` block, one commit on the
-//!   branch the entry worktree has checked out with the same message a
-//!   transition commit would carry, pushed fast-forward only through a
-//!   [`PromotionRecordWriter`] (decision D3 of the M6 plan). The block in the
-//!   entry worktree is the path's current record for `unchanged` (D2), and
-//!   its sequence counts for the next one. A detached HEAD and a refused
-//!   push write nothing ([`writer_finding`]).
+//!   `record: source` writes the record as the target Environment's
+//!   `source.fromPromotion.promoted` block, one commit on the branch the
+//!   entry worktree has checked out with the same message a transition
+//!   commit would carry, pushed fast-forward only through a
+//!   [`PromotionRecordWriter`] (decision D3 of the M6 plan). Then, under the
+//!   same lease, it writes a marker into the target's desired state: that
+//!   message, and no record file ([`write_marker`]), which reserves the
+//!   sequence and lists the promotion in the target's history. A marker that
+//!   fails after the push leaves the promotion standing
+//!   (`NYL-PROMOTE-MARKER-UNWRITTEN`), and the next `nyl promote`, finding
+//!   the block `unchanged`, writes it. The block in the entry worktree is
+//!   the path's current record for `unchanged` (D2), and its sequence counts
+//!   for the next one. A detached HEAD and a refused push write nothing
+//!   ([`writer_finding`]).
+//! - **Target units.** A target whose source the path promotes selects its
+//!   units as its definitions at each candidate's source commit say
+//!   ([`target_units`]), not as the entry worktree has them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ArtifactStatus, DriverSet, Supported, VerificationContext};
-use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress};
+use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitAddress, UnitName};
 use nyl_core::orchestration::ports::{
-    EnvironmentSnapshot, LogEntry, PromotionRecordWriter, RecordWriteError, SourceRepository, StateHistory, StateStore,
-    StateTips, TransitionChanges,
+    BlockSignatureError, EnvironmentSnapshot, LogEntry, PromotionBlockVerifier, PromotionRecordWriter,
+    RecordWriteError, SourceRenderer, SourceRepository, SourceResolver, StateHistory, StateStore, StateTips,
+    TransitionChanges,
 };
 use nyl_core::orchestration::promotion::{PromotedState, PromotionFrom, PromotionRecord, PromotionRequest};
 use nyl_core::orchestration::state::{Operation, StateLocation};
@@ -60,7 +71,7 @@ use crate::rules::freshness::receipt_is_current;
 use crate::rules::promotion::supersede::{self, Item, RecordCommits, SupersedeEntry, SupersedeRequest};
 use crate::rules::promotion::{
     self, recorded_states, ArtifactCheck, Decision, DesiredEntry, IgnoreRequest, PromotionInput, RecordedState,
-    Refusal, Request, Selection, StateAttestations, UnitRunning,
+    Refusal, Request, Selection, StateAttestations, TargetUnits, UnitRunning,
 };
 use crate::transition::{trailer, Trailers, TransitionSummary};
 
@@ -86,12 +97,12 @@ pub struct PromoteOptions {
     /// unless `--no-verify-artifacts`.
     pub verify_artifacts: bool,
     pub dry_run: bool,
-    /// The units the target environment also selects, as its entry worktree
-    /// renders them (not at each candidate's source commit).
-    pub target_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
-    /// `NYL-PROMOTE-REBUILT` warnings by value name
-    /// ([`crate::rules::promotion_paths::rebuilt`]).
-    pub rebuilt: Vec<(String, Finding)>,
+    /// The units the target environment selects as its entry worktree
+    /// renders them: what the whole-source rule covers when the target does
+    /// not run the promoted commit. A target whose source is promoted along
+    /// the path selects its units as each candidate's source commit says
+    /// ([`target_units`]).
+    pub entry_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
     /// The target's `source.fromPromotion` as the entry worktree declares
@@ -271,27 +282,73 @@ fn body(
         .and_then(|promoted| promoted.promoted.as_ref())
         .map(|block| block.sequence);
     let history_sequence = next_sequence(&target_history, &snapshot, target, block_sequence);
-    let input = PromotionInput {
-        path: &path,
-        source,
-        history: &history,
-        target_units: &options.target_units,
-        promotes_source: options.promotes_source,
-        consumers: &consumers,
-        target_records: &target_records,
-        sequence: history_sequence,
-        now: base.clock.now(),
-        request: &Request {
-            select: options.select.clone(),
-            evidence_published: options.evidence_published,
-            ignore: options.ignore.clone(),
-            requested: options.requested.clone(),
-        },
+    let ask = Request {
+        select: options.select.clone(),
+        evidence_published: options.evidence_published,
+        ignore: options.ignore.clone(),
+        requested: options.requested.clone(),
     };
-    let decision = promotion::decide(&input).map_err(|refusal| refusal_finding(&refusal, report))?;
+    let now = base.clock.now();
+    let (decision, read_units) = settle_target_units(
+        &TargetSources {
+            sources: context.sources,
+            renderer: context.renderer,
+            workspace: context.workspace,
+        },
+        target,
+        (options.promotes_source, &options.entry_units),
+        (&history, &options.select),
+        |units| {
+            promotion::decide(&PromotionInput {
+                path: &path,
+                source,
+                history: &history,
+                target_units: units,
+                promotes_source: options.promotes_source,
+                consumers: &consumers,
+                target_records: &target_records,
+                sequence: history_sequence,
+                now,
+                request: &ask,
+            })
+        },
+    );
+    let decision = decision.map_err(|refusal| refusal_finding(&refusal, report))?;
+    let chosen = match &decision {
+        Decision::Unchanged(record) => &record.from,
+        Decision::Promote(promotion) => &promotion.record.from,
+    };
+    if let PromotionFrom::Environment(from) = chosen {
+        if let Some(finding) = passed_over(&read_units, &history, &options.select, &from.desired_commit) {
+            return Err(finding);
+        }
+    }
+    let mut held = held;
     let promotion = match decision {
         Decision::Unchanged(record) => {
-            report.record = Some(current.get(&path_key).cloned().unwrap_or(*record));
+            let record = current.get(&path_key).cloned().unwrap_or(*record);
+            // A `record: source` block whose marker is missing from the
+            // target's state, such as after a marker that failed to write,
+            // gets it now: the retry the failure's fix names. Only a block
+            // its branch's upstream carries is stamped.
+            if let Some(held) = held.as_deref_mut() {
+                if options.records_in_source() && !has_marker(&target_history, target, &record) {
+                    let writer = writer.ok_or_else(|| {
+                        writer_finding(
+                            &RecordWriteError::Failed("this invocation cannot read the project's source".to_owned()),
+                            target,
+                            &path_key,
+                        )
+                    })?;
+                    writer
+                        .published()
+                        .map_err(|error| writer_finding(&error, target, &path_key))?;
+                    let commits = write_marker(context, request, held, &snapshot, &record)
+                        .map_err(|error| store_error(target, &error))?;
+                    report.commits.extend(commits);
+                }
+            }
+            report.record = Some(record);
             return Ok(());
         }
         Decision::Promote(promotion) => *promotion,
@@ -322,13 +379,6 @@ fn body(
         },
         report,
     )?;
-    report.warnings.extend(
-        options
-            .rebuilt
-            .iter()
-            .filter(|(name, _)| record.values.contains_key(name))
-            .map(|(_, finding)| finding.clone()),
-    );
 
     // Artifacts still exist where their receipts say they do.
     if options.verify_artifacts {
@@ -385,33 +435,27 @@ fn body(
         return Ok(());
     };
 
-    let mut summary = TransitionSummary {
-        operation: Operation::Promote,
-        environment: target.clone(),
-        headline: format!("{path_key} #{}", record.sequence),
-        units: BTreeMap::new(),
-        recovered: Vec::new(),
-        imported: Vec::new(),
-        lease_broken: None,
-        drift_repaired: Vec::new(),
-        reapplied: None,
-        details: BTreeMap::new(),
-    };
-    summary.details.insert("promotion".to_owned(), summary_of(&record));
-    let trailers = Trailers {
-        requested_by: Some(base.requested_by.clone()),
-        reason: request.reason.clone(),
-        source_commit: record.source_commit.clone(),
-        ..super::trailers(base, held, &snapshot.tips)
-    };
+    let (summary, trailers) = transition_of(context, request, held, &snapshot, &record);
     if let Some(writer) = writer {
-        // The record is a commit in source; the target's state is unchanged.
+        // The record is a commit in source, pushed first; then the marker in
+        // the target's state, under the same lease, reserves its sequence
+        // and lists it in the target's history.
         let message = crate::transition::message(&summary, &trailers);
         let commit = writer
             .commit_record(&record, &message)
             .map_err(|error| writer_finding(&error, target, &path_key))?;
-        report.commits.insert("source", commit);
+        report.commits.insert("source", commit.clone());
         report.outcome = Outcome::Done;
+        match write_marker(context, request, held, &snapshot, &record) {
+            Ok(commits) => report.commits.extend(commits),
+            Err(error) => {
+                // The promotion stands: its record is the pushed block. Only
+                // the marker is missing, which a second `nyl promote` writes.
+                let finding = marker_finding(&error, target, &path_key, &commit);
+                report.exit = crate::run_report::ExitCategory::of_finding(&finding).code();
+                report.errors.push(finding);
+            }
+        }
         return Ok(());
     }
     let mut changes = TransitionChanges::default();
@@ -421,6 +465,98 @@ fn body(
     report.commits.extend(commits);
     report.outcome = Outcome::Done;
     Ok(())
+}
+
+/// The summary and trailers of the `promote` transition that records
+/// `record` into the target: the record's own commit in state, or the
+/// message of a `record: source` commit and its marker.
+fn transition_of(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    held: &lease::HeldLease,
+    snapshot: &EnvironmentSnapshot,
+    record: &PromotionRecord,
+) -> (TransitionSummary, Trailers) {
+    let base = context.base;
+    let mut summary = TransitionSummary {
+        operation: Operation::Promote,
+        environment: request.environment.clone(),
+        headline: format!("{} #{}", record.path, record.sequence),
+        units: BTreeMap::new(),
+        recovered: Vec::new(),
+        imported: Vec::new(),
+        lease_broken: None,
+        drift_repaired: Vec::new(),
+        reapplied: None,
+        details: BTreeMap::new(),
+    };
+    summary.details.insert("promotion".to_owned(), summary_of(record));
+    let trailers = Trailers {
+        requested_by: Some(base.requested_by.clone()),
+        reason: request.reason.clone(),
+        source_commit: record.source_commit.clone(),
+        ..super::trailers(base, held, &snapshot.tips)
+    };
+    (summary, trailers)
+}
+
+/// The marker of a `record: source` promotion: one desired commit into the
+/// target's state with the `promote` summary and trailers a `record: state`
+/// promotion writes, and no record file
+/// ([`TransitionChanges::commit_unchanged_desired`]). It changes no
+/// document, so it is no state commit; [`next_sequence`] and the history
+/// of `nyl get promotions` read its summary, so the sequence is reserved
+/// across branches and the promotion is listed.
+fn write_marker(
+    context: &RunContext<'_>,
+    request: &RunRequest,
+    held: &mut lease::HeldLease,
+    snapshot: &EnvironmentSnapshot,
+    record: &PromotionRecord,
+) -> Result<BTreeMap<&'static str, CommitId>, nyl_core::orchestration::ports::StateError> {
+    let (summary, trailers) = transition_of(context, request, held, snapshot, record);
+    let changes = TransitionChanges {
+        commit_unchanged_desired: true,
+        ..TransitionChanges::default()
+    };
+    super::commit_transition(
+        context.base,
+        &request.location,
+        held,
+        &snapshot.tips,
+        summary,
+        changes,
+        &trailers,
+    )
+}
+
+/// Whether the target's desired history holds the `promote` commit of
+/// `record`: its record in state, or the marker of a `record: source` block.
+fn has_marker(history: &StateHistory, target: &EnvironmentName, record: &PromotionRecord) -> bool {
+    history.desired.iter().any(|commit| {
+        recorded_summary(&commit.message, target).is_some_and(|summary| {
+            summary.get("path").and_then(Value::as_str) == Some(record.path.as_str())
+                && summary.get("sequence").and_then(Value::as_u64) == Some(record.sequence)
+        })
+    })
+}
+
+/// Why the marker of a pushed `record: source` commit was not written
+/// (`NYL-PROMOTE-MARKER-UNWRITTEN`, exit 1). The promotion stands; running
+/// `nyl promote` again finds the block unchanged and writes the marker.
+fn marker_finding(
+    error: &nyl_core::orchestration::ports::StateError,
+    target: &EnvironmentName,
+    path: &nyl_core::orchestration::ids::PromotionPathName,
+    commit: &CommitId,
+) -> Finding {
+    Finding::new(
+        Code::PromoteMarkerUnwritten,
+        format!(
+            "the promotion record of {target} was committed to its source as {commit} and pushed, but its marker in {target}'s state was not written: {error}; until it is, the sequence is not reserved in state and `nyl get promotions` does not list the promotion"
+        ),
+        format!("the promotion stands; once the state is reachable, update the checkout to the pushed commit and run `nyl promote {path}` again: while the block still names the state it would promote, it writes only the marker, under your Nyl-Requested-By and Nyl-Reason; if a newer state qualifies by then, it promotes that instead, with a marker of its own"),
+    )
 }
 
 /// What the supersede check of one promotion reads.
@@ -895,6 +1031,10 @@ pub fn writer_finding(
             Code::PromoteSourceUnwritable,
             format!("nothing was pushed, but the entry worktree still holds commit {commit}: drop it (`git reset --keep @{{upstream}}`) and {again}"),
         ),
+        RecordWriteError::Unsigned(_) => (
+            Code::PromoteSourceUnwritable,
+            format!("sign commits with an SSH key the Environment's allowed signers file lists (`git config commit.gpgsign true`, `gpg.format ssh`, `user.signingkey <key>`), and {again}"),
+        ),
         RecordWriteError::Failed(_) => (Code::PromoteSourceUnwritable, format!("fix the cause, then {again}")),
     };
     let written = match error {
@@ -925,7 +1065,10 @@ pub fn environment_promotions(
     store: &dyn StateStore,
     location_of: &dyn Fn(&EnvironmentName, &str) -> Result<StateLocation, Finding>,
     paths: &[PromotionPath],
-    entry: &nyl_core::resources::environment::Environment,
+    (entry, verifier): (
+        &nyl_core::resources::environment::Environment,
+        Option<&dyn PromotionBlockVerifier>,
+    ),
     snapshot: &EnvironmentSnapshot,
 ) -> Result<BTreeMap<nyl_core::orchestration::ids::PromotionPathName, PromotionRecord>, Finding> {
     use crate::rules::sources::{invalid_block, promotion_records, Applied};
@@ -960,6 +1103,20 @@ pub fn environment_promotions(
             ),
         ));
     }
+    // Trusted by its signature: checked against its path, and the source's
+    // state is not read.
+    if let Some(signed_by) = promoted.and_then(|promoted| promoted.verify.as_ref()) {
+        crate::rules::promotion::check_block_shape(block, path)?;
+        let signature = verifier
+            .ok_or_else(|| {
+                BlockSignatureError::Unreadable("this invocation cannot read the project's Git history".to_owned())
+            })
+            .and_then(|verifier| verifier.verify_block(environment, &signed_by.allowed_signers));
+        return match signature {
+            Ok(_) => Ok(read.records),
+            Err(error) => Err(unsigned_block(environment, &signed_by.allowed_signers, &error)),
+        };
+    }
     let location = location_of(&source, &path.metadata.name)?;
     let states = read_history(
         store,
@@ -982,6 +1139,24 @@ pub fn environment_promotions(
     };
     crate::rules::promotion::check_block(block, path, state)?;
     Ok(read.records)
+}
+
+/// Why a `record: source` block is not trusted by its signature
+/// (`NYL-PROMOTION-RECORD-UNSIGNED`, exit 1).
+fn unsigned_block(environment: &str, allowed_signers: &str, error: &BlockSignatureError) -> Finding {
+    let fix = match error {
+        BlockSignatureError::Untrusted { .. } => format!(
+            "promote again with commit signing on (`git config commit.gpgsign true`, `gpg.format ssh`, and `user.signingkey`) as a signer {allowed_signers} lists, or add the signer's key to {allowed_signers} in a reviewed change; the block is written by `nyl promote`, never by hand"
+        ),
+        BlockSignatureError::Unreadable(_) => format!(
+            "run from a full clone (`fetch-depth: 0`, or `git fetch --unshallow`) with Git 2.34 or newer and OpenSSH 8.2 or newer, the Environment's file committed, and {allowed_signers} present; or remove `verify` to check the block against the source environment's state instead"
+        ),
+    };
+    Finding::new(
+        Code::PromotionRecordUnsigned,
+        format!("the promoted block of Environment {environment} cannot be trusted by its signature: {error}"),
+        fix,
+    )
 }
 
 /// The warnings that say an artifact could not be verified.
@@ -1116,6 +1291,147 @@ fn unverified_warning(check: &ArtifactCheck, why: &str) -> Finding {
         ),
         "the record says artifactsVerified: false; check the artifact by hand",
     )
+}
+
+/// What reading the target's definitions at a source commit needs.
+pub struct TargetSources<'a> {
+    pub sources: &'a dyn SourceResolver,
+    pub renderer: &'a dyn SourceRenderer,
+    /// A directory the invocation owns; the checkout is made beneath it.
+    pub workspace: &'a Path,
+}
+
+/// Decide with the units `target` selects for the candidate states of
+/// `history`, the one way `nyl promote` and `nyl get promotion-candidates`
+/// take them: `decide` is [`promotion::decide`] over an input carrying the
+/// units given.
+///
+/// - A target whose source is promoted along the path (`promotes_source`)
+///   runs the chosen state's source commit, so its own definitions at that
+///   commit decide which units it selects, whatever the entry worktree has
+///   checked out ([`TargetUnits::AtSource`]). They are read lazily, newest
+///   state first: the decision is taken with what was read, and the source
+///   commit of the newest candidate state at or above the chosen one (all
+///   of them for a refusal) that is not read yet is checked out, into one
+///   reused worktree, rendered, and the decision taken again. A state whose
+///   commit is not read cannot qualify, so the decision is settled once
+///   every state up to the chosen one is read: one render for the usual
+///   promotion of the newest state, not one per recorded state.
+/// - A commit whose definitions do not render, such as one before the
+///   target was declared, keeps its states out with the reason. So does a
+///   commit this clone cannot check out, such as one of a deleted branch;
+///   it is also listed in [`TargetUnitsRead::unavailable`], because passing
+///   over a newer state for that reason must not promote an older one
+///   ([`passed_over`]).
+/// - Any other target runs its own source: the units its entry worktree
+///   selects ([`TargetUnits::Fixed`]).
+pub fn settle_target_units(
+    access: &TargetSources<'_>,
+    target: &EnvironmentName,
+    (promotes_source, entry_units): (bool, &BTreeSet<UnitName>),
+    (history, select): (&[RecordedState], &Selection),
+    decide: impl Fn(&TargetUnits) -> Result<Decision, Refusal>,
+) -> (Result<Decision, Refusal>, TargetUnitsRead) {
+    let mut read = TargetUnitsRead {
+        units: if promotes_source {
+            TargetUnits::AtSource(BTreeMap::new())
+        } else {
+            TargetUnits::Fixed(entry_units.clone())
+        },
+        unavailable: BTreeMap::new(),
+    };
+    let worktree = access.workspace.join("target-units");
+    loop {
+        let decision = decide(&read.units);
+        let TargetUnits::AtSource(known) = &read.units else {
+            return (decision, read);
+        };
+        let chosen = match &decision {
+            Ok(Decision::Unchanged(record)) => Some(&record.from),
+            Ok(Decision::Promote(promotion)) => Some(&promotion.record.from),
+            Err(_) => None,
+        }
+        .and_then(|from| match from {
+            PromotionFrom::Environment(from) => Some(&from.desired_commit),
+            PromotionFrom::Target(_) => None,
+        });
+        let horizon = chosen
+            .and_then(|chosen| history.iter().position(|state| state.desired_commit == *chosen))
+            .map_or(history.len(), |position| position + 1);
+        let next = history[..horizon]
+            .iter()
+            .filter(|state| state.is_candidate() && select.admits(state))
+            .filter_map(RecordedState::source_commit)
+            .find(|commit| !known.contains_key(*commit))
+            .cloned();
+        let Some(commit) = next else {
+            return (decision, read);
+        };
+        let units = read_target_units(access, target, &worktree, &commit, &mut read.unavailable);
+        if let TargetUnits::AtSource(known) = &mut read.units {
+            known.insert(commit, units);
+        }
+    }
+}
+
+/// The units `target` selects at `commit`, or why they cannot be told.
+fn read_target_units(
+    access: &TargetSources<'_>,
+    target: &EnvironmentName,
+    worktree: &Path,
+    commit: &CommitId,
+    unavailable: &mut BTreeMap<CommitId, Finding>,
+) -> Result<BTreeSet<UnitName>, String> {
+    if let Err(error) = access.sources.reset_worktree(&SourceRepository::This, commit, worktree) {
+        let message =
+            format!("cannot check out source commit {commit} to read which units {target} selects there: {error}");
+        unavailable.insert(
+            commit.clone(),
+            Finding::new(
+                Code::SourceUnavailable,
+                message.clone(),
+                "make the commit fetchable from this clone (fetch the branch that carries it), then try again",
+            ),
+        );
+        return Err(message);
+    }
+    access
+        .renderer
+        .render(worktree, target, commit)
+        .map(|rendered| {
+            rendered
+                .units
+                .into_iter()
+                .filter(|(_, unit)| unit.selected)
+                .map(|(name, _)| name)
+                .collect()
+        })
+        .map_err(|error| format!("{target}'s definitions at source commit {commit} do not render: {error}"))
+}
+
+/// What [`settle_target_units`] read.
+pub struct TargetUnitsRead {
+    pub units: TargetUnits,
+    /// The source commits that could not be checked out, with why.
+    pub unavailable: BTreeMap<CommitId, Finding>,
+}
+
+/// Why a promotion of the state `chosen` (its desired commit) is refused:
+/// a newer candidate state was passed over because its source commit could
+/// not be checked out, so whether it qualifies is unknown. Older states
+/// whose commits are gone, such as those of a deleted hotfix branch, never
+/// stand in the way.
+pub fn passed_over(
+    read: &TargetUnitsRead,
+    history: &[RecordedState],
+    select: &Selection,
+    chosen: &CommitId,
+) -> Option<Finding> {
+    history
+        .iter()
+        .take_while(|state| state.desired_commit != *chosen)
+        .filter(|state| state.is_candidate() && select.admits(state))
+        .find_map(|state| read.unavailable.get(state.source_commit()?).cloned())
 }
 
 /// What a promotion along a path reads, for `nyl get promotion-candidates`
@@ -1459,8 +1775,10 @@ fn attestations_of(
 /// summary, including those whose records `state restore` removed, so the
 /// sequence never repeats. The current records, the sequence the environment
 /// record says a run applied, and `others` (a `record: source` block's)
-/// count too, for state moved without its history and for records kept in
-/// source, which no promote commit in state carries. Environments that share
+/// count too, for state moved without its history and for a block kept in
+/// source whose marker is missing (written before markers existed, or one
+/// that failed); a `record: source` promotion's marker is a `promote`
+/// commit like any other. Environments that share
 /// a desired ref (`spec.state.path`) share its history, so only promotions
 /// into `environment` count.
 pub fn next_sequence(
@@ -1707,5 +2025,58 @@ mod tests {
             found.units[&name("svc")]["qa"].reason.as_deref(),
             Some("for this receipt")
         );
+    }
+
+    /// A recorded state of dev, run `number`, that ran source commit `source`.
+    fn ran(number: u8, source: char) -> RecordedState {
+        let snapshot = EnvironmentSnapshot {
+            environment: Some(nyl_core::orchestration::state::EnvironmentRecord {
+                api_version: StateV1,
+                kind: nyl_core::orchestration::state::EnvironmentRecordKind,
+                environment: EnvironmentName::new("dev").unwrap(),
+                spec: Value::Null,
+                source_commit: CommitId::new(source.to_string().repeat(40)).unwrap(),
+                source_chosen_by: nyl_core::orchestration::state::SourceChoice::Entry,
+                applied_promotion_sequence: None,
+                ownership: BTreeMap::new(),
+            }),
+            ..EnvironmentSnapshot::default()
+        };
+        RecordedState {
+            run: nyl_core::orchestration::ids::RunId::new(format!("00000000-0000-7000-8000-00000000000{number}"))
+                .unwrap(),
+            desired_commit: CommitId::new(format!("{number}").repeat(40)).unwrap(),
+            observed_commit: None,
+            snapshot,
+            attestations: StateAttestations::default(),
+            running: BTreeMap::new(),
+        }
+    }
+
+    /// A source commit that cannot be checked out stands in the way only
+    /// of an older state: promoting the newest state ignores a gone commit
+    /// of an older one (a deleted hotfix branch), while choosing an older
+    /// state over a newer one whose commit could not be read is refused.
+    /// Catches an unreadable commit that silently promotes an older state,
+    /// and a deleted branch that blocks every later promotion.
+    #[test]
+    fn test_only_a_newer_unreadable_state_refuses_a_promotion() {
+        let history = vec![ran(3, 'c'), ran(2, 'b'), ran(1, 'a')];
+        let unreadable = |commit: char| TargetUnitsRead {
+            units: TargetUnits::AtSource(BTreeMap::new()),
+            unavailable: BTreeMap::from([(
+                CommitId::new(commit.to_string().repeat(40)).unwrap(),
+                Finding::new(Code::SourceUnavailable, "gone", "fetch it"),
+            )]),
+        };
+        let chosen = |number: u8| history[3 - usize::from(number)].desired_commit.clone();
+        let newest = &Selection::Newest;
+        assert!(passed_over(&unreadable('a'), &history, newest, &chosen(3)).is_none());
+        assert!(passed_over(&unreadable('a'), &history, newest, &chosen(2)).is_none());
+        let refused = passed_over(&unreadable('c'), &history, newest, &chosen(2)).unwrap();
+        assert_eq!(refused.code, Code::SourceUnavailable);
+        // An explicitly chosen state is not held back by states the selection excludes.
+        let explicit = Selection::StateRevision(chosen(2));
+        assert!(passed_over(&unreadable('c'), &history, &explicit, &chosen(2)).is_none());
     }
 }

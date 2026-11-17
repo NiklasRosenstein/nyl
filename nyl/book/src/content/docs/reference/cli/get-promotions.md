@@ -52,7 +52,11 @@ desired commits.
 
 The path's source states, newest first, judged exactly as
 [`nyl promote`](/nyl/reference/cli/promote/) judges them, with the units the
-target selects as its entry worktree renders them. Each state shows the level
+target selects read the same way: for a target whose source the path
+promotes, from its definitions at each state's source commit
+([Which units the target selects](/nyl/reference/cli/promote/#which-units-the-target-selects)).
+Those are read newest first, only up to the state `nyl promote` would
+take, so older states show `target-source` saying they were not read. Each state shows the level
 it reaches up to the path's own (`attested`, `published`, or `none`), what it
 lacks below the path's level, and the values it would carry. `selected` marks
 the state `nyl promote` without flags would take now, `promoted` the state
@@ -95,8 +99,10 @@ with `run`, `desiredCommit`, `observedCommit`, `sourceCommit`, `level`,
 `eligible`, `selected`, `promoted`, `running`, `values`, `byValue` (`level`
 and `eligible` per value, for a value-only path), and `missing[]`: each with
 `unit` (absent for an environment-wide attestation), `attestation`, `reason`
-(`no-receipt`, `pending`, `aged`, `failing`, `not-running`, or `coverage`
-for a `coverage` name no attestation lists), and
+(`no-receipt`, `pending`, `aged`, `failing`, `not-running`, `coverage`
+for a `coverage` name no attestation lists, or `target-source` when the
+target's definitions at the state's source commit do not render or the
+commit cannot be checked out), and
 `message`.
 
 A path `nyl promote` refuses before it reads state, such as an unknown path
@@ -111,7 +117,8 @@ first, the record whose source commit the environment's last run applied, the
 record the next run takes its source from, each `fromPromotion` binding of
 the environment's units with the record that supplies it, and every
 promotion its desired history records, newest first, including records a
-later promotion replaced. Environments that share a desired ref
+later promotion replaced and `record: source` promotions, whose marker
+commits carry the same summary. Environments that share a desired ref
 (`spec.state.path`) list only their own promotions.
 
 ```console

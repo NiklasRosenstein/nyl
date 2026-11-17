@@ -351,6 +351,7 @@ mod tests {
             commit_identity: None,
             progress: None,
             prompt,
+            promotion_blocks: None,
         };
         let waiting = waiting();
         let location = location();

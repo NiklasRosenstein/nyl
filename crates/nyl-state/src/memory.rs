@@ -219,7 +219,10 @@ fn apply_side(
             directory.environment_attestations = set.clone();
         }
     }
-    if directory == before && !(changes.commit_unchanged && observed_side) {
+    if directory == before
+        && !(changes.commit_unchanged && observed_side)
+        && !(changes.commit_unchanged_desired && desired_side)
+    {
         return None;
     }
     let commit = inner.next_commit();
