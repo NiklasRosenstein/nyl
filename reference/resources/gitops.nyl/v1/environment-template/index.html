@@ -642,6 +642,15 @@ none are left out, so an empty map says nothing was excluded.</p>
 <h3 id="specsourcefrompromotionrecord">spec.source.fromPromotion.record</h3>
 <p><strong>Optional</strong> · string or null</p>
 <p>Where the PromotionRecord lives: <code>state</code> (default) or <code>source</code>.</p>
+<p><a id="field-spec.source.fromPromotion.verify"></a></p>
+<h3 id="specsourcefrompromotionverify">spec.source.fromPromotion.verify</h3>
+<p><strong>Optional</strong> · object or null</p>
+<p>With <code>record: source</code>, how a run trusts a <code>promoted</code> block it has not applied yet. Without it, the run reads the source environment’s state and checks the block against the state it names, which needs read access to that state. With it, the run verifies instead that the commit which last changed the block is signed by a key the project’s allowed signers file lists, and trusts the block without reading the source’s state.</p>
+<p>Unknown fields are rejected.</p>
+<p><a id="field-spec.source.fromPromotion.verify.allowedSigners"></a></p>
+<h3 id="specsourcefrompromotionverifyallowedsigners">spec.source.fromPromotion.verify.allowedSigners</h3>
+<p><strong>Required</strong> · string</p>
+<p>A Git <code>allowed_signers</code> file (the format of <code>gpg.ssh.allowedSignersFile</code>) listing the keys whose signature on the commit that last changed the block is trusted, as a local path relative to the <code>nyl.toml</code> directory or <code>/</code>-rooted at the Git worktree. <code>git verify-commit</code> checks the signature against it.</p>
 <p><a id="field-spec.source.repository"></a></p>
 <h3 id="specsourcerepository">spec.source.repository</h3>
 <p><strong>Optional</strong> · object or null</p>
