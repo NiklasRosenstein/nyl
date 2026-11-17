@@ -177,28 +177,35 @@ from another environment instead of rebuilding or retyping it.</p>
 <p><a id="field-spec.coverage"></a></p>
 <h3 id="speccoverage">spec.coverage</h3>
 <p><strong>Optional</strong> · object</p>
-<p>Which Applications count toward a source promotion’s publication attestations.</p>
+<p>Per unit that runs as several deployments, such as a KubernetesPublication, which of them count toward its running-scoped attestations for this path: keyed by the unit’s name in the source environment. <code>nyl validate</code> and <code>nyl plan</code> check every unit, group, and deployment named here against what the unit’s kind lists for it. Omitted, every deployment of every unit counts.</p>
+<p><a id="field-spec.coverage%5Bkey%5D"></a></p>
+<h3 id="speccoveragekey">spec.coverage[key]</h3>
+<p><strong>Optional</strong> · object</p>
+<p>Which deployments of one unit a path counts, by the names the unit’s kind
+lists for them (for a KubernetesPublication, a deployment is an Argo CD
+Application, or a <a href="/nyl/reference/resources/k8s.nyl/v1/release/">Release</a> on a direct target, and a group is an
+<a href="/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/">ApplicationGroup</a>).</p>
 <p>Unknown fields are rejected.</p>
-<p><a id="field-spec.coverage.applicationGroups"></a></p>
-<h3 id="speccoverageapplicationgroups">spec.coverage.applicationGroups</h3>
+<p><a id="field-spec.coverage%5Bkey%5D.exclude"></a></p>
+<h3 id="speccoveragekeyexclude">spec.coverage[key].exclude</h3>
 <p><strong>Optional</strong> · array</p>
-<p>Narrows the Applications that count to these <a href="/nyl/reference/resources/k8s.gitops.nyl/v1/application-group/">ApplicationGroups</a>; never what moves. Omitted, every group.</p>
-<p><a id="field-spec.coverage.applicationGroups%5B%5D"></a></p>
-<h3 id="speccoverageapplicationgroups-1">spec.coverage.applicationGroups[]</h3>
+<p>Deployments knowingly accepted as falling short: they leave the unit’s aggregate for this path, and each record lists them. A value consumed by an excluded deployment must still come from a publication it runs.</p>
+<p><a id="field-spec.coverage%5Bkey%5D.exclude%5B%5D"></a></p>
+<h3 id="speccoveragekeyexclude-1">spec.coverage[key].exclude[]</h3>
 <p><strong>Required</strong> · string</p>
-<p><a id="field-spec.coverage.excludeApplications"></a></p>
-<h3 id="speccoverageexcludeapplications">spec.coverage.excludeApplications</h3>
+<p><a id="field-spec.coverage%5Bkey%5D.groups"></a></p>
+<h3 id="speccoveragekeygroups">spec.coverage[key].groups</h3>
 <p><strong>Optional</strong> · array</p>
-<p>Applications knowingly accepted as unhealthy; they leave the aggregate for this path and are listed in each record.</p>
-<p><a id="field-spec.coverage.excludeApplications%5B%5D"></a></p>
-<h3 id="speccoverageexcludeapplications-1">spec.coverage.excludeApplications[]</h3>
+<p>Narrows the deployments that count toward a source promotion to those of these groups; it never narrows what moves, and a deployment in no group (such as a catalog) then does not count. Omitted, every group. A path that promotes only values judges each value for its own consumer, so validation refuses <code>groups</code> there.</p>
+<p><a id="field-spec.coverage%5Bkey%5D.groups%5B%5D"></a></p>
+<h3 id="speccoveragekeygroups-1">spec.coverage[key].groups[]</h3>
 <p><strong>Required</strong> · string</p>
-<p><a id="field-spec.coverage.requireApplications"></a></p>
-<h3 id="speccoveragerequireapplications">spec.coverage.requireApplications</h3>
+<p><a id="field-spec.coverage%5Bkey%5D.require"></a></p>
+<h3 id="speccoveragekeyrequire">spec.coverage[key].require</h3>
 <p><strong>Optional</strong> · array</p>
-<p>Applications that must meet the required attestations at whatever publication they run, without contributing values.</p>
-<p><a id="field-spec.coverage.requireApplications%5B%5D"></a></p>
-<h3 id="speccoveragerequireapplications-1">spec.coverage.requireApplications[]</h3>
+<p>Deployments that must meet the path’s required attestations at whatever they run, without contributing values.</p>
+<p><a id="field-spec.coverage%5Bkey%5D.require%5B%5D"></a></p>
+<h3 id="speccoveragekeyrequire-1">spec.coverage[key].require[]</h3>
 <p><strong>Required</strong> · string</p>
 <p><a id="field-spec.evidence"></a></p>
 <h3 id="specevidence">spec.evidence</h3>

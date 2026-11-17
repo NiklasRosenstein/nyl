@@ -117,10 +117,18 @@ against the units the environments render, and each failure has its own code:
 <code dir="auto">NYL-PROMOTE-ENVIRONMENT-UNKNOWN</code>, <code dir="auto">NYL-PROMOTE-SELECTOR-UNIT</code>,
 <code dir="auto">NYL-PROMOTE-SELECTOR-INVALID</code>, <code dir="auto">NYL-PROMOTE-VALUE-TYPE</code>,
 <code dir="auto">NYL-PROMOTE-BINDING-UNKNOWN</code>, <code dir="auto">NYL-ATTESTATION-UNDECLARED</code> for an attestation a
-path requires that its scope does not declare, and <code dir="auto">NYL-PROMOTE-UNSUPPORTED</code> for
+path requires that its scope does not declare, <code dir="auto">NYL-PROMOTE-COVERAGE-UNKNOWN</code> for
+a <code dir="auto">coverage</code> unit, group, or deployment the unit does not run (as its kind
+lists it; a KubernetesPublication renders its target to list them),
+<code dir="auto">NYL-PROMOTE-COVERAGE-INEFFECTIVE</code> for <code dir="auto">groups</code> on a path that promotes only
+values or coverage of a unit that records nothing per deployment,
+<code dir="auto">NYL-PROMOTE-COVERAGE-UNCHECKED</code> when a coverage unit’s deployments cannot be
+listed (with the render error), and <code dir="auto">NYL-PROMOTE-UNSUPPORTED</code> for
 <code dir="auto">changeGate: pullRequest</code> or a DeploymentTarget in <code dir="auto">from</code> or <code dir="auto">to</code>, which M11
-delivers. <code dir="auto">nyl plan -e &#x3C;environment></code> reports the same findings for the paths
-that touch the environment.</p>
+delivers. <code dir="auto">nyl plan -e &#x3C;environment></code>, <code dir="auto">nyl reconcile</code>, <code dir="auto">nyl promote</code>, and
+<code dir="auto">nyl get promotion-candidates</code> report the same findings for the paths that
+touch the environment, except that <code dir="auto">NYL-PROMOTE-COVERAGE-UNCHECKED</code> is a
+warning there: they judge another environment only by what they need.</p>
 <p>A unit that declares its target inline (<code dir="auto">spec.target.inline</code>) places the
 inline target, named <code dir="auto">&#x3C;environment>-&#x3C;unit></code> or by <code dir="auto">spec.target.name</code>. Validation
 parses it as strictly as a discovered target, compiles it with every other
