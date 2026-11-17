@@ -253,7 +253,44 @@ pub(crate) fn render_at(
         inline,
         owner,
         inputs: &inputs,
+        placeholders: false,
         cache_dir: Some(cache_dir),
+        resource_catalogue: catalogue.clone(),
+        instances,
+    })
+    .map_err(|error| DriverError::before_effects(format!("cannot render DeploymentTarget {target:?}: {error}")))
+}
+
+/// Render the target `spec` names or declares inline at `worktree` as
+/// `nyl validate` compiles a placed target: every Release input binding
+/// orchestration resolves takes a placeholder of its declared type, so the
+/// unit's spec need not be resolved. It shows what the target generates
+/// (its deployments) and is never published.
+pub(crate) fn render_for_validation(
+    catalogue: &nyl_render::config::ResourceCatalogue,
+    worktree: &std::path::Path,
+    project_dir: &std::path::Path,
+    instances: &nyl_core::orchestration::instance::Instances,
+    spec: &Value,
+) -> DriverResult<RenderedTarget> {
+    let target = publication_target(spec)?;
+    let inline = match &target {
+        PublicationTarget::Inline(inline) => Some(inline),
+        PublicationTarget::Static(_) => None,
+    };
+    let target = target.name().to_owned();
+    render_target(&TargetRender {
+        source_commit: None,
+        selection: nyl_render::gitops::tree::partial::PublicationSelection::default(),
+        publication_base: None,
+        worktree,
+        project_dir,
+        target: &target,
+        inline,
+        owner: None,
+        inputs: &InputSnapshot::new(),
+        placeholders: true,
+        cache_dir: None,
         resource_catalogue: catalogue.clone(),
         instances,
     })

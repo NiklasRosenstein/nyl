@@ -275,7 +275,8 @@ pub struct PromotionRecord {
     /// The attestations `--ignore-attestation` set aside.
     #[serde(rename = "ignoredAttestations")]
     pub ignored_attestations: Vec<IgnoredAttestation>,
-    /// The path's `coverage.excludeApplications` at promotion time.
+    /// The deployments the path's `coverage` excluded at promotion time:
+    /// every unit's `exclude`, sorted, each name once.
     #[serde(rename = "excludedApplications")]
     pub excluded_applications: Vec<String>,
     /// The commits `--supersede` accepted as replaced.

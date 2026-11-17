@@ -7261,6 +7261,7 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
         },
         publication_base: None,
         inputs: &BTreeMap::new(),
+        placeholders: false,
         cache_dir: None,
     })
     .unwrap();
@@ -7487,6 +7488,7 @@ fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
         selection: Default::default(),
         publication_base: None,
         inputs: &BTreeMap::new(),
+        placeholders: false,
         cache_dir: None,
     })
     .unwrap();

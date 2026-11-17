@@ -73,6 +73,11 @@ pub struct TargetRender<'a> {
     pub publication_base: Option<PublicationBase>,
     /// Resolved values of the target's `fromUnit` (and later `fromPromotion`) bindings.
     pub inputs: &'a InputSnapshot,
+    /// Render for validation instead: every binding orchestration resolves
+    /// takes a placeholder of its declared type, as `nyl validate` compiles a
+    /// target an environment places, and `inputs` must be empty. Such a
+    /// render shows what the target generates, never what it publishes.
+    pub placeholders: bool,
     /// The render cache directory, from the invocation's workspace; `None`
     /// renders without a cache. Never the user's default cache, so parallel
     /// invocations and tests stay isolated and the result never depends on
@@ -254,7 +259,11 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     let options = TreeRenderOptions {
         selection: request.selection.clone(),
         publication_base: request.publication_base.clone(),
-        orchestrated_inputs: Some(OrchestratedInputs::Pinned(request.inputs.clone())),
+        orchestrated_inputs: Some(if request.placeholders {
+            OrchestratedInputs::Placeholders
+        } else {
+            OrchestratedInputs::Pinned(request.inputs.clone())
+        }),
         ..TreeRenderOptions::default()
     };
     let (compiled, dependencies) = compile_target_tree_recorded(&inventory, request.target, &cache, options).await?;
@@ -2206,6 +2215,7 @@ spec:
             project_dir: &worktree.join("nyl"),
             target: "dev",
             inputs,
+            placeholders: false,
             cache_dir,
             resource_catalogue: crate::config::test_catalogue(),
         })
@@ -2340,6 +2350,7 @@ spec:
             project_dir: &worktree.join("nyl"),
             target: &inline.name,
             inputs: &snapshot("registry.invalid/web@sha256:feed"),
+            placeholders: false,
             cache_dir: None,
             resource_catalogue: crate::config::test_catalogue(),
         })

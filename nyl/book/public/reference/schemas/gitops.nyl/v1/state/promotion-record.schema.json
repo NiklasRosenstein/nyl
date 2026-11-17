@@ -503,7 +503,7 @@
       "description": "The evidence the promotion rested on."
     },
     "excludedApplications": {
-      "description": "The path's `coverage.excludeApplications` at promotion time.",
+      "description": "The deployments the path's `coverage` excluded at promotion time:\nevery unit's `exclude`, sorted, each name once.",
       "items": {
         "type": "string"
       },

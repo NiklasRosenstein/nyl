@@ -15,7 +15,7 @@ export const orchestrationRoadmap = {
       { text: 'Promote dev\'s source commit and image digest to prod from one recorded dev state, with the whole-source evidence rule and rollback through `--revision`.', done: true },
       { text: 'Support several paths into one environment, the per-value supersede check, and the hotfix pattern.', done: true },
       { text: 'Add `nyl get states`, `nyl get promotion-candidates`, and `nyl promote --dry-run`.', done: true },
-      { text: 'Promote values only, each from the state its consuming Application runs, and gate promotion on the current receipt\'s publication attestations with `coverage`.', done: true },
+      { text: 'Promote values only, each from the state its consuming deployment runs, and gate promotion on the current receipt\'s publication attestations with per-unit `coverage`, whose names `nyl validate` checks against what each unit runs.', done: true },
     ],
     outro: 'Every M6 item is delivered; the closing change of the [M6 plan](https://github.com/NiklasRosenstein/nyl/blob/develop/design/m6-plan.md) confirms the exit criterion and marks M6 done. Promotion from and into non-orchestrated targets and the pull-request change gate follow in M11.',
   },

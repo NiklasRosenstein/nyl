@@ -19,9 +19,9 @@
 //!
 //! Which unit *consumes* a value, and so whose evidence a value-only path
 //! judges, is [`consumer`]: the selected unit (decision D7 of the M6 plan).
-//! When the unit's driver maps an input selector to one of its deployments,
-//! such as `{unit: <publication>, input: /releases/<group>~1<release>/…}` to
-//! that Release's Application, the value is judged for that deployment
+//! When the unit's driver maps an input selector to one of its deployments
+//! ([`Driver::input_consumer`](nyl_core::orchestration::driver::Driver::input_consumer)),
+//! the value is judged for that deployment
 //! ([`super::PromotionInput::consumers`], [`super::standing`]).
 
 use std::collections::{BTreeMap, BTreeSet};

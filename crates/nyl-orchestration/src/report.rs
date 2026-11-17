@@ -708,8 +708,8 @@ pub enum MissingReason {
     /// has a newer receipt, or the deployment that consumes a value runs
     /// another state's result.
     NotRunning,
-    /// The path's `coverage` names an Application or ApplicationGroup no
-    /// attestation lists, or leaves nothing to judge while it fails.
+    /// The path's `coverage` names a deployment or group no attestation of
+    /// its unit lists, or leaves nothing to judge while it fails.
     Coverage,
 }
 

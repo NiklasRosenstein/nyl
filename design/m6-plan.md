@@ -212,12 +212,15 @@ scenario step yet; each gets one, or rule tests only, in the PR named:
   an inline scenario or a shell test.
 - A path's `attestations` field (per-unit and environment overrides), and
   `NYL-ATTESTATION-UNDECLARED` for a path: PR 3 and PR 11, rule tests.
-- `coverage.applicationGroups`, `excludeApplications`, `requireApplications`:
-  PR 11, rule tests. Their names are checked only when a promotion runs
-  (a name no attestation lists refuses it); validating them in `validate`
-  and `plan` needs a driver contract that lists the Applications a target
-  generates, and follows later. `validate` does not warn about
-  `applicationGroups` on a value-only path, which ignores it.
+- `coverage`: PR 11 added it as flat fields (`applicationGroups`,
+  `excludeApplications`, `requireApplications`); a follow-up made it per
+  publication unit (`coverage.<unit>.{groups, exclude, require}`) with
+  neutral names. `validate` and `plan` check every name against what the
+  unit's driver lists (`Driver::deployments`, `NYL-PROMOTE-COVERAGE-UNKNOWN`),
+  and refuse `groups` on a value-only path
+  (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); promotion keeps refusing a name no
+  attestation lists. Rule tests, a driver test, CLI tests, and the
+  `value-only-promotion` walkthrough's last steps.
 - `NYL-PROMOTE-UNCHECKED` (a value without a known source commit) and
   repository-qualified `--supersede web:S1..c3d4`: PR 9, rule tests.
 - The declared type of the Release input a `fromPromotion` binding in a DeploymentTarget's `releaseInputs` fills, and the fields of an artifact a selector reads: PR 3 compares only what it can know from rendered units (a literal, a declared output's type, the kind's schema at a pointer, and the field a unit binding replaces). PR 6 did not add them: a Release input's declared type is known to the publication side, and an artifact's fields to the producing kind, so the checks need a driver-owned contract for field types (the engine may not name `/releases/…` layouts or artifact kinds). They move to a follow-up change after PR 11 that adds it.
@@ -252,5 +255,5 @@ Validation in M6 rejects `changeGate: pullRequest` and a target in `from` or
 `to` with `NYL-PROMOTE-UNSUPPORTED` (PR 3), so a project cannot rely on a
 form that silently does nothing.
 
-The coverage options (`applicationGroups`, `excludeApplications`,
-`requireApplications`) stay in M6 (item 7) but can follow PR 11 if it grows.
+The coverage options (per unit: `groups`, `exclude`, `require`) stay in M6
+(item 7).

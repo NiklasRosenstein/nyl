@@ -99,6 +99,78 @@ fn test_validate_reports_each_failure_with_its_code_and_fix() {
     }
 }
 
+/// `coverage` is checked against what each named unit runs, as its driver
+/// lists it: every unknown name is `NYL-PROMOTE-COVERAGE-UNKNOWN`, and
+/// `groups` on this value-only path is `NYL-PROMOTE-COVERAGE-INEFFECTIVE`.
+#[test]
+fn test_validate_checks_coverage_names_against_the_unit() {
+    let world = World::new(&scenario::shell::shared_project());
+    let path = "  from: {environment: dev}\n  to: {environment: prod}\n";
+    let cases = [
+        (
+            "  coverage:\n    ghost: {exclude: [web]}\n",
+            "NYL-PROMOTE-COVERAGE-UNKNOWN",
+            "names unit \"ghost\" in `coverage`",
+        ),
+        (
+            "  coverage:\n    database: {exclude: [web]}\n",
+            "NYL-PROMOTE-COVERAGE-UNKNOWN",
+            "runs no deployments",
+        ),
+        (
+            "  coverage:\n    kubernetes: {exclude: [nope]}\n",
+            "NYL-PROMOTE-COVERAGE-UNKNOWN",
+            "deployment \"nope\" in coverage.kubernetes.exclude, but unit kubernetes runs no such deployment (it runs: dev-catalog, web)",
+        ),
+        (
+            "  coverage:\n    kubernetes: {require: [nope]}\n",
+            "NYL-PROMOTE-COVERAGE-UNKNOWN",
+            "deployment \"nope\" in coverage.kubernetes.require",
+        ),
+        (
+            "  coverage:\n    kubernetes: {groups: [wbe]}\n",
+            "NYL-PROMOTE-COVERAGE-UNKNOWN",
+            "group \"wbe\" in coverage.kubernetes.groups",
+        ),
+        (
+            "  coverage:\n    kubernetes: {groups: [web]}\n",
+            "NYL-PROMOTE-COVERAGE-INEFFECTIVE",
+            "promotes only values",
+        ),
+    ];
+    for (coverage, code, text) in cases {
+        let checkout = checkout_with(&world, &format!("{path}{coverage}"));
+        nyl(&world, &checkout, &["validate"]).assert().failure().stderr(
+            predicate::str::contains(code)
+                .and(predicate::str::contains(text))
+                .and(predicate::str::contains("dev-to-prod")),
+        );
+    }
+    // The deployments the driver lists pass: the Release's Application and the catalog.
+    let checkout = checkout_with(
+        &world,
+        &format!("{path}  coverage:\n    kubernetes: {{exclude: [web], require: [dev-catalog]}}\n"),
+    );
+    nyl(&world, &checkout, &["validate"]).assert().success();
+}
+
+/// `plan` checks coverage names through the same path as `validate`.
+#[test]
+fn test_plan_reports_unknown_coverage_names() {
+    let world = World::new(&scenario::shell::shared_project());
+    let checkout = checkout_with(
+        &world,
+        "  from: {environment: dev}\n  to: {environment: prod}\n  coverage:\n    kubernetes: {require: [nope]}\n",
+    );
+    nyl(&world, &checkout, &["plan", "-e", "dev"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("NYL-PROMOTE-COVERAGE-UNKNOWN")
+                .and(predicate::str::contains("coverage.kubernetes.require")),
+        );
+}
+
 /// `plan` reports the findings of the paths that touch its environment.
 #[test]
 fn test_plan_reports_the_findings_of_the_paths_touching_the_environment() {

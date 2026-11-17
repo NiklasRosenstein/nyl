@@ -22,11 +22,20 @@
 //!   matched publication by.
 //! - [`input_consumer`] maps a Release input of the resolved spec,
 //!   `/releases/<group>~1<release>/…`, to the deployment of that Release.
+//! - [`deployments`] lists the target's expected deployments, the names a
+//!   PromotionPath's `coverage` may use for the unit: each Argo CD
+//!   Application (or Release of a direct target) by its id, in the
+//!   ApplicationGroup its Release belongs to; the catalog Application is in
+//!   none. A resolved spec lists the deployments it recorded; a rendered one
+//!   is rendered for validation first.
 
 use std::collections::BTreeMap;
 
-use nyl_core::orchestration::driver::{DeploymentRuns, DeploymentVerdict};
+use nyl_core::orchestration::driver::{
+    Deployment, DeploymentContext, DeploymentRuns, DeploymentVerdict, DriverError, DriverResult,
+};
 use nyl_core::orchestration::state::{ArtifactDocument, Attestation};
+use nyl_render::gitops::observation::{ExpectedDeployment, ReconcilerFacts};
 use serde_json::Value;
 
 use super::observe::{observes, RECONCILER};
@@ -83,9 +92,7 @@ pub(crate) fn deployment_verdicts(attestation: &Attestation) -> Option<Vec<Deplo
                 DeploymentRuns::Receipt => None,
             };
             Some(DeploymentVerdict {
-                group: text("release")
-                    .and_then(|release| release.split_once('/'))
-                    .map(|(group, _)| group.to_owned()),
+                group: group_of(text("release")),
                 name,
                 runs,
                 meets,
@@ -93,6 +100,53 @@ pub(crate) fn deployment_verdicts(attestation: &Attestation) -> Option<Vec<Deplo
             })
         })
         .collect()
+}
+
+/// The ApplicationGroup of a Release's deployment, from its
+/// `<applicationGroup>/<release>`; `None` for the catalog.
+fn group_of(release: Option<&str>) -> Option<String> {
+    release
+        .and_then(|release| release.split_once('/'))
+        .map(|(group, _)| group.to_owned())
+}
+
+/// The deployments the target runs as, each by its id and in its Release's
+/// ApplicationGroup: those `spec` recorded at resolution under
+/// `/reconciler`, or, for a spec that records none (a rendered one, or one
+/// that neither observes nor applies directly), those a validation render
+/// of the target generates.
+pub(crate) fn deployments(
+    catalogue: &nyl_render::config::ResourceCatalogue,
+    ctx: &DeploymentContext<'_>,
+    spec: &Value,
+) -> DriverResult<Option<Vec<Deployment>>> {
+    let expected: Vec<ExpectedDeployment> = if let Some(recorded) = spec.pointer(&format!("{RECONCILER}/expected")) {
+        serde_json::from_value(recorded.clone())
+            .map_err(|error| DriverError::before_effects(format!("spec.reconciler.expected: {error}")))?
+    } else {
+        let rendered = super::render_for_validation(
+            catalogue,
+            ctx.worktree,
+            std::path::Path::new(ctx.project_dir),
+            ctx.instances,
+            spec,
+        )?;
+        ReconcilerFacts::of(&rendered)
+            .map_err(|error| {
+                DriverError::before_effects(format!("cannot list the deployments of the target: {error}"))
+            })?
+            .expected
+            .deployments
+    };
+    Ok(Some(
+        expected
+            .iter()
+            .map(|deployment| Deployment {
+                name: deployment.id.clone(),
+                group: group_of(deployment.release.as_deref()),
+            })
+            .collect(),
+    ))
 }
 
 /// The commit of the receipt's `PublishedTree`.

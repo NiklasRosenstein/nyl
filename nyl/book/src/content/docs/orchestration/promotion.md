@@ -101,32 +101,49 @@ with `--state-revision`, or reconcile the source so it publishes again.
 
 ## Coverage
 
-`coverage` narrows or extends which Applications a promotion's publication
-attestations are judged for. It never changes what moves.
+A publication unit has one receipt and one publication commit, but runs as
+several deployments, each synced on its own. `coverage` says, per unit,
+which of its deployments a promotion judges that unit's running-scoped
+attestations (`accepted` and `healthy`) for. It never changes what moves.
+Entries are keyed by the unit's name and name deployments and groups as the
+unit's kind lists them:
 
 ```yaml
 spec:
   coverage:
-    applicationGroups: [web]              # source paths: count only these groups
-    excludeApplications: [web-batch]      # knowingly accepted as unhealthy; listed in each record
-    requireApplications: [web-gateway]    # must meet the attestations at whatever they run
+    kubernetes:                 # the publication unit
+      groups: [web]             # source paths: count only these groups
+      exclude: [web-batch]      # knowingly accepted as falling short; listed in each record
+      require: [web-gateway]    # must meet the attestations at whatever they run
 ```
 
-- `applicationGroups` and `excludeApplications` narrow a source path's
-  judgement: a failing `accepted` or `healthy` that only Applications outside
-  them explain does not block. The catalog Application belongs to no group.
-  `applicationGroups` applies only to source paths; a value-only path ignores
-  it, because it judges each value for its own consumer.
-- Coverage never fails open: a group no Application belongs to, or a
-  coverage that leaves no Application to judge while the attestation fails,
-  refuses the promotion and names the field. Names are checked when a
-  promotion runs; `nyl validate` does not check them yet.
+For a KubernetesPublication, a deployment is an Argo CD Application the
+target generates, named as the attestation details name it (its name,
+qualified by its namespace outside the Argo CD instance's), or a Release,
+`<group>/<release>`, on a direct target; a group is the ApplicationGroup of
+its Release. The catalog Application belongs to no group.
+
+- `groups` and `exclude` narrow a source path's judgement of their unit: a
+  failing `accepted` or `healthy` that only deployments outside them explain
+  does not block. An entry counts only for the unit it is keyed by.
+- `groups` applies only to source paths. A value-only path judges each value
+  for its own consumer, so `nyl validate` refuses `groups` there
+  (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); use `exclude` instead.
 - On a value-only path, an excluded consumer must still run a publication of
   the source, which decides its value's state, but need not be healthy.
-- `requireApplications` adds Applications that contribute no value but must
-  meet the required attestations at whatever publication they run. A name no
-  attestation lists blocks the promotion, also for a publication without
-  `observe` and on a path that requires none of its attestations.
+- `require` adds deployments that contribute no value but must meet the
+  required attestations at whatever publication they run.
+- `nyl validate` and `nyl plan` check every name against what the unit runs,
+  as its kind lists it for the worktree (a KubernetesPublication renders its
+  target): a unit the source does not select, a unit whose kind runs no
+  deployments, and a group or deployment the unit does not run are refused
+  with `NYL-PROMOTE-COVERAGE-UNKNOWN`, which lists the names the unit has.
+- Coverage still never fails open when a promotion runs: a group no
+  deployment of the attestation belongs to, a coverage that leaves no
+  deployment to judge while the attestation fails, and a `require` name no
+  attestation of the unit lists (also for a publication without `observe`,
+  and on a path that requires none of its attestations) refuse the
+  promotion and name the field.
 
 ## Reading what was promoted
 

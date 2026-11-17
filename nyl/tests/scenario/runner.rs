@@ -2099,6 +2099,13 @@ pub fn check_promotion_record(
     if expected.superseded.is_some() {
         present(&mut problems, "superseded", record.get("superseded"));
     }
+    if let Some(excluded) = &expected.excluded_applications {
+        problems.compare(
+            "excludedApplications",
+            Value::from(excluded.clone()),
+            record.get("excludedApplications"),
+        );
+    }
     if expected.ignored_attestations.is_some() {
         present(&mut problems, "ignoredAttestations", record.get("ignoredAttestations"));
     }

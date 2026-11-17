@@ -347,6 +347,16 @@ impl Driver for KubernetesPublicationDriver {
         super::input_consumer(spec, pointer)
     }
 
+    /// Every Argo CD Application the target generates (or Release of a
+    /// direct target), in its ApplicationGroup; the catalog is in none.
+    fn deployments(
+        &self,
+        ctx: &nyl_core::orchestration::driver::DeploymentContext<'_>,
+        spec: &Value,
+    ) -> DriverResult<Option<Vec<nyl_core::orchestration::driver::Deployment>>> {
+        super::deployments(&self.resource_catalogue, ctx, spec)
+    }
+
     fn ownership_scopes(&self, _environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         unit_target(spec)
             .ok()

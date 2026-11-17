@@ -8,7 +8,9 @@
 //! reads a promoted value. The renderer copies a DeploymentTarget's
 //! `releaseInputs` into the spec of the publication unit that places it, so
 //! walking the units' specs finds those bindings too, with the environment
-//! that reads them.
+//! that reads them. The units a path's `coverage` names are listed by their
+//! drivers ([`nyl_orchestration::shell::coverage`]), so their names are
+//! checked against what each unit runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -112,6 +114,13 @@ fn findings_of(
         .filter_map(|environment| environment.name().ok())
         .collect();
     let readers = promotion_paths::unit_readers(sources, drivers);
+    let deployments = nyl_orchestration::shell::coverage::deployments(
+        check,
+        sources,
+        drivers,
+        &inventory.worktree_root,
+        &inventory.instances,
+    );
     promotion_paths::check(&PathChecks {
         paths: check,
         known,
@@ -120,6 +129,7 @@ fn findings_of(
         sources,
         drivers,
         readers: &readers,
+        deployments: &deployments,
     })
 }
 

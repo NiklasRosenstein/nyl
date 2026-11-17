@@ -97,7 +97,19 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "866b869e-1ea0-46f0-9351-2d4a08c4eb51"
 type = "feature"
-description = "A PromotionPath that promotes only values takes each value from the state its consumer runs: a value selected as a publication's Release input (`input: /releases/<group>~1<release>/…`) is consumed by that Release's Application, so Applications synced to different publications by hand no longer block it, and the record names a value's own `state`. Only the consuming Application's own findings block its value (`unmatched`, a mix of revisions, not `Healthy` when `healthy` is required). `coverage.applicationGroups` and `coverage.excludeApplications` narrow the Applications a source promotion's publication attestations count, and `coverage.requireApplications` adds Applications that must meet them at whatever publication they run. Drivers gain `running_attestations`, `deployment_verdicts`, `receipt_publication`, and `input_consumer`; nothing new is persisted"
+description = "A PromotionPath that promotes only values takes each value from the state its consumer runs: a value selected as a publication's Release input (`input: /releases/<group>~1<release>/…`) is consumed by that Release's Application, so Applications synced to different publications by hand no longer block it, and the record names a value's own `state`. Only the consuming Application's own findings block its value (`unmatched`, a mix of revisions, not `Healthy` when `healthy` is required). A path's `coverage` is keyed by the publication unit: `coverage.<unit>.groups` and `coverage.<unit>.exclude` narrow the deployments (for a KubernetesPublication, its Applications and their ApplicationGroups) a source promotion counts toward that unit's attestations, and `coverage.<unit>.require` adds deployments that must meet them at whatever publication they run. Drivers gain `running_attestations`, `deployment_verdicts`, `receipt_publication`, `input_consumer`, and `deployments`; nothing new is persisted"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "386fc8e1-af12-4f5e-85dc-df08f18a9d6e"
+type = "feature"
+description = "`nyl validate` and `nyl plan` check a PromotionPath's `coverage` against what each named unit runs, as its kind lists it (a KubernetesPublication renders its target, with placeholders for the bindings orchestration resolves): a unit the source environment does not select, a unit whose kind runs no deployments, and a group or deployment the unit does not run fail with `NYL-PROMOTE-COVERAGE-UNKNOWN`, which lists the names the unit has, and `groups` on a path that promotes only values fails with `NYL-PROMOTE-COVERAGE-INEFFECTIVE`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "c281f882-04ff-455b-848e-3421371a367f"
+type = "breaking"
+description = "For projects that tracked the development branch: a PromotionPath's `coverage` is now per publication unit, `coverage: {<unit>: {groups, exclude, require}}`, replacing the flat `coverage.applicationGroups`, `coverage.excludeApplications`, and `coverage.requireApplications` that no release shipped; the flat fields are refused. Move each list under the publication unit whose deployments it names. The PromotionRecord keeps its `excludedApplications` field, now every unit's `exclude`, sorted, each name once. Promotion refusals and fixes say deployment instead of Application, and a `require` name no attestation lists is reported under its unit instead of `environment`"
 author = "@NiklasRosenstein"
 
 [[entries]]
