@@ -276,7 +276,20 @@ fn body(
 
     let mut history = read_history(store, source_location, source, &options.select)?;
     read_running(context.drivers, &mut history);
-    let read_units = target_units(
+    let consumers = value_consumers(context.drivers, &history, &path);
+    let target_history = store.history(location).map_err(|error| store_error(target, &error))?;
+    let block_sequence = crate::rules::sources::record_in_source(options.promoted.as_ref())
+        .and_then(|promoted| promoted.promoted.as_ref())
+        .map(|block| block.sequence);
+    let history_sequence = next_sequence(&target_history, &snapshot, target, block_sequence);
+    let ask = Request {
+        select: options.select.clone(),
+        evidence_published: options.evidence_published,
+        ignore: options.ignore.clone(),
+        requested: options.requested.clone(),
+    };
+    let now = base.clock.now();
+    let (decision, read_units) = settle_target_units(
         &TargetSources {
             sources: context.sources,
             renderer: context.renderer,
@@ -284,33 +297,23 @@ fn body(
         },
         target,
         (options.promotes_source, &options.entry_units),
-        &history,
-        &options.select,
-    );
-    let consumers = value_consumers(context.drivers, &history, &path);
-    let target_history = store.history(location).map_err(|error| store_error(target, &error))?;
-    let block_sequence = crate::rules::sources::record_in_source(options.promoted.as_ref())
-        .and_then(|promoted| promoted.promoted.as_ref())
-        .map(|block| block.sequence);
-    let history_sequence = next_sequence(&target_history, &snapshot, target, block_sequence);
-    let input = PromotionInput {
-        path: &path,
-        source,
-        history: &history,
-        target_units: &read_units.units,
-        promotes_source: options.promotes_source,
-        consumers: &consumers,
-        target_records: &target_records,
-        sequence: history_sequence,
-        now: base.clock.now(),
-        request: &Request {
-            select: options.select.clone(),
-            evidence_published: options.evidence_published,
-            ignore: options.ignore.clone(),
-            requested: options.requested.clone(),
+        (&history, &options.select),
+        |units| {
+            promotion::decide(&PromotionInput {
+                path: &path,
+                source,
+                history: &history,
+                target_units: units,
+                promotes_source: options.promotes_source,
+                consumers: &consumers,
+                target_records: &target_records,
+                sequence: history_sequence,
+                now,
+                request: &ask,
+            })
         },
-    };
-    let decision = promotion::decide(&input).map_err(|refusal| refusal_finding(&refusal, report))?;
+    );
+    let decision = decision.map_err(|refusal| refusal_finding(&refusal, report))?;
     let chosen = match &decision {
         Decision::Unchanged(record) => &record.from,
         Decision::Promote(promotion) => &promotion.record.from,
@@ -326,9 +329,20 @@ fn body(
             let record = current.get(&path_key).cloned().unwrap_or(*record);
             // A `record: source` block whose marker is missing from the
             // target's state, such as after a marker that failed to write,
-            // gets it now: the retry the failure's fix names.
+            // gets it now: the retry the failure's fix names. Only a block
+            // its branch's upstream carries is stamped.
             if let Some(held) = held.as_deref_mut() {
                 if options.records_in_source() && !has_marker(&target_history, target, &record) {
+                    let writer = writer.ok_or_else(|| {
+                        writer_finding(
+                            &RecordWriteError::Failed("this invocation cannot read the project's source".to_owned()),
+                            target,
+                            &path_key,
+                        )
+                    })?;
+                    writer
+                        .published()
+                        .map_err(|error| writer_finding(&error, target, &path_key))?;
                     let commits = write_marker(context, request, held, &snapshot, &record)
                         .map_err(|error| store_error(target, &error))?;
                     report.commits.extend(commits);
@@ -541,7 +555,7 @@ fn marker_finding(
         format!(
             "the promotion record of {target} was committed to its source as {commit} and pushed, but its marker in {target}'s state was not written: {error}; until it is, the sequence is not reserved in state and `nyl get promotions` does not list the promotion"
         ),
-        format!("the promotion stands; run `nyl promote {path}` again once the state is reachable: it finds the record unchanged and writes only the marker"),
+        format!("the promotion stands; once the state is reachable, update the checkout to the pushed commit and run `nyl promote {path}` again: while the block still names the state it would promote, it writes only the marker, under your Nyl-Requested-By and Nyl-Reason; if a newer state qualifies by then, it promotes that instead, with a marker of its own"),
     )
 }
 
@@ -1017,6 +1031,10 @@ pub fn writer_finding(
             Code::PromoteSourceUnwritable,
             format!("nothing was pushed, but the entry worktree still holds commit {commit}: drop it (`git reset --keep @{{upstream}}`) and {again}"),
         ),
+        RecordWriteError::Unsigned(_) => (
+            Code::PromoteSourceUnwritable,
+            format!("sign commits with an SSH key the Environment's allowed signers file lists (`git config commit.gpgsign true`, `gpg.format ssh`, `user.signingkey <key>`), and {again}"),
+        ),
         RecordWriteError::Failed(_) => (Code::PromoteSourceUnwritable, format!("fix the cause, then {again}")),
     };
     let written = match error {
@@ -1131,7 +1149,7 @@ fn unsigned_block(environment: &str, allowed_signers: &str, error: &BlockSignatu
             "promote again with commit signing on (`git config commit.gpgsign true`, `gpg.format ssh`, and `user.signingkey`) as a signer {allowed_signers} lists, or add the signer's key to {allowed_signers} in a reviewed change; the block is written by `nyl promote`, never by hand"
         ),
         BlockSignatureError::Unreadable(_) => format!(
-            "run from a full clone with the Environment's file committed and {allowed_signers} present, or remove `verify` to check the block against the source environment's state instead"
+            "run from a full clone (`fetch-depth: 0`, or `git fetch --unshallow`) with Git 2.34 or newer and OpenSSH 8.2 or newer, the Environment's file committed, and {allowed_signers} present; or remove `verify` to check the block against the source environment's state instead"
         ),
     };
     Finding::new(
@@ -1283,82 +1301,115 @@ pub struct TargetSources<'a> {
     pub workspace: &'a Path,
 }
 
-/// The units `target` selects for each candidate state of `history`, the
-/// one way `nyl promote` and `nyl get promotion-candidates` take them.
+/// Decide with the units `target` selects for the candidate states of
+/// `history`, the one way `nyl promote` and `nyl get promotion-candidates`
+/// take them: `decide` is [`promotion::decide`] over an input carrying the
+/// units given.
 ///
 /// - A target whose source is promoted along the path (`promotes_source`)
 ///   runs the chosen state's source commit, so its own definitions at that
 ///   commit decide which units it selects, whatever the entry worktree has
-///   checked out: each distinct source commit of the states `select`
-///   admits is checked out once, into one reused worktree, and the target
-///   rendered there ([`TargetUnits::AtSource`]). A commit whose definitions
-///   do not render, such as one before the target was declared, keeps its
-///   states out with the reason. So does a commit this clone cannot check
-///   out, such as one of a deleted branch; it is also listed in
-///   [`TargetUnitsRead::unavailable`], because passing over a newer state
-///   for that reason must not promote an older one ([`passed_over`]).
+///   checked out ([`TargetUnits::AtSource`]). They are read lazily, newest
+///   state first: the decision is taken with what was read, and the source
+///   commit of the newest candidate state at or above the chosen one (all
+///   of them for a refusal) that is not read yet is checked out, into one
+///   reused worktree, rendered, and the decision taken again. A state whose
+///   commit is not read cannot qualify, so the decision is settled once
+///   every state up to the chosen one is read: one render for the usual
+///   promotion of the newest state, not one per recorded state.
+/// - A commit whose definitions do not render, such as one before the
+///   target was declared, keeps its states out with the reason. So does a
+///   commit this clone cannot check out, such as one of a deleted branch;
+///   it is also listed in [`TargetUnitsRead::unavailable`], because passing
+///   over a newer state for that reason must not promote an older one
+///   ([`passed_over`]).
 /// - Any other target runs its own source: the units its entry worktree
 ///   selects ([`TargetUnits::Fixed`]).
-pub fn target_units(
+pub fn settle_target_units(
     access: &TargetSources<'_>,
     target: &EnvironmentName,
     (promotes_source, entry_units): (bool, &BTreeSet<UnitName>),
-    history: &[RecordedState],
-    select: &Selection,
-) -> TargetUnitsRead {
-    if !promotes_source {
-        return TargetUnitsRead {
-            units: TargetUnits::Fixed(entry_units.clone()),
-            unavailable: BTreeMap::new(),
-        };
-    }
-    let commits: BTreeSet<CommitId> = history
-        .iter()
-        .filter(|state| state.is_candidate() && select.admits(state))
-        .filter_map(|state| state.source_commit().cloned())
-        .collect();
+    (history, select): (&[RecordedState], &Selection),
+    decide: impl Fn(&TargetUnits) -> Result<Decision, Refusal>,
+) -> (Result<Decision, Refusal>, TargetUnitsRead) {
+    let mut read = TargetUnitsRead {
+        units: if promotes_source {
+            TargetUnits::AtSource(BTreeMap::new())
+        } else {
+            TargetUnits::Fixed(entry_units.clone())
+        },
+        unavailable: BTreeMap::new(),
+    };
     let worktree = access.workspace.join("target-units");
-    let mut by_commit = BTreeMap::new();
-    let mut unavailable = BTreeMap::new();
-    for commit in commits {
-        if let Err(error) = access
-            .sources
-            .reset_worktree(&SourceRepository::This, &commit, &worktree)
-        {
-            let message =
-                format!("cannot check out source commit {commit} to read which units {target} selects there: {error}");
-            by_commit.insert(commit.clone(), Err(message.clone()));
-            unavailable.insert(
-                commit,
-                Finding::new(
-                    Code::SourceUnavailable,
-                    message,
-                    "make the commit fetchable from this clone (fetch the branch that carries it), then try again",
-                ),
-            );
-            continue;
+    loop {
+        let decision = decide(&read.units);
+        let TargetUnits::AtSource(known) = &read.units else {
+            return (decision, read);
+        };
+        let chosen = match &decision {
+            Ok(Decision::Unchanged(record)) => Some(&record.from),
+            Ok(Decision::Promote(promotion)) => Some(&promotion.record.from),
+            Err(_) => None,
         }
-        let units = access
-            .renderer
-            .render(&worktree, target, &commit)
-            .map(|rendered| {
-                rendered
-                    .units
-                    .into_iter()
-                    .filter(|(_, unit)| unit.selected)
-                    .map(|(name, _)| name)
-                    .collect()
-            })
-            .map_err(|error| format!("{target}'s definitions at source commit {commit} do not render: {error}"));
-        by_commit.insert(commit, units);
-    }
-    TargetUnitsRead {
-        units: TargetUnits::AtSource(by_commit),
-        unavailable,
+        .and_then(|from| match from {
+            PromotionFrom::Environment(from) => Some(&from.desired_commit),
+            PromotionFrom::Target(_) => None,
+        });
+        let horizon = chosen
+            .and_then(|chosen| history.iter().position(|state| state.desired_commit == *chosen))
+            .map_or(history.len(), |position| position + 1);
+        let next = history[..horizon]
+            .iter()
+            .filter(|state| state.is_candidate() && select.admits(state))
+            .filter_map(RecordedState::source_commit)
+            .find(|commit| !known.contains_key(*commit))
+            .cloned();
+        let Some(commit) = next else {
+            return (decision, read);
+        };
+        let units = read_target_units(access, target, &worktree, &commit, &mut read.unavailable);
+        if let TargetUnits::AtSource(known) = &mut read.units {
+            known.insert(commit, units);
+        }
     }
 }
 
-/// What [`target_units`] read.
+/// The units `target` selects at `commit`, or why they cannot be told.
+fn read_target_units(
+    access: &TargetSources<'_>,
+    target: &EnvironmentName,
+    worktree: &Path,
+    commit: &CommitId,
+    unavailable: &mut BTreeMap<CommitId, Finding>,
+) -> Result<BTreeSet<UnitName>, String> {
+    if let Err(error) = access.sources.reset_worktree(&SourceRepository::This, commit, worktree) {
+        let message =
+            format!("cannot check out source commit {commit} to read which units {target} selects there: {error}");
+        unavailable.insert(
+            commit.clone(),
+            Finding::new(
+                Code::SourceUnavailable,
+                message.clone(),
+                "make the commit fetchable from this clone (fetch the branch that carries it), then try again",
+            ),
+        );
+        return Err(message);
+    }
+    access
+        .renderer
+        .render(worktree, target, commit)
+        .map(|rendered| {
+            rendered
+                .units
+                .into_iter()
+                .filter(|(_, unit)| unit.selected)
+                .map(|(name, _)| name)
+                .collect()
+        })
+        .map_err(|error| format!("{target}'s definitions at source commit {commit} do not render: {error}"))
+}
+
+/// What [`settle_target_units`] read.
 pub struct TargetUnitsRead {
     pub units: TargetUnits,
     /// The source commits that could not be checked out, with why.

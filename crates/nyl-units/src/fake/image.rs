@@ -111,9 +111,8 @@ impl Driver for FakeImage {
         }
     }
 
-    fn artifact_schema(&self, _spec: &Value, artifact: &str) -> Option<schemars::Schema> {
-        (artifact == crate::oci_image::IMAGE_ARTIFACT)
-            .then(|| schemars::schema_for!(crate::oci_image::ContainerImageArtifact))
+    fn artifact_schema(&self, _spec: &Value, artifact: &str) -> nyl_core::orchestration::driver::ArtifactSchema {
+        crate::oci_image::container_image_schema(artifact)
     }
 
     fn spec_schema(&self) -> schemars::Schema {

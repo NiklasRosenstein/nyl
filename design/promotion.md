@@ -505,9 +505,15 @@ spec:
     source first, marker second. A marker that cannot be written leaves the
     promotion standing (the pushed block is the record): `nyl promote`
     reports `done` with the source commit and exits 1 with
-    `NYL-PROMOTE-MARKER-UNWRITTEN`, and running it again finds the block
-    `unchanged` and writes only the missing marker. `--dry-run` writes
-    neither.
+    `NYL-PROMOTE-MARKER-UNWRITTEN`. Running it again from a checkout of the
+    pushed commit finds the block `unchanged` while it still names the
+    state it would promote, and writes only the missing marker, under the
+    re-runner's `Nyl-Requested-By` and `Nyl-Reason`; if a newer state
+    qualifies by then, it promotes that instead. A marker is written for an
+    existing block only when the checked-out branch is not ahead of its
+    upstream and the Environment's file is unchanged, so the block is the
+    one the upstream carries; otherwise `NYL-PROMOTE-SOURCE-UNWRITABLE`.
+    `--dry-run` writes neither.
   - **Trusting the block.** By default a run that first applies a new
     block reads the source environment's state and checks the block
     against the state it names, so it needs read access to that state.
@@ -516,13 +522,24 @@ spec:
     by its signature instead: the commit that last changed the block, as
     `git log -L` follows the block's lines back from the entry commit, must
     carry an SSH signature `git verify-commit` accepts with
-    `gpg.ssh.allowedSignersFile` set to that file. The block is still
-    checked against its path, and the source's state is not read. An
-    unsigned commit, a signature by an unlisted key, an OpenPGP or X.509
-    signature, an Environment file with uncommitted changes, or a missing
-    allowed signers file refuses with `NYL-PROMOTION-RECORD-UNSIGNED`
-    (exit 1). Nothing enables it implicitly; the allowed signers file
-    deserves the same review as the block's branch.
+    `gpg.ssh.allowedSignersFile` set to that file (through a merge, the
+    side commit that changed the lines counts, not the merge). Only the
+    commit's `gpgsig`/`gpgsig-sha256` headers are read, every one must be
+    an SSH signature, and `verify-commit` runs with OpenPGP and X.509
+    programs that cannot start, so no keyring is consulted. The block's
+    lines, dedented, must parse to the declared block. The clone must not
+    be shallow (its boundary commit would be credited with the whole
+    block), replace objects are ignored, and the file must hold what the
+    checked-out commit carries. The block is still checked against its
+    path, and the source's state is not read. Any failure refuses with
+    `NYL-PROMOTION-RECORD-UNSIGNED` (exit 1). `nyl promote` verifies its
+    own commit the same way before pushing and refuses to push one a run
+    would not trust, and its dry run checks that SSH commit signing is
+    configured. It needs Git 2.34 and OpenSSH 8.2. `valid-after` and
+    `valid-before` are checked against the committer date the signer
+    chose; `gpg.ssh.revocationFile` withdraws keys. Nothing enables it
+    implicitly; the allowed signers file deserves the same review as the
+    block's branch.
 - Either way, the source commit and the values sit in one record, so they
   cannot diverge. An environment that follows its entry worktree, or a
   revision, is not a promotion target for its source.

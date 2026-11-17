@@ -307,31 +307,40 @@ fn test_value_types_must_fit_every_reading_binding() {
 
 /// A selector's pointer into an artifact is typed by the schema its
 /// producing kind declares for that artifact (`Driver::artifact_schema`):
-/// a field it lacks is an invalid selector, and an artifact the kind does
-/// not describe is checked only once a receipt is read. Catches an image
-/// field bound where an integer belongs, and a typo in an artifact pointer,
-/// both found only after a promotion was recorded.
+/// a field it lacks, and an artifact the kind does not publish, are invalid
+/// selectors, and the artifact of a kind that describes none is checked
+/// only once a receipt is read. Catches an image field bound where an
+/// integer belongs, and a typo in an artifact pointer or name, both found
+/// only after a promotion was recorded.
 #[test]
 fn test_artifact_pointers_are_typed_by_the_producing_kind() {
     let paths = [path(base(json!({
         "size": {"select": {"unit": "web", "artifact": "image", "pointer": "/size"}},
         "typo": {"select": {"unit": "web", "artifact": "image", "pointer": "/referense"}},
-        "other": {"select": {"unit": "web", "artifact": "sbom", "pointer": "/anything"}},
+        "other": {"select": {"unit": "web", "artifact": "imgae", "pointer": "/reference"}},
         "untyped": {"select": {"unit": "db", "artifact": "image", "pointer": "/anything"}}
     })))];
     let readers = [
         reader("prod", None, "size", Some(ValueType::String)),
-        reader("prod", None, "other", Some(ValueType::String)),
         reader("prod", None, "untyped", Some(ValueType::Integer)),
     ];
     let findings = run(&world(), &paths, &readers);
     assert_eq!(
         codes(&findings),
-        [Code::PromoteSelectorInvalid, Code::PromoteValueType],
+        [
+            Code::PromoteSelectorInvalid,
+            Code::PromoteSelectorInvalid,
+            Code::PromoteValueType
+        ],
         "{findings:?}"
     );
-    assert!(findings[0].message.contains("\"/referense\""), "{}", findings[0]);
-    assert!(findings[1].message.contains("\"size\" is a integer"), "{}", findings[1]);
+    assert!(
+        findings[0].message.contains("no artifact named \"imgae\""),
+        "{}",
+        findings[0]
+    );
+    assert!(findings[1].message.contains("\"/referense\""), "{}", findings[1]);
+    assert!(findings[2].message.contains("\"size\" is a integer"), "{}", findings[2]);
 }
 
 /// A path's `attestations` scopes name units it covers and attestations the

@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::PromotionInputSource;
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{Driver, DriverSet};
+use nyl_core::orchestration::driver::{ArtifactSchema, Driver, DriverSet};
 use nyl_core::orchestration::ids::EnvironmentName;
 use nyl_core::orchestration::ports::{RenderedSource, RenderedUnit};
 use nyl_core::resources::promotion::{PromotionPath, SelectForm};
@@ -314,10 +314,18 @@ fn select_type(
                 return Ok(None);
             };
             let pointer = select.pointer.as_deref().unwrap_or_default();
-            let Some(schema) = driver
-                .artifact_schema(spec, artifact)
-                .and_then(|schema| serde_json::to_value(schema).ok())
-            else {
+            let schema = match driver.artifact_schema(spec, artifact) {
+                ArtifactSchema::Undescribed => return Ok(None),
+                ArtifactSchema::NoSuchArtifact => return Err(invalid(
+                    format!(
+                        "unit {unit_name} of kind {} publishes no artifact named {artifact:?}",
+                        unit.envelope.kind
+                    ),
+                    "name an artifact the unit's kind publishes; `nyl get artifacts -e <env>` lists those of a receipt",
+                )),
+                ArtifactSchema::Described(schema) => schema,
+            };
+            let Ok(schema) = serde_json::to_value(schema) else {
                 return Ok(None);
             };
             match schema_type_in(&schema, pointer) {
@@ -328,7 +336,7 @@ fn select_type(
                         "the pointer {pointer:?} names no field of artifact {artifact} of kind {}",
                         unit.envelope.kind
                     ),
-                    "point at a field the artifact has, such as /reference or /digest of an image",
+                    "point at a field the artifact declares; the kind's documentation lists its artifacts' fields",
                 )),
             }
         }

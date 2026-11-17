@@ -134,7 +134,9 @@ impl TargetUnits {
                 match by_commit.get(commit) {
                     Some(Ok(units)) => Ok(units),
                     Some(Err(reason)) => Err(reason.clone()),
-                    None => Err(format!("its definitions at source commit {commit} were not read")),
+                    None => Err(format!(
+                        "its definitions at source commit {commit} were not read, because a newer state settles what `nyl promote` takes; name the state with `--state-revision` to judge it"
+                    )),
                 }
             }
         }

@@ -919,6 +919,11 @@ impl nyl_core::orchestration::ports::PromotionRecordWriter for FakeWriter {
         self.error.clone().map_or(Ok(()), Err)
     }
 
+    fn published(&self) -> Result<(), nyl_core::orchestration::ports::RecordWriteError> {
+        self.calls.lock().unwrap().push("published");
+        Ok(())
+    }
+
     fn commit_record(
         &self,
         _record: &nyl_core::orchestration::promotion::PromotionRecord,
@@ -1171,6 +1176,119 @@ fn test_a_marker_that_cannot_be_written_leaves_the_promotion_standing() {
     assert_eq!(error.code, nyl_core::orchestration::codes::Code::PromoteMarkerUnwritten);
     assert!(error.fix.contains("nyl promote dev-to-prod"), "{}", error.fix);
     assert_eq!(harness.shell.tip(PROD_DESIRED), prod_desired, "no marker");
+}
+
+/// `environments` with `record`'s block placed into prod's Environment.
+fn with_block(environments: &str, record: &nyl_core::orchestration::promotion::PromotionRecord) -> String {
+    let documents: Vec<String> = environments
+        .split("---\n")
+        .map(|document| {
+            if document.contains("name: prod}") && document.contains("record: source") {
+                nyl::orchestration::record_source::place_block(document, record).unwrap()
+            } else {
+                document.to_owned()
+            }
+        })
+        .collect();
+    let placed = documents.join("---\n");
+    assert_ne!(placed, environments);
+    placed
+}
+
+/// The record `nyl promote dev-to-prod` would write now.
+fn dry_record(harness: &Promote) -> nyl_core::orchestration::promotion::PromotionRecord {
+    let dry = harness.promote(&["dev-to-prod", "--dry-run"]);
+    assert_eq!(dry.exit, 0, "{}", dry.stderr);
+    serde_json::from_value(dry.report["record"].clone()).unwrap()
+}
+
+/// `verify` end to end. A block whose last change is unsigned is refused
+/// by the next run of prod (`NYL-PROMOTION-RECORD-UNSIGNED`, naming that
+/// commit), through the verifier every command that resolves prod is
+/// given; and `nyl promote` from a clone whose commits a run would not
+/// trust is refused before anything is pushed
+/// (`NYL-PROMOTE-SOURCE-UNWRITABLE`). Catches a run that trusts an
+/// unsigned block, and an untrusted promotion pushed.
+#[test]
+fn test_verify_refuses_unsigned_blocks_before_pushing_and_when_running() {
+    let environments = record_source_environments().replace(
+        "      record: source\n",
+        "      record: source\n      verify: {allowedSigners: allowed_signers}\n",
+    );
+    let harness = Promote::of(&environments, &format!("{UNITS}{BINDER}"), true);
+    let record = dry_record(&harness);
+    harness.shell.world.commit_files(
+        "main",
+        "Promote dev-to-prod #1 without a signature",
+        &[
+            ("nyl/environments.yaml", &with_block(&environments, &record)),
+            ("nyl/allowed_signers", ""),
+        ],
+    );
+    let unsigned_commit = harness.shell.tip("refs/heads/main");
+    let refused = harness.shell.invoke(&["reconcile", "-e", "prod"]);
+    assert_eq!(refused.exit, 1, "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("NYL-PROMOTION-RECORD-UNSIGNED"),
+        "{}",
+        refused.stderr
+    );
+    assert!(refused.stderr.contains(&unsigned_commit), "{}", refused.stderr);
+    assert!(refused.stderr.contains("not signed"), "{}", refused.stderr);
+
+    // The allowed signers file lists nobody: whatever this clone signs
+    // with, the promotion commit would not be trusted, so it is not pushed.
+    harness.release("2");
+    let main = harness.shell.tip("refs/heads/main");
+    let prod_desired = harness.shell.tip(PROD_DESIRED);
+    let untrusted = harness.promote(&["dev-to-prod", "--reason", "Release 2"]);
+    assert_eq!(untrusted.exit, 1, "{}", untrusted.stderr);
+    assert!(
+        untrusted.stderr.contains("NYL-PROMOTE-SOURCE-UNWRITABLE"),
+        "{}",
+        untrusted.stderr
+    );
+    assert_eq!(harness.shell.tip("refs/heads/main"), main, "nothing pushed");
+    assert_eq!(harness.shell.tip(PROD_DESIRED), prod_desired, "no marker");
+}
+
+/// A block pushed without its marker, such as after a marker that failed:
+/// running `nyl promote` again finds the block `unchanged` and writes only
+/// the marker, under the re-runner's `Nyl-Reason`, and `nyl get
+/// promotions` then lists it. Catches a retry that writes a second block,
+/// and a marker never repaired.
+#[test]
+fn test_a_rerun_writes_the_missing_marker() {
+    let harness = Promote::of(&record_source_environments(), &format!("{UNITS}{BINDER}"), true);
+    let record = dry_record(&harness);
+    // The block lands in source by hand, as a pushed promotion whose marker failed would leave it.
+    harness.shell.world.commit_files(
+        "main",
+        "Promote dev-to-prod #1",
+        &[(
+            "nyl/environments.yaml",
+            &with_block(&record_source_environments(), &record),
+        )],
+    );
+    let main = harness.shell.tip("refs/heads/main");
+    let prod_desired = harness.shell.tip(PROD_DESIRED);
+
+    let rerun = harness.promote(&["dev-to-prod", "--reason", "Write the missing marker"]);
+    assert_eq!(rerun.exit, 0, "{}", rerun.stderr);
+    assert_eq!(rerun.report["outcome"], "unchanged");
+    assert_eq!(harness.shell.tip("refs/heads/main"), main, "no second block");
+    let marker = harness.shell.tip(PROD_DESIRED);
+    assert_ne!(marker, prod_desired);
+    assert_eq!(rerun.report["commits"]["desired"], marker.as_str());
+    let message = harness.shell.message(PROD_DESIRED);
+    assert!(message.contains("Nyl-Reason: Write the missing marker"), "{message}");
+    let listed = harness.get(&["promotions", "-e", "prod"]);
+    assert_eq!(listed.report["history"][0]["sequence"], 1);
+    assert_eq!(listed.report["history"][0]["commit"], marker.as_str());
+    // Once there, a re-run writes nothing.
+    let again = harness.promote(&["dev-to-prod"]);
+    assert_eq!(again.exit, 0, "{}", again.stderr);
+    assert_eq!(harness.shell.tip(PROD_DESIRED), marker);
 }
 
 /// After switching prod from `record: state` to `record: source`, the

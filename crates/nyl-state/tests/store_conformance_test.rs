@@ -1624,11 +1624,10 @@ fn test_commit_unchanged_desired_writes_a_desired_commit_without_changes() {
         assert_eq!(after.tips.desired.as_ref(), Some(&desired), "{}", subject.name);
         assert_eq!(after.tips.observed, before.tips.observed, "{}", subject.name);
         assert_eq!(after.desired, before.desired, "{}", subject.name);
-        if let Ok(history) = store.history(&location) {
-            let newest = &history.desired[0];
-            assert_eq!(newest.commit, desired, "{}", subject.name);
-            assert!(!newest.changed_desired, "{}: a marker is no state commit", subject.name);
-        }
+        let history = store.history(&location).unwrap();
+        let newest = &history.desired[0];
+        assert_eq!(newest.commit, desired, "{}", subject.name);
+        assert!(!newest.changed_desired, "{}: a marker is no state commit", subject.name);
     }
 }
 

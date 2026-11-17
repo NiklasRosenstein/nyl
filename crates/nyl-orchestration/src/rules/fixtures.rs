@@ -286,13 +286,16 @@ impl Driver for TestDriver {
     }
     /// Kind `Typed` publishes an artifact `image` with a string `reference`
     /// and an integer `size`.
-    fn artifact_schema(&self, _spec: &Value, artifact: &str) -> Option<schemars::Schema> {
-        (self.kind == "Typed" && artifact == "image").then(|| {
-            schemars::json_schema!({
+    fn artifact_schema(&self, _spec: &Value, artifact: &str) -> nyl_core::orchestration::driver::ArtifactSchema {
+        use nyl_core::orchestration::driver::ArtifactSchema;
+        match (self.kind, artifact) {
+            ("Typed", "image") => ArtifactSchema::Described(schemars::json_schema!({
                 "type": "object", "additionalProperties": false,
                 "properties": {"reference": {"type": "string"}, "size": {"type": "integer"}}
-            })
-        })
+            })),
+            ("Typed", _) => ArtifactSchema::NoSuchArtifact,
+            _ => ArtifactSchema::Undescribed,
+        }
     }
     /// Kind `Built` builds from the Git source field `/source`.
     fn source_fields(&self, _spec: &Value) -> Vec<String> {

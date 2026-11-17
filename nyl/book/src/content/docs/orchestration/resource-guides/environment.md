@@ -75,7 +75,9 @@ spec:
 The commit that last changed the block must then carry an SSH signature by
 a key the file lists, and the run reads nothing of the source's state; see
 [Trusting the block by its signature](/nyl/orchestration/promotion/#trusting-the-block-by-its-signature).
-`verify` is accepted only with `record: source`.
+`verify` is accepted only with `record: source`, and needs Git 2.34 or newer,
+OpenSSH 8.2 or newer (`ssh-keygen`), and a full (not shallow) clone on every
+runner that runs the environment or promotes into it.
 
 ## Drift repair
 

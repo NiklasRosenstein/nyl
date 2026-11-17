@@ -54,7 +54,9 @@ The path's source states, newest first, judged exactly as
 [`nyl promote`](/nyl/reference/cli/promote/) judges them, with the units the
 target selects read the same way: for a target whose source the path
 promotes, from its definitions at each state's source commit
-([Which units the target selects](/nyl/reference/cli/promote/#which-units-the-target-selects)). Each state shows the level
+([Which units the target selects](/nyl/reference/cli/promote/#which-units-the-target-selects)).
+Those are read newest first, only up to the state `nyl promote` would
+take, so older states show `target-source` saying they were not read. Each state shows the level
 it reaches up to the path's own (`attested`, `published`, or `none`), what it
 lacks below the path's level, and the values it would carry. `selected` marks
 the state `nyl promote` without flags would take now, `promoted` the state

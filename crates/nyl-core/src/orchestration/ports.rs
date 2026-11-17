@@ -948,6 +948,11 @@ pub enum RecordWriteError {
     PushUnknown { commit: String, message: String },
     /// The push was refused, and the commit could not be undone.
     UndoFailed { commit: String, message: String },
+    /// The Environment trusts its block by signature (`verify`), and the
+    /// promotion commit would not be trusted: signing is not configured, or
+    /// the commit is not signed by a key the allowed signers file lists.
+    /// Nothing was pushed.
+    Unsigned(String),
     /// `git` failed otherwise.
     Failed(String),
 }
@@ -971,6 +976,7 @@ impl std::fmt::Display for RecordWriteError {
             | Self::Undeclared(message)
             | Self::Rejected(message)
             | Self::RemoteRejected(message)
+            | Self::Unsigned(message)
             | Self::Failed(message) => formatter.write_str(message),
             Self::PushUnknown { commit, message } => {
                 write!(formatter, "the push of commit {commit} failed, and may have reached the remote: {message}")
@@ -993,6 +999,11 @@ pub trait PromotionRecordWriter: Send + Sync {
     fn check(&self, record: &PromotionRecord) -> Result<(), RecordWriteError>;
     /// Commit `record` as the block with `message`, push it, and return the commit.
     fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError>;
+    /// Whether the block in the entry worktree is the one its branch's
+    /// upstream carries: a branch is checked out, it is not ahead of its
+    /// upstream, and the Environment's file is unchanged. A marker is
+    /// written for an existing block only then.
+    fn published(&self) -> Result<(), RecordWriteError>;
 }
 
 /// Why the signature on a `record: source` block cannot be trusted.

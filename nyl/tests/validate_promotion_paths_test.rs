@@ -83,6 +83,18 @@ fn test_validate_reports_each_failure_with_its_code_and_fix() {
             "NYL-PROMOTE-SELECTOR-INVALID",
             "declares no output \"nope\"",
         ),
+        // The image driver closes its artifact's schema: a misspelled field
+        // or artifact name is caught before any receipt exists.
+        (
+            "  from: {environment: dev}\n  to: {environment: prod}\n  values:\n    v:\n      select: {unit: web-image, artifact: image, pointer: /referense}\n",
+            "NYL-PROMOTE-SELECTOR-INVALID",
+            "names no field of artifact image",
+        ),
+        (
+            "  from: {environment: dev}\n  to: {environment: prod}\n  values:\n    v:\n      select: {unit: web-image, artifact: imgae, pointer: /reference}\n",
+            "NYL-PROMOTE-SELECTOR-INVALID",
+            "publishes no artifact named \"imgae\"",
+        ),
         (
             "  from: {environment: dev}\n  to: {environment: prod}\n  evidence: attested\n  attestations: {environment: [release]}\n",
             "NYL-ATTESTATION-UNDECLARED",

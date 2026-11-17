@@ -57,6 +57,10 @@ pub struct GitRecordWriter {
     /// Extra environment of every local `git` the writer runs, such as an
     /// isolated configuration in tests; empty in production.
     pub git_env: Vec<(String, String)>,
+    /// The allowed signers file of `source.fromPromotion.verify`: the
+    /// promotion commit must be signed by a key it lists, which is checked
+    /// before the push.
+    pub verify: Option<PathBuf>,
 }
 
 /// What a write starts from, found without writing anything.
@@ -74,12 +78,18 @@ struct Ready {
     relative: String,
     head: String,
     contents: String,
+    /// The Environment's document with the block placed.
+    document: String,
     edited: String,
 }
 
 impl PromotionRecordWriter for GitRecordWriter {
     fn check(&self, record: &PromotionRecord) -> Result<(), RecordWriteError> {
         self.ready(record).map(drop)
+    }
+
+    fn published(&self) -> Result<(), RecordWriteError> {
+        self.published_branch().map(drop)
     }
 
     fn commit_record(&self, record: &PromotionRecord, message: &str) -> Result<CommitId, RecordWriteError> {
@@ -129,6 +139,8 @@ impl PromotionRecordWriter for GitRecordWriter {
         let commit = self
             .git(&["rev-parse", "--verify", "HEAD"])
             .map_err(RecordWriteError::Failed)?;
+        // A commit a run would not trust is never pushed.
+        self.trusted_before_push(&ready, &commit)?;
         let pushed = nyl_git::push_atomic(
             &self.git_dir,
             &ready.url,
@@ -175,8 +187,39 @@ impl PromotionRecordWriter for GitRecordWriter {
 }
 
 impl GitRecordWriter {
-    /// Everything a write needs, checked without writing.
-    fn ready(&self, record: &PromotionRecord) -> Result<Ready, RecordWriteError> {
+    /// With `verify`, the promotion commit `commit` must be the block's last
+    /// change and signed as a run requires; otherwise it is undone.
+    fn trusted_before_push(&self, ready: &Ready, commit: &str) -> Result<(), RecordWriteError> {
+        let Some(signers) = &self.verify else {
+            return Ok(());
+        };
+        let verified = BlockSignatures {
+            git_dir: self.git_dir.clone(),
+            worktree: self.worktree.clone(),
+            git_env: self.git_env.clone(),
+        }
+        .verify(&self.file, (self.document_index, &ready.document), signers);
+        let problem = match verified {
+            Ok(signed) if signed.as_str() == commit => return Ok(()),
+            Ok(signed) => format!("the block's last change is {signed}, not the promotion commit"),
+            Err(error) => error.to_string(),
+        };
+        Err(match self.undo(ready, commit) {
+            Ok(()) => RecordWriteError::Unsigned(format!(
+                "the promotion commit would not be trusted, so it was undone and nothing was pushed: {problem}"
+            )),
+            Err(undo) => RecordWriteError::UndoFailed {
+                commit: commit.to_owned(),
+                message: format!("{problem}; {undo}"),
+            },
+        })
+    }
+
+    /// The checked-out branch with an upstream it is not ahead of, and the
+    /// Environment's file tracked and unchanged: what a write starts from,
+    /// and what says that the block in the checkout is the one the upstream
+    /// carries.
+    fn published_branch(&self) -> Result<Ready, RecordWriteError> {
         let failed = RecordWriteError::Failed;
         let head_ref = self.run(&["symbolic-ref", "--quiet", "HEAD"]).map_err(failed)?;
         let branch = match head_ref.status.code() {
@@ -239,10 +282,6 @@ impl GitRecordWriter {
         let head = self.git(&["rev-parse", "--verify", "HEAD"]).map_err(failed)?;
         let contents =
             std::fs::read_to_string(&self.file).map_err(|error| failed(format!("cannot read {relative}: {error}")))?;
-        let document = place_block(&self.document, record).map_err(RecordWriteError::Unplaceable)?;
-        let edited =
-            crate::cli::resource_file::replace_document(&contents, self.document_index, &self.document, &document)
-                .map_err(|error| RecordWriteError::Unplaceable(error.to_string()))?;
         Ok(Ready {
             branch,
             url,
@@ -252,8 +291,51 @@ impl GitRecordWriter {
             relative,
             head,
             contents,
-            edited,
+            document: String::new(),
+            edited: String::new(),
         })
+    }
+
+    /// Everything a write needs, checked without writing.
+    fn ready(&self, record: &PromotionRecord) -> Result<Ready, RecordWriteError> {
+        let mut ready = self.published_branch()?;
+        let document = place_block(&self.document, record).map_err(RecordWriteError::Unplaceable)?;
+        ready.edited = crate::cli::resource_file::replace_document(
+            &ready.contents,
+            self.document_index,
+            &self.document,
+            &document,
+        )
+        .map_err(|error| RecordWriteError::Unplaceable(error.to_string()))?;
+        ready.document = document;
+        if self.verify.is_some() {
+            self.signing_configured()?;
+        }
+        Ok(ready)
+    }
+
+    /// With `verify`, commits must be signed with SSH, as the user's Git
+    /// configuration says: `commit.gpgsign`, `gpg.format ssh`, and a
+    /// `user.signingkey`. Whether the key is one the allowed signers file
+    /// lists shows once the commit is made, before it is pushed.
+    fn signing_configured(&self) -> Result<(), RecordWriteError> {
+        let config = |key: &str| self.git(&["config", "--get", key]).unwrap_or_default();
+        let missing: Vec<&str> = [
+            ("commit.gpgsign", config("commit.gpgsign") == "true"),
+            ("gpg.format", config("gpg.format") == "ssh"),
+            ("user.signingkey", !config("user.signingkey").is_empty()),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| (!set).then_some(key))
+        .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(RecordWriteError::Unsigned(format!(
+                "the Environment trusts its block by signature (`verify`), and this clone does not sign commits with SSH: {} not set",
+                missing.join(", ")
+            )))
+        }
     }
 
     /// Undo the promotion commit after a refused push: the branch moves back
@@ -518,6 +600,21 @@ pub fn writer_for(
         })?;
     let auth = crate::cli::git_auth::project_git_auth(&session.inventory.project_config.config)
         .map_err(|error| RecordWriteError::Failed(error.to_string()))?;
+    let verify = session
+        .entry()
+        .ok()
+        .and_then(|entry| entry.spec.source?.from_promotion?.verify)
+        .map(|verify| {
+            session
+                .inventory
+                .paths()
+                .resolve(
+                    "spec.source.fromPromotion.verify.allowedSigners",
+                    &verify.allowed_signers,
+                )
+                .map_err(|error| RecordWriteError::Failed(error.to_string()))
+        })
+        .transpose()?;
     Ok(GitRecordWriter {
         git_dir: session.resolved.git_dir.clone(),
         worktree: session.inventory.worktree_root.clone(),
@@ -528,6 +625,7 @@ pub fn writer_for(
         clock,
         auth,
         git_env: Vec::new(),
+        verify,
     })
 }
 
@@ -584,19 +682,60 @@ struct BlockSignatures {
     git_env: Vec<(String, String)>,
 }
 
+/// What `verify` needs of the tools: Git with SSH signature support
+/// (2.34) and OpenSSH's `ssh-keygen -Y` (8.2).
+const PREREQUISITES: &str = "verify needs Git 2.34 or newer and OpenSSH 8.2 or newer (`ssh-keygen`) on the runner";
+
+/// The value of each signature header (`gpgsig`, `gpgsig-sha256`) of a raw
+/// commit object, with its continuation lines.
+fn signature_headers(object: &str) -> Vec<String> {
+    let header = object.split("\n\n").next().unwrap_or_default();
+    let mut found: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in header.lines() {
+        if let Some(continued) = line.strip_prefix(' ') {
+            if let Some(value) = current.as_mut() {
+                value.push('\n');
+                value.push_str(continued);
+            }
+            continue;
+        }
+        found.extend(current.take());
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        if key == "gpgsig" || key == "gpgsig-sha256" {
+            current = Some(value.to_owned());
+        }
+    }
+    found.extend(current);
+    found
+}
+
+/// A program name that never exists, so `git verify-commit` cannot check an
+/// OpenPGP or X.509 signature against a keyring the allowed signers file
+/// does not govern.
+const NO_PROGRAM: &str = "nyl-refuses-non-ssh-signatures";
+
 impl BlockSignatures {
     /// The commit of `HEAD`'s history that last changed the `promoted`
     /// block of the Environment in `file` (its document `index`, reading
     /// `document`), checked with `git verify-commit` against `signers`.
     ///
-    /// - The file must be tracked and unchanged, so the block a run reads is
-    ///   the one a commit carries.
+    /// - The clone must hold the whole history: in a shallow clone the
+    ///   boundary commit would be credited with the whole block. Replace
+    ///   objects are ignored (`GIT_NO_REPLACE_OBJECTS`).
+    /// - The file must be tracked and its content the one `HEAD` carries
+    ///   (compared by object ID, so `assume-unchanged` and `skip-worktree`
+    ///   flags hide nothing).
+    /// - The block's lines, dedented, must parse to the block the
+    ///   Environment declares, so the range `git log -L` follows is the
+    ///   block.
     /// - The commit is the newest that changed any line of the block, as
-    ///   `git log -L` follows the block's lines back from `HEAD`: a later
-    ///   hand edit inside the block is that commit, and must be signed too.
-    /// - Only an SSH signature is checked against the allowed signers file;
-    ///   an OpenPGP or X.509 signature would be checked against a keyring
-    ///   the file does not govern, so it is refused.
+    ///   `git log -L` follows the block's lines back from `HEAD` (through a
+    ///   merge, to the side that changed them): a later hand edit inside
+    ///   the block is that commit, and must be signed too.
+    /// - Only an SSH signature is checked against the allowed signers file:
+    ///   every signature header must hold one, and `verify-commit` runs with
+    ///   OpenPGP and X.509 programs that cannot start.
     fn verify(
         &self,
         file: &std::path::Path,
@@ -604,44 +743,23 @@ impl BlockSignatures {
         signers: &std::path::Path,
     ) -> Result<CommitId, BlockSignatureError> {
         let unreadable = BlockSignatureError::Unreadable;
-        let worktree = std::fs::canonicalize(&self.worktree).unwrap_or_else(|_| self.worktree.clone());
-        let canonical = std::fs::canonicalize(file)
-            .map_err(|error| unreadable(format!("cannot read {}: {error}", file.display())))?;
-        let relative = canonical
-            .strip_prefix(&worktree)
-            .map_err(|_| unreadable(format!("{} is outside the worktree", file.display())))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let pathspec = format!(":(literal){relative}");
-        if self.git(&["ls-files", "--error-unmatch", "--", &pathspec]).is_err() {
+        let version = self.git(&["version"]).map_err(unreadable)?;
+        if !git_supports_ssh_signatures(&version) {
             return Err(unreadable(format!(
-                "{relative} is not tracked by Git, so no commit carries its block"
+                "{version} cannot verify SSH signatures; {PREREQUISITES}"
             )));
         }
-        let changed = self
-            .git(&["status", "--porcelain", "--", &pathspec])
-            .map_err(unreadable)?;
-        if !changed.is_empty() {
-            return Err(unreadable(format!(
-                "{relative} has uncommitted changes, so the block read is not the one a commit carries"
-            )));
+        if self
+            .git(&["rev-parse", "--is-shallow-repository"])
+            .map_err(unreadable)?
+            == "true"
+        {
+            return Err(unreadable(
+                "the clone is shallow, so the commit that last changed the block cannot be told from the clone's boundary; fetch the full history (`git fetch --unshallow`, or `fetch-depth: 0` with actions/checkout)"
+                    .to_owned(),
+            ));
         }
-        let contents =
-            std::fs::read_to_string(file).map_err(|error| unreadable(format!("cannot read {relative}: {error}")))?;
-        let start = crate::cli::resource_file::document_start(&contents, index, document)
-            .map_err(|error| unreadable(error.to_string()))?;
-        let lines: Vec<&str> = document.split_inclusive('\n').collect();
-        let (first, last) = scan_from_promotion(&lines)
-            .ok()
-            .and_then(|scan| scan.promoted)
-            .ok_or_else(|| {
-                unreadable(format!(
-                    "the Environment in {relative} has no block-style `promoted` block"
-                ))
-            })?;
-        // One-based line numbers of the block in the file.
-        let offset = contents[..start].matches('\n').count();
-        let range = format!("-L{},{}:{relative}", offset + first + 1, offset + last);
+        let range = self.block_range(file, (index, document))?;
         let log = self
             .git(&["log", "--max-count=1", "--format=commit:%H", &range, "HEAD"])
             .map_err(|error| unreadable(format!("cannot find the commit that last changed the block: {error}")))?;
@@ -657,21 +775,39 @@ impl BlockSignatures {
             commit: commit.clone(),
             message: message.to_owned(),
         };
-        let header = object.split("\n\n").next().unwrap_or_default();
-        if !header.contains("gpgsig") {
+        let signatures = signature_headers(&object);
+        if signatures.is_empty() {
             return Err(untrusted("it is not signed"));
         }
-        if !header.contains("-----BEGIN SSH SIGNATURE-----") {
+        if !signatures
+            .iter()
+            .all(|signature| signature.starts_with("-----BEGIN SSH SIGNATURE-----"))
+        {
             return Err(untrusted(
                 "it carries an OpenPGP or X.509 signature, which an allowed signers file does not cover; sign with an SSH key",
             ));
         }
-        let setting = format!(
+        let ssh_keygen = std::process::Command::new("ssh-keygen").arg("-?").output();
+        if matches!(&ssh_keygen, Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+            return Err(unreadable(format!("`ssh-keygen` is not installed; {PREREQUISITES}")));
+        }
+        let signers = format!(
             "gpg.ssh.allowedSignersFile={}",
             nyl_git::cli_path(signers).to_string_lossy()
         );
+        let openpgp = format!("gpg.openpgp.program={NO_PROGRAM}");
+        let x509 = format!("gpg.x509.program={NO_PROGRAM}");
         let output = self
-            .run(&["-c", &setting, "verify-commit", commit.as_str()])
+            .run(&[
+                "-c",
+                &signers,
+                "-c",
+                &openpgp,
+                "-c",
+                &x509,
+                "verify-commit",
+                commit.as_str(),
+            ])
             .map_err(unreadable)?;
         if output.status.success() {
             Ok(commit)
@@ -680,16 +816,72 @@ impl BlockSignatures {
         }
     }
 
-    /// `git` bound to the entry clone and its worktree.
+    /// The `git log -L` range of the block in `file`, once the file is
+    /// tracked, holds what `HEAD` carries, and the range parses to the block.
+    fn block_range(
+        &self,
+        file: &std::path::Path,
+        (index, document): (usize, &str),
+    ) -> Result<String, BlockSignatureError> {
+        let unreadable = BlockSignatureError::Unreadable;
+        let worktree = std::fs::canonicalize(&self.worktree).unwrap_or_else(|_| self.worktree.clone());
+        let canonical = std::fs::canonicalize(file)
+            .map_err(|error| unreadable(format!("cannot read {}: {error}", file.display())))?;
+        let relative = canonical
+            .strip_prefix(&worktree)
+            .map_err(|_| unreadable(format!("{} is outside the worktree", file.display())))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let pathspec = format!(":(literal){relative}");
+        if self.git(&["ls-files", "--error-unmatch", "--", &pathspec]).is_err() {
+            return Err(unreadable(format!(
+                "{relative} is not tracked by Git, so no commit carries its block"
+            )));
+        }
+        let committed = self
+            .git(&["rev-parse", "--verify", "--quiet", &format!("HEAD:{relative}")])
+            .map_err(|_| unreadable(format!("{relative} is not in HEAD, so no commit carries its block")))?;
+        let on_disk = self
+            .git(&["hash-object", &format!("--path={relative}"), "--", &relative])
+            .map_err(unreadable)?;
+        if committed != on_disk {
+            return Err(unreadable(format!(
+                "{relative} has uncommitted changes, so the block read is not the one a commit carries"
+            )));
+        }
+        let contents =
+            std::fs::read_to_string(file).map_err(|error| unreadable(format!("cannot read {relative}: {error}")))?;
+        let start = crate::cli::resource_file::document_start(&contents, index, document)
+            .map_err(|error| unreadable(error.to_string()))?;
+        let lines: Vec<&str> = document.split_inclusive('\n').collect();
+        let no_block = || {
+            unreadable(format!(
+                "the Environment in {relative} has no block-style `promoted` block"
+            ))
+        };
+        let (first, last) = scan_from_promotion(&lines)
+            .ok()
+            .and_then(|scan| scan.promoted)
+            .ok_or_else(no_block)?;
+        check_block_lines(document, &lines[first..last]).map_err(unreadable)?;
+        // One-based line numbers of the block in the file.
+        let offset = contents[..start].matches('\n').count();
+        let range = format!("-L{},{}:{relative}", offset + first + 1, offset + last);
+        Ok(range)
+    }
+
+    /// `git` bound to the entry clone and its worktree, ignoring replace
+    /// objects, which could stand another history in for the real one.
     fn run(&self, args: &[&str]) -> Result<Output, String> {
         nyl_git::repository_command(&self.git_dir)
             .arg("--work-tree")
             .arg(nyl_git::cli_path(&self.worktree))
             .current_dir(&self.worktree)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .envs(self.git_env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
             .args(args)
             .output()
-            .map_err(|error| format!("cannot run git: {error}"))
+            .map_err(|error| format!("cannot run git: {error}; {PREREQUISITES}"))
     }
 
     fn git(&self, args: &[&str]) -> Result<String, String> {
@@ -699,6 +891,47 @@ impl BlockSignatures {
         } else {
             Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
         }
+    }
+}
+
+/// Whether `git version` names 2.34 or newer, the first with SSH signatures.
+fn git_supports_ssh_signatures(version: &str) -> bool {
+    let numbers: Vec<u32> = version
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or_default()
+        .split('.')
+        .take(2)
+        .map_while(|part| part.parse().ok())
+        .collect();
+    matches!(numbers.as_slice(), [major, minor] if (*major, *minor) >= (2, 34))
+}
+
+/// The block's own lines, dedented, must parse to the `promoted` block the
+/// Environment `document` declares: the line range `git log -L` follows is
+/// then exactly the block.
+fn check_block_lines(document: &str, block: &[&str]) -> Result<(), String> {
+    let indent = block.first().map_or(0, |line| indent(line));
+    let dedented: String = block
+        .iter()
+        .map(|line| {
+            if line.len() >= indent && line[..indent].trim().is_empty() {
+                &line[indent..]
+            } else {
+                line.trim_start()
+            }
+        })
+        .collect();
+    let read = nyl_render::yaml::parse_yaml_value_k8s_compatible(&dedented)
+        .map_err(|error| format!("the block's lines do not parse on their own: {error}"))?;
+    let declared = nyl_render::yaml::parse_yaml_value_k8s_compatible(document)
+        .map_err(|error| format!("the Environment does not parse: {error}"))?;
+    match (
+        read.get("promoted"),
+        declared.pointer("/spec/source/fromPromotion/promoted"),
+    ) {
+        (Some(read), Some(declared)) if read == declared => Ok(()),
+        _ => Err("the block's lines do not hold exactly the `promoted` block the Environment declares".to_owned()),
     }
 }
 
@@ -837,7 +1070,7 @@ spec:
 
     /// A bare remote with `main` holding the Environment and a clone of it.
     struct World {
-        _root: TempDir,
+        root: TempDir,
         remote: PathBuf,
         clone: PathBuf,
     }
@@ -854,11 +1087,7 @@ spec:
         git(&clone, &["commit", "--quiet", "-m", "Initial"]);
         git(&clone, &["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
         git(&clone, &["branch", "--quiet", "--set-upstream-to=origin/main"]);
-        World {
-            _root: root,
-            remote,
-            clone,
-        }
+        World { root, remote, clone }
     }
 
     fn writer(world: &World) -> GitRecordWriter {
@@ -872,6 +1101,7 @@ spec:
             clock: Arc::new(FrozenClock("2026-09-25T16:41:00Z".parse().unwrap())),
             auth: GitAuth::none(),
             git_env: isolated(),
+            verify: None,
         }
     }
 
@@ -1045,10 +1275,13 @@ spec:
     }
 
     /// A generated SSH key and an `allowed_signers` file listing it, or
-    /// `None` when `ssh-keygen` is not installed.
+    /// `None` when `ssh-keygen` is missing and `NYL_SKIP_SSH_SIGNING` says
+    /// to skip; without it a missing `ssh-keygen` fails the test, so CI
+    /// never passes it silently.
     struct Signer {
         key: PathBuf,
         allowed: PathBuf,
+        line: String,
     }
 
     fn signer(directory: &Path, name: &str) -> Option<Signer> {
@@ -1058,13 +1291,21 @@ spec:
             .arg(&key)
             .output();
         match generated {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                assert!(
+                    std::env::var_os("NYL_SKIP_SSH_SIGNING").is_some(),
+                    "ssh-keygen (OpenSSH 8.2 or newer) is not installed; install it, or set NYL_SKIP_SSH_SIGNING=1 to skip the SSH signing tests (never in CI)"
+                );
+                eprintln!("skipped: ssh-keygen is not installed and NYL_SKIP_SSH_SIGNING is set");
+                return None;
+            }
             generated => assert!(generated.unwrap().status.success(), "ssh-keygen failed"),
         }
         let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let line = format!("{name}@example.invalid {}\n", public.trim());
         let allowed = directory.join(format!("{name}.allowed_signers"));
-        std::fs::write(&allowed, format!("{name}@example.invalid {}\n", public.trim())).unwrap();
-        Some(Signer { key, allowed })
+        std::fs::write(&allowed, &line).unwrap();
+        Some(Signer { key, allowed, line })
     }
 
     /// Commit everything staged, signed with `key` when given.
@@ -1082,54 +1323,85 @@ spec:
         git(clone, &["rev-parse", "HEAD"])
     }
 
+    /// The Environment with `record`'s block in `prod.yaml` behind a
+    /// leading document, committed (signed with `key` when given).
+    fn with_block(world: &World, key: Option<&Path>) -> (String, String) {
+        let document = place_block(ENVIRONMENT, &record(1)).unwrap();
+        std::fs::write(world.clone.join("prod.yaml"), format!("{LEADING}{document}")).unwrap();
+        git(&world.clone, &["add", "prod.yaml"]);
+        let commit = commit(&world.clone, "nyl: promote prod", key);
+        (document, commit)
+    }
+
+    const LEADING: &str = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata: {name: dev}\nspec: {}\n---\n";
+
+    fn signatures(clone: &Path) -> BlockSignatures {
+        BlockSignatures {
+            git_dir: clone.join(".git"),
+            worktree: clone.to_path_buf(),
+            git_env: isolated(),
+        }
+    }
+
+    fn verify_in(clone: &Path, document: &str, allowed: &Path) -> Result<CommitId, BlockSignatureError> {
+        signatures(clone).verify(&clone.join("prod.yaml"), (2, document), allowed)
+    }
+
+    /// An allowed signers file for tests that never reach `verify-commit`.
+    fn no_signers(world: &World) -> PathBuf {
+        let path = world.root.path().join("nobody.allowed_signers");
+        std::fs::write(&path, "").unwrap();
+        path
+    }
+
     /// `source.fromPromotion.verify` (item 11, option c2): the commit that
     /// last changed the block must carry an SSH signature by a key the
     /// allowed signers file lists. A later edit elsewhere in the file keeps
-    /// the signed commit as the one that changed the block; an unsigned edit
-    /// inside the block, a signature by an unlisted key, an unsigned
-    /// promotion commit, and an uncommitted change are each refused. Catches
-    /// a block trusted without a signature, or by a signature on the wrong
-    /// commit.
+    /// the signed commit as the one that changed the block; a signature by
+    /// an unlisted key (or after the file stops listing the key), an
+    /// unsigned edit inside the block, and an uncommitted change are each
+    /// refused. Catches a block trusted without a signature, or by a
+    /// signature on the wrong commit.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "SSH signing in tests depends on private key ACLs and on which ssh-keygen Git runs on Windows; it runs on Linux and macOS"
+    )]
     fn test_block_signature_is_the_commit_that_last_changed_the_block() {
         let root = TempDir::new().unwrap();
         let (Some(trusted), Some(stranger)) = (signer(root.path(), "trusted"), signer(root.path(), "stranger")) else {
-            eprintln!("skipped: ssh-keygen is not installed, so no SSH signature can be made");
             return;
         };
         let world = world();
-        let leading = "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata: {name: dev}\nspec: {}\n---\n";
-        let document = place_block(ENVIRONMENT, &record(1)).unwrap();
+        let (document, signed) = with_block(&world, Some(&trusted.key));
         let file = world.clone.join("prod.yaml");
-        std::fs::write(&file, format!("{leading}{document}")).unwrap();
-        git(&world.clone, &["add", "prod.yaml"]);
-        let signed = commit(&world.clone, "nyl: promote prod", Some(&trusted.key));
-        let signatures = BlockSignatures {
-            git_dir: world.clone.join(".git"),
-            worktree: world.clone.clone(),
-            git_env: isolated(),
-        };
-        let verify = |document: &str, allowed: &Path| signatures.verify(&file, (2, document), allowed);
+        let verify = |document: &str, allowed: &Path| verify_in(&world.clone, document, allowed);
         assert_eq!(verify(&document, &trusted.allowed).unwrap().as_str(), signed);
 
         // An unsigned change outside the block leaves the signed commit as its last change.
         let annotated = document.replace("  unitSelector:", "  # reviewed\n  unitSelector:");
         assert_ne!(annotated, document);
-        std::fs::write(&file, format!("{leading}{annotated}")).unwrap();
+        std::fs::write(&file, format!("{LEADING}{annotated}")).unwrap();
         git(&world.clone, &["add", "prod.yaml"]);
         commit(&world.clone, "Annotate", None);
         assert_eq!(verify(&annotated, &trusted.allowed).unwrap().as_str(), signed);
-        // Not signed by a listed key.
-        let error = verify(&annotated, &stranger.allowed).unwrap_err();
-        assert!(
-            matches!(&error, BlockSignatureError::Untrusted { commit, .. } if commit.as_str() == signed),
-            "{error:?}"
-        );
+        // Not signed by a listed key, and no longer once the file drops the key.
+        for allowed in [&stranger.allowed, &trusted.allowed] {
+            if allowed == &trusted.allowed {
+                std::fs::write(allowed, &stranger.line).unwrap();
+            }
+            let error = verify(&annotated, allowed).unwrap_err();
+            assert!(
+                matches!(&error, BlockSignatureError::Untrusted { commit, .. } if commit.as_str() == signed),
+                "{error:?}"
+            );
+        }
+        std::fs::write(&trusted.allowed, &trusted.line).unwrap();
 
         // An unsigned hand edit inside the block is the block's last change.
         let edited = annotated.replace("sequence: 1", "sequence: 2");
         assert_ne!(edited, annotated);
-        std::fs::write(&file, format!("{leading}{edited}")).unwrap();
+        std::fs::write(&file, format!("{LEADING}{edited}")).unwrap();
         git(&world.clone, &["add", "prod.yaml"]);
         let hand = commit(&world.clone, "Edit by hand", None);
         let error = verify(&edited, &trusted.allowed).unwrap_err();
@@ -1139,10 +1411,175 @@ spec:
         );
 
         // An uncommitted change is not what any commit carries.
-        std::fs::write(&file, format!("{leading}{edited}# local\n")).unwrap();
+        std::fs::write(&file, format!("{LEADING}{edited}# local\n")).unwrap();
         assert!(matches!(
             verify(&edited, &trusted.allowed).unwrap_err(),
             BlockSignatureError::Unreadable(_)
         ));
+    }
+
+    /// An unsigned change to the block made on another branch and merged
+    /// is the block's last change, not the merge commit: whoever signs the
+    /// merge does not vouch for it. Catches a merge commit credited with a
+    /// side branch's edit.
+    #[test]
+    fn test_a_merged_unsigned_edit_is_the_blocks_last_change() {
+        let world = world();
+        let (document, _) = with_block(&world, None);
+        git(&world.clone, &["checkout", "--quiet", "-b", "side"]);
+        let edited = document.replace("sequence: 1", "sequence: 2");
+        std::fs::write(world.clone.join("prod.yaml"), format!("{LEADING}{edited}")).unwrap();
+        git(&world.clone, &["add", "prod.yaml"]);
+        let side = commit(&world.clone, "Edit on a side branch", None);
+        git(&world.clone, &["checkout", "--quiet", "main"]);
+        std::fs::write(world.clone.join("other.yaml"), "a: 2\n").unwrap();
+        git(&world.clone, &["add", "other.yaml"]);
+        commit(&world.clone, "Meanwhile on main", None);
+        git(
+            &world.clone,
+            &[
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "--no-gpg-sign",
+                "-m",
+                "Merge side",
+                "side",
+            ],
+        );
+        let error = verify_in(&world.clone, &edited, &no_signers(&world)).unwrap_err();
+        assert!(
+            matches!(&error, BlockSignatureError::Untrusted { commit, .. } if commit.as_str() == side),
+            "{error:?}"
+        );
+    }
+
+    /// Only an SSH signature counts, read from the commit's signature
+    /// headers themselves: an OpenPGP signature, or SSH text anywhere else
+    /// in the commit, is refused without consulting any keyring. Catches a
+    /// GPG-signed commit trusted through the user's keyring, which the
+    /// allowed signers file does not govern.
+    #[test]
+    fn test_an_openpgp_signature_is_refused() {
+        let world = world();
+        let (document, unsigned) = with_block(&world, None);
+        let object = git(&world.clone, &["cat-file", "commit", &unsigned]);
+        let (header, message) = object.split_once("\n\n").unwrap();
+        let forged = format!(
+            "{header}\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEE\n -----END PGP SIGNATURE-----\n\n{message}\n-----BEGIN SSH SIGNATURE-----\n"
+        );
+        let written = std::process::Command::new("git")
+            .current_dir(&world.clone)
+            .envs(isolated())
+            .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                child.stdin.take().unwrap().write_all(forged.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        let commit = String::from_utf8(written.stdout).unwrap().trim().to_owned();
+        git(&world.clone, &["update-ref", "refs/heads/main", &commit]);
+        let error = verify_in(&world.clone, &document, &no_signers(&world)).unwrap_err();
+        assert!(
+            matches!(&error, BlockSignatureError::Untrusted { commit: found, message } if found.as_str() == commit && message.contains("OpenPGP")),
+            "{error:?}"
+        );
+        assert_eq!(
+            signature_headers(
+                "tree t\ngpgsig-sha256 -----BEGIN SSH SIGNATURE-----\n a\n -----END SSH SIGNATURE-----\nauthor x\n\nm"
+            ),
+            ["-----BEGIN SSH SIGNATURE-----\na\n-----END SSH SIGNATURE-----"]
+        );
+    }
+
+    /// A shallow clone cannot tell the commit that last changed the block
+    /// from its boundary commit, which would be credited with the whole
+    /// file: refused with the fix to fetch the history. Catches a shallow
+    /// CI checkout trusting a block on the boundary's signature.
+    #[test]
+    fn test_a_shallow_clone_is_refused() {
+        let world = world();
+        let (document, _) = with_block(&world, None);
+        git(&world.clone, &["push", "--quiet"]);
+        let shallow = world.root.path().join("shallow");
+        let url = format!(
+            "file:///{}",
+            world
+                .remote
+                .display()
+                .to_string()
+                .replace('\\', "/")
+                .trim_start_matches('/')
+        );
+        git(
+            world.root.path(),
+            &["clone", "--quiet", "--depth", "1", &url, shallow.to_str().unwrap()],
+        );
+        let error = verify_in(&shallow, &document, &no_signers(&world)).unwrap_err();
+        assert!(
+            matches!(&error, BlockSignatureError::Unreadable(message) if message.contains("fetch-depth: 0")),
+            "{error:?}"
+        );
+    }
+
+    /// The line range followed is the block itself: lines that parse to
+    /// another block are refused.
+    #[test]
+    fn test_block_lines_must_hold_the_declared_block() {
+        let document = place_block(ENVIRONMENT, &record(1)).unwrap();
+        let lines: Vec<&str> = document.split_inclusive('\n').collect();
+        let (first, last) = scan_from_promotion(&lines).unwrap().promoted.unwrap();
+        check_block_lines(&document, &lines[first..last]).unwrap();
+        assert!(check_block_lines(&document, &lines[first..last - 1]).is_err());
+        assert!(git_supports_ssh_signatures("git version 2.34.1"));
+        assert!(git_supports_ssh_signatures("git version 2.43.0.windows.1"));
+        assert!(!git_supports_ssh_signatures("git version 2.33.8"));
+    }
+
+    /// With `verify`, the writer refuses before pushing: a clone that does
+    /// not sign with SSH is refused by the dry-run check and the write
+    /// alike, and a commit signed by a key the file does not list is undone
+    /// and never pushed; one signed by a listed key is pushed. Catches a
+    /// promotion pushed that every run would refuse.
+    #[test]
+    fn test_a_writer_with_verify_pushes_only_a_trusted_commit() {
+        let world = world();
+        let remote = git(&world.remote, &["rev-parse", "main"]);
+        let head = git(&world.clone, &["rev-parse", "HEAD"]);
+        let unsigned = GitRecordWriter {
+            verify: Some(no_signers(&world)),
+            ..writer(&world)
+        };
+        assert!(matches!(unsigned.check(&record(1)), Err(RecordWriteError::Unsigned(_))));
+        let refused = unsigned.commit_record(&record(1), "nyl: promote prod\n").unwrap_err();
+        assert!(matches!(refused, RecordWriteError::Unsigned(_)), "{refused:?}");
+        untouched(&world, &remote, &head);
+
+        if cfg!(windows) {
+            return; // SSH signing in tests runs on Linux and macOS only.
+        }
+        let root = TempDir::new().unwrap();
+        let (Some(trusted), Some(stranger)) = (signer(root.path(), "trusted"), signer(root.path(), "stranger")) else {
+            return;
+        };
+        git(&world.clone, &["config", "commit.gpgsign", "true"]);
+        git(&world.clone, &["config", "gpg.format", "ssh"]);
+        let key = |key: &Path| nyl_git::cli_path(key).to_string_lossy().into_owned();
+        git(&world.clone, &["config", "user.signingkey", &key(&stranger.key)]);
+        let signed = GitRecordWriter {
+            verify: Some(trusted.allowed.clone()),
+            ..writer(&world)
+        };
+        signed.check(&record(1)).unwrap();
+        let refused = signed.commit_record(&record(1), "nyl: promote prod\n").unwrap_err();
+        assert!(matches!(refused, RecordWriteError::Unsigned(_)), "{refused:?}");
+        untouched(&world, &remote, &head);
+        git(&world.clone, &["config", "user.signingkey", &key(&trusted.key)]);
+        let pushed = signed.commit_record(&record(1), "nyl: promote prod\n").unwrap();
+        assert_eq!(git(&world.remote, &["rev-parse", "main"]), pushed.as_str());
     }
 }

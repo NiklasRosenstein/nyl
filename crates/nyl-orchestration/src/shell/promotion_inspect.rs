@@ -111,13 +111,6 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
     };
     promote::read_running(request.drivers, &mut history);
     let consumers = promote::value_consumers(request.drivers, &history, path);
-    let read_units = promote::target_units(
-        &request.target_sources,
-        target,
-        (request.promotes_source, request.entry_units),
-        &history,
-        &Selection::Newest,
-    );
     // A promotion without flags. Who asks is not read by the decision's
     // choice, and the sequence is not shown: neither is recorded here.
     let ask = Request {
@@ -133,20 +126,34 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         },
     };
     let records = crate::rules::sources::recorded_promotions(&snapshot, request.promoted);
-    let input = PromotionInput {
-        path,
-        source,
-        history: &history,
-        target_units: &read_units.units,
-        promotes_source: request.promotes_source,
-        consumers: &consumers,
-        target_records: &records,
-        sequence: 0,
-        now: request.now,
-        request: &ask,
-    };
-    let evaluations = promotion::evaluate(&input);
-    let (selected, refusal) = match promotion::decide(&input) {
+    macro_rules! input {
+        ($units:expr) => {
+            PromotionInput {
+                path,
+                source,
+                history: &history,
+                target_units: $units,
+                promotes_source: request.promotes_source,
+                consumers: &consumers,
+                target_records: &records,
+                sequence: 0,
+                now: request.now,
+                request: &ask,
+            }
+        };
+    }
+    // The same lazy reading `nyl promote` takes, so the state it selects is
+    // the one `nyl promote` would take; states older than that one whose
+    // commits were not read show why.
+    let (decision, read_units) = promote::settle_target_units(
+        &request.target_sources,
+        target,
+        (request.promotes_source, request.entry_units),
+        (&history, &Selection::Newest),
+        |units| promotion::decide(&input!(units)),
+    );
+    let evaluations = promotion::evaluate(&input!(&read_units.units));
+    let (selected, refusal) = match decision {
         Ok(Decision::Promote(promotion)) => (states_named(&promotion.record), None),
         Ok(Decision::Unchanged(record)) => (states_named(&record), None),
         Err(refusal) => (Vec::new(), Some(refusal.finding)),
