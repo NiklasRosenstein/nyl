@@ -93,3 +93,21 @@ id = "0175c514-da53-4356-97f9-8807f3b98568"
 type = "improvement"
 description = "`nyl attest -e <env>` names the driver's reason in each `NYL-ATTESTATION-FAILED` warning, such as which Applications run another publication or are not Healthy, instead of only the attestation's name"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "866b869e-1ea0-46f0-9351-2d4a08c4eb51"
+type = "feature"
+description = "A PromotionPath that promotes only values takes each value from the state its consumer runs: a value selected as a publication's Release input (`input: /releases/<group>~1<release>/…`) is consumed by that Release's Application, so Applications synced to different publications by hand no longer block it, and the record names a value's own `state`. Only the consuming Application's own findings block its value (`unmatched`, a mix of revisions, not `Healthy` when `healthy` is required). `coverage.applicationGroups` and `coverage.excludeApplications` narrow the Applications a source promotion's publication attestations count, and `coverage.requireApplications` adds Applications that must meet them at whatever publication they run. Drivers gain `running_attestations`, `deployment_verdicts`, `receipt_publication`, and `input_consumer`; nothing new is persisted"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "995afde4-f1a8-4fd0-9b00-8aee26c51aa8"
+type = "breaking"
+description = "`nyl promote` counts a publication's `accepted` and `healthy` only for its current receipt, because they say what runs now: an older state no longer qualifies through them once a newer receipt is published, and a failing newest one refuses the promotion with `NYL-PROMOTE-NO-EVIDENCE` and the driver's reason instead of falling back to an older state that once passed. The refusal names that older state; `--state-revision` (or `--revision`) promotes it on the attestations recorded for it. Environment-wide, external, and other units' attestations still let the newest passing state win, and a publication without `observe` is unaffected. `nyl get promotion-candidates` reports such a state's gap as `not-running`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "a96f7920-876f-4f46-b0d4-f358aeff08a5"
+type = "feature"
+description = "`nyl status` warns with `NYL-ATTESTATION-FAILED` and the attestation's reason for every attestation that fails for what the environment runs: a unit's for its current receipt and an environment-wide one for the current state. `nyl plan` of an environment that two or more PromotionPaths promote into warns with `NYL-PROMOTE-UNCHECKED` for each value they both carry that has no known source commit, which the supersede check cannot compare"
+author = "@NiklasRosenstein"

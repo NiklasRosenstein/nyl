@@ -165,7 +165,7 @@ codes! {
     PromoteValueType => "NYL-PROMOTE-VALUE-TYPE",
     /// A `fromPromotion` binding names a path or a value no PromotionPath declares.
     PromoteBindingUnknown => "NYL-PROMOTE-BINDING-UNKNOWN",
-    /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing. Nothing was written. Exit 2.
+    /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing, or a publication's running-scoped attestation that no longer describes what runs (only its current receipt's counts; `--state-revision` judges an older state on its own). Nothing was written. Exit 2.
     PromoteNoEvidence => "NYL-PROMOTE-NO-EVIDENCE",
     /// `--evidence published` promoted a state whose evidence is below the path's level; the record says so. A warning.
     PromoteEvidenceOverride => "NYL-PROMOTE-EVIDENCE-OVERRIDE",
@@ -191,7 +191,7 @@ codes! {
     PromoteShallowClone => "NYL-PROMOTE-SHALLOW-CLONE",
     /// A `nyl promote --supersede` entry has no reason of its own, and the promotion has no `--reason`. Exit 1.
     PromoteSupersedeReason => "NYL-PROMOTE-SUPERSEDE-REASON",
-    /// The supersede check cannot check a promoted value: it, or another path's record of it, has no known source commit, such as an image from outside Nyl or a command output. A warning.
+    /// The supersede check cannot check a promoted value: it, or another path's record of it, has no known source commit, such as an image from outside Nyl or a command output. `nyl plan` lists such values of every path into the environment that another path also promotes. A warning.
     PromoteUnchecked => "NYL-PROMOTE-UNCHECKED",
     /// A unit's driver could not produce its attestations.
     AttestUnknown => "NYL-ATTEST-UNKNOWN",
@@ -209,7 +209,7 @@ codes! {
     ObserveUnsupported => "NYL-OBSERVE-UNSUPPORTED",
     /// `nyl attest --unit` named a unit whose kind produces no attestations for its spec.
     AttestUnsupported => "NYL-ATTEST-UNSUPPORTED",
-    /// A driver attestation of a unit's current receipt failed.
+    /// A driver attestation of a unit's current receipt failed; `status` also warns with it for every recorded attestation that fails for what the environment runs.
     AttestationFailed => "NYL-ATTESTATION-FAILED",
     /// A remote state ref's tip is a `Nyl-Local` commit, which only a manual push of local branches produces.
     StateLocalTip => "NYL-STATE-LOCAL-TIP",

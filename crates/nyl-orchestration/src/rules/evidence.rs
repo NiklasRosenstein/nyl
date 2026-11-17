@@ -40,6 +40,12 @@
 //!   [`ATTESTATION_FAILING`] with the producer, and [`warnings`] gives the
 //!   warnings ([`Code::AttestationPending`], [`Code::AttestationFailing`]),
 //!   all from the typed fields.
+//! - **Status.** `status` lists every attestation that fails for what the
+//!   environment runs ([`failing`]): a unit's for its current receipt, and an
+//!   environment-wide one for the current state, each as a warning
+//!   ([`Code::AttestationFailed`]) with the attestation's own reason, so a
+//!   failure that blocks promotion or a dependent is visible before either
+//!   runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -298,6 +304,75 @@ pub fn attestation_changes(
     changes
 }
 
+/// The attestations that fail for what the environment runs, as `status`
+/// warnings: per unit those recorded for its current receipt, and the
+/// environment-wide ones recorded for `state_commit` (the current state's
+/// desired commit, when known).
+pub fn failing(
+    desired: &BTreeMap<UnitName, DesiredUnit>,
+    observed: &BTreeMap<UnitName, ObservedUnit>,
+    recorded: &BTreeMap<UnitName, BTreeMap<String, Attestation>>,
+    environment: (&str, &BTreeMap<String, Attestation>, Option<&str>),
+) -> (BTreeMap<UnitName, Vec<Finding>>, Vec<Finding>) {
+    let (environment_name, environment_recorded, state_commit) = environment;
+    // How a passing attestation is recorded: by the driver (`nyl attest`)
+    // for a name it reports, by `--name` for an external one.
+    let finding = |scope: &str, attestation: &Attestation, unit: Option<(&UnitName, bool)>| {
+        let mut message = format!("attestation {scope}/{} fails", attestation.name);
+        if let Some(reason) = attestation.reason.as_deref().filter(|reason| !reason.is_empty()) {
+            message.push_str(": ");
+            message.push_str(reason);
+        }
+        let record = match unit {
+            Some((unit, false)) => format!("`nyl attest -e {environment_name} --unit {unit}`"),
+            Some((unit, true)) => format!(
+                "`nyl attest -e {environment_name} --unit {unit} --name {} --result pass`",
+                attestation.name
+            ),
+            None => format!(
+                "`nyl attest -e {environment_name} --name {} --result pass`",
+                attestation.name
+            ),
+        };
+        Finding::new(
+            Code::AttestationFailed,
+            message,
+            format!(
+                "fix what failed and record a passing attestation with {record}; until then it blocks dependents that require it and promotion of this state (on a path that promotes only values, of the values whose consuming Application it fails for)"
+            ),
+        )
+    };
+    let mut units: BTreeMap<UnitName, Vec<Finding>> = BTreeMap::new();
+    for (unit, producer) in desired {
+        let observed = observed.get(unit);
+        if !super::freshness::receipt_is_current(producer, observed) {
+            continue;
+        }
+        let Some(receipt) = observed.and_then(|observed| observed.receipt.as_ref()) else {
+            continue;
+        };
+        let recorded = recorded.get(unit);
+        for name in recorded.into_iter().flat_map(BTreeMap::keys) {
+            if let Some(attestation) = recorded_for(name, producer, receipt, recorded)
+                .filter(|attestation| attestation.result == AttestationResult::Fail)
+            {
+                units.entry(unit.clone()).or_default().push(finding(
+                    unit.as_str(),
+                    attestation,
+                    Some((unit, external_only(producer).contains(name))),
+                ));
+            }
+        }
+    }
+    let environment = environment_recorded
+        .values()
+        .filter(|attestation| attestation.result == AttestationResult::Fail)
+        .filter(|attestation| state_commit == Some(attestation.execution_key.as_str()))
+        .map(|attestation| finding("environment", attestation, None))
+        .collect();
+    (units, environment)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -549,5 +624,52 @@ mod tests {
             )]),
         )]);
         assert!(attestation_changes(&all_current, &observed_new).is_empty());
+    }
+
+    /// `status` lists the attestations that fail for what runs: a unit's
+    /// failing one for its current receipt (not one recorded for a replaced
+    /// receipt, nor a pass), and an environment-wide one for the current
+    /// state only. Catches a failure that blocks promotion yet `status`
+    /// hides, or a stale one it reports as current.
+    #[test]
+    fn test_failing_lists_failures_of_what_runs() {
+        let producer = producer(&["accepted", "healthy"], json!({}));
+        let desired = BTreeMap::from([(name("kubernetes"), producer)]);
+        let observed = BTreeMap::from([(
+            name("kubernetes"),
+            observed("kubernetes", "Command", Some(receipt("k", json!({}), Vec::new()))),
+        )]);
+        let mut failing_accepted = attestation("accepted", "k", AttestationResult::Fail);
+        failing_accepted.reason = Some("api other-publication".to_owned());
+        let recorded = BTreeMap::from([(
+            name("kubernetes"),
+            BTreeMap::from([
+                ("accepted".to_owned(), failing_accepted),
+                (
+                    "healthy".to_owned(),
+                    attestation("healthy", "k", AttestationResult::Pass),
+                ),
+                (
+                    "old".to_owned(),
+                    attestation("old", "replaced", AttestationResult::Fail),
+                ),
+            ]),
+        )]);
+        let mut qa = attestation("qa", "k", AttestationResult::Fail);
+        qa.execution_key = "d".repeat(40);
+        let mut older = attestation("smoke", "k", AttestationResult::Fail);
+        older.execution_key = "e".repeat(40);
+        let environment = BTreeMap::from([("qa".to_owned(), qa), ("smoke".to_owned(), older)]);
+        let state = "d".repeat(40);
+        let (units, environment) = failing(&desired, &observed, &recorded, ("dev", &environment, Some(&state)));
+        let unit = &units[&name("kubernetes")];
+        assert_eq!(unit.len(), 1);
+        assert_eq!(unit[0].code, Code::AttestationFailed);
+        assert_eq!(
+            unit[0].message,
+            "attestation kubernetes/accepted fails: api other-publication"
+        );
+        assert_eq!(environment.len(), 1);
+        assert!(environment[0].message.starts_with("attestation environment/qa fails"));
     }
 }

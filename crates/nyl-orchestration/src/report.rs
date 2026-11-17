@@ -701,8 +701,16 @@ pub enum MissingReason {
     Pending,
     /// A required attestation is older than `maxAttestationAge`.
     Aged,
-    /// An attestation recorded for the state fails.
+    /// An attestation recorded for the state fails, or a covered deployment
+    /// falls short of it.
     Failing,
+    /// A running-scoped attestation does not describe the state: the unit
+    /// has a newer receipt, or the deployment that consumes a value runs
+    /// another state's result.
+    NotRunning,
+    /// The path's `coverage` names an Application or ApplicationGroup no
+    /// attestation lists, or leaves nothing to judge while it fails.
+    Coverage,
 }
 
 /// One reason a candidate falls short.
@@ -730,6 +738,8 @@ impl MissingEvidence {
                 GapKind::Pending => MissingReason::Pending,
                 GapKind::Aged => MissingReason::Aged,
                 GapKind::Failing => MissingReason::Failing,
+                GapKind::NotRunning => MissingReason::NotRunning,
+                GapKind::Coverage => MissingReason::Coverage,
             },
             message: gap.message.clone(),
         }
@@ -1171,6 +1181,7 @@ mod promotion_report_tests {
             observed_commit: Some(commit(OBSERVED)),
             snapshot,
             attestations,
+            running: BTreeMap::new(),
         }
     }
 

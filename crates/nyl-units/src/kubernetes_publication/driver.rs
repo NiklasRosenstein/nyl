@@ -322,6 +322,31 @@ impl Driver for KubernetesPublicationDriver {
         }
     }
 
+    /// `accepted` and `healthy`: read from the reconciler, they say what runs now.
+    fn running_attestations(&self, spec: &Value) -> Vec<String> {
+        super::running_attestations(spec)
+    }
+
+    fn deployment_verdicts(
+        &self,
+        _spec: &Value,
+        attestation: &nyl_core::orchestration::state::Attestation,
+    ) -> Option<Vec<nyl_core::orchestration::driver::DeploymentVerdict>> {
+        super::deployment_verdicts(attestation)
+    }
+
+    fn receipt_publication(
+        &self,
+        _spec: &Value,
+        artifacts: &std::collections::BTreeMap<String, ArtifactDocument>,
+    ) -> Option<String> {
+        super::receipt_publication(artifacts)
+    }
+
+    fn input_consumer(&self, spec: &Value, pointer: &str) -> Option<String> {
+        super::input_consumer(spec, pointer)
+    }
+
     fn ownership_scopes(&self, _environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         unit_target(spec)
             .ok()

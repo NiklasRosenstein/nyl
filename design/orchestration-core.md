@@ -5347,8 +5347,11 @@ values. After R2, Argo CD runs R2's publication for `web` and still R1's for
 `other-publication` for `api` in its details. `nyl promote dev-to-staging`
 nevertheless takes `webImage` from R2's state and `apiImage` from R1's, the
 states their Applications run, and the record names `apiImage`'s own state.
-`nyl promote dev-to-prod` refuses with `NYL-PROMOTE-NO-EVIDENCE`, because one
-source commit must fit every value and what runs is mixed; with
+`nyl promote dev-to-prod` refuses with `NYL-PROMOTE-NO-EVIDENCE` and the
+driver's reason (`other-publication`), because one source commit must fit
+every value: the publication's attestations count only for its current
+receipt, R2's, which fails, and R1's state does not qualify through
+attestations that no longer describe what runs; with
 `--state-revision` naming R1's state it promotes R1 on the attestations
 recorded for it. Once `api` runs R2 too, both paths promote R2. An
 Application that runs no publication of dev (`unmatched`) or is `Degraded`

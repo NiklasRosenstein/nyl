@@ -1228,3 +1228,65 @@ fn test_get_promotions_shows_each_bindings_supplier() {
     let status = harness.shell.invoke(&["status", "-e", "prod", "-o", "json"]);
     assert!(status.stdout.contains("\"pendingSequence\": 2"), "{}", status.stdout);
 }
+
+/// Decision D8, the 12:00/12:35 story: at 12:00 dev's state S5 passed
+/// `accepted` and `healthy`; then R6 was published, and the newest
+/// attestation, the one of R6's receipt, fails while both Applications are
+/// still on R5's publication and Degraded. The publication's attestations
+/// say what runs now, so only the current receipt's count: `promote`
+/// refuses with the driver's reason and does not fall back to S5, whose
+/// attestations no longer describe what runs. `--state-revision S5` is
+/// still allowed on the attestations recorded for S5. Catches a promotion
+/// that takes an older state through a publication attestation that once
+/// passed.
+#[test]
+fn test_a_failing_newest_publication_attestation_blocks_without_falling_back() {
+    let text = r#"contract: design/promotion.md#promoting-an-environments-source
+milestone: M6
+tiers: [1]
+publication: fake
+steps:
+  - nyl: [state, init, -e, dev]
+    exit: 0
+  - nyl: [state, init, -e, prod]
+    exit: 0
+  - nyl: [reconcile, -e, dev]
+    id: s5
+    exit: 0
+  - argocd: {target: dev, all: {runs: s5}}
+  - nyl: [attest, -e, dev]
+    exit: 0
+  - commit: {branch: main, message: "Release 6", apply: patches/release-2}
+  - nyl: [reconcile, -e, dev]
+    id: r6
+    exit: 0
+  - argocd: {target: dev, all: {runs: s5, health: Degraded}}
+  - nyl: [attest, -e, dev]
+    exit: 3
+    expect:
+      codes: [NYL-ATTESTATION-FAILED]
+  - nyl: [promote, dev-to-prod]
+    exit: 2
+    expect:
+      codes: [NYL-PROMOTE-NO-EVIDENCE]
+      messages: [other-publication, --state-revision]
+      commits: {desired: 0, observed: 0}
+  - nyl: [promote, dev-to-prod, --state-revision, '%STATE(s5)%', --reason, "Roll back to S5"]
+    exit: 0
+    expect:
+      commits: {desired: 1, observed: 0}
+      promotion:
+        path: dev-to-prod
+        sequence: 1
+        sourceCommit: main~1
+        from: {environment: dev, run: s5}
+        evidence: {level: attested, override: false, attestations: [kubernetes/accepted, kubernetes/healthy]}
+"#;
+    let loaded = scenario::Loaded {
+        name: "inline/d8-what-runs-now".to_owned(),
+        directory: scenario::scenarios_root().join("walkthroughs/value-only-promotion"),
+        scenario: serde_saphyr::from_str(text).unwrap(),
+    };
+    scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root()).unwrap();
+    scenario::runner::run(&loaded).unwrap();
+}

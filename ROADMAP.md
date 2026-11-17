@@ -518,7 +518,10 @@ spec:
 - The unit of promotion is one recorded state of the source: a transition
   commit pair that ties together the source commit, the desired documents, and
   the receipts with their artifacts. Evidence covers the whole source, not
-  only the selected values, and mixed revisions block.
+  only the selected values, and mixed revisions block. A publication's
+  attestations say what runs now, so they count only for its current
+  receipt; a path that promotes only values takes each value from what its
+  consuming Application runs.
 - Evidence levels are `published` (receipts or publication commits) and
   `attested` (every required attestation passes for that state). `nyl promote`
   reads only evidence recorded beforehand, so it needs no cluster credentials.

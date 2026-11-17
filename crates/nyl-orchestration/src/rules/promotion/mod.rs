@@ -4,7 +4,7 @@
 //! Contract: [Promotion paths](../../../../../design/promotion.md#promotion-paths),
 //! [Promoting an environment's source](../../../../../design/promotion.md#promoting-an-environments-source),
 //! [Health evidence](../../../../../design/promotion.md#health-evidence), and the
-//! decisions D2, D5 ([`supersede`]), D11, and D13 (D6, D7, and D8 are not here: see below) of the
+//! decisions D2, D5 ([`supersede`]), D6, D7, D8, D11, and D13 of the
 //! [M6 plan](../../../../../design/m6-plan.md#open-decisions).
 //!
 //! [`decide`] is a pure function of the source environment's recorded states
@@ -59,24 +59,33 @@
 //! **Which paths.** A path whose target takes its source from the promotion
 //! (`promotes_source`) takes the source commit and every value from one state
 //! under the whole-source rule. Any other path promotes values: each value
-//! comes from the newest state in which its consumer ([`values::consumer`])
-//! reaches the level, `from` is the newest of those states, and a value from
-//! another state names it (D11).
+//! comes from the newest state in which its consumer reaches the level, `from`
+//! is the newest of those states, and a value from another state names it
+//! (D11). A value's consumer (D7) is the selected unit, or, for an input
+//! selector its driver maps to one of the unit's deployments
+//! ([`PromotionInput::consumers`]), that deployment: the value then comes
+//! from the state whose receipt produced what the deployment runs, as the
+//! current receipt's running-scoped attestations show it, and only that
+//! deployment's own findings block it (D6, [`standing`]).
 //!
-//! Not here: the next `sequence` from history (PR 6), the supersede check's
-//! reading of commits ([`supersede`] decides; the shell asks Git), artifact verification and every other effect (PR 6; the decision
-//! lists what to verify), a `--value` subset (PR 6), and the value-only
-//! specifics of PR 11: judging a publication's `accepted` and `healthy` per
-//! covered Application (D6) and tracing an input selector to the Application
-//! of its Release (D7). Until then a value-only path judges the selected unit
-//! like any other unit, and a failing attestation of any unit of the chosen
-//! state blocks it. Also not here: D8 (a publication's newest attestation
-//! decides what runs, and mixed revisions block). It needs a typed,
-//! driver-decided "what runs now" result in state, which the core cannot read
-//! from the driver's private `details`; see the M6 plan.
+//! **What runs now (D8).** Without an explicit choice, a running-scoped
+//! attestation (a publication's `accepted` and `healthy`) counts only for
+//! the unit's current receipt, so an older state never qualifies through
+//! one once a newer receipt exists, and a failing newest one blocks with no
+//! fallback ([`standing`]). Environment-wide attestations, external ones, and
+//! those of other units name a state or a receipt, so for them the newest
+//! state that passed still wins. `--state-revision` and `--revision` judge
+//! the chosen state on what was recorded for it.
+//!
+//! Not here: the next `sequence` from history, the supersede check's
+//! reading of commits ([`supersede`] decides; the shell asks Git), artifact
+//! verification and every other effect (the decision lists what to verify),
+//! and what the drivers say about deployments ([`UnitRunning`], which the
+//! shell reads).
 
 mod history;
 mod lineage;
+mod running;
 mod source_block;
 mod standing;
 pub mod supersede;
@@ -98,6 +107,7 @@ use nyl_core::resources::promotion::PromotionPath;
 
 pub use history::{recorded_states, DesiredEntry, RecordedState, StateAttestations, StateRef};
 pub use lineage::{lineage, lineage_with};
+pub use running::UnitRunning;
 pub use source_block::check_block;
 pub use standing::{Gap, GapKind, Judgement, Used, ENVIRONMENT_SCOPE};
 pub use values::ArtifactCheck;
@@ -183,6 +193,11 @@ pub struct PromotionInput<'a> {
     pub target_units: &'a BTreeSet<UnitName>,
     /// Whether the target's source is `fromPromotion` naming this path.
     pub promotes_source: bool,
+    /// Per value name, the deployment of its selected unit that consumes it
+    /// (D7), as the unit's driver maps the selector
+    /// ([`Driver::input_consumer`](nyl_core::orchestration::driver::Driver::input_consumer));
+    /// a value without an entry is consumed by the unit itself.
+    pub consumers: &'a BTreeMap<String, String>,
     /// The records in the target environment's desired state, by path.
     pub target_records: &'a BTreeMap<PromotionPathName, PromotionRecord>,
     /// The record's sequence, from the target's history (PR 6).
@@ -297,6 +312,22 @@ fn context<'a>(input: &'a PromotionInput<'_>, value_units: &'a BTreeSet<UnitName
         target_units: input.target_units,
         value_units,
         ignores: &input.request.ignore,
+        // An explicitly chosen state is judged on what was recorded for it.
+        current: if input.request.select.explicit() {
+            None
+        } else {
+            input.history.first()
+        },
+        history: input.history,
+    }
+}
+
+/// The subject a value-only path judges value `name` for: its unit, and
+/// the deployment that consumes it.
+fn value_subject<'a>(input: &'a PromotionInput<'_>, name: &str, unit: &'a UnitName) -> Subject<'a> {
+    Subject::Value {
+        unit,
+        deployment: input.consumers.get(name).map(String::as_str),
     }
 }
 
@@ -316,16 +347,17 @@ pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
     let value_units = value_units(input.path);
     let ctx = Context {
         ignores: &[],
+        current: input.history.first(),
         ..context(input, &value_units)
     };
     let whole = input.promotes_source || input.path.spec.values.is_empty();
     // A value-only path selects a state per value, for that value's consumer.
-    let consumers: Vec<(&String, BTreeSet<UnitName>)> = input
+    let consumers: Vec<(&String, UnitName)> = input
         .path
         .spec
         .values
         .iter()
-        .filter_map(|(name, value)| values::consumer(&value.select).map(|unit| (name, BTreeSet::from([unit]))))
+        .filter_map(|(name, value)| values::consumer(&value.select).map(|unit| (name, unit)))
         .collect();
     let levels: &[EvidenceLevel] = match ctx.level() {
         EvidenceLevel::Attested => &[EvidenceLevel::Attested, EvidenceLevel::Published],
@@ -350,8 +382,8 @@ pub fn evaluate(input: &PromotionInput<'_>) -> Vec<StateEvaluation> {
                 (level, reaches(level, required), gaps)
             } else {
                 let mut gaps: Vec<Gap> = Vec::new();
-                for (name, units) in &consumers {
-                    let subject = Subject::Units(units);
+                for (name, unit) in &consumers {
+                    let subject = value_subject(input, name, unit);
                     let level = reach(&subject);
                     let eligible = reaches(level, required);
                     if !eligible {
@@ -472,7 +504,24 @@ fn select_whole<'a>(input: &'a PromotionInput<'_>, ctx: &Context<'_>) -> Result<
         .first()
         .map(|state| judge(ctx, state, &subject, ctx.level()).gaps)
         .unwrap_or_default();
-    Err(refuse(input, &pool, gaps, None))
+    Err(held_back(ctx, &pool, &subject, refuse(input, &pool, gaps, None)))
+}
+
+/// `refusal`, with the fix naming the newest older state that only what
+/// runs now held back (every gap [`GapKind::NotRunning`]): it can still be
+/// promoted explicitly, on the attestations recorded for it (D8).
+fn held_back(ctx: &Context<'_>, pool: &[&RecordedState], subject: &Subject<'_>, mut refusal: Refusal) -> Refusal {
+    let older = pool.iter().skip(1).find(|state| {
+        let gaps = judge(ctx, state, subject, ctx.level()).gaps;
+        !gaps.is_empty() && gaps.iter().all(|gap| gap.kind == GapKind::NotRunning)
+    });
+    if let Some(older) = older {
+        refusal.finding.fix = format!(
+            "{}; the older state {} (run {}) falls short only because the newest attestations no longer show it running: to promote it anyway, pass `--state-revision {}`, which judges it on the attestations recorded for it",
+            refusal.finding.fix, older.desired_commit, older.run, older.desired_commit
+        );
+    }
+    refusal
 }
 
 /// The value-only selection: each value from the newest state in which its
@@ -490,12 +539,9 @@ fn select_values<'a>(
     let all: BTreeSet<UnitName> = consumers.values().cloned().collect();
     let mut chosen: Vec<Chosen<'a>> = Vec::new();
     let mut per_value = BTreeMap::new();
-    let find = |units: &BTreeSet<UnitName>| {
-        let subject = Subject::Units(units);
-        pool.iter().find_map(|state| qualify(input, ctx, state, &subject))
-    };
     if input.request.select.explicit() {
-        let Some(found) = find(&all) else {
+        let subject = Subject::Units(&all);
+        let Some(found) = pool.iter().find_map(|state| qualify(input, ctx, state, &subject)) else {
             let gaps = pool
                 .first()
                 .map(|state| judge(ctx, state, &Subject::Units(&all), ctx.level()).gaps)
@@ -509,13 +555,13 @@ fn select_values<'a>(
         return Ok((chosen, per_value));
     }
     for (name, unit) in &consumers {
-        let units = BTreeSet::from([unit.clone()]);
-        let Some(found) = find(&units) else {
+        let subject = value_subject(input, name, unit);
+        let Some(found) = pool.iter().find_map(|state| qualify(input, ctx, state, &subject)) else {
             let gaps = pool
                 .first()
-                .map(|state| judge(ctx, state, &Subject::Units(&units), ctx.level()).gaps)
+                .map(|state| judge(ctx, state, &subject, ctx.level()).gaps)
                 .unwrap_or_default();
-            return Err(refuse(input, &pool, gaps, Some(name)));
+            return Err(held_back(ctx, &pool, &subject, refuse(input, &pool, gaps, Some(name))));
         };
         let index = if let Some(index) = chosen.iter().position(|known| known.state.run == found.state.run) {
             index
@@ -608,6 +654,17 @@ fn fix_for(source: &EnvironmentName, gaps: &[Gap], level: &str) -> String {
         fixes.push(format!(
             "record them again with `nyl attest -e {source}`: attestations older than maxAttestationAge do not count"
         ));
+    }
+    if has(GapKind::NotRunning) {
+        fixes.push(format!(
+            "what runs decides: a publication's attestations count only for its current receipt, and a value-only path takes each value from the state its consumer runs; wait until what runs is attested (`nyl attest -e {source}`), or promote an explicitly chosen state with `--state-revision <desired commit>`, which is judged on the attestations recorded for it"
+        ));
+    }
+    if has(GapKind::Coverage) {
+        fixes.push(
+            "correct the PromotionPath's `coverage`: name Applications and ApplicationGroups as the publication's attestations list them (`nyl get states -e <source> -o yaml` shows their details)"
+                .to_owned(),
+        );
     }
     if has(GapKind::Failing) {
         fixes.push(

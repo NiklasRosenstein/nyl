@@ -12,9 +12,9 @@ reads it when it reconciles.
 :::note[Status]
 M6 delivers promotion in steps. `nyl promote`, `fromPromotion` sources and
 bindings, artifact verification, `nyl get states`, `promotion-candidates`,
-and `promotions`, `status` lineage, `record: source`, and several paths into
-one environment with the supersede check and hotfixes work today. Value-only
-coverage follows.
+and `promotions`, `status` lineage, `record: source`, several paths into
+one environment with the supersede check and hotfixes, value-only paths
+judged per Application, and `coverage` work today.
 :::
 
 ## The unit of promotion
@@ -29,12 +29,104 @@ Without flags `nyl promote` takes the newest state whose evidence reaches the
 path's level: at `published`, every unit the target also selects has a current
 receipt; at `attested`, every required attestation passes for that state,
 within `maxAttestationAge`. A failing attestation blocks a state on every path.
+A publication's `accepted` and `healthy` say what runs now, so they count
+only for its current receipt ([below](#what-runs-now)).
 `--revision` and `--state-revision` choose a state, and rolling back is
 promoting an older one:
 
 ```bash
 nyl promote dev-to-prod --revision 3e7b9c… --evidence published --reason "Roll back release 2"
 ```
+
+## What runs now
+
+A KubernetesPublication that declares `observe: {}` attests `accepted` and
+`healthy` by reading what Argo CD (or the direct reconciler) runs. Those
+attestations describe the present, not one receipt's past, so promotion
+counts them only for the publication's current receipt:
+
+- An older state does not qualify through its publication attestations once
+  a newer receipt of the publication exists, even if they passed.
+- When the newest attestation fails, such as when Applications still run the
+  previous publication or run different ones, `nyl promote` refuses with
+  `NYL-PROMOTE-NO-EVIDENCE` and the driver's reason. It does not fall back to
+  an older state that once passed.
+- Environment-wide attestations, external ones recorded with
+  `nyl attest --name`, and the attestations of other units name a state or a
+  receipt, so for them the newest state that passed still wins.
+- An explicitly chosen state, with `--state-revision` or `--revision`, is
+  judged on the attestations recorded for it.
+
+The cost: between publishing a new receipt and its Applications running it,
+the state they still run cannot be promoted without flags. The refusal names
+that state, and `--state-revision` promotes it:
+
+```bash
+nyl promote dev-to-prod --state-revision <desired commit> --reason "Release 5, still running"
+```
+
+A publication without `observe` has no reader: it declares no attestations,
+its receipt is its evidence, and none of this applies.
+
+## Value-only paths
+
+A path whose target does not take its source from it promotes values only,
+and takes each value from the state its consumer runs. A value selected as a
+publication's Release input, `{unit: kubernetes, input:
+/releases/<group>~1<release>/image}`, is consumed by that Release's
+Application; any other selector (an artifact, an output, another input) is
+consumed by the selected unit itself.
+
+For a value consumed by an Application, `nyl promote` reads the publication's
+current `accepted` and `healthy` per Application: the value comes from the
+state whose receipt published what that Application runs, so Applications
+that were synced to different publications by hand do not block, and the
+record names a value's own `state` when it differs from `from`. Only the
+consuming Application's own findings block its value: it runs a revision no
+publication explains (`unmatched`), a mix of revisions, nothing, or a recorded
+`healthy` fails for it (even when the path requires only `accepted`, as any
+failing attestation blocks). A path that promotes the target's source still
+needs one state behind every value, so the same mix refuses it.
+
+Following the consumer is how a value-only path picks a state, not an
+evidence requirement: it applies at `evidence: published` and under
+`--evidence published` too, whenever the publication's current receipt has a
+recorded `accepted` or `healthy`. A state is matched by the publication commit
+it published, which may be the commit the reading matched or the revision
+the Application reports running. When no recorded state published what an
+Application runs, such as after the history was cut short or a publication
+outside orchestration, the promotion is refused with "no recorded state
+published what <Application> runs (<commit>)": promote a state explicitly
+with `--state-revision`, or reconcile the source so it publishes again.
+
+## Coverage
+
+`coverage` narrows or extends which Applications a promotion's publication
+attestations are judged for. It never changes what moves.
+
+```yaml
+spec:
+  coverage:
+    applicationGroups: [web]              # source paths: count only these groups
+    excludeApplications: [web-batch]      # knowingly accepted as unhealthy; listed in each record
+    requireApplications: [web-gateway]    # must meet the attestations at whatever they run
+```
+
+- `applicationGroups` and `excludeApplications` narrow a source path's
+  judgement: a failing `accepted` or `healthy` that only Applications outside
+  them explain does not block. The catalog Application belongs to no group.
+  `applicationGroups` applies only to source paths; a value-only path ignores
+  it, because it judges each value for its own consumer.
+- Coverage never fails open: a group no Application belongs to, or a
+  coverage that leaves no Application to judge while the attestation fails,
+  refuses the promotion and names the field. Names are checked when a
+  promotion runs; `nyl validate` does not check them yet.
+- On a value-only path, an excluded consumer must still run a publication of
+  the source, which decides its value's state, but need not be healthy.
+- `requireApplications` adds Applications that contribute no value but must
+  meet the required attestations at whatever publication they run. A name no
+  attestation lists blocks the promotion, also for a publication without
+  `observe` and on a path that requires none of its attestations.
 
 ## Reading what was promoted
 
@@ -136,6 +228,8 @@ environment runs:
   current receipt, a pending, aged, or failing attestation), the values it
   would carry, the state `nyl promote` would take now (or why it would
   refuse), the state the path's record names, and the state prod runs now.
+  A state whose publication attestations no longer describe what runs shows
+  `not-running`.
   A value-only path is judged per value, as `nyl promote` takes each value
   from its own state. Artifacts are not verified here.
   `nyl promote dev-to-prod --dry-run` then shows the exact record.
@@ -143,7 +237,13 @@ environment runs:
   last run applied, and every earlier promotion from prod's desired history.
 - `nyl status -e prod` shows the lineage of what prod runs: the path and
   sequence of the applied record, the source commit, and the source state it
-  came from, and a newer record waiting for the next reconcile.
+  came from, and a newer record waiting for the next reconcile. `nyl status
+  -e dev` lists every attestation that fails for what dev runs
+  (`NYL-ATTESTATION-FAILED`, a warning with the attestation's reason), so a
+  failure that blocks promotion shows before anyone promotes.
+- `nyl plan -e prod` warns with `NYL-PROMOTE-UNCHECKED` about each value two
+  paths into prod promote that has no known source commit, such as a
+  command's output: the supersede check cannot compare it.
 
 ```console
 $ nyl get promotion-candidates dev-to-prod

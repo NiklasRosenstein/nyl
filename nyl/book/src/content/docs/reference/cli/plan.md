@@ -38,6 +38,15 @@ asks each ready unit's driver what executing it would change, and reports:
   `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM`,
   `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS`), each naming
   the setting that fixes it;
+- for an environment that two or more PromotionPaths promote into, a
+  `NYL-PROMOTE-UNCHECKED` warning for each value they both carry that has no
+  known source commit, such as a command's output or a Release input written
+  as a literal: the [supersede check](/nyl/reference/cli/promote/#superseding)
+  of `nyl promote` cannot compare it, so check by hand that a promotion keeps
+  what the other path promoted. Values are paired by name, and the check is
+  static: it reads the source environment's units as the worktree renders
+  them, not a recorded state, so `nyl promote` can still find a value
+  unchecked that `plan` did not list;
 - each unit's state: `ready` for a unit that would execute, with the driver's
   change summary and digest, `drifted` for a current unit whose drift the
   run would repair, `current`, `held`, or `blocked` with the references it

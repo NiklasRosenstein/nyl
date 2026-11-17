@@ -122,13 +122,17 @@ steps:
           'staging/web/web/**':
             - [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r2)%']
 
-  # The source path needs one dev state behind every value: what the newest
-  # attestations show running is mixed, so it is refused and writes nothing.
+  # The source path needs one dev state behind every value. The publication's
+  # newest attestations, those of its current receipt (R2's), fail because
+  # the api Application runs another publication, and an older state does
+  # not qualify through its publication attestations once a newer receipt
+  # exists: the promotion is refused with the driver's reason and writes
+  # nothing, without falling back to R1.
   - nyl: [promote, dev-to-prod]
     exit: 2
     expect:
       codes: [NYL-PROMOTE-NO-EVIDENCE]
-      messages: [mixed]
+      messages: [other-publication]
       commits: {desired: 0, observed: 0}
   # An explicitly chosen state reaches `attested` through the attestations
   # recorded for it: R1's passed when Argo CD ran R1 everywhere.

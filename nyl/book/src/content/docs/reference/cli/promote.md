@@ -104,6 +104,22 @@ now, not as it renders at each candidate state's source commit. A unit added to
 or removed from the target's selection in source that is not yet checked out is
 judged when the checkout has it.
 
+## Which state
+
+Without `--revision` or `--state-revision`, the state is the newest whose
+evidence reaches the path's level. A publication's `accepted` and `healthy`
+count only for its current receipt: once a newer receipt is published, an
+older state no longer qualifies through them, and a newest one that fails
+refuses the promotion without falling back to an older state that passed
+(the [promotion guide](/nyl/orchestration/promotion/#what-runs-now) explains
+why). The refusal names the older state that would otherwise qualify, and
+`--state-revision` promotes it on the attestations recorded for it. On a
+path that promotes only values, each value comes from the state its
+consuming Application runs, as the publication's current attestations show
+it ([Value-only paths](/nyl/orchestration/promotion/#value-only-paths)), and
+`coverage` narrows or extends the Applications judged
+([Coverage](/nyl/orchestration/promotion/#coverage)).
+
 ## Unchanged
 
 When the chosen state and values are what the path's record already names, and
@@ -164,7 +180,9 @@ as from a deleted branch, is not a refusal: the promotion warns with
 `NYL-PROMOTE-UNCHECKED`, naming the record, and `--supersede <full commit
 ID>=<reason>` naming that commit records that the promotion replaces it. A
 value without a known source commit, such as an image built outside Nyl or a
-command output, cannot be checked either and warns the same way.
+command output, cannot be checked either and warns the same way; `nyl plan`
+of the target lists such values before any promotion, for each value two
+paths into it promote.
 
 ## Artifacts
 
@@ -194,7 +212,7 @@ false`.
 | --- | --- |
 | 0 | The record was written, or the path's record already names the chosen state (`unchanged`), or the dry run found a promotion to make. |
 | 1 | Configuration error: an invalid path or selector, a refused or unknown `--value`, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a form M6 does not support (`NYL-PROMOTE-UNSUPPORTED`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a shallow clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), a `record: source` block a run would refuse (`NYL-PROMOTION-RECORD-INVALID`, `NYL-PROMOTION-SEQUENCE-OLDER`), an unreadable commit or a `--supersede` entry that names none, or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`, see [`record: source`](#record-source)). |
-| 2 | Nothing was written because evidence is missing, stale, or failing (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the promotion would drop commits another path promoted (`NYL-PROMOTE-SUPERSEDES`, see [Superseding](#superseding)), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
+| 2 | Nothing was written because evidence is missing, stale, failing, or no longer describes what runs (`NYL-PROMOTE-NO-EVIDENCE`, the fix says what is missing), the promotion would drop commits another path promoted (`NYL-PROMOTE-SUPERSEDES`, see [Superseding](#superseding)), the target's lease is held (`NYL-LEASE-HELD`), or the remote refused the push of a `record: source` commit (`NYL-PROMOTE-SOURCE-REJECTED`). |
 
 Run [`nyl reconcile`](/nyl/reference/cli/reconcile/) on the target afterwards:
 an environment that takes its source from a promotion exits 2 with

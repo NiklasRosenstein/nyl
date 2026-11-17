@@ -62,8 +62,12 @@ runs now (its last run applied that record and no newer one waits). When
 exits 0.
 
 A path that promotes only values takes each value from its own state, as
-`nyl promote` does: each value is judged for the unit it reads, and a state
-is `eligible` when it can supply some value. The text form adds each
+`nyl promote` does: each value is judged for its consumer (the Application
+of the Release whose input it reads, or else the unit it reads), and a state
+is `eligible` when it can supply some value. A publication's `accepted` and
+`healthy` count only for its current receipt, so an older state whose
+publication attestations passed shows them as `not-running`
+([What runs now](/nyl/orchestration/promotion/#what-runs-now)). The text form adds each
 value's level, and `-o json` lists it under `byValue`.
 
 The candidates are judged on evidence only: artifacts are not verified, so a
@@ -91,7 +95,9 @@ with `run`, `desiredCommit`, `observedCommit`, `sourceCommit`, `level`,
 `eligible`, `selected`, `promoted`, `running`, `values`, `byValue` (`level`
 and `eligible` per value, for a value-only path), and `missing[]`: each with
 `unit` (absent for an environment-wide attestation), `attestation`, `reason`
-(`no-receipt`, `pending`, `aged`, or `failing`), and `message`.
+(`no-receipt`, `pending`, `aged`, `failing`, `not-running`, or `coverage`
+for a `coverage` name no attestation lists), and
+`message`.
 
 A path `nyl promote` refuses before it reads state, such as an unknown path
 (`NYL-PROMOTE-BINDING-UNKNOWN`), a form M6 does not support

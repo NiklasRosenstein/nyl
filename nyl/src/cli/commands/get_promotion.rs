@@ -117,7 +117,7 @@ pub fn candidates(args: &GetCandidatesArgs, wiring: &Wiring<'_>) -> Result<Comma
     // would be judged by rules it does not satisfy.
     let prepared = session
         .check_promotion_paths(wiring)
-        .and_then(|()| target_view(&session, wiring.drivers, &path))
+        .and_then(|_| target_view(&session, wiring.drivers, &path))
         .and_then(|view| {
             let source = EnvironmentName::new(&source).map_err(|error| {
                 Finding::new(
@@ -151,6 +151,7 @@ pub fn candidates(args: &GetCandidatesArgs, wiring: &Wiring<'_>) -> Result<Comma
             promotes_source: view.promotes_source,
             promoted: view.promoted.as_ref(),
             now: wiring.clock.now(),
+            drivers: wiring.drivers,
         },
     );
     let names = report

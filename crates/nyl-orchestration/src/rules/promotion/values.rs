@@ -18,12 +18,11 @@
 //! the digest of the selected input value (canonical JSON) for an input.
 //!
 //! Which unit *consumes* a value, and so whose evidence a value-only path
-//! judges, is [`consumer`]. Today it is the selected unit itself (the
-//! decision D7 of the M6 plan for artifact and output selectors). Tracing
-//! `{unit: <publication>, input: /releases/<group>~1<release>/…}` to the
-//! Application of that Release is the value-only specifics of M6's PR 11,
-//! which replaces this function and the unit-level judgement with the
-//! per-Application one.
+//! judges, is [`consumer`]: the selected unit (decision D7 of the M6 plan).
+//! When the unit's driver maps an input selector to one of its deployments,
+//! such as `{unit: <publication>, input: /releases/<group>~1<release>/…}` to
+//! that Release's Application, the value is judged for that deployment
+//! ([`super::PromotionInput::consumers`], [`super::standing`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 
 use nyl_core::orchestration::codes::Finding;
+use nyl_core::orchestration::driver::DriverSet;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{EnvironmentSnapshot, StateHistory, StateStore};
 use nyl_core::orchestration::promotion::{EvidenceLevel, PromotionFrom, PromotionRecord, PromotionRequest};
@@ -78,6 +79,9 @@ pub struct CandidatesRequest<'a> {
     /// it: with `record: source`, its block is the path's current record.
     pub promoted: Option<&'a PromotedSource>,
     pub now: Timestamp,
+    /// The drivers, which say what the source's running-scoped attestations
+    /// show ([`promote::read_running`]).
+    pub drivers: &'a DriverSet,
 }
 
 /// `nyl get promotion-candidates <path>`: every recorded state of the
@@ -92,7 +96,7 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         PathEvidence::Attested => EvidenceLevel::Attested,
     };
     let report = PromotionCandidatesReport::new(&path.metadata.name, source.clone(), target.clone(), required);
-    let PathReading { snapshot, history } = match promote::read_path(
+    let PathReading { snapshot, mut history } = match promote::read_path(
         store,
         (target, target_location),
         (source, source_location),
@@ -101,6 +105,8 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         Ok(reading) => reading,
         Err(finding) => return report.refused(finding),
     };
+    promote::read_running(request.drivers, &mut history);
+    let consumers = promote::value_consumers(request.drivers, &history, path);
     // A promotion without flags. Who asks is not read by the decision's
     // choice, and the sequence is not shown: neither is recorded here.
     let ask = Request {
@@ -122,6 +128,7 @@ pub fn candidates(store: &dyn StateStore, request: &CandidatesRequest<'_>) -> Pr
         history: &history,
         target_units: request.target_units,
         promotes_source: request.promotes_source,
+        consumers: &consumers,
         target_records: &records,
         sequence: 0,
         now: request.now,
