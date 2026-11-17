@@ -340,7 +340,7 @@ because it locates the state that holds the parameters.</p>
 <p><a id="field-spec.source.fromPromotion.promoted.evidence.attestations%5B%5D.details"></a></p>
 <h3 id="specsourcefrompromotionpromotedevidenceattestationsdetails">spec.source.fromPromotion.promoted.evidence.attestations[].details</h3>
 <p><strong>Optional</strong> · any value</p>
-<p>The driver’s details, such as each Application’s running publication and health.</p>
+<p>The driver’s details, such as each deployment’s running publication and health.</p>
 <p><a id="field-spec.source.fromPromotion.promoted.evidence.attestations%5B%5D.name"></a></p>
 <h3 id="specsourcefrompromotionpromotedevidenceattestationsname">spec.source.fromPromotion.promoted.evidence.attestations[].name</h3>
 <p><strong>Required</strong> · string</p>
@@ -386,13 +386,17 @@ because it locates the state that holds the parameters.</p>
 <h3 id="specsourcefrompromotionpromotedevidenceoverridereason">spec.source.fromPromotion.promoted.evidence.override.reason</h3>
 <p><strong>Required</strong> · string</p>
 <p>Why the promotion went ahead below the path’s level.</p>
-<p><a id="field-spec.source.fromPromotion.promoted.excludedApplications"></a></p>
-<h3 id="specsourcefrompromotionpromotedexcludedapplications">spec.source.fromPromotion.promoted.excludedApplications</h3>
-<p><strong>Required</strong> · array</p>
-<p>The deployments the path’s <code>coverage</code> excluded at promotion time:
-every unit’s <code>exclude</code>, sorted, each name once.</p>
-<p><a id="field-spec.source.fromPromotion.promoted.excludedApplications%5B%5D"></a></p>
-<h3 id="specsourcefrompromotionpromotedexcludedapplications-1">spec.source.fromPromotion.promoted.excludedApplications[]</h3>
+<p><a id="field-spec.source.fromPromotion.promoted.excludedDeployments"></a></p>
+<h3 id="specsourcefrompromotionpromotedexcludeddeployments">spec.source.fromPromotion.promoted.excludedDeployments</h3>
+<p><strong>Required</strong> · object</p>
+<p>The deployments the path’s <code>coverage</code> excluded at promotion time,
+by unit: each unit’s <code>exclude</code>, sorted, each name once. Units with
+none are left out, so an empty map says nothing was excluded.</p>
+<p><a id="field-spec.source.fromPromotion.promoted.excludedDeployments%5Bkey%5D"></a></p>
+<h3 id="specsourcefrompromotionpromotedexcludeddeploymentskey">spec.source.fromPromotion.promoted.excludedDeployments[key]</h3>
+<p><strong>Optional</strong> · array</p>
+<p><a id="field-spec.source.fromPromotion.promoted.excludedDeployments%5Bkey%5D%5B%5D"></a></p>
+<h3 id="specsourcefrompromotionpromotedexcludeddeploymentskey-1">spec.source.fromPromotion.promoted.excludedDeployments[key][]</h3>
 <p><strong>Required</strong> · string</p>
 <p><a id="field-spec.source.fromPromotion.promoted.from"></a></p>
 <h3 id="specsourcefrompromotionpromotedfrom">spec.source.fromPromotion.promoted.from</h3>
