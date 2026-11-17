@@ -153,3 +153,9 @@ id = "4bc18392-ef42-4403-9853-50ebf34ac0b1"
 type = "improvement"
 description = "Teardown text that the orchestration engine writes for every kind no longer speaks of Argo CD or Applications: a teardown wait's terminal prompt says the unit waits for its deployments to be removed, and an `observe` wait with no observation is uncertain with `observation-failed: the driver made no removal observation`. KubernetesPublication's own messages keep their Argo CD terms. The released codes and reason tokens are unchanged, including `NYL-TEARDOWN-APPLICATIONS-ORPHANED` and the other KubernetesPublication teardown readiness codes, and `applications-remain`."
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "3130d79f-0f85-4710-a2a9-79bbcc9d5426"
+type = "fix"
+description = "Update the bundled `libz-sys` to 1.1.33 for RUSTSEC-2026-0544, a heap buffer overflow in zlib reachable through `git2`"
+author = "@NiklasRosenstein"
