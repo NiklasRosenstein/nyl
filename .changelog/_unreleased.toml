@@ -155,6 +155,12 @@ description = "Teardown text that the orchestration engine writes for every kind
 author = "@NiklasRosenstein"
 
 [[entries]]
+id = "3130d79f-0f85-4710-a2a9-79bbcc9d5426"
+type = "fix"
+description = "Update the bundled `libz-sys` to 1.1.33 for RUSTSEC-2026-0544, a heap buffer overflow in zlib reachable through `git2`"
+author = "@NiklasRosenstein"
+
+[[entries]]
 id = "76b34f5f-effd-4e1b-b165-bdea559704ee"
 type = "fix"
 description = "Commands that render through the render cache, such as `nyl reconcile`, `publish-tree`, `render-tree`, and Helm chart renders, no longer read the whole `nyl` executable into memory to fingerprint it: they hash it in chunks, once per process, so peak memory no longer grows by the size of the binary (about 45 MB for a release build, several hundred megabytes for a debug build; `nyl reconcile` peaked at 310 MiB before and 37 MiB after). The fingerprint is unchanged, so existing cache entries are still reused"
