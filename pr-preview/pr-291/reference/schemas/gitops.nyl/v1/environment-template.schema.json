@@ -1,0 +1,1140 @@
+{
+  "$defs": {
+    "Admission": {
+      "description": "Whether state-writing runs require a CI deployment admission.",
+      "enum": [
+        "off",
+        "required"
+      ],
+      "type": "string"
+    },
+    "ApprovalIdentity": {
+      "description": "How Nyl learned an approver's identity. An audit record, not authorization.",
+      "oneOf": [
+        {
+          "const": "verified",
+          "description": "Read from the CI system, by a built-in lookup or the project's hook.",
+          "type": "string"
+        },
+        {
+          "const": "asserted",
+          "description": "Passed with `--approved-by`.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The Git user of a workstation run.",
+          "type": "string"
+        }
+      ]
+    },
+    "AttestationResult": {
+      "enum": [
+        "pass",
+        "fail"
+      ],
+      "type": "string"
+    },
+    "CommitId": {
+      "description": "A full, lowercase, 40-character Git commit ID.",
+      "type": "string"
+    },
+    "DeletionPolicy": {
+      "description": "What happens to a unit's resources when it leaves the ownership set.",
+      "oneOf": [
+        {
+          "const": "Teardown",
+          "description": "Tear the resources down, after `--allow-teardown`.",
+          "type": "string"
+        },
+        {
+          "const": "Retain",
+          "description": "Leave the resources in place.",
+          "type": "string"
+        }
+      ]
+    },
+    "DriftRepair": {
+      "description": "Whether reconcile repairs drift on its own.\n\nContract: [Drift](../../../../design/orchestration-core.md#drift).",
+      "oneOf": [
+        {
+          "const": "converge",
+          "description": "The next reconcile executes drifted units whose recovery policy is\n`converge` again; a drifted unit that is not safe to re-run awaits\napproval.",
+          "type": "string"
+        },
+        {
+          "const": "manual",
+          "description": "Reconcile repairs no drift by itself: drifted units stay `drifted`\nuntil `nyl reconcile --unit <unit> --reapply --reason <text>`.",
+          "type": "string"
+        }
+      ]
+    },
+    "Duration": {
+      "description": "A duration such as `90s`, `30m`, `1h30m`, or `7d`.",
+      "examples": [
+        "30m"
+      ],
+      "pattern": "^(?=.)([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?$",
+      "type": "string"
+    },
+    "EnvironmentFrom": {
+      "additionalProperties": false,
+      "description": "One transition commit pair of the source environment, pushed together\nwith one `Nyl-Run-Id`.",
+      "properties": {
+        "desiredCommit": {
+          "$ref": "#/$defs/CommitId",
+          "description": "The state's commit on the desired ref."
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentName",
+          "description": "The source environment."
+        },
+        "observedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when the state has no observed commit of its own."
+        },
+        "run": {
+          "$ref": "#/$defs/RunId",
+          "description": "The `Nyl-Run-Id` of the run that recorded the state."
+        }
+      },
+      "required": [
+        "environment",
+        "run",
+        "desiredCommit"
+      ],
+      "type": "object"
+    },
+    "EnvironmentName": {
+      "description": "An Environment's name, unique across declared Environments and all\ntemplate instances because leases, run refs, and keep refs are named\nafter it. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "EnvironmentSource": {
+      "additionalProperties": false,
+      "description": "The source commit of an environment's runs: a ref whose tip each run uses,\noptionally pinned to a commit that `nyl update source-locks` moves, or the\ncommit the newest promotion recorded.",
+      "properties": {
+        "commit": {
+          "description": "Full 40-character lowercase commit ID that is read, refreshed by `nyl update source-locks`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fromPromotion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotedSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source commit recorded by the newest promotion on a path; excludes the other fields."
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReadGitRepository"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inline repository coordinates to read from. Mutually exclusive with `repositoryRef`."
+        },
+        "repositoryRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Project-local `gitops.nyl/v1` GitRepository to read from. Mutually exclusive with inline `repository`."
+        },
+        "revision": {
+          "description": "Human-readable branch or tag that `nyl update source-locks` resolves.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EnvironmentState": {
+      "additionalProperties": false,
+      "description": "The location of an environment's state: a repository and the refs within it.",
+      "properties": {
+        "admissionRef": {
+          "description": "Ref of the deployment admission record. Default the desired ref.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coordinationRefPrefix": {
+          "description": "Prefix, ending in `/`, of the leases, runs, and signals refs. Default `refs/nyl/`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desiredRef": {
+          "description": "Ref of the desired state. A short name is a branch. Default `nyl/<environment>/desired`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedRef": {
+          "description": "Ref of the observed state; may equal `desiredRef`. Default `nyl/<environment>/observed`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Directory of the environment's state within its refs, so several environments can share one ref. Default the root.",
+          "type": "string"
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InlineGitRepository"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inline repository coordinates holding the state. Mutually exclusive with `repositoryRef`."
+        },
+        "repositoryRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "GitRepository holding the state, read through its `repoURL` and written through its `publishURL`. Mutually exclusive with `repository`. Omitted with `repository`: the group's, else the checkout's `origin`, else the local repository."
+        }
+      },
+      "type": "object"
+    },
+    "EnvironmentTemplateSpec": {
+      "additionalProperties": false,
+      "description": "The Environment's fields, templated, plus what only instances have.",
+      "properties": {
+        "admission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Admission"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "CI deployment admission: `required` makes state-writing runs use the source of the current admission. Omitted, `off`."
+        },
+        "allowTeardown": {
+          "description": "Whether omission teardown needs no `--allow-teardown`: a unit removed from the template or its selection is torn down by the next reconcile. Default `false`.",
+          "type": "boolean"
+        },
+        "allowUnprotectedSource": {
+          "description": "Whether runs may use source commits outside `protectedRefs`; previews run from pull request branches and set `true`. Omitted, `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "attestations": {
+          "description": "Environment-wide attestations, recorded with `nyl attest` for an instance's current state.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deletionPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeletionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`Teardown` overrides every unit's own policy, including an explicit `Retain`, for the kinds that support teardown; units of other kinds are left in place and dropped from state when the instance is removed. `Retain` or omitted leaves each unit's own policy."
+        },
+        "driftRepair": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DriftRepair"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether `reconcile` repairs drift by itself. Omitted, `converge`."
+        },
+        "keepSource": {
+          "description": "Opt in to keeping each instance's recorded source commit fetchable with a keep ref of its own, `refs/nyl-keep/<keepId>/<commit>`, in the source repository, for instances that may expire (`ttl`) long after their pull request branches are gone. `nyl state delete` removes the refs. Needs push access to `refs/nyl-keep/*` in the source repository, which a read-only token (GitHub's default `contents: read`, a fork pull request) lacks: without it `state init --template` and `reconcile --template` refuse (`NYL-INSTANCE-KEEP-FAILED`), so grant the access or leave `false`. Omitted, `false`: tear an instance down in the pull request closed job, which fetches the recorded commit by its id from the project's origin; GitHub keeps `refs/pull/<n>/head` and GitLab `refs/merge-requests/<n>/head` after the branch is deleted.",
+          "type": "boolean"
+        },
+        "maxInstances": {
+          "description": "The most instances of this template that may exist at once, expired ones included until they are removed. At the limit, `state init --template` and `reconcile --template` refuse to create another instance (exit 2) and name the expired instances that could be removed; `--make-room` removes them first, oldest expiry first and only as many as needed. Needs `state.path` ending in `{{ environment.name }}` so Nyl can list the instances. Omitted, unlimited.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parameters": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputDeclaration"
+          },
+          "description": "Typed parameters of an instance, exposed to templates as `params`; `--param <name>=<value>` parses its value as YAML and checks it against the declaration. A parameter without a `default` is required.",
+          "type": "object"
+        },
+        "protectedRefs": {
+          "description": "Refs that pinned commits and run source commits must be reachable from. Omitted, the group's, else each repository's default branch.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source commit runs use, which may template `revision` from `params`. Omitted, an instance runs from the commit recorded when it was created or last reconciled from a checkout."
+        },
+        "state": {
+          "$ref": "#/$defs/EnvironmentState",
+          "default": {},
+          "description": "Where an instance's state lives. Strings may read `environment.name` only. With `path` such as `{{ environment.name }}`, every instance shares the refs, one directory each."
+        },
+        "ttl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How long an instance lives without activity, such as `7d`: `state init --template`, `reconcile --template`, and every other `reconcile` of the instance (unless `--no-extend`) move its `expiresAt` to now plus `ttl`. A `reconcile` that finds the instance expired removes it, the way `nyl state delete --teardown` does, unless it is `--renew` or `reconcile --template`; `reconcile --template <name>` without an instance sweeps every instance of the template and never extends. Omitted, instances never expire."
+        },
+        "unitSelector": {
+          "$ref": "#/$defs/LabelSelector",
+          "default": {},
+          "description": "Matches literal unit `metadata.labels` across all unit kinds. An empty selector selects every unit."
+        },
+        "values": {
+          "additionalProperties": true,
+          "description": "Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "EvidenceAttestation": {
+      "additionalProperties": false,
+      "description": "An attestation a promotion relied on.",
+      "properties": {
+        "at": {
+          "description": "When it was recorded.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "details": {
+          "description": "The driver's details, such as each deployment's running publication and health."
+        },
+        "name": {
+          "description": "The attestation's name.",
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/$defs/AttestationResult",
+          "description": "Whether it passed."
+        },
+        "scope": {
+          "description": "The unit name, or `environment`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "result",
+        "at"
+      ],
+      "type": "object"
+    },
+    "EvidenceLevel": {
+      "description": "The level a promotion's evidence reached.",
+      "oneOf": [
+        {
+          "const": "published",
+          "description": "The source state recorded every value.",
+          "type": "string"
+        },
+        {
+          "const": "attested",
+          "description": "The required attestations also passed.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionKey": {
+      "description": "A digest of everything that decides what a unit's execution does:\n`sha256:` and 64 lowercase hex digits.",
+      "type": "string"
+    },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Literal labels used for organization and target selection.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "IgnoredAttestation": {
+      "additionalProperties": false,
+      "description": "An attestation `--ignore-attestation` set aside.",
+      "properties": {
+        "by": {
+          "description": "Who set it aside.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The attestation's name.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why it was set aside.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "The unit name, or `environment`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "reason",
+        "by"
+      ],
+      "type": "object"
+    },
+    "InlineGitRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "publishURL": {
+          "description": "Optional Git write URL. Publication uses `repoURL` when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repoURL": {
+          "description": "Credential-free Git read URL used by renderers and generated Applications.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
+      ],
+      "type": "object"
+    },
+    "InputDeclaration": {
+      "additionalProperties": false,
+      "description": "One typed input a Release declares. Templates read its effective value as `inputs.<name>`.",
+      "properties": {
+        "default": {
+          "description": "Value used when the target binds none. Makes the input optional; must satisfy `type` and `enum`."
+        },
+        "description": {
+          "description": "Documentation, surfaced in errors and inspection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enum": {
+          "description": "Allowed values, for scalar types only. A non-empty list of values of the declared type.",
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/$defs/InputType",
+          "description": "Value type: `string`, `integer`, `number`, `boolean`, `object`, or `array`."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "InputType": {
+      "description": "Declared input type. Every type is a subset of JSON Schema.",
+      "oneOf": [
+        {
+          "const": "string",
+          "description": "A JSON string.",
+          "type": "string"
+        },
+        {
+          "const": "integer",
+          "description": "A JSON integer; numbers with a fractional part are rejected.",
+          "type": "string"
+        },
+        {
+          "const": "number",
+          "description": "Any JSON number.",
+          "type": "string"
+        },
+        {
+          "const": "boolean",
+          "description": "`true` or `false`.",
+          "type": "string"
+        },
+        {
+          "const": "object",
+          "description": "A JSON object. Only the top-level type is checked.",
+          "type": "string"
+        },
+        {
+          "const": "array",
+          "description": "A JSON array. Only the top-level type is checked.",
+          "type": "string"
+        }
+      ]
+    },
+    "LabelSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Exact label matches, combined with AND. An empty map selects every ApplicationGroup.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "LocalReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Project-local name of the referenced resource; its kind and API group are determined by the containing field.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "PromotedSource": {
+      "additionalProperties": false,
+      "description": "A source that promotion paths supply.",
+      "properties": {
+        "path": {
+          "description": "The PromotionPath that supplies the source. Mutually exclusive with `paths`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paths": {
+          "description": "Several PromotionPaths; the newest record on any of them wins. Mutually exclusive with `path`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "promoted": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotionRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The PromotionRecord `nyl promote` writes here with `record: source`, never by hand. It has the shape of the record in state, without `apiVersion` and `kind`."
+        },
+        "record": {
+          "description": "Where the PromotionRecord lives: `state` (default) or `source`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotedVerify"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With `record: source`, how a run trusts a `promoted` block it has not applied yet. Without it, the run reads the source environment's state and checks the block against the state it names, which needs read access to that state. With it, the run verifies instead that the commit which last changed the block is signed by a key the project's allowed signers file lists, and trusts the block without reading the source's state."
+        }
+      },
+      "type": "object"
+    },
+    "PromotedState": {
+      "additionalProperties": false,
+      "description": "The state a value-only path took one value from, when that is not the\nrecord's `from`.",
+      "properties": {
+        "desiredCommit": {
+          "$ref": "#/$defs/CommitId",
+          "description": "The state's commit on the desired ref."
+        },
+        "observedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The state's commit on the observed ref; absent when it has none of its own."
+        },
+        "run": {
+          "$ref": "#/$defs/RunId",
+          "description": "The `Nyl-Run-Id` of the run that recorded the state."
+        }
+      },
+      "required": [
+        "run",
+        "desiredCommit"
+      ],
+      "type": "object"
+    },
+    "PromotedUnit": {
+      "additionalProperties": false,
+      "description": "The identity of the source unit a value came from.",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/UnitName",
+          "description": "The unit's name in the source environment."
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The incarnation; absent when the unit had none in the recorded state."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "PromotedValue": {
+      "additionalProperties": false,
+      "description": "One promoted value with its lineage.",
+      "properties": {
+        "executionKey": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The receipt the value came from, for an output or artifact selector."
+        },
+        "inputDigest": {
+          "description": "The `sha256:` digest of the canonical JSON of the value an `input` selector read: the same digest the ownership index records for a Release input.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "select": {
+          "$ref": "#/$defs/PromotionSelect",
+          "description": "The path's selector the value was read with."
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotedState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present when a value-only path took the value from another state than `from`."
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotedUnit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source unit; absent for a target source's value (M11) and when unknown."
+        },
+        "value": {
+          "description": "The value as promoted."
+        }
+      },
+      "required": [
+        "value",
+        "select"
+      ],
+      "type": "object"
+    },
+    "PromotedVerify": {
+      "additionalProperties": false,
+      "description": "How a run trusts a `record: source` block: by the signature on the commit\nthat last changed it.",
+      "properties": {
+        "allowedSigners": {
+          "description": "A Git `allowed_signers` file (the format of `gpg.ssh.allowedSignersFile`) listing the keys whose signature on the commit that last changed the block is trusted, as a local path relative to the `nyl.toml` directory or `/`-rooted at the Git worktree. `git verify-commit` checks the signature against it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "allowedSigners"
+      ],
+      "type": "object"
+    },
+    "PromotionEvidence": {
+      "additionalProperties": false,
+      "description": "The evidence a promotion rested on.",
+      "properties": {
+        "attestations": {
+          "description": "The attestations the promotion relied on.",
+          "items": {
+            "$ref": "#/$defs/EvidenceAttestation"
+          },
+          "type": "array"
+        },
+        "level": {
+          "$ref": "#/$defs/EvidenceLevel",
+          "description": "The level the evidence reached."
+        },
+        "override": {
+          "additionalProperties": false,
+          "description": "Written as `null` when the promotion needed no override.",
+          "properties": {
+            "reason": {
+              "description": "Why the promotion went ahead below the path's level.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "level",
+        "attestations",
+        "override"
+      ],
+      "type": "object"
+    },
+    "PromotionFrom": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentFrom",
+          "description": "A state of the source environment."
+        },
+        {
+          "$ref": "#/$defs/TargetFrom",
+          "description": "Reserved for M11."
+        }
+      ],
+      "description": "The source state a record promotes: an environment's, or (M11, never\nwritten by M6) a DeploymentTarget's publication commit."
+    },
+    "PromotionPathName": {
+      "description": "A PromotionPath's `metadata.name`, which names its record file\n`desired/promotions/<path>.yaml`. A Kubernetes DNS label.",
+      "type": "string"
+    },
+    "PromotionRecord": {
+      "additionalProperties": false,
+      "description": "What `nyl promote` records about one promotion on one path.\n\nEach promotion replaces the path's record; Git history keeps earlier ones.\nIn an Environment's `source.fromPromotion.promoted` block it stands alone;\nin state it is a [`PromotionRecordDocument`].",
+      "properties": {
+        "artifactsVerified": {
+          "description": "Whether the artifact check ran.",
+          "type": "boolean"
+        },
+        "evidence": {
+          "$ref": "#/$defs/PromotionEvidence",
+          "description": "The evidence the promotion rested on."
+        },
+        "excludedDeployments": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "The deployments the path's `coverage` excluded at promotion time,\nby unit: each unit's `exclude`, sorted, each name once. Units with\nnone are left out, so an empty map says nothing was excluded.",
+          "type": "object"
+        },
+        "from": {
+          "$ref": "#/$defs/PromotionFrom",
+          "description": "The source state; for a path that promotes only values, the newest state any value came from."
+        },
+        "ignoredAttestations": {
+          "description": "The attestations `--ignore-attestation` set aside.",
+          "items": {
+            "$ref": "#/$defs/IgnoredAttestation"
+          },
+          "type": "array"
+        },
+        "path": {
+          "$ref": "#/$defs/PromotionPathName",
+          "description": "The PromotionPath that wrote the record."
+        },
+        "requested": {
+          "$ref": "#/$defs/PromotionRequest",
+          "description": "Who asked for the promotion, and why."
+        },
+        "sequence": {
+          "description": "Increases with every promotion into the target environment, on any path; the highest is the newest.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommitId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source commit of that state, present when the path promotes the target's source or a value's lineage includes one."
+        },
+        "superseded": {
+          "description": "The commits `--supersede` accepted as replaced.",
+          "items": {
+            "$ref": "#/$defs/SupersededCommit"
+          },
+          "type": "array"
+        },
+        "values": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PromotedValue"
+          },
+          "description": "The promoted values by name.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "path",
+        "sequence",
+        "from",
+        "values",
+        "evidence",
+        "ignoredAttestations",
+        "excludedDeployments",
+        "superseded",
+        "artifactsVerified",
+        "requested"
+      ],
+      "type": "object"
+    },
+    "PromotionRequest": {
+      "additionalProperties": false,
+      "description": "Who asked for the promotion, recorded like an approval.",
+      "properties": {
+        "at": {
+          "description": "When the promotion was requested.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "by": {
+          "description": "Who asked for the promotion.",
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/ApprovalIdentity",
+          "description": "How that identity was established, as for an approval."
+        },
+        "reason": {
+          "description": "The `--reason` given.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Where the identity came from, such as a CI provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "by",
+        "identity",
+        "at"
+      ],
+      "type": "object"
+    },
+    "PromotionSelect": {
+      "additionalProperties": false,
+      "description": "Which field of the source a promoted value reads: the same selectors, with\nthe same JSON Pointer semantics and resolver, as `fromUnit` references and\n`nyl get`.\n\nSet exactly one of the four forms:\n`{unit, input}` reads the source unit's resolved spec;\n`{unit, output, pointer?}` a declared, non-sensitive output of its receipt;\n`{unit, artifact, kind?, pointer}` a field of an artifact its receipt lists,\nrelative to the artifact's `spec`; and `{input}` (a target source, M11)\na Release input of the target.",
+      "properties": {
+        "artifact": {
+          "description": "An artifact the unit's receipt lists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "description": "JSON Pointer into the source unit's resolved spec, such as `/source` or `/releases/platform~1web/image`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The artifact kind the artifact must have.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "A declared, non-sensitive output of the unit's receipt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pointer": {
+          "description": "JSON Pointer inside the output, or inside the artifact's `spec`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnitName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source unit's name."
+        }
+      },
+      "type": "object"
+    },
+    "ReadGitRepository": {
+      "additionalProperties": false,
+      "description": "Credential-free coordinates for a repository that is only read.",
+      "properties": {
+        "repoURL": {
+          "description": "Git read URL. Source checkouts never publish to this repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoURL"
+      ],
+      "type": "object"
+    },
+    "RunId": {
+      "description": "The UUID of one run, recorded in the `Nyl-Run-Id` trailer.",
+      "type": "string"
+    },
+    "SupersededCommit": {
+      "additionalProperties": false,
+      "description": "A commit `--supersede` accepted as replaced.",
+      "properties": {
+        "by": {
+          "description": "Who accepted it.",
+          "type": "string"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitId",
+          "description": "The commit accepted as replaced."
+        },
+        "reason": {
+          "description": "Why it no longer needs to reach the target.",
+          "type": "string"
+        },
+        "repository": {
+          "description": "The repository of the commit, such as a unit's source repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "commit",
+        "reason",
+        "by"
+      ],
+      "type": "object"
+    },
+    "TargetFrom": {
+      "additionalProperties": false,
+      "description": "A target source: the publication commit the values came from. Reserved for M11.",
+      "properties": {
+        "branch": {
+          "description": "The publication branch.",
+          "type": "string"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitId",
+          "description": "The publication commit the values were read at."
+        },
+        "repository": {
+          "description": "The repository the target publishes to.",
+          "type": "string"
+        },
+        "target": {
+          "description": "The DeploymentTarget the values came from.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "repository",
+        "branch",
+        "commit"
+      ],
+      "type": "object"
+    },
+    "Uid": {
+      "description": "The UUIDv7 of one incarnation of a unit. It fences every receipt,\ncheckpoint, and deletion.",
+      "type": "string"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What a preview environment looks like, instantiated with parameters.\n\nInstances are created with `nyl state init --template` (or\n`nyl reconcile --template`), exist only in state, and behave like declared\nenvironments for every command. The template has the Environment's fields\nplus `parameters`, `deletionPolicy`, `allowTeardown`, `ttl`,\n`maxInstances`, and `keepSource`. Strings in `values`, `state`, and `source`\nare templates: they read `params` and `environment.name` when an instance\nis created from the template, and `state` reads only `environment.name`,\nbecause it locates the state that holds the parameters.\n\n## When needed\n\nTo give every pull request its own environment, created and removed by CI.\n\n## If omitted\n\nEvery environment is declared with an `Environment` resource in source.",
+  "examples": [
+    {
+      "apiVersion": "gitops.nyl/v1",
+      "kind": "EnvironmentTemplate",
+      "metadata": {
+        "name": "preview"
+      },
+      "spec": {
+        "allowTeardown": true,
+        "allowUnprotectedSource": true,
+        "deletionPolicy": "Teardown",
+        "maxInstances": 20,
+        "parameters": {
+          "pr": {
+            "type": "integer"
+          }
+        },
+        "state": {
+          "desiredRef": "nyl/previews",
+          "observedRef": "nyl/previews",
+          "path": "{{ environment.name }}",
+          "repositoryRef": {
+            "name": "platform-state"
+          }
+        },
+        "ttl": "7d",
+        "unitSelector": {
+          "matchLabels": {
+            "preview": "true"
+          }
+        },
+        "values": {
+          "hostname": "pr-{{ params.pr }}.preview.example.com"
+        }
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "gitops.nyl/v1",
+      "description": "API group and version defining this resource.",
+      "type": "string"
+    },
+    "kind": {
+      "const": "EnvironmentTemplate",
+      "description": "Resource kind within the API group.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/GitOpsResourceMetadata",
+      "description": "Resource identity and metadata. Instances take its labels."
+    },
+    "spec": {
+      "$ref": "#/$defs/EnvironmentTemplateSpec",
+      "default": {
+        "state": {},
+        "unitSelector": {}
+      },
+      "description": "Configuration for this resource."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata"
+  ],
+  "title": "EnvironmentTemplate",
+  "type": "object"
+}
