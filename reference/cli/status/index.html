@@ -106,6 +106,15 @@ naming <code dir="auto">nyl reconcile --allow-teardown</code> for an omission (o
 resources. A publication whose teardown waits warns with
 <code dir="auto">NYL-TEARDOWN-WAITING</code>, naming <code dir="auto">nyl teardown --unit &#x3C;u> --confirm-removed</code>
 and <code dir="auto">--allow-incomplete</code>.</li>
+<li><strong>Failing attestations.</strong> Each attestation that fails for what the
+environment runs warns with <code dir="auto">NYL-ATTESTATION-FAILED</code> and the attestation’s
+own reason: a unit’s recorded for its current receipt, such as a
+publication’s <code dir="auto">accepted</code> while an Application runs another publication,
+and an environment-wide one recorded for the current state. A failing
+attestation blocks promotion of the state and dependents that require it;
+the fix names <code dir="auto">nyl attest</code>. Attestations of replaced receipts and earlier
+states are not shown; <a href="/nyl/reference/cli/get-promotions/#get-states"><code dir="auto">nyl get states</code></a>
+lists them.</li>
 <li><strong>Teardown readiness.</strong> Units whose kind reports teardown settings, such
 as a <code dir="auto">KubernetesPublication</code>, carry their teardown readiness in the
 report, <code dir="auto">ready</code> or the unmet requirements, read from the stored desired

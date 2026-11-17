@@ -89,8 +89,12 @@ runs now (its last run applied that record and no newer one waits). When
 <code dir="auto">nyl promote</code> would refuse, the report says why, with its code, and still
 exits 0.</p>
 <p>A path that promotes only values takes each value from its own state, as
-<code dir="auto">nyl promote</code> does: each value is judged for the unit it reads, and a state
-is <code dir="auto">eligible</code> when it can supply some value. The text form adds each
+<code dir="auto">nyl promote</code> does: each value is judged for its consumer (the Application
+of the Release whose input it reads, or else the unit it reads), and a state
+is <code dir="auto">eligible</code> when it can supply some value. A publication’s <code dir="auto">accepted</code> and
+<code dir="auto">healthy</code> count only for its current receipt, so an older state whose
+publication attestations passed shows them as <code dir="auto">not-running</code>
+(<a href="/nyl/orchestration/promotion/#what-runs-now">What runs now</a>). The text form adds each
 value’s level, and <code dir="auto">-o json</code> lists it under <code dir="auto">byValue</code>.</p>
 <p>The candidates are judged on evidence only: artifacts are not verified, so a
 candidate whose image is gone from the registry still shows as <code dir="auto">selected</code>,
@@ -103,7 +107,9 @@ with <code dir="auto">run</code>, <code dir="auto">desiredCommit</code>, <code d
 <code dir="auto">eligible</code>, <code dir="auto">selected</code>, <code dir="auto">promoted</code>, <code dir="auto">running</code>, <code dir="auto">values</code>, <code dir="auto">byValue</code> (<code dir="auto">level</code>
 and <code dir="auto">eligible</code> per value, for a value-only path), and <code dir="auto">missing[]</code>: each with
 <code dir="auto">unit</code> (absent for an environment-wide attestation), <code dir="auto">attestation</code>, <code dir="auto">reason</code>
-(<code dir="auto">no-receipt</code>, <code dir="auto">pending</code>, <code dir="auto">aged</code>, or <code dir="auto">failing</code>), and <code dir="auto">message</code>.</p>
+(<code dir="auto">no-receipt</code>, <code dir="auto">pending</code>, <code dir="auto">aged</code>, <code dir="auto">failing</code>, <code dir="auto">not-running</code>, or <code dir="auto">coverage</code>
+for a <code dir="auto">coverage</code> name no attestation lists), and
+<code dir="auto">message</code>.</p>
 <p>A path <code dir="auto">nyl promote</code> refuses before it reads state, such as an unknown path
 (<code dir="auto">NYL-PROMOTE-BINDING-UNKNOWN</code>), a form M6 does not support
 (<code dir="auto">NYL-PROMOTE-UNSUPPORTED</code>, also for a target with <code dir="auto">record: source</code>), or a

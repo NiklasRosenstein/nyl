@@ -83,6 +83,15 @@ publication that would be torn down (<code dir="auto">NYL-TEARDOWN-CATALOG-MANUA
 <code dir="auto">NYL-TEARDOWN-APPLICATIONS-ORPHANED</code>, <code dir="auto">NYL-TEARDOWN-NAMESPACE-CONFIRM</code>,
 <code dir="auto">NYL-TEARDOWN-NAMESPACES-REMAIN</code>, <code dir="auto">NYL-TEARDOWN-CATALOG-REMAINS</code>), each naming
 the setting that fixes it;</li>
+<li>for an environment that two or more PromotionPaths promote into, a
+<code dir="auto">NYL-PROMOTE-UNCHECKED</code> warning for each value they both carry that has no
+known source commit, such as a command’s output or a Release input written
+as a literal: the <a href="/nyl/reference/cli/promote/#superseding">supersede check</a>
+of <code dir="auto">nyl promote</code> cannot compare it, so check by hand that a promotion keeps
+what the other path promoted. Values are paired by name, and the check is
+static: it reads the source environment’s units as the worktree renders
+them, not a recorded state, so <code dir="auto">nyl promote</code> can still find a value
+unchecked that <code dir="auto">plan</code> did not list;</li>
 <li>each unit’s state: <code dir="auto">ready</code> for a unit that would execute, with the driver’s
 change summary and digest, <code dir="auto">drifted</code> for a current unit whose drift the
 run would repair, <code dir="auto">current</code>, <code dir="auto">held</code>, or <code dir="auto">blocked</code> with the references it
