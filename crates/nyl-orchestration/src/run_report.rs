@@ -142,7 +142,7 @@ impl ExitCategory {
 
     /// The category an error finding contributes: a held lease, an
     /// instance limit, renewal, or removal that waits, a missing record or
-    /// evidence, or a rejected `record: source` push to retry, is incomplete (2), a lost lease or a cancelled run uncertain (4),
+    /// evidence, or a rejected or uncertain `record: source` push to retry, is incomplete (2), a lost lease or a cancelled run uncertain (4),
     /// anything else an error (1).
     pub fn of_finding(finding: &Finding) -> Self {
         match finding.code {
@@ -154,6 +154,7 @@ impl ExitCategory {
             | Code::PromotionMissing
             | Code::PromoteNoEvidence
             | Code::PromoteSourceRejected
+            | Code::PromoteSourceUncertain
             | Code::PromoteSupersedes => Self::Incomplete,
             Code::LeaseLost | Code::RunCancelled | Code::RunUnimported => Self::Uncertain,
             _ => Self::Error,

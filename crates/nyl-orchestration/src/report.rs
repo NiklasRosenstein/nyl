@@ -92,6 +92,7 @@ impl StateOperationReport {
                 | Code::PromotionMissing
                 | Code::PromoteNoEvidence
                 | Code::PromoteSourceRejected
+                | Code::PromoteSourceUncertain
                 | Code::PromoteSupersedes
         ) {
             2

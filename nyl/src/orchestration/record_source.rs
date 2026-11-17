@@ -25,7 +25,9 @@
 //!   only while the branch still points at it, and the file is restored only
 //!   while it still holds what was written; an undo that cannot finish is
 //!   reported. A push that fails without a refusal, such as a network error,
-//!   may have reached the remote, so the commit is kept and reported.
+//!   may have reached the remote, so the commit is kept and reported
+//!   ([`RecordWriteError::PushUnknown`], which the shell reports as
+//!   `NYL-PROMOTE-SOURCE-UNCERTAIN` without writing the marker).
 
 use std::path::PathBuf;
 use std::process::{Command, Output};

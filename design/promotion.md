@@ -127,7 +127,7 @@ the file, and its `state restore` leaves the file as it is.
 | --- | --- |
 | 0 | The record was written, or (M11) the pull request opened or updated; or the path's record already names the chosen state and values and supplies every value of the target, so nothing was written (`outcome: unchanged`) |
 | 1 | Configuration error: an invalid path, a broken selector, an unreachable commit, a missing artifact (`NYL-PROMOTE-ARTIFACT-MISSING`), a `--supersede` entry with neither its own reason nor `--reason` (`NYL-PROMOTE-SUPERSEDE-REASON`), a form M6 does not support yet (`NYL-PROMOTE-UNSUPPORTED`), a shallow entry clone the supersede check cannot use (`NYL-PROMOTE-SHALLOW-CLONE`), or a `record: source` block that cannot be committed or pushed (`NYL-PROMOTE-SOURCE-UNWRITABLE`) |
-| 2 | Nothing was written because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), the target's lease is held, or the push of a `record: source` commit was refused because the branch moved (`NYL-PROMOTE-SOURCE-REJECTED`) |
+| 2 | Nothing was written because evidence is missing, stale, mixed, or failing (`NYL-PROMOTE-NO-EVIDENCE`), a newer promotion on another path is not contained (`NYL-PROMOTE-SUPERSEDES`), the target's lease is held, the push of a `record: source` commit was refused because the branch moved (`NYL-PROMOTE-SOURCE-REJECTED`), or that push failed without a refusal and may have reached the remote, so no marker was written (`NYL-PROMOTE-SOURCE-UNCERTAIN`) |
 
 Other codes of the promotion rules: `NYL-PROMOTION-MISSING` (exit 2 of a
 `reconcile` or `plan`: an environment's `fromPromotion` source, or a
@@ -152,6 +152,14 @@ upstream, or a push the remote refuses for branch protection; each cause
 has its own fix); `NYL-PROMOTE-SOURCE-REJECTED` (exit 2: the remote refused
 the fast-forward push because the branch moved, and the commit is undone;
 the fix is to update the checkout and promote again);
+`NYL-PROMOTE-SOURCE-UNCERTAIN` (exit 2: the push of a `record: source`
+commit failed without a refusal, such as a network error after the upload,
+so it may have reached the remote; the commit stays on the local branch and
+no marker is written into the target's state, because the record is not
+known to be published. Nothing is known to have failed, and promoting again
+is safe: the fix is to fetch the branch, check whether the commit reached
+the remote, and run `nyl promote <path>` again, which finds the pushed block
+`unchanged` and writes only the marker, or promotes again);
 `NYL-PROMOTE-EVIDENCE-OVERRIDE` (a warning: `--evidence published` below the
 path's level, recorded as an override); and `NYL-PROMOTE-UNCHECKED` (a
 warning: a value without a known source commit, or a record whose commit
@@ -527,7 +535,11 @@ spec:
     existing block only when the checked-out branch is not ahead of its
     upstream and the Environment's file is unchanged, so the block is the
     one the upstream carries; otherwise `NYL-PROMOTE-SOURCE-UNWRITABLE`.
-    `--dry-run` writes neither.
+    A push that fails without a refusal may have reached the remote, so
+    no marker is written until a re-run finds the block published
+    (`NYL-PROMOTE-SOURCE-UNCERTAIN`, exit 2): the marker reserves a
+    sequence only for a record known to exist, and that re-run's repair
+    writes it. `--dry-run` writes neither.
   - **Trusting the block.** By default a run that first applies a new
     block reads the source environment's state and checks the block
     against the state it names, so it needs read access to that state.

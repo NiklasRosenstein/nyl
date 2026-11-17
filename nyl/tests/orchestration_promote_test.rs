@@ -894,6 +894,8 @@ struct FakeWriter {
     calls: std::sync::Mutex<Vec<&'static str>>,
     /// Runs once a commit succeeded, such as to take the target's lease away.
     after_commit: Option<Box<dyn Fn() + Send + Sync>>,
+    /// The record of the last commit asked for.
+    committed: std::sync::Mutex<Option<nyl_core::orchestration::promotion::PromotionRecord>>,
 }
 
 impl FakeWriter {
@@ -902,6 +904,7 @@ impl FakeWriter {
             error,
             calls: std::sync::Mutex::default(),
             after_commit: None,
+            committed: std::sync::Mutex::default(),
         }
     }
 
@@ -926,10 +929,11 @@ impl nyl_core::orchestration::ports::PromotionRecordWriter for FakeWriter {
 
     fn commit_record(
         &self,
-        _record: &nyl_core::orchestration::promotion::PromotionRecord,
+        record: &nyl_core::orchestration::promotion::PromotionRecord,
         _message: &str,
     ) -> Result<nyl_core::orchestration::ids::CommitId, nyl_core::orchestration::ports::RecordWriteError> {
         self.calls.lock().unwrap().push("commit");
+        *self.committed.lock().unwrap() = Some(record.clone());
         match &self.error {
             Some(error) => Err(error.clone()),
             None => {
@@ -1291,6 +1295,57 @@ fn test_a_rerun_writes_the_missing_marker() {
     let again = harness.promote(&["dev-to-prod"]);
     assert_eq!(again.exit, 0, "{}", again.stderr);
     assert_eq!(harness.shell.tip(PROD_DESIRED), marker);
+}
+
+/// A push that fails without a refusal may have reached the remote:
+/// `NYL-PROMOTE-SOURCE-UNCERTAIN`, exit 2 (nothing is known to have
+/// failed), with the fix to fetch, check, and promote again; no marker is
+/// written, since the record is not known to be published. Once the push
+/// has landed, the re-run finds the block `unchanged` and writes the
+/// marker. Catches an uncertain push reported as a failure, a marker for a
+/// record that may not exist, and a re-run that never repairs it.
+#[test]
+fn test_an_uncertain_push_writes_no_marker_until_a_rerun_finds_it_pushed() {
+    use nyl_core::orchestration::codes::Code;
+    use nyl_core::orchestration::ports::RecordWriteError;
+    let harness = Promote::of(&record_source_environments(), &format!("{UNITS}{BINDER}"), true);
+    let prod_desired = harness.shell.tip(PROD_DESIRED);
+    let writer = FakeWriter::answering(Some(RecordWriteError::PushUnknown {
+        commit: "c".repeat(40),
+        message: "connection reset".to_owned(),
+    }));
+    let report = promote_with(&harness, Some(&writer), false);
+    assert_eq!(report.exit, 2, "{report:?}");
+    let error = &report.errors[0];
+    assert_eq!(error.code, Code::PromoteSourceUncertain);
+    assert!(error.message.contains("no marker was written"), "{}", error.message);
+    assert!(error.message.contains(&"c".repeat(40)), "{}", error.message);
+    for expected in ["git fetch", "reached the remote", "nyl promote dev-to-prod"] {
+        assert!(error.fix.contains(expected), "{expected}: {}", error.fix);
+    }
+    assert_eq!(writer.calls(), ["commit"]);
+    assert_eq!(harness.shell.tip(PROD_DESIRED), prod_desired, "no marker");
+    assert!(harness.prod_lease_released());
+
+    // The push did land: the block is on the branch the run reads.
+    let record = writer.committed.lock().unwrap().clone().unwrap();
+    harness.shell.world.commit_files(
+        "main",
+        "Promote dev-to-prod #1",
+        &[(
+            "nyl/environments.yaml",
+            &with_block(&record_source_environments(), &record),
+        )],
+    );
+    let main = harness.shell.tip("refs/heads/main");
+    let rerun = harness.promote(&["dev-to-prod", "--reason", "After an uncertain push"]);
+    assert_eq!(rerun.exit, 0, "{}", rerun.stderr);
+    assert_eq!(rerun.report["outcome"], "unchanged");
+    assert_eq!(harness.shell.tip("refs/heads/main"), main, "no second block");
+    let marker = harness.shell.tip(PROD_DESIRED);
+    assert_ne!(marker, prod_desired, "the re-run writes the marker");
+    assert_eq!(rerun.report["commits"]["desired"], marker.as_str());
+    assert_eq!(rerun.report["record"]["sequence"], record.sequence);
 }
 
 /// After switching prod from `record: state` to `record: source`, the

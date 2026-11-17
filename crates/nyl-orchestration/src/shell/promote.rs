@@ -40,7 +40,11 @@
 //!   the block `unchanged`, writes it. The block in the entry worktree is
 //!   the path's current record for `unchanged` (D2), and its sequence counts
 //!   for the next one. A detached HEAD and a refused push write nothing
-//!   ([`writer_finding`]).
+//!   ([`writer_finding`]). A push that fails without a refusal may have
+//!   reached the remote (`NYL-PROMOTE-SOURCE-UNCERTAIN`, exit 2): the commit
+//!   stays on the local branch and no marker is written, since the record
+//!   is not known to be published; the re-run that finds the pushed block
+//!   `unchanged` writes the marker, through the same repair.
 //! - **Target units.** A target whose source the path promotes selects its
 //!   units as its definitions at each candidate's source commit say
 //!   ([`target_units`]), not as the entry worktree has them.
@@ -979,7 +983,12 @@ fn resolve_entries(
 }
 
 /// Why a `record: source` block was not committed, as the finding the
-/// promotion is refused with. Nothing was written in any case.
+/// promotion is refused with. Nothing was written, except for a push that
+/// may have reached the remote (`NYL-PROMOTE-SOURCE-UNCERTAIN`, exit 2) and
+/// a commit that could not be undone, which keep the commit on the local
+/// branch. No marker is written into the target's state in any case: after
+/// an uncertain push, the re-run the fix names writes it once the pushed
+/// block is current.
 pub fn writer_finding(
     error: &RecordWriteError,
     target: &EnvironmentName,
@@ -1023,9 +1032,9 @@ pub fn writer_finding(
             Code::PromoteSourceUnwritable,
             "the remote refused the push, such as for branch protection or a hook: allow this identity to push to the branch, or keep the record in state (`record: state`); promoting through a pull request (`changeGate: pullRequest`) comes in a later milestone".to_owned(),
         ),
-        RecordWriteError::PushUnknown { .. } => (
-            Code::PromoteSourceUnwritable,
-            "the record may have been pushed: fetch the branch and check whether its tip is the promotion commit; if it is not, reset the local branch to its upstream and promote again".to_owned(),
+        RecordWriteError::PushUnknown { commit, .. } => (
+            Code::PromoteSourceUncertain,
+            format!("fetch the branch (`git fetch`) and check whether commit {commit} reached the remote, then {again}: once the remote has it and the checkout is at it, the block is unchanged and only the marker is written; if it did not arrive, push it (`git push`) or drop it (`git reset --keep @{{upstream}}`) first"),
         ),
         RecordWriteError::UndoFailed { commit, .. } => (
             Code::PromoteSourceUnwritable,
@@ -1037,15 +1046,16 @@ pub fn writer_finding(
         ),
         RecordWriteError::Failed(_) => (Code::PromoteSourceUnwritable, format!("fix the cause, then {again}")),
     };
-    let written = match error {
-        RecordWriteError::PushUnknown { .. } | RecordWriteError::UndoFailed { .. } => "",
-        _ => ", so nothing was written",
+    let message = match error {
+        RecordWriteError::PushUnknown { .. } => format!(
+            "the promotion record of {target} was committed to its source, but whether the push reached the remote is unknown, so no marker was written into {target}'s state: {error}"
+        ),
+        RecordWriteError::UndoFailed { .. } => {
+            format!("the promotion record of {target} cannot be committed to its source: {error}")
+        }
+        _ => format!("the promotion record of {target} cannot be committed to its source, so nothing was written: {error}"),
     };
-    Finding::new(
-        code,
-        format!("the promotion record of {target} cannot be committed to its source{written}: {error}"),
-        fix,
-    )
+    Finding::new(code, message, fix)
 }
 
 /// The PromotionRecords of `entry`'s environment as every entry point that

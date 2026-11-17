@@ -944,7 +944,8 @@ pub enum RecordWriteError {
     /// protection or a hook. The commit was undone.
     RemoteRejected(String),
     /// The push failed without saying whether the remote took it, such as a
-    /// network error after the upload. The commit is kept on the branch.
+    /// network error after the upload. The commit is kept on the branch, and
+    /// the shell writes no marker until a re-run finds the block published.
     PushUnknown { commit: String, message: String },
     /// The push was refused, and the commit could not be undone.
     UndoFailed { commit: String, message: String },
