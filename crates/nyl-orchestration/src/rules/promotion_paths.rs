@@ -42,16 +42,18 @@
 //!   registered driver serves.
 //!
 //! Types are checked when both sides are known: what a selector reads (a
-//! rendered literal, a declared output's type, or the kind's schema at the
-//! pointer) against what the reading place accepts (the kind's schema at the
-//! field a unit's `fromPromotion` binding replaces). An unknown side fits
-//! anything; a Release input's declared type is not read yet.
+//! rendered literal, a declared output's type, the kind's schema at the
+//! pointer, or the schema the producing kind declares for an artifact,
+//! [`Driver::artifact_schema`]) against what the reading place accepts (the
+//! kind's schema at the field a unit's `fromPromotion` binding replaces). An
+//! unknown side fits anything; a Release input's declared type is not read
+//! yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::PromotionInputSource;
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{Deployment, Driver, DriverSet};
+use nyl_core::orchestration::driver::{ArtifactSchema, Deployment, Driver, DriverSet};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{RenderedSource, RenderedUnit};
 use nyl_core::resources::promotion::{PromotionPath, SelectForm};
@@ -322,6 +324,7 @@ fn check_path(inputs: &PathChecks<'_>, path: &PromotionPath) -> Vec<Finding> {
 }
 
 /// The type a selector reads, or the finding for why it reads nothing.
+#[allow(clippy::too_many_lines)] // One arm per selector form, in the order the contract lists them.
 fn select_type(
     inputs: &PathChecks<'_>,
     source: &RenderedSource,
@@ -406,9 +409,40 @@ fn select_type(
                 nyl_core::bindings::InputType::Array => ValueType::Array,
             }))
         }
-        // The artifacts a kind publishes are known only from a receipt: checked
-        // when `nyl promote` reads one.
-        SelectForm::Artifact | SelectForm::TargetInput => Ok(None),
+        // An artifact's fields, as far as its producing kind describes them;
+        // anything else is checked when `nyl promote` reads a receipt.
+        SelectForm::Artifact => {
+            let (Some(driver), Some(artifact)) = (driver, select.artifact.as_deref()) else {
+                return Ok(None);
+            };
+            let pointer = select.pointer.as_deref().unwrap_or_default();
+            let schema = match driver.artifact_schema(spec, artifact) {
+                ArtifactSchema::Undescribed => return Ok(None),
+                ArtifactSchema::NoSuchArtifact => return Err(invalid(
+                    format!(
+                        "unit {unit_name} of kind {} publishes no artifact named {artifact:?}",
+                        unit.envelope.kind
+                    ),
+                    "name an artifact the unit's kind publishes; `nyl get artifacts -e <env>` lists those of a receipt",
+                )),
+                ArtifactSchema::Described(schema) => schema,
+            };
+            let Ok(schema) = serde_json::to_value(schema) else {
+                return Ok(None);
+            };
+            match schema_type_in(&schema, pointer) {
+                SchemaType::Known(found) => Ok(Some(found)),
+                SchemaType::Unknown => Ok(None),
+                SchemaType::Missing => Err(invalid(
+                    format!(
+                        "the pointer {pointer:?} names no field of artifact {artifact} of kind {}",
+                        unit.envelope.kind
+                    ),
+                    "point at a field the artifact declares; the kind's documentation lists its artifacts' fields",
+                )),
+            }
+        }
+        SelectForm::TargetInput => Ok(None),
     }
 }
 
@@ -812,51 +846,6 @@ pub fn check_sources(
     findings
 }
 
-/// The values of `path` whose source unit the target environment also builds
-/// while one of its own `fromPromotion` bindings replaces that unit's result
-/// (`NYL-PROMOTE-REBUILT`, a warning): the target selects the unit, and a
-/// binding reads the value that unit supplies, so one result is built and
-/// the other used. A target that only selects the unit, or only binds the
-/// value, is not warned about. Contract:
-/// [Promoting an environment's source](../../../../design/promotion.md#promoting-an-environments-source).
-pub fn rebuilt(
-    path: &PromotionPath,
-    target: &EnvironmentName,
-    source: &RenderedSource,
-    readers: &[ValueReader],
-) -> Vec<(String, Finding)> {
-    let built = ownership_set(source);
-    let mut warnings = Vec::new();
-    for (name, value) in &path.spec.values {
-        let Some(unit) = value.select.unit.as_ref().filter(|unit| built.contains_key(unit)) else {
-            continue;
-        };
-        let replaces = readers.iter().any(|reader| {
-            reader.environment == *target
-                && reader.binding.value == *name
-                && reader
-                    .binding
-                    .path
-                    .as_ref()
-                    .is_none_or(|named| *named == path.metadata.name)
-        });
-        if replaces {
-            warnings.push((
-                name.clone(),
-                Finding::new(
-                    Code::PromoteRebuilt,
-                    format!(
-                        "{target} builds unit {unit}, whose result a binding to value {name:?} of path {} replaces with the source's: one result is built and the other used",
-                        path.metadata.name
-                    ),
-                    format!("remove unit {unit} from {target}'s unitSelector, or drop the binding, so one result is used"),
-                ),
-            ));
-        }
-    }
-    warnings
-}
-
 /// The values that two or more paths into `target` promote whose selector
 /// names no source commit, so the supersede check cannot check them
 /// (`NYL-PROMOTE-UNCHECKED`, a warning `plan` reports before any promotion
@@ -1061,17 +1050,24 @@ fn schema_type_at(driver: &dyn Driver, pointer: &str) -> SchemaType {
     let Ok(root) = serde_json::to_value(driver.spec_schema()) else {
         return SchemaType::Unknown;
     };
+    if pointer
+        .split('/')
+        .nth(1)
+        .is_some_and(|first| COMMON_UNIT_FIELDS.contains(&first.replace("~1", "/").replace("~0", "~").as_str()))
+    {
+        return SchemaType::Unknown;
+    }
+    schema_type_in(&root, pointer)
+}
+
+/// The type of the field `pointer` names in the JSON Schema `root`.
+fn schema_type_in(root: &Value, pointer: &str) -> SchemaType {
     let segments = pointer
         .split('/')
         .skip(1)
         .map(|segment| segment.replace("~1", "/").replace("~0", "~"))
         .collect::<Vec<_>>();
-    if segments
-        .first()
-        .is_some_and(|first| COMMON_UNIT_FIELDS.contains(&first.as_str()))
-    {
-        return SchemaType::Unknown;
-    }
+    let root = root.clone();
     let mut nodes = vec![root.clone()];
     for segment in &segments {
         let mut next = Vec::new();

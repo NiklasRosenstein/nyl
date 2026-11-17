@@ -7,9 +7,10 @@
 //! runs under the target environment's lease (`--wait-lease` waits for a
 //! running reconcile; a held lease is exit 2), reads the source's recorded
 //! state and writes nothing to it, and writes one desired commit holding the
-//! record and a summary; with `record: source` it writes no state and
-//! commits the record to the branch the entry worktree has checked out
-//! instead ([`crate::orchestration::record_source`]). `--dry-run` takes no
+//! record and a summary; with `record: source` it commits the record to the
+//! branch the entry worktree has checked out instead
+//! ([`crate::orchestration::record_source`]) and writes only a marker commit,
+//! without the record, into the target's state. `--dry-run` takes no
 //! lease, writes nothing, and reports the record it would write. The decisions are
 //! `nyl_orchestration::rules::promotion`'s and the effects the shell's; this
 //! module resolves the invocation, the project's declaration, and who asks.
@@ -285,11 +286,10 @@ fn prepare(
         reason: args.reason.clone(),
     };
     let TargetView {
-        target_units,
+        entry_units,
         promotes_source,
         promoted,
-        rebuilt,
-    } = target_view(session, wiring.drivers, path)?;
+    } = target_view(session, path)?;
     Ok((
         PromoteOptions {
             path: path.clone(),
@@ -299,8 +299,7 @@ fn prepare(
             values: args.values.iter().cloned().collect(),
             verify_artifacts: path.spec.verify_artifacts && !args.no_verify_artifacts,
             dry_run: args.dry_run,
-            target_units,
-            rebuilt,
+            entry_units,
             promotes_source,
             promoted,
             requested,

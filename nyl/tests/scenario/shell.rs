@@ -339,6 +339,7 @@ impl Harness {
             commit_identity: identity.then_some(&self.identity),
             progress: None,
             prompt: None,
+            promotion_blocks: None,
         };
         operation(&context, &job.request)
     }
@@ -361,6 +362,7 @@ impl Harness {
             commit_identity: Some(&self.identity),
             progress: None,
             prompt: None,
+            promotion_blocks: None,
         };
         operation(&context, &job.request)
     }

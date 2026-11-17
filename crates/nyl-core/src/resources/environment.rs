@@ -264,6 +264,19 @@ pub struct PromotedSource {
     /// The PromotionRecord `nyl promote` writes here with `record: source`, never by hand. It has the shape of the record in state, without `apiVersion` and `kind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promoted: Option<crate::orchestration::promotion::PromotionRecord>,
+    /// With `record: source`, how a run trusts a `promoted` block it has not applied yet. Without it, the run reads the source environment's state and checks the block against the state it names, which needs read access to that state. With it, the run verifies instead that the commit which last changed the block is signed by a key the project's allowed signers file lists, and trusts the block without reading the source's state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<PromotedVerify>,
+}
+
+/// How a run trusts a `record: source` block: by the signature on the commit
+/// that last changed it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PromotedVerify {
+    /// A Git `allowed_signers` file (the format of `gpg.ssh.allowedSignersFile`) listing the keys whose signature on the commit that last changed the block is trusted, as a local path relative to the `nyl.toml` directory or `/`-rooted at the Git worktree. `git verify-commit` checks the signature against it.
+    #[serde(rename = "allowedSigners")]
+    pub allowed_signers: String,
 }
 
 fn environment_source_schema(schema: &mut schemars::Schema) {
@@ -504,6 +517,17 @@ impl EnvironmentSource {
                 return Err(CoreError::config(format!(
                     "{field}.fromPromotion needs exactly one of path and paths"
                 )));
+            }
+            if promoted.verify.is_some() && promoted.record.as_deref() != Some("source") {
+                return Err(CoreError::config(format!(
+                    "{field}.fromPromotion.verify checks the block of `record: source`; set record: source, or remove verify (a record in state needs no signature)"
+                )));
+            }
+            if let Some(verify) = &promoted.verify {
+                crate::local_path::validate_local_path(
+                    &format!("{field}.fromPromotion.verify.allowedSigners"),
+                    &verify.allowed_signers,
+                )?;
             }
             if promoted.promoted.is_some() && promoted.record.as_deref() != Some("source") {
                 return Err(CoreError::config(format!(

@@ -711,6 +711,10 @@ pub enum MissingReason {
     /// The path's `coverage` names a deployment or group no attestation of
     /// its unit lists, or leaves nothing to judge while it fails.
     Coverage,
+    /// The target runs the state's source commit, and its definitions there
+    /// cannot be checked out or do not render, so which units it selects is
+    /// unknown.
+    TargetSource,
 }
 
 /// One reason a candidate falls short.
@@ -740,6 +744,7 @@ impl MissingEvidence {
                 GapKind::Failing => MissingReason::Failing,
                 GapKind::NotRunning => MissingReason::NotRunning,
                 GapKind::Coverage => MissingReason::Coverage,
+                GapKind::TargetSource => MissingReason::TargetSource,
             },
             message: gap.message.clone(),
         }

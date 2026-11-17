@@ -47,6 +47,7 @@ fn reconcile_with_progress(
         commit_identity: Some(&harness.identity),
         progress,
         prompt: None,
+        promotion_blocks: None,
     };
     run::reconcile(&context, &job.request)
 }

@@ -225,9 +225,48 @@ scenario step yet; each gets one, or rule tests only, in the PR named:
   `value-only-promotion` walkthrough's last steps.
 - `NYL-PROMOTE-UNCHECKED` (a value without a known source commit) and
   repository-qualified `--supersede web:S1..c3d4`: PR 9, rule tests.
-- The declared type of the Release input a `fromPromotion` binding in a DeploymentTarget's `releaseInputs` fills, and the fields of an artifact a selector reads: PR 3 compares only what it can know from rendered units (a literal, a declared output's type, the kind's schema at a pointer, and the field a unit binding replaces). PR 6 did not add them: a Release input's declared type is known to the publication side, and an artifact's fields to the producing kind, so the checks need a driver-owned contract for field types (the engine may not name `/releases/…` layouts or artifact kinds). They move to a follow-up change after PR 11 that adds it.
+- The fields of an artifact a selector reads: typed since the
+  promote-fixes follow-up through the driver-owned contract
+  `Driver::artifact_schema` (the producing kind declares each artifact's
+  schema; `OciImage` and the fake image declare `ContainerImage`), so a
+  pointer the artifact lacks is `NYL-PROMOTE-SELECTOR-INVALID` and its
+  type is compared with the bindings that read it.
+- The declared type of the Release input a `fromPromotion` binding in a
+  DeploymentTarget's `releaseInputs` fills: still not compared by
+  `validate` and `plan` (the value is checked against the declaration only
+  when the publication unit resolves). The declaration is known only once
+  the target's ApplicationGroups are selected and their sources resolved,
+  which the publication driver does when it renders the target.
+  Proposal, following the shape `promotion/coverage-unit` gives
+  `shell::coverage::deployments`:
+  - The shell, not the rule, collects the types: for each rendered unit
+    whose spec holds `fromPromotion` bindings the kind's schema cannot
+    type, it asks the unit's driver for the declared types of the fields
+    those bindings fill, and passes the answers to
+    `rules::promotion_paths::check` as a snapshot (a map from unit and JSON
+    Pointer to `InputType`), so the rule stays pure and names no
+    `/releases/…` layout.
+  - The driver call reuses the context that branch gives
+    `Driver::deployments` (`DeploymentContext`: the checked-out project and
+    the environment, without effects beyond reading it), generalized if
+    needed into one read-only context for both questions, such as
+    `Driver::bound_field_types(&DeploymentContext, spec) -> Result<BTreeMap<String, InputType>, String>`.
+  - The publication driver answers through a new nyl-render function that
+    lists the literal input declarations of the Releases a target selects:
+    the group selection and group-source steps of `render_target`, without
+    rendering. A group whose source is remote stays unknown (fits any
+    type), with a note in the finding's context, so `validate` and `plan`
+    never fetch for it; the resolution-time check still covers it.
 - A target environment that rebuilds a unit its `fromPromotion` bindings
-  replace (the warning and the "rebuilt" record): PR 6.
+  replace: no warning and no "rebuilt" record (decided in the
+  promote-fixes follow-up; `NYL-PROMOTE-REBUILT` is gone). Rebuilding and
+  binding are both explicit choices of the target's configuration.
+- The units the target selects are read at each candidate's source commit
+  when the target's source is promoted along the path (promote-fixes).
+- A `record: source` promotion writes a marker commit into the target's
+  state, and `source.fromPromotion.verify` trusts a block by the SSH
+  signature on the commit that last changed it (promote-fixes; item 11,
+  options a and c2).
 - `nyl promote` while the target's lease is held (exit 2): PR 6, shell test.
 - Renaming a source unit breaking future promotions while recorded lineage
   stays valid: PR 3 (validation) and PR 5.

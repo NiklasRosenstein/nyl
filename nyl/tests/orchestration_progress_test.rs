@@ -117,6 +117,7 @@ fn run(harness: &Harness, observer: &Events, mode: RunMode) -> EnvironmentRunRep
         commit_identity: Some(&harness.identity),
         progress: Some(observer),
         prompt: None,
+        promotion_blocks: None,
     };
     run::reconcile(&context, &job.request).environments.remove(0)
 }

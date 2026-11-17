@@ -23,23 +23,26 @@ use nyl_core::resources::promotion::PromotionPath;
 use super::values::{self, Unreadable};
 use super::RecordedState;
 
-/// Check `block` against `path`, the PromotionPath it names, and `state`,
-/// the recorded state of the path's source environment its `from` names (by
-/// desired commit). A mismatch is `NYL-PROMOTION-RECORD-INVALID`.
-///
-/// The path promotes the target's source, so every value comes from `from`:
-/// a value that names a state of its own is refused.
-pub fn check_block(block: &PromotionRecord, path: &PromotionPath, state: &RecordedState) -> Result<(), Finding> {
-    let invalid = |problem: String| {
-        Finding::new(
-            Code::PromotionRecordInvalid,
-            format!(
-                "the promoted block of path {} (sequence {}) does not match {problem}",
-                block.path, block.sequence
-            ),
-            "restore the block `nyl promote` wrote, or promote again; the block is written by `nyl promote`, never by hand",
-        )
-    };
+fn invalid(block: &PromotionRecord, problem: &str) -> Finding {
+    Finding::new(
+        Code::PromotionRecordInvalid,
+        format!(
+            "the promoted block of path {} (sequence {}) does not match {problem}",
+            block.path, block.sequence
+        ),
+        "restore the block `nyl promote` wrote, or promote again; the block is written by `nyl promote`, never by hand",
+    )
+}
+
+/// Check `block` against `path`, the PromotionPath it names, without
+/// reading state: the path's name and source environment, the values it
+/// declares, and their selectors. A path that promotes the target's source
+/// takes every value from `from`, so a value that names a state of its own
+/// is refused. A block trusted by its signature
+/// (`source.fromPromotion.verify`) is checked this far. Returns the path's
+/// source environment.
+pub fn check_block_shape(block: &PromotionRecord, path: &PromotionPath) -> Result<EnvironmentName, Finding> {
+    let invalid = |problem: String| invalid(block, &problem);
     if block.path.as_str() != path.metadata.name {
         return Err(invalid(format!(
             "path {}, which it was checked against",
@@ -64,6 +67,38 @@ pub fn check_block(block: &PromotionRecord, path: &PromotionPath, state: &Record
             from.environment
         )));
     }
+    let declared: BTreeSet<&String> = path.spec.values.keys().collect();
+    let carried: BTreeSet<&String> = block.values.keys().collect();
+    if declared != carried {
+        return Err(invalid(format!(
+            "its path: it carries the values {carried:?}, and the path declares {declared:?}"
+        )));
+    }
+    for (name, value) in &block.values {
+        if value.state.is_some() {
+            return Err(invalid(format!(
+                "its path: value {name:?} names a state of its own, and a path that promotes the source takes every value from one state"
+            )));
+        }
+        if value.select != path.spec.values[name].select {
+            return Err(invalid(format!(
+                "its path: value {name:?} records another selector than the path declares"
+            )));
+        }
+    }
+    Ok(source)
+}
+
+/// Check `block` against `path`, the PromotionPath it names
+/// ([`check_block_shape`]), and `state`, the recorded state of the path's
+/// source environment its `from` names (by desired commit). A mismatch is
+/// `NYL-PROMOTION-RECORD-INVALID`.
+pub fn check_block(block: &PromotionRecord, path: &PromotionPath, state: &RecordedState) -> Result<(), Finding> {
+    let source = check_block_shape(block, path)?;
+    let invalid = |problem: String| invalid(block, &problem);
+    let PromotionFrom::Environment(from) = &block.from else {
+        return Err(invalid("its path: it names a target as its source".to_owned()));
+    };
     if from.desired_commit != state.desired_commit {
         return Err(invalid(format!(
             "the state of {source} it was checked against: it names {}, not {}",
@@ -89,26 +124,8 @@ pub fn check_block(block: &PromotionRecord, path: &PromotionPath, state: &Record
                 .map_or_else(|| "(none)".to_owned(), ToString::to_string),
         )));
     }
-    let declared: BTreeSet<&String> = path.spec.values.keys().collect();
-    let carried: BTreeSet<&String> = block.values.keys().collect();
-    if declared != carried {
-        return Err(invalid(format!(
-            "its path: it carries the values {carried:?}, and the path declares {declared:?}"
-        )));
-    }
     for (name, value) in &block.values {
-        // A path that promotes the source takes every value from `from`.
-        if value.state.is_some() {
-            return Err(invalid(format!(
-                "its path: value {name:?} names a state of its own, and a path that promotes the source takes every value from one state"
-            )));
-        }
         let select = &path.spec.values[name].select;
-        if &value.select != select {
-            return Err(invalid(format!(
-                "its path: value {name:?} records another selector than the path declares"
-            )));
-        }
         let read = values::read(&source, state, name, select, block.requested.at).map_err(|unreadable| {
             named(match unreadable {
                 Unreadable::Invalid(finding) => format!("value {name:?} cannot be read there: {}", finding.message),

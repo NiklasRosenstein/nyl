@@ -1388,6 +1388,7 @@ fn exec_repair(harness: &Harness) -> nyl_orchestration::report::StateOperationRe
         commit_identity: Some(&harness.identity),
         progress: None,
         prompt: None,
+        promotion_blocks: None,
     };
     let options = nyl_orchestration::shell::operator::ExecOptions {
         unit: unit("network"),

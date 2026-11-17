@@ -1729,7 +1729,8 @@ fn transition_commit(
                     .filter_map(|unit| unit.source_commit.as_ref()),
             ),
     )?;
-    let allow_empty = transition.changes.commit_unchanged && observed;
+    let allow_empty =
+        (transition.changes.commit_unchanged && observed) || (transition.changes.commit_unchanged_desired && desired);
     tree::commit(repository, author, &files, &transition.message, &parents, allow_empty)
 }
 

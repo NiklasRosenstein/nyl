@@ -199,23 +199,23 @@ pub fn promotable_path(
 }
 
 /// What a path's target contributes to judging the source's states: the
-/// units it selects, which the whole-source rule covers, as the entry
-/// worktree renders them (not at each candidate's source commit); whether its
-/// source is promoted along the path; and the `NYL-PROMOTE-REBUILT` warnings.
+/// units its entry worktree selects, which the whole-source rule covers when
+/// the target does not run the promoted commit, and whether its source is
+/// promoted along the path, in which case the shell reads the units at each
+/// candidate's source commit instead
+/// ([`nyl_orchestration::shell::promote::target_units`]).
 pub struct TargetView {
-    pub target_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
+    pub entry_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
     pub promotes_source: bool,
     /// The target's `source.fromPromotion` as the entry worktree declares
     /// it; with `record: source` its block is the path's current record.
     pub promoted: Option<nyl_core::resources::environment::PromotedSource>,
-    pub rebuilt: Vec<(String, Finding)>,
 }
 
 /// The [`TargetView`] of `path` from the target's session, the one way
 /// `nyl promote` and `nyl get promotion-candidates` both take it.
 pub fn target_view(
     session: &super::session::Session,
-    drivers: &DriverSet,
     path: &PromotionPath,
 ) -> std::result::Result<TargetView, Finding> {
     use nyl_core::orchestration::codes::Code;
@@ -249,19 +249,16 @@ pub fn target_view(
                 "correct the environment's unit declarations; `nyl validate` reports them",
             )
         })?;
-    let readers = promotion_paths::unit_readers(&BTreeMap::from([(target.clone(), rendered.clone())]), drivers);
-    let rebuilt = promotion_paths::rebuilt(path, &target, &rendered, &readers);
-    let target_units = rendered
+    let entry_units = rendered
         .units
         .iter()
         .filter(|(_, unit)| unit.selected)
         .map(|(name, _)| name.clone())
         .collect();
     Ok(TargetView {
-        target_units,
+        entry_units,
         promotes_source,
         promoted,
-        rebuilt,
     })
 }
 
@@ -269,9 +266,11 @@ pub fn target_view(
 /// run reads them ([`nyl_orchestration::shell::promote::environment_promotions`]):
 /// with `record: source` the block is refused below the applied sequence and
 /// checked against its path and the source state it names, which is read
-/// through `store` at the source environment's location in `inventory`.
+/// through `store` at the source environment's location in `inventory`, or
+/// with `fromPromotion.verify` by the signature on the commit of the clone at
+/// `git_dir` that last changed it.
 pub fn environment_promotions(
-    inventory: &GitOpsInventory,
+    (inventory, git_dir): (&GitOpsInventory, &std::path::Path),
     request: &super::project::InstanceRequest,
     store: &dyn nyl_core::orchestration::ports::StateStore,
     entry: &nyl_core::resources::environment::Environment,
@@ -287,7 +286,13 @@ pub fn environment_promotions(
                 .map(|resolved| resolved.location)
         },
         &declared_paths(inventory),
-        entry,
+        (
+            entry,
+            Some(&super::record_source::GitBlockVerifier {
+                inventory,
+                git_dir: git_dir.to_path_buf(),
+            }),
+        ),
         snapshot,
     )
 }

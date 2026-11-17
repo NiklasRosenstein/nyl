@@ -220,6 +220,7 @@ fn recover(harness: &Harness, unit: Option<RecoverUnit>) -> StateOperationReport
         commit_identity: Some(&harness.identity),
         progress: None,
         prompt: None,
+        promotion_blocks: None,
     };
     recover_environment(&context, &job.request)
 }

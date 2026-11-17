@@ -103,6 +103,7 @@ fn remove(harness: &shell::Harness, decided_on: &str, allow_teardown: bool) -> D
         commit_identity: Some(&harness.identity),
         progress: None,
         prompt: None,
+        promotion_blocks: None,
     };
     state_delete_detailed(&context, &job.request, true)
 }

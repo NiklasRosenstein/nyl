@@ -5360,8 +5360,8 @@ blocks the value-only path as well. The walkthrough runs from M6.
 
 **A promotion recorded in source (M6).** Prod's `source.fromPromotion` sets
 `record: source`, so `nyl promote dev-to-prod` writes the PromotionRecord into
-prod's Environment as a commit on `main`, with `sequence` 1, and leaves prod's
-state alone; `reconcile -e prod` runs at the promoted commit and records the
+prod's Environment as a commit on `main`, with `sequence` 1, and writes only a
+marker commit, without a record file, into prod's desired state; `reconcile -e prod` runs at the promoted commit and records the
 sequence it applied. After a second promotion, a reconcile from a checkout
 made before it reads the sequence-1 block, refuses with
 `NYL-PROMOTION-SEQUENCE-OLDER`, writes nothing, and names `nyl promote

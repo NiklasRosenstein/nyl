@@ -179,16 +179,18 @@ codes! {
     PromoteArtifactMissing => "NYL-PROMOTE-ARTIFACT-MISSING",
     /// A promoted artifact's kind cannot verify artifacts, so the record says `artifactsVerified: false`. A warning.
     PromoteArtifactUnverified => "NYL-PROMOTE-ARTIFACT-UNVERIFIED",
-    /// The target environment selects a unit whose result a promoted value replaces, so it rebuilds what its `fromPromotion` binding takes from the source. A warning.
-    PromoteRebuilt => "NYL-PROMOTE-REBUILT",
     /// An environment's `fromPromotion` source, or a `fromPromotion` binding, names a path with no record yet. Exit 2.
     PromotionMissing => "NYL-PROMOTION-MISSING",
     /// The `record: source` block in an Environment's source has a lower `sequence` than the one a run applied, such as an older checkout or a reverted promotion commit. Rolling back is a new promotion. Exit 1.
     PromotionSequenceOlder => "NYL-PROMOTION-SEQUENCE-OLDER",
     /// The `record: source` block in an Environment's source does not match the source state it names, or names a path the Environment does not promote along. Exit 1.
     PromotionRecordInvalid => "NYL-PROMOTION-RECORD-INVALID",
-    /// `nyl promote` cannot commit or push a `record: source` block: the entry worktree has no branch checked out (detached HEAD), the branch has no upstream or commits its upstream lacks, the Environment's file is untracked or has uncommitted changes, the block cannot be placed in the Environment's own document, the Environment is not declared in a file (a template's instance), the remote refused the push for another reason than a moved branch (branch protection, a hook), or the push failed in a way that may have reached the remote. The message says whether anything was written; the fix is the cause's. Exit 1.
+    /// The `record: source` block of an Environment whose `fromPromotion.verify` names an allowed signers file was last changed by a commit `git verify-commit` does not accept against it (unsigned, or signed by a key the file does not list), or its provenance cannot be read (an untracked or changed Environment file, a missing allowed signers file, a shallow history). Nothing ran. Exit 1.
+    PromotionRecordUnsigned => "NYL-PROMOTION-RECORD-UNSIGNED",
+    /// `nyl promote` cannot commit or push a `record: source` block: the entry worktree has no branch checked out (detached HEAD), the branch has no upstream or commits its upstream lacks, the Environment's file is untracked or has uncommitted changes, the block cannot be placed in the Environment's own document, the Environment is not declared in a file (a template's instance), with `fromPromotion.verify` the commit would not be signed as a run requires (it is undone before the push), the remote refused the push for another reason than a moved branch (branch protection, a hook), or the push failed in a way that may have reached the remote. The message says whether anything was written; the fix is the cause's. Exit 1.
     PromoteSourceUnwritable => "NYL-PROMOTE-SOURCE-UNWRITABLE",
+    /// `nyl promote` pushed a `record: source` commit, but could not write its marker into the target's desired state, so the sequence is not reserved in state and `nyl get promotions` does not list the promotion. The promotion stands; running `nyl promote` again writes only the marker. Exit 1.
+    PromoteMarkerUnwritten => "NYL-PROMOTE-MARKER-UNWRITTEN",
     /// The remote refused the fast-forward push of a `record: source` commit because the branch moved since the checkout (non-fast-forward). The commit was undone, so nothing was written; update the checkout and promote again. Exit 2.
     PromoteSourceRejected => "NYL-PROMOTE-SOURCE-REJECTED",
     /// `nyl promote` would replace commits another PromotionPath promoted into the target since this path last promoted: the promoted source commit or value does not contain them (`git cherry` lists them, by their changes). Nothing was written; merge the missing commits or pass `--supersede`. Exit 2.
