@@ -1215,7 +1215,9 @@ fn test_verify_refuses_unsigned_blocks_before_pushing_and_when_running() {
         "      record: source\n",
         "      record: source\n      verify: {allowedSigners: allowed_signers}\n",
     );
-    let harness = Promote::of(&environments, &format!("{UNITS}{BINDER}"), true);
+    // The record is taken before `verify` is on: a dry run with `verify`
+    // set refuses a clone that does not sign, as CI's runners do not.
+    let harness = Promote::of(&record_source_environments(), &format!("{UNITS}{BINDER}"), true);
     let record = dry_record(&harness);
     harness.shell.world.commit_files(
         "main",
