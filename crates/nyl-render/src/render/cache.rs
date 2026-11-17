@@ -1013,18 +1013,49 @@ fn find_executable(name: &str) -> Option<PathBuf> {
 
 fn renderer_tool_dependencies() -> Result<BTreeMap<String, RecordedDependency>> {
     let mut dependencies = BTreeMap::new();
-    let executable = std::env::current_exe()?;
     dependencies.insert(
         "tool:nyl".to_string(),
         RecordedDependency {
             kind: "file".to_string(),
-            digest: sha256_hex(&fs::read(executable)?),
+            digest: executable_digest()?,
         },
     );
     for (tool, arguments) in [("helm", &["version", "--short"][..]), ("kyverno", &["version"][..])] {
         dependencies.insert(format!("tool:{tool}"), tool_dependency(tool, arguments));
     }
     Ok(dependencies)
+}
+
+/// The SHA-256 of the running executable, hashed once per process: the code
+/// a process runs cannot change while it runs, and every render cache of the
+/// process would otherwise hash it again.
+fn executable_digest() -> Result<String> {
+    static DIGEST: OnceLock<String> = OnceLock::new();
+    if let Some(digest) = DIGEST.get() {
+        return Ok(digest.clone());
+    }
+    let digest = file_sha256_hex(&std::env::current_exe()?)?;
+    Ok(DIGEST.get_or_init(|| digest).clone())
+}
+
+/// The SHA-256 of a file's contents, read in fixed-size chunks rather than
+/// whole: the executable is tens of megabytes in a release build and can be
+/// over a gigabyte in a test build with debug information.
+fn file_sha256_hex(path: &Path) -> Result<String> {
+    use std::io::Read as _;
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn tool_dependency(tool: &str, arguments: &[&str]) -> RecordedDependency {
@@ -1163,6 +1194,20 @@ mod tests {
 
     fn plain_stats(stats: &CacheStats) -> String {
         stats.format_with_color(false)
+    }
+
+    /// The executable's digest keys every cached render, so hashing it in
+    /// chunks must give the digest of its whole contents, across chunk
+    /// boundaries and for an empty file.
+    #[test]
+    fn test_file_sha256_hex_matches_the_digest_of_the_whole_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        for length in [0_usize, 1, 64 * 1024, 64 * 1024 + 1, 3 * 64 * 1024 + 17] {
+            let bytes: Vec<u8> = (0..length).map(|index| u8::try_from(index % 251).unwrap()).collect();
+            let path = temp.path().join(format!("file-{length}"));
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(file_sha256_hex(&path).unwrap(), sha256_hex(&bytes), "length {length}");
+        }
     }
 
     #[test]
