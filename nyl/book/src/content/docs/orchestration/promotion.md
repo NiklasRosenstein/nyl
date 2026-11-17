@@ -401,9 +401,15 @@ trusted, and dev's state is not read.
   withdraw a key, remove it from the file, or list it in a revocation file
   your Git configuration names (`gpg.ssh.revocationFile`), which
   `verify-commit` honours.
-- **Trust root.** Anyone who can change the allowed signers file can change
-  whom a run trusts, so review it like the branch itself. Nyl never turns
-  this on by itself; without `verify` the state check above applies.
+- **Only as strong as your branch protection.** A run reads the `verify`
+  setting and the allowed signers file from the same commit it checks.
+  Anyone who can push to that branch can add their own key to the file, or
+  point `verify` at another file, and then sign a block of their choosing.
+  So `verify` is only as strong as the protection on the branch: protect the
+  Environment's file and the allowed signers file (for example with
+  required reviews and a CODEOWNERS entry), or keep the default state check.
+  Nyl never turns `verify` on by itself; without it the state check above
+  applies.
 
 ## How a promotion reads the source
 

@@ -538,8 +538,12 @@ spec:
     configured. It needs Git 2.34 and OpenSSH 8.2. `valid-after` and
     `valid-before` are checked against the committer date the signer
     chose; `gpg.ssh.revocationFile` withdraws keys. Nothing enables it
-    implicitly; the allowed signers file deserves the same review as the
-    block's branch.
+    implicitly. The `verify` setting and the allowed signers file are read
+    from the same commit the run checks, so anyone who can push to that
+    branch can change whom it trusts: `verify` is only as strong as the
+    branch protection on the Environment's file and the signers file, and
+    the documentation says so. Reading both as of the commit the target
+    last applied would remove that dependency; it is not implemented.
 - Either way, the source commit and the values sit in one record, so they
   cannot diverge. An environment that follows its entry worktree, or a
   revision, is not a promotion target for its source.
