@@ -824,7 +824,7 @@ fn build(
                 by: requested.by.clone(),
             })
             .collect(),
-        excluded_applications: input.path.spec.excluded_deployments(),
+        excluded_deployments: input.path.spec.excluded_deployments(),
         superseded: Vec::new(),
         artifacts_verified: false,
         requested: requested.clone(),

@@ -100,9 +100,9 @@ writes it, and a reader loads it.
 | `from` | The source state: `{environment, run, desiredCommit, observedCommit}`, or for a target source `{target, repository, branch, commit}`. For a path that promotes only values, the newest state any value came from |
 | `sourceCommit` | The source commit of that state, present when the path promotes the target's source or a value's lineage includes one |
 | `values.<name>` | `{value, select, unit: {name, uid}, executionKey or inputDigest, state}`; `inputDigest` is the `sha256:` digest of the canonical JSON of the value an `input` selector read; `state` (`{run, desiredCommit, observedCommit}`) is present when a value-only path took the value from another state than `from` |
-| `evidence` | `{level, attestations: [{scope, name, result, at, details}], override: {reason} \| null}`; `details` are the driver's, such as each Application's running publication and health |
+| `evidence` | `{level, attestations: [{scope, name, result, at, details}], override: {reason} \| null}`; `details` are the driver's, such as each deployment's running publication and health |
 | `ignoredAttestations` | `[{scope, name, reason, by}]` from `--ignore-attestation` |
-| `excludedApplications` | The deployments the path's `coverage` excluded at promotion time: every unit's `exclude`, sorted, each name once (the field keeps the name it was introduced with) |
+| `excludedDeployments` | `{<unit>: [name]}`: the deployments the path's `coverage` excluded at promotion time, by unit; units and names sorted, each name once, a unit that excludes none left out, and `{}` when nothing was excluded |
 | `superseded` | `[{repository, commit, reason, by}]` from `--supersede` |
 | `artifactsVerified` | Whether the artifact check ran |
 | `requested` | `{by, identity, source, at, reason}`, recorded like an approval |
@@ -438,12 +438,13 @@ spec:
   state, every unit the target environment also selects has a current
   receipt, and at `attested` every such unit's required attestations pass for
   that state. A publication unit's `accepted` and `healthy` aggregate all
-  Applications it generates: `accepted` when all of them run that
+  deployments it generates (for a KubernetesPublication, its Applications):
+  `accepted` when all of them run that
   publication, `healthy` when all are also Healthy. Mixed revisions block,
   because one source commit must fit every value. A path's
   `coverage.<unit>.exclude` names deployments of that unit it knowingly
   accepts as falling short; they leave the unit's aggregate for that path and
-  are listed in the PromotionRecord. A publication unit without
+  are listed in the PromotionRecord's `excludedDeployments` under the unit. A publication unit without
   `observe` declares no attestations and is satisfied by its receipt.
 - `record` decides where the PromotionRecord lives. With `record: state`, the
   default, it is written into the target's desired state, as a pull request
@@ -475,7 +476,7 @@ spec:
             - {scope: kubernetes, name: healthy, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}
           override: null
         ignoredAttestations: []
-        excludedApplications: []
+        excludedDeployments: {}
         artifactsVerified: true
         superseded: []                 # commits replaced with --supersede, with reasons
         requested: {by: …, identity: …, source: …, at: 2026-09-25T16:41:00Z, reason: …}
@@ -813,7 +814,7 @@ spec:
         attestations: [{scope: dev, name: accepted, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}, {scope: dev, name: healthy, result: pass, at: 2026-09-25T16:40:00Z, details: {…}}]
         override: null
       ignoredAttestations: []
-      excludedApplications: []
+      excludedDeployments: {}
       superseded: []
       artifactsVerified: true
       requested: {by: …, identity: verified, source: …, at: 2026-09-25T16:40:00Z, reason: …}

@@ -248,4 +248,4 @@ steps:
             equals: [get, artifact, web-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r3)%']
           apiImage:
             equals: [get, artifact, api-image/image, -e, dev, --pointer, /reference, --state-revision, '%STATE(r3)%']
-        excludedApplications: [web]
+        excludedDeployments: {kubernetes: [web]}

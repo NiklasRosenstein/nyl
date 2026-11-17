@@ -201,14 +201,17 @@ impl PromotionPathSpec {
         self.coverage.get(unit)
     }
 
-    /// Every excluded deployment, as a record lists them: every unit's
-    /// `exclude`, sorted, each name once.
-    pub fn excluded_deployments(&self) -> Vec<String> {
+    /// The excluded deployments by unit, as a record lists them: each unit's
+    /// `exclude`, sorted, each name once; a unit that excludes none is left
+    /// out.
+    pub fn excluded_deployments(&self) -> BTreeMap<String, Vec<String>> {
         self.coverage
-            .values()
-            .flat_map(|coverage| coverage.exclude.iter().cloned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
+            .iter()
+            .filter(|(_, coverage)| !coverage.exclude.is_empty())
+            .map(|(unit, coverage)| {
+                let names: std::collections::BTreeSet<&String> = coverage.exclude.iter().collect();
+                (unit.clone(), names.into_iter().cloned().collect())
+            })
             .collect()
     }
 }
@@ -483,7 +486,16 @@ mod tests {
         assert!(edge.counts("catalog", None));
         assert!(!edge.counts("edge-canary", None));
         assert_eq!(path.spec.unit_coverage("other"), None);
-        assert_eq!(path.spec.excluded_deployments(), ["edge-canary", "web-batch"]);
+        assert_eq!(
+            path.spec.excluded_deployments(),
+            BTreeMap::from([
+                (
+                    "edge".to_owned(),
+                    vec!["edge-canary".to_owned(), "web-batch".to_owned()]
+                ),
+                ("kubernetes".to_owned(), vec!["web-batch".to_owned()]),
+            ])
+        );
     }
 
     /// The unreleased flat shape is refused rather than ignored, so a path

@@ -1233,7 +1233,7 @@ superseded:
 artifactsVerified: true
 ignoredAttestations:
   - {attestation: environment/qa, reason: Behind a flag}
-excludedApplications: [web-batch]
+excludedDeployments: {web: [web-batch]}
 "#;
 
 fn promotion_record() -> serde_json::Value {
@@ -1252,7 +1252,7 @@ fn promotion_record() -> serde_json::Value {
             "override": null,
         },
         "ignoredAttestations": [{"scope": "environment", "name": "qa", "reason": "Behind a flag"}],
-        "excludedApplications": ["web-batch"],
+        "excludedDeployments": {"web": ["web-batch"]},
         "superseded": [{"commit": "beef", "reason": "Fix merged"}],
         "artifactsVerified": true,
         "requested": {"by": "someone", "reason": "Release 1"},
@@ -1367,8 +1367,13 @@ fn test_promotion_expectation_checks_every_field_of_the_record() {
         ("/ignoredAttestations", json!([]), "ignoredAttestations"),
         ("/ignoredAttestations/0/reason", json!("Because"), "ignoredAttestations"),
         ("/ignoredAttestations/0/name", json!("smoke"), "ignoredAttestations"),
-        ("/excludedApplications", json!([]), "excludedApplications"),
-        ("/excludedApplications/0", json!("web-api"), "excludedApplications"),
+        ("/excludedDeployments", json!({}), "excludedDeployments"),
+        ("/excludedDeployments/web/0", json!("web-api"), "excludedDeployments"),
+        (
+            "/excludedDeployments",
+            json!({"api": ["web-batch"]}),
+            "excludedDeployments",
+        ),
     ];
     for (pointer, value, expected) in cases {
         let error = check_promotion(PROMOTION_EXPECTATION, &changed(pointer, value), None)

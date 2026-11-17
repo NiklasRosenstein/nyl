@@ -17,7 +17,7 @@
 //! version (decision F1 of the M6 plan).
 //!
 //! Lists the contract says a record always carries (`ignoredAttestations`,
-//! `excludedApplications`, `superseded`, `evidence.attestations`) are written
+//! `excludedDeployments`, `superseded`, `evidence.attestations`) are written
 //! even when empty, so a record states that nothing was ignored or superseded
 //! instead of leaving it out.
 
@@ -178,7 +178,7 @@ pub struct EvidenceAttestation {
     pub result: AttestationResult,
     /// When it was recorded.
     pub at: Timestamp,
-    /// The driver's details, such as each Application's running publication and health.
+    /// The driver's details, such as each deployment's running publication and health.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub details: Value,
 }
@@ -275,10 +275,11 @@ pub struct PromotionRecord {
     /// The attestations `--ignore-attestation` set aside.
     #[serde(rename = "ignoredAttestations")]
     pub ignored_attestations: Vec<IgnoredAttestation>,
-    /// The deployments the path's `coverage` excluded at promotion time:
-    /// every unit's `exclude`, sorted, each name once.
-    #[serde(rename = "excludedApplications")]
-    pub excluded_applications: Vec<String>,
+    /// The deployments the path's `coverage` excluded at promotion time,
+    /// by unit: each unit's `exclude`, sorted, each name once. Units with
+    /// none are left out, so an empty map says nothing was excluded.
+    #[serde(rename = "excludedDeployments")]
+    pub excluded_deployments: BTreeMap<String, Vec<String>>,
     /// The commits `--supersede` accepted as replaced.
     pub superseded: Vec<SupersededCommit>,
     /// Whether the artifact check ran.
@@ -320,7 +321,7 @@ mod tests {
             "path": "dev-to-prod", "sequence": 3,
             "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90", "desiredCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a"},
             "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
-            "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+            "ignoredAttestations": [], "excludedDeployments": {}, "superseded": [],
             "artifactsVerified": true,
             "requested": {"by": "alice", "identity": "local", "at": "2026-09-25T16:41:00Z"}
         })
@@ -386,7 +387,7 @@ mod tests {
         for field in [
             "values",
             "ignoredAttestations",
-            "excludedApplications",
+            "excludedDeployments",
             "superseded",
             "evidence",
             "requested",

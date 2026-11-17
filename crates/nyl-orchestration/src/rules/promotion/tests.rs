@@ -257,7 +257,7 @@ fn attestation(name: &str, key: &str, result: AttestationResult, recorded: &str,
 const FRESH: &str = "2026-09-25T11:30:00Z";
 const OLD: &str = "2026-09-25T08:00:00Z";
 
-/// Argo CD's reading when every Application runs publication `p`.
+/// The driver's reading when every deployment runs publication `p`.
 fn running(publication: &str) -> Value {
     json!({"deployments": [
         {"id": "web/web", "state": "accepted", "health": "Healthy", "publication": publication},
@@ -690,7 +690,7 @@ fn runs_other(deployment: &str, publication: &str) -> DeploymentVerdict {
 
 /// D8: a publication's attestations say what runs now, so only the current
 /// receipt's count. State 1 passed; state 2's newest attestation fails, as
-/// its Applications still run state 1's publication. The promotion is
+/// its deployments still run state 1's publication. The promotion is
 /// refused with the driver's reason and does not fall back to state 1,
 /// whose attestations no longer describe what runs, and the fix names
 /// `--state-revision`. Explicitly chosen, state 1 is judged on the
@@ -765,7 +765,7 @@ fn test_environment_attestations_still_take_the_newest_passing_state() {
 }
 
 /// Two values of one publication, each consumed by its Release's
-/// Application (D7).
+/// deployment (D7).
 fn per_release() -> (PromotionPath, BTreeMap<String, String>) {
     let path = path(json!({
         "evidence": "attested",
@@ -782,7 +782,7 @@ fn per_release() -> (PromotionPath, BTreeMap<String, String>) {
     (path, consumers)
 }
 
-/// D6: a value-only path judges each value for the Application that consumes
+/// D6: a value-only path judges each value for the deployment that consumes
 /// it, from the current receipt's attestations. web runs state 2's
 /// publication and api still runs state 1's, so the aggregate fails, yet
 /// each value comes from the state its consumer runs, and only a consumer's
@@ -861,7 +861,7 @@ fn test_an_unhealthy_consumer_blocks_unless_excluded() {
     );
     cover(&mut values.path, "kubernetes").exclude = vec!["web".to_owned()];
     let promotion = values.promoted();
-    assert_eq!(promotion.record.excluded_applications, ["web"]);
+    assert_eq!(promotion.record.excluded_deployments, excluded("kubernetes", &["web"]));
     assert_eq!(promotion.record.values["webImage"].value, json!("sha256:one"));
 }
 
@@ -940,6 +940,11 @@ fn test_coverage_narrows_and_extends_the_source_judgement() {
     );
 }
 
+/// A record's `excludedDeployments` that excludes `names` of `unit` only.
+fn excluded(unit: &str, names: &[&str]) -> BTreeMap<String, Vec<String>> {
+    BTreeMap::from([(unit.to_owned(), names.iter().map(|name| (*name).to_owned()).collect())])
+}
+
 /// The path's coverage entry of `unit`, created empty when absent.
 fn cover<'p>(path: &'p mut PromotionPath, unit: &str) -> &'p mut nyl_core::resources::promotion::UnitCoverage {
     path.spec.coverage.entry(unit.to_owned()).or_default()
@@ -973,7 +978,10 @@ fn test_coverage_counts_only_for_the_unit_it_names() {
         .any(|gap| gap.kind == GapKind::Failing && gap.scope == "kubernetes"));
     cover(&mut source.path, "kubernetes").exclude = vec!["worker".to_owned()];
     let promotion = source.promoted();
-    assert_eq!(promotion.record.excluded_applications, ["worker"]);
+    // The record keeps each unit's exclusions under its own unit.
+    let mut both = excluded("kubernetes", &["worker"]);
+    both.extend(excluded("web-image", &["worker"]));
+    assert_eq!(promotion.record.excluded_deployments, both);
     cover(&mut source.path, "web-image").require = vec!["web".to_owned()];
     let refusal = source.refused();
     assert!(
@@ -1235,7 +1243,7 @@ fn test_value_only_refusal_names_the_value_and_explicit_state_takes_all() {
 }
 
 /// The record states what the path and request say: the path, sequence,
-/// excluded Applications, who asked, and that artifacts are not yet verified.
+/// excluded deployments, who asked, and that artifacts are not yet verified.
 #[test]
 fn test_record_carries_the_request_and_the_path() {
     let path = path(json!({"coverage": {"kubernetes": {"exclude": ["batch"]}}}));
@@ -1245,7 +1253,7 @@ fn test_record_carries_the_request_and_the_path() {
     let record = &promotion.record;
     assert_eq!(record.path.as_str(), "dev-to-prod");
     assert_eq!(record.sequence, 7);
-    assert_eq!(record.excluded_applications, ["batch"]);
+    assert_eq!(record.excluded_deployments, excluded("kubernetes", &["batch"]));
     assert_eq!(record.requested.by, "alice");
     assert_eq!(record.requested.reason.as_deref(), Some("Release"));
     assert!(record.superseded.is_empty());
@@ -1363,7 +1371,7 @@ fn test_evidence_published_without_a_selection_takes_the_newest_published_state(
     assert!(promotion.warnings.is_empty());
 }
 
-/// Until the per-Application judgement exists, a value-only path is blocked
+/// Until the per-deployment judgement exists, a value-only path is blocked
 /// by a failing attestation of any unit of the state, not only its consumers.
 #[test]
 fn test_value_only_path_is_blocked_by_a_failing_attestation_of_another_unit() {
@@ -1633,7 +1641,7 @@ fn test_an_explicit_value_only_state_honours_excluded_deployments() {
 /// newest run changed the publication but did not finish it, so the
 /// publication still has state 1's receipt, and its attestations (recorded
 /// for that receipt) say what runs: both values come from state 1, on a
-/// value-only path and judged per Application.
+/// value-only path and judged per deployment.
 #[test]
 fn test_a_failed_newest_run_keeps_the_observed_receipt_current() {
     let (path, consumers) = per_release();
@@ -1681,7 +1689,7 @@ fn path_without_values() -> PromotionPath {
 /// S3/U3: values follow what their consumer runs at every evidence level:
 /// at `published` with an observing publication, and under `--evidence
 /// published`, apiImage still comes from the state whose publication its
-/// Application runs. The gap on the newer state says so.
+/// deployment runs. The gap on the newer state says so.
 #[test]
 fn test_values_follow_their_consumer_at_published_too() {
     let (mut path, consumers) = per_release();

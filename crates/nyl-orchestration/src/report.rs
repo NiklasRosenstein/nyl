@@ -1383,7 +1383,7 @@ d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 published (selected, promoted, running)
                 override_: None,
             },
             ignored_attestations: Vec::new(),
-            excluded_applications: Vec::new(),
+            excluded_deployments: BTreeMap::new(),
             superseded: Vec::new(),
             artifacts_verified: true,
             requested: PromotionRequest {

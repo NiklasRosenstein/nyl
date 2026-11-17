@@ -246,8 +246,8 @@ pub struct AttestationOutcome {
     pub result: AttestationResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Driver-specific evidence behind the result, such as each Argo CD
-    /// Application's running publication and health; recorded unchanged.
+    /// Driver-specific evidence behind the result, such as each
+    /// deployment's running publication and health; recorded unchanged.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub details: Value,
 }
@@ -888,7 +888,7 @@ pub trait Driver: Send + Sync {
         None
     }
     /// The deployment, as [`DeploymentVerdict::name`] names it, that consumes
-    /// the resolved input at `pointer` of `spec`, such as the Application of
+    /// the resolved input at `pointer` of `spec`, such as the deployment of
     /// the Release whose input it is; `None` when the unit itself consumes
     /// it, and by default (decision D7 of the M6 plan).
     fn input_consumer(&self, spec: &Value, pointer: &str) -> Option<String> {

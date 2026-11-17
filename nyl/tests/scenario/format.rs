@@ -617,10 +617,10 @@ pub struct PromotionExpectation {
     /// Exactly these entries of `ignoredAttestations`.
     #[serde(rename = "ignoredAttestations")]
     pub ignored_attestations: Option<Vec<IgnoredAttestationExpectation>>,
-    /// Exactly these entries of `excludedApplications`: the deployments the
+    /// Exactly this `excludedDeployments`: by unit, the deployments the
     /// path's coverage excluded.
-    #[serde(rename = "excludedApplications")]
-    pub excluded_applications: Option<Vec<String>>,
+    #[serde(rename = "excludedDeployments")]
+    pub excluded_deployments: Option<BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]

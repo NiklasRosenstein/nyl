@@ -14,7 +14,7 @@ M6 delivers promotion in steps. `nyl promote`, `fromPromotion` sources and
 bindings, artifact verification, `nyl get states`, `promotion-candidates`,
 and `promotions`, `status` lineage, `record: source`, several paths into
 one environment with the supersede check and hotfixes, value-only paths
-judged per Application, and `coverage` work today.
+judged per deployment, and `coverage` work today.
 :::
 
 ## The unit of promotion
@@ -47,7 +47,7 @@ counts them only for the publication's current receipt:
 
 - An older state does not qualify through its publication attestations once
   a newer receipt of the publication exists, even if they passed.
-- When the newest attestation fails, such as when Applications still run the
+- When the newest attestation fails, such as when deployments still run the
   previous publication or run different ones, `nyl promote` refuses with
   `NYL-PROMOTE-NO-EVIDENCE` and the driver's reason. It does not fall back to
   an older state that once passed.
@@ -57,7 +57,7 @@ counts them only for the publication's current receipt:
 - An explicitly chosen state, with `--state-revision` or `--revision`, is
   judged on the attestations recorded for it.
 
-The cost: between publishing a new receipt and its Applications running it,
+The cost: between publishing a new receipt and its deployments running it,
 the state they still run cannot be promoted without flags. The refusal names
 that state, and `--state-revision` promotes it:
 
@@ -71,18 +71,20 @@ its receipt is its evidence, and none of this applies.
 ## Value-only paths
 
 A path whose target does not take its source from it promotes values only,
-and takes each value from the state its consumer runs. A value selected as a
-publication's Release input, `{unit: kubernetes, input:
-/releases/<group>~1<release>/image}`, is consumed by that Release's
-Application; any other selector (an artifact, an output, another input) is
-consumed by the selected unit itself.
+and takes each value from the state its consumer runs. A unit's driver says
+which of the unit's deployments consumes an input: for a
+KubernetesPublication, a value selected as a Release input, `{unit:
+kubernetes, input: /releases/<group>~1<release>/image}`, is consumed by that
+Release's deployment, its Argo CD Application (or the Release itself on a
+direct target). Any other selector (an artifact, an output, another input)
+is consumed by the selected unit itself.
 
-For a value consumed by an Application, `nyl promote` reads the publication's
-current `accepted` and `healthy` per Application: the value comes from the
-state whose receipt published what that Application runs, so Applications
-that were synced to different publications by hand do not block, and the
-record names a value's own `state` when it differs from `from`. Only the
-consuming Application's own findings block its value: it runs a revision no
+For a value consumed by a deployment, `nyl promote` reads the unit's current
+`accepted` and `healthy` per deployment: the value comes from the state
+whose receipt published what that deployment runs, so deployments that were
+synced to different publications by hand do not block, and the record names
+a value's own `state` when it differs from `from`. Only the consuming
+deployment's own findings block its value: it runs a revision no
 publication explains (`unmatched`), a mix of revisions, nothing, or a recorded
 `healthy` fails for it (even when the path requires only `accepted`, as any
 failing attestation blocks). A path that promotes the target's source still
@@ -93,10 +95,10 @@ evidence requirement: it applies at `evidence: published` and under
 `--evidence published` too, whenever the publication's current receipt has a
 recorded `accepted` or `healthy`. A state is matched by the publication commit
 it published, which may be the commit the reading matched or the revision
-the Application reports running. When no recorded state published what an
-Application runs, such as after the history was cut short or a publication
+the deployment reports running. When no recorded state published what a
+deployment runs, such as after the history was cut short or a publication
 outside orchestration, the promotion is refused with "no recorded state
-published what <Application> runs (<commit>)": promote a state explicitly
+published what <deployment> runs (<commit>)": promote a state explicitly
 with `--state-revision`, or reconcile the source so it publishes again.
 
 ## Coverage

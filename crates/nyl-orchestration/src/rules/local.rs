@@ -596,7 +596,7 @@ mod tests {
                 "from": {"environment": "dev", "run": "0192f0c4-8d0a-7c3e-9a51-3c1f0e7d2b90",
                          "desiredCommit": "3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a"},
                 "values": {}, "evidence": {"level": "published", "attestations": [], "override": null},
-                "ignoredAttestations": [], "excludedApplications": [], "superseded": [],
+                "ignoredAttestations": [], "excludedDeployments": {}, "superseded": [],
                 "artifactsVerified": true,
                 "requested": {"by": "a", "identity": "local", "at": "2026-09-24T10:00:00Z"}
             }))

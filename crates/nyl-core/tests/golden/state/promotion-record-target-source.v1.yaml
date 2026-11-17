@@ -23,7 +23,7 @@ evidence:
     at: "2026-09-25T16:40:00Z"
   override: null
 ignoredAttestations: []
-excludedApplications: []
+excludedDeployments: {}
 superseded: []
 artifactsVerified: true
 requested:

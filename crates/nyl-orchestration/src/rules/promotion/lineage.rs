@@ -112,7 +112,7 @@ mod tests {
                 override_: None,
             },
             ignored_attestations: Vec::new(),
-            excluded_applications: Vec::new(),
+            excluded_deployments: std::collections::BTreeMap::new(),
             superseded: Vec::new(),
             artifacts_verified: true,
             requested: PromotionRequest {
