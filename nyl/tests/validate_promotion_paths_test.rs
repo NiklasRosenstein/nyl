@@ -38,6 +38,21 @@ fn checkout_with(world: &World, spec: &str) -> std::path::PathBuf {
     checkout
 }
 
+/// [`checkout_with`] whose publication unit `kubernetes` observes, so it
+/// attests what each deployment runs and takes coverage.
+fn observing_checkout_with(world: &World, spec: &str) -> std::path::PathBuf {
+    let checkout = checkout_with(world, spec);
+    let units = checkout.join("nyl/units.yaml");
+    let text = std::fs::read_to_string(&units).unwrap().replace("\r\n", "\n");
+    let observed = text.replace(
+        "  target: '{{ values.target }}'\n",
+        "  target: '{{ values.target }}'\n  observe: {}\n",
+    );
+    assert_ne!(observed, text, "the publication unit's spec changed shape");
+    std::fs::write(&units, observed).unwrap();
+    checkout
+}
+
 const SOUND: &str = "  from: {environment: dev}\n  to: {environment: prod}\n  values:\n    webImage:\n      select: {unit: web-image, artifact: image, pointer: /reference}\n    dbHost:\n      select: {unit: database, input: /source/path}\n";
 
 #[test]
@@ -101,7 +116,8 @@ fn test_validate_reports_each_failure_with_its_code_and_fix() {
 
 /// `coverage` is checked against what each named unit runs, as its driver
 /// lists it: every unknown name is `NYL-PROMOTE-COVERAGE-UNKNOWN`, and
-/// `groups` on this value-only path is `NYL-PROMOTE-COVERAGE-INEFFECTIVE`.
+/// `groups` on this value-only path, or any entry of a unit that attests
+/// nothing per deployment, is `NYL-PROMOTE-COVERAGE-INEFFECTIVE`.
 #[test]
 fn test_validate_checks_coverage_names_against_the_unit() {
     let world = World::new(&scenario::shell::shared_project());
@@ -114,8 +130,8 @@ fn test_validate_checks_coverage_names_against_the_unit() {
         ),
         (
             "  coverage:\n    database: {exclude: [web]}\n",
-            "NYL-PROMOTE-COVERAGE-UNKNOWN",
-            "runs no deployments",
+            "NYL-PROMOTE-COVERAGE-INEFFECTIVE",
+            "records no attestation of what each of its deployments runs",
         ),
         (
             "  coverage:\n    kubernetes: {exclude: [nope]}\n",
@@ -139,7 +155,7 @@ fn test_validate_checks_coverage_names_against_the_unit() {
         ),
     ];
     for (coverage, code, text) in cases {
-        let checkout = checkout_with(&world, &format!("{path}{coverage}"));
+        let checkout = observing_checkout_with(&world, &format!("{path}{coverage}"));
         nyl(&world, &checkout, &["validate"]).assert().failure().stderr(
             predicate::str::contains(code)
                 .and(predicate::str::contains(text))
@@ -147,7 +163,7 @@ fn test_validate_checks_coverage_names_against_the_unit() {
         );
     }
     // The deployments the driver lists pass: the Release's Application and the catalog.
-    let checkout = checkout_with(
+    let checkout = observing_checkout_with(
         &world,
         &format!("{path}  coverage:\n    kubernetes: {{exclude: [web], require: [dev-catalog]}}\n"),
     );
@@ -158,7 +174,7 @@ fn test_validate_checks_coverage_names_against_the_unit() {
 #[test]
 fn test_plan_reports_unknown_coverage_names() {
     let world = World::new(&scenario::shell::shared_project());
-    let checkout = checkout_with(
+    let checkout = observing_checkout_with(
         &world,
         "  from: {environment: dev}\n  to: {environment: prod}\n  coverage:\n    kubernetes: {require: [nope]}\n",
     );
@@ -169,6 +185,56 @@ fn test_plan_reports_unknown_coverage_names() {
             predicate::str::contains("NYL-PROMOTE-COVERAGE-UNKNOWN")
                 .and(predicate::str::contains("coverage.kubernetes.require")),
         );
+}
+
+/// When a coverage unit's target does not render, its names cannot be
+/// checked: `nyl validate` fails with `NYL-PROMOTE-COVERAGE-UNCHECKED` and
+/// the render error, while `nyl plan` of the target environment, which does
+/// not need dev's render, warns and plans (with a warning about prod's
+/// uninitialized state, which is not what this test is about). Catches one environment's broken
+/// render blocking commands for another.
+#[test]
+fn test_an_unrenderable_coverage_unit_fails_validate_and_warns_plan() {
+    let world = World::new(&scenario::shell::shared_project());
+    let checkout = observing_checkout_with(
+        &world,
+        "  from: {environment: dev}\n  to: {environment: prod}\n  coverage:\n    kubernetes: {exclude: [web]}\n",
+    );
+    let release = checkout.join("applications/web/release.yaml");
+    let text = std::fs::read_to_string(&release).unwrap();
+    std::fs::write(
+        &release,
+        text.replace("{{ inputs.databaseHost }}", "{{ inputs.databaseHost | nope }}"),
+    )
+    .unwrap();
+    nyl(&world, &checkout, &["validate"]).assert().failure().stderr(
+        predicate::str::contains("NYL-PROMOTE-COVERAGE-UNCHECKED").and(predicate::str::contains("cannot be listed")),
+    );
+    // `plan` renders the committed source.
+    for args in [
+        &["add", "-A"][..],
+        &[
+            "commit",
+            "-q",
+            "--no-gpg-sign",
+            "-m",
+            "Break the web Release's template",
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .current_dir(&checkout)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "user.name=Nyl Test", "-c", "user.email=test@example.invalid"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    nyl(&world, &checkout, &["plan", "-e", "prod"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("NYL-PROMOTE-COVERAGE-UNCHECKED"));
 }
 
 /// `plan` reports the findings of the paths that touch its environment.

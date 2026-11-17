@@ -1290,6 +1290,7 @@ fn test_deployments_are_the_targets_expected_deployments() {
         worktree: &world.work(),
         project_dir: "/nyl",
         instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+        cache_dir: None,
     };
     let rendered = json!({
         "target": "dev",

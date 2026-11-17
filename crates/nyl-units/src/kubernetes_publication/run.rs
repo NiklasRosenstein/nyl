@@ -254,6 +254,7 @@ pub(crate) fn render_at(
         owner,
         inputs: &inputs,
         placeholders: false,
+        publication_read: nyl_render::gitops::inputs::PublicationRead::Fresh,
         cache_dir: Some(cache_dir),
         resource_catalogue: catalogue.clone(),
         instances,
@@ -264,13 +265,15 @@ pub(crate) fn render_at(
 /// Render the target `spec` names or declares inline at `worktree` as
 /// `nyl validate` compiles a placed target: every Release input binding
 /// orchestration resolves takes a placeholder of its declared type, so the
-/// unit's spec need not be resolved. It shows what the target generates
-/// (its deployments) and is never published.
+/// unit's spec need not be resolved, and `fromPublication` inputs fall back
+/// to the cached branch, so it works offline. It shows what the target
+/// generates (its deployments) and is never published.
 pub(crate) fn render_for_validation(
     catalogue: &nyl_render::config::ResourceCatalogue,
     worktree: &std::path::Path,
     project_dir: &std::path::Path,
     instances: &nyl_core::orchestration::instance::Instances,
+    cache_dir: Option<&std::path::Path>,
     spec: &Value,
 ) -> DriverResult<RenderedTarget> {
     let target = publication_target(spec)?;
@@ -290,7 +293,8 @@ pub(crate) fn render_for_validation(
         owner: None,
         inputs: &InputSnapshot::new(),
         placeholders: true,
-        cache_dir: None,
+        publication_read: nyl_render::gitops::inputs::PublicationRead::FreshOrCached,
+        cache_dir,
         resource_catalogue: catalogue.clone(),
         instances,
     })

@@ -78,6 +78,10 @@ pub struct TargetRender<'a> {
     /// target an environment places, and `inputs` must be empty. Such a
     /// render shows what the target generates, never what it publishes.
     pub placeholders: bool,
+    /// How `fromPublication` inputs read the publication branch: `Fresh` for
+    /// a run, `FreshOrCached` for a validation render, which then works
+    /// offline as `nyl validate` does.
+    pub publication_read: super::inputs::PublicationRead,
     /// The render cache directory, from the invocation's workspace; `None`
     /// renders without a cache. Never the user's default cache, so parallel
     /// invocations and tests stay isolated and the result never depends on
@@ -259,6 +263,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     let options = TreeRenderOptions {
         selection: request.selection.clone(),
         publication_base: request.publication_base.clone(),
+        publication_read: request.publication_read,
         orchestrated_inputs: Some(if request.placeholders {
             OrchestratedInputs::Placeholders
         } else {
@@ -2216,6 +2221,7 @@ spec:
             target: "dev",
             inputs,
             placeholders: false,
+            publication_read: crate::gitops::inputs::PublicationRead::Fresh,
             cache_dir,
             resource_catalogue: crate::config::test_catalogue(),
         })
@@ -2351,6 +2357,7 @@ spec:
             target: &inline.name,
             inputs: &snapshot("registry.invalid/web@sha256:feed"),
             placeholders: false,
+            publication_read: crate::gitops::inputs::PublicationRead::Fresh,
             cache_dir: None,
             resource_catalogue: crate::config::test_catalogue(),
         })

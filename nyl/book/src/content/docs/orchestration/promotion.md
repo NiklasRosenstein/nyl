@@ -128,16 +128,21 @@ its Release. The catalog Application belongs to no group.
   does not block. An entry counts only for the unit it is keyed by.
 - `groups` applies only to source paths. A value-only path judges each value
   for its own consumer, so `nyl validate` refuses `groups` there
-  (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); use `exclude` instead.
+  (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); use `exclude` instead. Coverage of a
+  unit that records nothing per deployment, such as a KubernetesPublication
+  without `observe: {}`, is refused the same way.
 - On a value-only path, an excluded consumer must still run a publication of
   the source, which decides its value's state, but need not be healthy.
 - `require` adds deployments that contribute no value but must meet the
   required attestations at whatever publication they run.
-- `nyl validate` and `nyl plan` check every name against what the unit runs,
-  as its kind lists it for the worktree (a KubernetesPublication renders its
-  target): a unit the source does not select, a unit whose kind runs no
+- `nyl validate`, `nyl plan`, `nyl reconcile`, `nyl promote`, and `nyl get promotion-candidates` check every name against what the unit runs, as its kind lists
+  it for the worktree (a KubernetesPublication renders its target): a unit
+  the source does not declare, select, or enable, a unit whose kind runs no
   deployments, and a group or deployment the unit does not run are refused
   with `NYL-PROMOTE-COVERAGE-UNKNOWN`, which lists the names the unit has.
+  When the names cannot be listed, such as when the source's target does not
+  render, `nyl validate` fails with `NYL-PROMOTE-COVERAGE-UNCHECKED` and the
+  render error, and the other commands warn with it and carry on.
 - Coverage still never fails open when a promotion runs: a group no
   deployment of the attestation belongs to, a coverage that leaves no
   deployment to judge while the attestation fails, and a `require` name no

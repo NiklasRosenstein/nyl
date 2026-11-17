@@ -102,10 +102,14 @@ path requires that its scope does not declare, `NYL-PROMOTE-COVERAGE-UNKNOWN` fo
 a `coverage` unit, group, or deployment the unit does not run (as its kind
 lists it; a KubernetesPublication renders its target to list them),
 `NYL-PROMOTE-COVERAGE-INEFFECTIVE` for `groups` on a path that promotes only
-values, and `NYL-PROMOTE-UNSUPPORTED` for
+values or coverage of a unit that records nothing per deployment,
+`NYL-PROMOTE-COVERAGE-UNCHECKED` when a coverage unit's deployments cannot be
+listed (with the render error), and `NYL-PROMOTE-UNSUPPORTED` for
 `changeGate: pullRequest` or a DeploymentTarget in `from` or `to`, which M11
-delivers. `nyl plan -e <environment>` reports the same findings for the paths
-that touch the environment.
+delivers. `nyl plan -e <environment>`, `nyl reconcile`, `nyl promote`, and
+`nyl get promotion-candidates` report the same findings for the paths that
+touch the environment, except that `NYL-PROMOTE-COVERAGE-UNCHECKED` is a
+warning there: they judge another environment only by what they need.
 
 A unit that declares its target inline (`spec.target.inline`) places the
 inline target, named `<environment>-<unit>` or by `spec.target.name`. Validation

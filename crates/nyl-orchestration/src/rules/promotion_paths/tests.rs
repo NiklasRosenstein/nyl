@@ -76,7 +76,7 @@ fn world() -> World {
         unit(
             "Typed",
             true,
-            json!({"replicas": 2, "source": {"path": "/app"}, "image": {"fromUnit": {"unit": "x", "artifact": "image"}}}),
+            json!({"replicas": 2, "source": {"path": "/app"}, "image": {"fromUnit": {"unit": "x", "artifact": "image"}}, "runs": ["accepted"]}),
         )
     };
     let db = || {
@@ -710,40 +710,58 @@ fn test_coverage_names_the_driver_lists_pass() {
 }
 
 /// Each unknown name is `NYL-PROMOTE-COVERAGE-UNKNOWN`: a unit the source
-/// does not select (or does not run at all), a unit whose kind lists no
-/// deployments, a group, an excluded deployment, and a required deployment
-/// the unit does not run. Catches a typo that would otherwise only refuse
-/// at promotion time, or a name of another unit that never counts.
+/// does not declare, select, or enable, a unit whose kind lists no
+/// deployments, and a group, an excluded deployment, or a required
+/// deployment the unit does not run. Catches a typo that would otherwise
+/// only refuse at promotion time, or a name of another unit that never
+/// counts.
 #[test]
 fn test_unknown_coverage_names_are_refused() {
+    let mut world = source_world();
+    world.sources.get_mut(&environment("dev")).unwrap().units.insert(
+        UnitName::new("off").unwrap(),
+        unit("Typed", true, json!({"enabled": false, "runs": ["accepted"]})),
+    );
+    let mut lists_none = listings();
+    lists_none.insert((environment("dev"), UnitName::new("web").unwrap()), Ok(None));
     let cases = [
         (
             json!({"ghost": {"exclude": ["web-api"]}}),
-            "names unit \"ghost\" in `coverage`",
+            listings(),
+            "declares no such unit",
         ),
         (
             json!({"scratch": {"exclude": ["web-api"]}}),
-            "names unit \"scratch\" in `coverage`",
+            listings(),
+            "does not select",
         ),
-        (json!({"db": {"require": ["web-api"]}}), "runs no deployments"),
+        (json!({"off": {"exclude": ["web-api"]}}), listings(), "is disabled"),
+        (
+            json!({"web": {"exclude": ["web-api"]}}),
+            lists_none,
+            "runs no deployments",
+        ),
         (
             json!({"web": {"groups": ["wbe"]}}),
+            listings(),
             "group \"wbe\" in coverage.web.groups",
         ),
         (
             json!({"web": {"exclude": ["web-cron"]}}),
+            listings(),
             "deployment \"web-cron\" in coverage.web.exclude",
         ),
         (
             json!({"web": {"require": ["web-gateway"]}}),
+            listings(),
             "deployment \"web-gateway\" in coverage.web.require",
         ),
     ];
-    for (coverage, message) in cases {
+    for (coverage, deployments, message) in cases {
         let mut spec = base(json!({}));
         spec["coverage"] = coverage.clone();
         let paths = [path(spec)];
-        let findings = run_coverage(&source_world(), &paths, &listings());
+        let findings = run_coverage(&world, &paths, &deployments);
         assert_eq!(
             codes(&findings),
             [Code::PromoteCoverageUnknown],
@@ -753,10 +771,51 @@ fn test_unknown_coverage_names_are_refused() {
     }
 }
 
-/// A unit whose deployments the driver could not list is reported with the
-/// driver's reason, never passed unchecked.
+/// A unit whose kind no registered driver serves is reported where the
+/// coverage names it, so `plan` reports it too, not only `nyl validate`'s
+/// unit checks.
 #[test]
-fn test_an_unlistable_coverage_unit_is_reported() {
+fn test_a_coverage_unit_of_an_unknown_kind_is_reported() {
+    let mut world = source_world();
+    world
+        .sources
+        .get_mut(&environment("dev"))
+        .unwrap()
+        .units
+        .insert(UnitName::new("odd").unwrap(), unit("Unregistered", true, json!({})));
+    let mut spec = base(json!({}));
+    spec["coverage"] = json!({"odd": {"exclude": ["x"]}});
+    let findings = run_coverage(&world, &[path(spec)], &listings());
+    assert_eq!(codes(&findings), [Code::UnitKindUnknown], "{findings:?}");
+}
+
+/// A unit whose kind has no running-scoped attestations for its spec judges
+/// no deployment: its `groups` and `exclude` select nothing and its
+/// `require` would refuse every promotion, so each is
+/// `NYL-PROMOTE-COVERAGE-INEFFECTIVE` with a fix that names the kind.
+#[test]
+fn test_coverage_of_a_unit_that_judges_no_deployment_is_ineffective() {
+    let mut spec = base(json!({}));
+    spec["coverage"] = json!({"db": {"groups": ["web"], "exclude": ["a"], "require": ["b"]}});
+    let findings = run_coverage(&source_world(), &[path(spec)], &listings());
+    assert_eq!(codes(&findings), [Code::PromoteCoverageIneffective; 3], "{findings:?}");
+    assert!(
+        findings[2]
+            .message
+            .contains("every promotion along the path would be refused"),
+        "{}",
+        findings[2]
+    );
+    assert!(findings[0].fix.contains("kind Test"), "{}", findings[0].fix);
+}
+
+/// A unit whose deployments the driver could not list is
+/// `NYL-PROMOTE-COVERAGE-UNCHECKED` with the driver's reason, never passed
+/// silently: `nyl validate` refuses it, and a command working on one
+/// environment takes it as a warning ([`split_unchecked`]) so another
+/// environment's broken render does not block it.
+#[test]
+fn test_an_unlistable_coverage_unit_is_unchecked() {
     let mut spec = base(json!({}));
     spec["coverage"] = json!({"web": {"exclude": ["web-api"]}});
     let paths = [path(spec)];
@@ -765,8 +824,12 @@ fn test_an_unlistable_coverage_unit_is_reported() {
         Err("cannot render DeploymentTarget \"dev\"".to_owned()),
     )]);
     let findings = run_coverage(&source_world(), &paths, &deployments);
-    assert_eq!(codes(&findings), [Code::PromoteCoverageUnknown], "{findings:?}");
+    assert_eq!(codes(&findings), [Code::PromoteCoverageUnchecked], "{findings:?}");
     assert!(findings[0].message.contains("cannot render"), "{}", findings[0]);
+    assert!(!findings[0].fix.contains("nyl validate"), "{}", findings[0].fix);
+    let (errors, warnings) = split_unchecked(findings);
+    assert!(errors.is_empty());
+    assert_eq!(codes(&warnings), [Code::PromoteCoverageUnchecked]);
 }
 
 /// `groups` on a path that promotes only values is refused: each value is
@@ -780,18 +843,31 @@ fn test_groups_on_a_value_only_path_are_refused() {
     let findings = run_coverage(&world(), &paths, &listings());
     assert_eq!(codes(&findings), [Code::PromoteCoverageIneffective], "{findings:?}");
     assert!(findings[0].fix.contains("coverage.web.exclude"), "{}", findings[0].fix);
+    assert!(
+        findings[0]
+            .message
+            .contains("Environment prod does not take its source"),
+        "{}",
+        findings[0]
+    );
+    assert!(
+        findings[0].fix.contains("fromPromotion: {path: dev-to-prod}"),
+        "{}",
+        findings[0].fix
+    );
     let mut spec = base(json!({}));
     spec["coverage"] = json!({"web": {"exclude": ["web-batch"], "require": ["web-api"]}});
     assert!(run_coverage(&world(), &[path(spec)], &listings()).is_empty());
 }
 
 /// The shell lists exactly the units the paths' coverage names that the
-/// source selects, so nothing else is rendered.
+/// source selects and whose kind judges deployments, so nothing else is
+/// rendered.
 #[test]
 fn test_coverage_units_are_the_named_selected_units() {
     let mut spec = base(json!({}));
-    spec["coverage"] = json!({"web": {}, "scratch": {}, "ghost": {}});
-    let units = coverage_units(&[path(spec)], &world().sources);
+    spec["coverage"] = json!({"web": {}, "db": {}, "scratch": {}, "ghost": {}});
+    let units = coverage_units(&[path(spec)], &world().sources, &drivers());
     assert_eq!(
         units,
         BTreeSet::from([(environment("dev"), UnitName::new("web").unwrap())])

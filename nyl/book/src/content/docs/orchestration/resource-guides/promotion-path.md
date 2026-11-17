@@ -90,8 +90,9 @@ environment. Every finding has a stable code and a fix:
 | `NYL-PROMOTE-VALUE-TYPE` | A value's type does not fit a unit field that reads it |
 | `NYL-PROMOTE-BINDING-UNKNOWN` | A `fromPromotion` binding names a path or value no path declares |
 | `NYL-ATTESTATION-UNDECLARED` | The path requires an attestation its unit or environment scope does not declare |
-| `NYL-PROMOTE-COVERAGE-UNKNOWN` | `coverage` names a unit the source does not select, a unit whose kind runs no deployments, or a group or deployment the unit does not run; the message lists the names it has |
-| `NYL-PROMOTE-COVERAGE-INEFFECTIVE` | A path that promotes only values sets a unit's `groups`, which only a source path uses |
+| `NYL-PROMOTE-COVERAGE-UNKNOWN` | `coverage` names a unit the source does not declare, select, or enable, a unit whose kind runs no deployments, or a group or deployment the unit does not run; the message lists the names it has |
+| `NYL-PROMOTE-COVERAGE-INEFFECTIVE` | A path that promotes only values sets a unit's `groups`, which only a source path uses, or the unit records nothing per deployment (a KubernetesPublication without `observe`) |
+| `NYL-PROMOTE-COVERAGE-UNCHECKED` | A coverage unit's deployments cannot be listed, such as when its target does not render; an error in `nyl validate`, a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates` |
 | `NYL-PROMOTE-UNSUPPORTED` | `changeGate: pullRequest`, or a DeploymentTarget in `from` or `to`: both arrive with M11 |
 
 Types are compared when both sides are known: what a selector reads (a rendered

@@ -67,10 +67,16 @@ field that reads it; a Release input's declared type is not compared yet),
 `NYL-PROMOTE-BINDING-UNKNOWN` (a `fromPromotion` binding names a path or value no
 path declares), `NYL-ATTESTATION-UNDECLARED` (a required attestation its scope
 does not declare), `NYL-PROMOTE-COVERAGE-UNKNOWN` (`coverage` names a unit
-the source does not select, a unit whose kind runs no deployments, or a group
-or deployment the unit's driver does not list for it),
+the source does not declare, select, or enable, a unit whose kind runs no
+deployments, or a group or deployment the unit's driver does not list for it),
 `NYL-PROMOTE-COVERAGE-INEFFECTIVE` (a path that promotes only values sets a
-unit's `groups`), and `NYL-PROMOTE-UNSUPPORTED`. A pointer into an optional
+unit's `groups`, or the unit's kind has no running-scoped attestations for its
+spec, so its entry selects nothing), `NYL-PROMOTE-COVERAGE-UNCHECKED` (the
+unit's deployments could not be listed, such as when its target does not
+render; an error in `nyl validate`, a warning in the commands that work on one
+environment, because they judge another environment only by what they need),
+`NYL-UNIT-KIND-UNKNOWN` for a coverage unit whose kind no driver serves, and
+`NYL-PROMOTE-UNSUPPORTED`. A pointer into an optional
 field the rendered spec omits resolves through the kind's schema.
 
 ### PromotionRecord
@@ -1034,13 +1040,20 @@ nothing itself, so there is one evidence path.
   only they explain does not block. An entry counts only for the unit it is
   keyed by. `groups` applies only to source paths: a value-only path judges
   each value for its own consumer, so validation refuses `groups` there with
-  `NYL-PROMOTE-COVERAGE-INEFFECTIVE`. `nyl validate` and `nyl plan` check
-  every name against what the unit's driver lists for the worktree, through
-  the same path checks, and refuse a unit the source does not select, a unit
+  `NYL-PROMOTE-COVERAGE-INEFFECTIVE`, as it refuses any entry of a unit
+  whose kind has no running-scoped attestations for its spec (such as a
+  publication without `observe`). `nyl validate`, `nyl plan`, `nyl reconcile`, `nyl promote`, and `nyl get promotion-candidates` check every name against what the
+  unit's driver lists for the worktree, through the same path checks, and
+  refuse a unit the source does not declare, select, or enable, a unit
   whose kind lists no deployments, and a group or deployment the unit does
-  not run with `NYL-PROMOTE-COVERAGE-UNKNOWN`; a KubernetesPublication lists
-  the deployments its resolved spec recorded, or renders its target for
-  validation, with each binding orchestration resolves taking a placeholder.
+  not run with `NYL-PROMOTE-COVERAGE-UNKNOWN`. When the driver cannot list
+  them, such as when the target does not render, the names are unchecked
+  (`NYL-PROMOTE-COVERAGE-UNCHECKED`): an error in `nyl validate`, a warning
+  in the others, which judge another environment only by what they need. A
+  KubernetesPublication lists the deployments its resolved spec recorded,
+  or renders its target for validation, with each binding orchestration
+  resolves taking a placeholder and `fromPublication` inputs read fresh or
+  from the cached branch, so it works offline.
   Coverage still never fails open at promotion time, for what changed since:
   a named group no deployment of the attestation belongs to, a coverage that
   leaves no deployment to judge while the attestation fails, and a `require`

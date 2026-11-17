@@ -215,10 +215,12 @@ scenario step yet; each gets one, or rule tests only, in the PR named:
 - `coverage`: PR 11 added it as flat fields (`applicationGroups`,
   `excludeApplications`, `requireApplications`); a follow-up made it per
   publication unit (`coverage.<unit>.{groups, exclude, require}`) with
-  neutral names. `validate` and `plan` check every name against what the
-  unit's driver lists (`Driver::deployments`, `NYL-PROMOTE-COVERAGE-UNKNOWN`),
-  and refuse `groups` on a value-only path
-  (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); promotion keeps refusing a name no
+  neutral names. `validate`, `plan`, `reconcile`, `promote`, and
+  `get promotion-candidates` check every name against what the unit's driver
+  lists (`Driver::deployments`, `NYL-PROMOTE-COVERAGE-UNKNOWN`; a listing that
+  fails is `NYL-PROMOTE-COVERAGE-UNCHECKED`, an error only in `validate`),
+  and refuse `groups` on a value-only path and coverage of a unit without
+  running-scoped attestations (`NYL-PROMOTE-COVERAGE-INEFFECTIVE`); promotion keeps refusing a name no
   attestation lists. Rule tests, a driver test, CLI tests, and the
   `value-only-promotion` walkthrough's last steps.
 - `NYL-PROMOTE-UNCHECKED` (a value without a known source commit) and

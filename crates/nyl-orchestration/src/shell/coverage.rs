@@ -21,17 +21,18 @@ use crate::rules::promotion_paths::{coverage_units, DeploymentListings};
 
 /// The deployments of every unit `paths` name in `coverage`
 /// ([`coverage_units`]), as their drivers list them from the specs
-/// `sources` rendered from `worktree`. A unit whose kind has no registered
-/// driver is left out; the unit checks report it.
+/// `sources` rendered from `worktree`, keeping what they render in
+/// `cache_dir` when the invocation has one.
 pub fn deployments(
     paths: &[PromotionPath],
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     drivers: &DriverSet,
     worktree: &Path,
     instances: &Instances,
+    cache_dir: Option<&Path>,
 ) -> DeploymentListings {
     let mut listings = DeploymentListings::new();
-    for (environment, unit) in coverage_units(paths, sources) {
+    for (environment, unit) in coverage_units(paths, sources, drivers) {
         let Some(source) = sources.get(&environment) else {
             continue;
         };
@@ -48,6 +49,7 @@ pub fn deployments(
             worktree,
             project_dir: &source.project_dir,
             instances,
+            cache_dir,
         };
         let listing = driver.deployments(&ctx, spec).map_err(|error| error.to_string());
         listings.insert((environment, unit), listing);

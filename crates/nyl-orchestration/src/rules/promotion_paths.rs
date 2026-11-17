@@ -25,12 +25,20 @@
 //! - [`Code::AttestationUndeclared`]: the path requires an attestation its scope
 //!   does not declare.
 //! - [`Code::PromoteCoverageUnknown`]: `coverage` names a unit the source
-//!   environment does not select, a unit whose kind runs no deployments, or
-//!   a group or deployment the unit's driver does not list
+//!   environment does not declare, select, or enable, a unit whose kind runs
+//!   no deployments, or a group or deployment the unit's driver does not list
 //!   ([`Driver::deployments`](nyl_core::orchestration::driver::Driver::deployments),
 //!   gathered by the shell into [`DeploymentListings`]).
 //! - [`Code::PromoteCoverageIneffective`]: a path that promotes only values
-//!   sets a unit's `groups`, which only a source path uses.
+//!   sets a unit's `groups`, which only a source path uses; or the unit's
+//!   kind has no running-scoped attestations for its spec, so its entry
+//!   selects nothing (and a `require` would refuse every promotion).
+//! - [`Code::PromoteCoverageUnchecked`]: the driver could not list a unit's
+//!   deployments, such as when its target does not render. `nyl validate`
+//!   refuses it; commands that work on one environment report it as a
+//!   warning ([`split_unchecked`]).
+//! - [`Code::UnitKindUnknown`]: `coverage` names a unit whose kind no
+//!   registered driver serves.
 //!
 //! Types are checked when both sides are known: what a selector reads (a
 //! rendered literal, a declared output's type, or the kind's schema at the
@@ -116,11 +124,50 @@ pub struct ValueReader {
 /// deployments, `Err` with why the driver could not list them.
 pub type DeploymentListings = BTreeMap<(EnvironmentName, UnitName), Result<Option<Vec<Deployment>>, String>>;
 
+/// What a unit a path's `coverage` names is in the source environment, as
+/// far as it can be told without listing its deployments.
+enum CoverageUnit<'a> {
+    /// No unit of that name is declared.
+    Missing,
+    /// The environment's `unitSelector` does not select it.
+    Unselected,
+    /// It is selected but disabled, so it renders no spec.
+    Disabled,
+    /// No registered driver serves its kind.
+    UnknownKind(&'a RenderedUnit),
+    /// Its kind has no running-scoped attestations for its spec, so no
+    /// promotion judges its deployments one by one.
+    NotJudged(&'a RenderedUnit),
+    /// Its driver can list its deployments.
+    Listable(&'a UnitName),
+}
+
+fn coverage_unit<'a>(source: &'a RenderedSource, drivers: &DriverSet, unit: &str) -> CoverageUnit<'a> {
+    let Some((name, rendered)) = source.units.iter().find(|(name, _)| name.as_str() == unit) else {
+        return CoverageUnit::Missing;
+    };
+    if !rendered.selected {
+        return CoverageUnit::Unselected;
+    }
+    if !ownership_set(source).contains_key(name) {
+        return CoverageUnit::Disabled;
+    }
+    let spec = rendered.spec.as_ref().expect("the ownership set holds rendered specs");
+    match drivers.get(&rendered.envelope.api_version, &rendered.envelope.kind) {
+        None => CoverageUnit::UnknownKind(rendered),
+        Some(driver) if driver.running_attestations(spec).is_empty() => CoverageUnit::NotJudged(rendered),
+        Some(_) => CoverageUnit::Listable(name),
+    }
+}
+
 /// The units whose deployments [`check`] needs listed for `paths`: each unit
-/// a path's `coverage` names that its source environment selects.
+/// a path's `coverage` names that its source environment selects and whose
+/// kind judges its deployments (it has running-scoped attestations), so
+/// nothing else is rendered.
 pub fn coverage_units(
     paths: &[PromotionPath],
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    drivers: &DriverSet,
 ) -> BTreeSet<(EnvironmentName, UnitName)> {
     let mut wanted = BTreeSet::new();
     for path in paths {
@@ -136,10 +183,9 @@ pub fn coverage_units(
         let Some(source) = sources.get(&environment) else {
             continue;
         };
-        let selected = ownership_set(source);
         for unit in path.spec.coverage.keys() {
-            if let Some((name, _)) = selected.iter().find(|(name, _)| name.as_str() == unit) {
-                wanted.insert((environment.clone(), (*name).clone()));
+            if let CoverageUnit::Listable(name) = coverage_unit(source, drivers, unit) {
+                wanted.insert((environment.clone(), name.clone()));
             }
         }
     }
@@ -257,11 +303,15 @@ fn check_path(inputs: &PathChecks<'_>, path: &PromotionPath) -> Vec<Finding> {
             );
         }
         findings.extend(check_attestations(inputs, path, source, from, &covered));
-        let promotes_source = endpoints
-            .get("to")
-            .and_then(|to| inputs.sources.get(to))
-            .map(|target| source_paths(target).is_some_and(|paths| paths.contains(name)));
-        findings.extend(check_coverage(inputs, path, source, from, promotes_source));
+        let target = endpoints.get("to").and_then(|to| {
+            inputs.sources.get(to).map(|target| {
+                (
+                    to.as_str(),
+                    source_paths(target).is_some_and(|paths| paths.contains(name)),
+                )
+            })
+        });
+        findings.extend(check_coverage(inputs, path, source, from, target));
     }
 
     for reader in inputs.readers {
@@ -417,46 +467,103 @@ fn check_attestations(
 }
 
 /// The path's `coverage` against what each named unit runs as: the unit is
-/// one the source selects, its kind lists deployments, and every group and
-/// deployment named is one it lists. `promotes_source` is whether the path
-/// promotes the target's source, when the target is known: a value-only
-/// path takes no `groups`.
+/// one the source selects and enables, its kind is registered and judges
+/// its deployments, and every group and deployment named is one its driver
+/// lists. `target` is the path's target environment with whether the path
+/// promotes its source, when the target is known: a value-only path takes no
+/// `groups`. A listing the driver could not make is
+/// [`Code::PromoteCoverageUnchecked`], which a command that needs only
+/// another environment may report as a warning.
+#[allow(clippy::too_many_lines)] // One entry: the unit, then each field, in the order the contract lists them.
 fn check_coverage(
     inputs: &PathChecks<'_>,
     path: &PromotionPath,
     source: &RenderedSource,
     from: &str,
-    promotes_source: Option<bool>,
+    target: Option<(&str, bool)>,
 ) -> Vec<Finding> {
     let name = &path.metadata.name;
     let mut findings = Vec::new();
-    let units = ownership_set(source);
     let environment = EnvironmentName::new(from).ok();
     for (unit, coverage) in &path.spec.coverage {
         let unknown = |message: String, fix: String| Finding::new(Code::PromoteCoverageUnknown, message, fix);
-        if !coverage.groups.is_empty() && promotes_source == Some(false) {
+        if let (false, Some((to, false))) = (coverage.groups.is_empty(), target) {
             findings.push(Finding::new(
                 Code::PromoteCoverageIneffective,
                 format!(
-                    "PromotionPath {name} sets coverage.{unit}.groups, but it promotes only values, and each value is judged for the deployment that consumes it, whatever its group"
+                    "PromotionPath {name} sets coverage.{unit}.groups, but Environment {to} does not take its source from the path (its `source.fromPromotion` does not name {name}), so the path promotes only values, and each value is judged for the deployment that consumes it, whatever its group"
                 ),
                 format!(
-                    "remove coverage.{unit}.groups; to leave a deployment out of a value's judgement, list it in coverage.{unit}.exclude"
+                    "remove coverage.{unit}.groups and list a deployment to leave out of a value's judgement in coverage.{unit}.exclude, or make the path promote {to}'s source with `source: {{fromPromotion: {{path: {name}}}}}` on Environment {to}"
                 ),
             ));
         }
-        let Some((unit_name, found)) = units.iter().find(|(known, _)| known.as_str() == unit) else {
-            findings.push(unknown(
-                format!(
-                    "PromotionPath {name} names unit {unit:?} in `coverage`, which Environment {from} does not select"
-                ),
-                format!("key coverage by a unit Environment {from} runs (`nyl get units -e {from}` lists them)"),
-            ));
-            continue;
+        let unit_name = match coverage_unit(source, inputs.drivers, unit) {
+            CoverageUnit::Missing => {
+                findings.push(unknown(
+                    format!("PromotionPath {name} names unit {unit:?} in `coverage`, but Environment {from} declares no such unit"),
+                    format!("key coverage by a unit Environment {from} runs (`nyl get units -e {from}` lists them)"),
+                ));
+                continue;
+            }
+            CoverageUnit::Unselected => {
+                findings.push(unknown(
+                    format!("PromotionPath {name} names unit {unit:?} in `coverage`, which Environment {from} does not select (its `unitSelector` does not match the unit's labels)"),
+                    format!("key coverage by a unit Environment {from} runs (`nyl get units -e {from}` lists them)"),
+                ));
+                continue;
+            }
+            CoverageUnit::Disabled => {
+                findings.push(unknown(
+                    format!("PromotionPath {name} names unit {unit:?} in `coverage`, which is disabled in Environment {from}"),
+                    format!("enable unit {unit} in Environment {from}, or remove coverage.{unit}"),
+                ));
+                continue;
+            }
+            CoverageUnit::UnknownKind(found) => {
+                findings.push(Finding::new(
+                    Code::UnitKindUnknown,
+                    format!(
+                        "PromotionPath {name} names unit {unit} in `coverage`, whose kind {}/{} no registered driver serves",
+                        found.envelope.api_version, found.envelope.kind
+                    ),
+                    "use a unit kind this Nyl supports (`nyl validate` lists the unit's own finding), or remove the coverage entry",
+                ));
+                continue;
+            }
+            CoverageUnit::NotJudged(found) => {
+                let kind = &found.envelope.kind;
+                for (field, names) in [("groups", &coverage.groups), ("exclude", &coverage.exclude)] {
+                    if !names.is_empty() {
+                        findings.push(Finding::new(
+                            Code::PromoteCoverageIneffective,
+                            format!(
+                                "PromotionPath {name} sets coverage.{unit}.{field}, but unit {unit} (kind {kind}) records no attestation of what each of its deployments runs, so there is nothing for it to select"
+                            ),
+                            format!(
+                                "turn on the unit's observation of what runs (an option of kind {kind}), or remove coverage.{unit}.{field}"
+                            ),
+                        ));
+                    }
+                }
+                if !coverage.require.is_empty() {
+                    findings.push(Finding::new(
+                        Code::PromoteCoverageIneffective,
+                        format!(
+                            "PromotionPath {name} sets coverage.{unit}.require, but unit {unit} (kind {kind}) records no attestation of what each of its deployments runs, so every promotion along the path would be refused"
+                        ),
+                        format!(
+                            "turn on the unit's observation of what runs (an option of kind {kind}), or remove coverage.{unit}.require"
+                        ),
+                    ));
+                }
+                continue;
+            }
+            CoverageUnit::Listable(unit_name) => unit_name,
         };
         let Some(listing) = environment
             .as_ref()
-            .and_then(|environment| inputs.deployments.get(&(environment.clone(), (*unit_name).clone())))
+            .and_then(|environment| inputs.deployments.get(&(environment.clone(), unit_name.clone())))
         else {
             continue;
         };
@@ -464,18 +571,16 @@ fn check_coverage(
             Ok(Some(deployments)) => deployments,
             Ok(None) => {
                 findings.push(unknown(
-                    format!(
-                        "PromotionPath {name} names unit {unit} in `coverage`, but its kind {} runs no deployments a path can select",
-                        found.envelope.kind
-                    ),
+                    format!("PromotionPath {name} names unit {unit} in `coverage`, but its kind runs no deployments a path can select"),
                     format!("remove coverage.{unit}: only a unit whose kind lists its deployments takes coverage"),
                 ));
                 continue;
             }
             Err(error) => {
-                findings.push(unknown(
-                    format!("PromotionPath {name}: cannot list the deployments of unit {unit} to check coverage.{unit}: {error}"),
-                    format!("correct unit {unit}'s declaration so its kind can list what it runs; `nyl validate` reports why"),
+                findings.push(Finding::new(
+                    Code::PromoteCoverageUnchecked,
+                    format!("PromotionPath {name}: the deployments of unit {unit} in Environment {from} cannot be listed, so coverage.{unit} is not checked: {error}"),
+                    format!("correct what the error names in unit {unit}'s declaration or its target; until then a promotion still refuses a coverage.{unit} name no attestation lists"),
                 ));
                 continue;
             }
@@ -491,7 +596,7 @@ fn check_coverage(
                     "PromotionPath {name} names group {group:?} in coverage.{unit}.groups, but no deployment of unit {unit} belongs to it (its groups: {})",
                     list_set(&groups)
                 ),
-                format!("name a group unit {unit} deploys, as `nyl validate` lists them"),
+                format!("name one of the groups of unit {unit} listed in the message"),
             ));
         }
         for (field, named) in [("exclude", &coverage.exclude), ("require", &coverage.require)] {
@@ -507,6 +612,17 @@ fn check_coverage(
         }
     }
     findings
+}
+
+/// Split `findings` into the errors of a command that works on one
+/// environment and its warnings: a listing that could not be made
+/// ([`Code::PromoteCoverageUnchecked`]) concerns the source environment's
+/// declaration, which such a command does not need, so it warns there;
+/// `nyl validate` keeps it an error.
+pub fn split_unchecked(findings: Vec<Finding>) -> (Vec<Finding>, Vec<Finding>) {
+    findings
+        .into_iter()
+        .partition(|finding| finding.code != Code::PromoteCoverageUnchecked)
 }
 
 fn list_set(names: &BTreeSet<&str>) -> String {

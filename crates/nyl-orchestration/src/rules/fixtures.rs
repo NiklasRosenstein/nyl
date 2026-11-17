@@ -302,6 +302,17 @@ impl Driver for TestDriver {
             .map(str::to_owned)
             .collect()
     }
+    /// The names a spec's `runs` lists: running-scoped attestations, which
+    /// say what each of the unit's deployments runs.
+    fn running_attestations(&self, spec: &Value) -> Vec<String> {
+        spec.get("runs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    }
     fn validate_spec(&self, spec: &Value) -> Result<(), String> {
         if spec.get("broken").is_some() {
             return Err("spec.broken is not a field".to_owned());

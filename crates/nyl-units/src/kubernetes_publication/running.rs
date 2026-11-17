@@ -129,6 +129,7 @@ pub(crate) fn deployments(
             ctx.worktree,
             std::path::Path::new(ctx.project_dir),
             ctx.instances,
+            ctx.cache_dir,
             spec,
         )?;
         ReconcilerFacts::of(&rendered)

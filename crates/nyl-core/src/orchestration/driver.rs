@@ -304,6 +304,9 @@ pub struct DeploymentContext<'a> {
     pub project_dir: &'a str,
     /// The instances of EnvironmentTemplates the caller knows.
     pub instances: &'a super::instance::Instances,
+    /// A cache directory of the invocation's workspace, when it has one; a
+    /// driver that renders keeps nothing between calls without it.
+    pub cache_dir: Option<&'a std::path::Path>,
 }
 
 /// What a deployment runs, as a running-scoped attestation shows it.
