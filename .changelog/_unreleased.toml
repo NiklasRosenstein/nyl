@@ -147,3 +147,9 @@ id = "eb59c3a1-c2f9-4ca9-80ce-edb3d981951f"
 type = "feature"
 description = "Promotion validation types a selector's pointer into an artifact through the producing kind's declaration of the artifact (`OciImage`'s `ContainerImage`: `repository`, `digest`, `reference`, `platforms`, `tags`): a pointer the artifact lacks, or an artifact name the kind does not publish, is `NYL-PROMOTE-SELECTOR-INVALID`, and its type must fit the bindings that read the value (`NYL-PROMOTE-VALUE-TYPE`)"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "4bc18392-ef42-4403-9853-50ebf34ac0b1"
+type = "improvement"
+description = "Teardown text that the orchestration engine writes for every kind no longer speaks of Argo CD or Applications: a teardown wait's terminal prompt says the unit waits for its deployments to be removed, and an `observe` wait with no observation is uncertain with `observation-failed: the driver made no removal observation`. KubernetesPublication's own messages keep their Argo CD terms. The released codes and reason tokens are unchanged, including `NYL-TEARDOWN-APPLICATIONS-ORPHANED` and the other KubernetesPublication teardown readiness codes, and `applications-remain`."
+author = "@NiklasRosenstein"

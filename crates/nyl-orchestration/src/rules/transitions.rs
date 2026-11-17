@@ -411,7 +411,7 @@ mod tests {
         let unit = fixtures::desired("database", "Command", json!({}), "a");
         let since: Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
         let waiting = TeardownWaiting {
-            phase: "applications-removed".to_owned(),
+            phase: "deployments-removed".to_owned(),
             reason: "waiting".to_owned(),
             since,
             until: None,
@@ -433,7 +433,7 @@ mod tests {
         let failed = Event::Uncertain {
             since,
             run: run(),
-            reason: "the wait could not observe Argo CD".to_owned(),
+            reason: "the wait could not observe the removal".to_owned(),
         };
         let Ok(Applied::Changed(after)) = apply_to(&unit, Some(&waited), failed) else {
             panic!("an uncertain outcome changes the observed document");

@@ -104,7 +104,7 @@ pub(crate) fn wait(context: &RunContext<'_>, request: &WaitRequest<'_>) -> WaitE
                 .unwrap_or(request.deadline)
                 .min(request.deadline);
             let message = format!(
-                "{}/{unit} waits for its workload Applications to be removed ({}, {} left); press Enter to confirm they are gone",
+                "{}/{unit} waits for its deployments to be removed ({}, {} left); press Enter to confirm they are gone",
                 request.environment,
                 request.waiting.reason,
                 seconds_between(now, end),
@@ -315,8 +315,8 @@ mod tests {
 
     fn waiting() -> TeardownWaiting {
         TeardownWaiting {
-            phase: "applications-removed".to_owned(),
-            reason: "phase 1 removed the workload Applications".to_owned(),
+            phase: "deployments-removed".to_owned(),
+            reason: "phase 1 removed the deployments".to_owned(),
             since: time(0),
             until: None,
             phase1_commit: Some(phase1()),
@@ -527,10 +527,10 @@ mod tests {
         };
         let clock = HookedClock::new(|_| {});
         let mut failing = observing(&[]);
-        failing.resolved_spec.as_mut().unwrap()["removalFails"] = json!("Argo CD rejected the token (401)");
+        failing.resolved_spec.as_mut().unwrap()["removalFails"] = json!("the reconciler rejected the token (401)");
         assert_eq!(
             reason(wait_for(&store, &clock, &failing, None, &Cancellation::new())),
-            "observation-failed: Argo CD rejected the token (401)"
+            "observation-failed: the reconciler rejected the token (401)"
         );
         let mut unsupported = observing(&[]);
         unsupported.resolved_spec.as_mut().unwrap()["removalUnsupported"] = json!(true);

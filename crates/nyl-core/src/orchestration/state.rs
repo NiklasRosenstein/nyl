@@ -634,7 +634,7 @@ pub struct OperatorModification {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TeardownWaiting {
-    /// The driver's phase name, such as `applications-removed`.
+    /// The driver's phase name, such as KubernetesPublication's `applications-removed`.
     pub phase: String,
     pub reason: String,
     /// When the phase was published: the start of a `delay` wait.

@@ -259,23 +259,34 @@ codes! {
     /// A teardown proceeded, or would proceed, without everything removed:
     /// an unmet readiness requirement or an unconfirmed removal.
     TeardownIncomplete => "NYL-TEARDOWN-INCOMPLETE",
-    /// Teardown readiness: the catalog does not prune removed workload
-    /// Applications on its own, because it does not sync with pruning or its
-    /// `Prune` sync option waits for confirmation or skips them (blocking).
+    /// Teardown readiness (blocking): the target would not remove a
+    /// deployment that leaves it on its own. The KubernetesPublication
+    /// driver raises it when the catalog does not prune removed workload
+    /// Applications, because it does not sync with pruning or its `Prune`
+    /// sync option waits for confirmation or skips them. The code's name is
+    /// kept as released.
     TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
-    /// Teardown readiness: deleting an Application orphans its workloads (blocking).
+    /// Teardown readiness (blocking): removing a deployment would leave its
+    /// workloads running. The KubernetesPublication driver raises it when
+    /// deleting an Application orphans its workloads. The code's name is
+    /// kept as released.
     TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",
-    /// Teardown readiness: a resource a workload Application would delete,
-    /// whose own sync options or the Application's `syncPolicy.syncOptions`
-    /// resolve `Delete` or `Prune` to `confirm`, holds the Application's
-    /// finalizer until someone confirms the deletion in Argo CD (blocking).
-    /// An owned Namespace with the default `prunePolicy` or `deletePolicy`
-    /// of `Confirm` is the usual case.
+    /// Teardown readiness (blocking): a resource a deployment's removal
+    /// deletes waits for someone to confirm its deletion. The
+    /// KubernetesPublication driver raises it when a resource a workload
+    /// Application would delete, whose own sync options or the
+    /// Application's `syncPolicy.syncOptions` resolve `Delete` or `Prune` to
+    /// `confirm`, holds the Application's finalizer until someone confirms
+    /// the deletion in Argo CD; an owned Namespace with the default
+    /// `prunePolicy` or `deletePolicy` of `Confirm` is the usual case.
     TeardownNamespaceConfirm => "NYL-TEARDOWN-NAMESPACE-CONFIRM",
-    /// Teardown readiness: owned Namespaces remain after teardown (remnant).
+    /// Teardown readiness (remnant): resources the target owns remain after
+    /// teardown. The KubernetesPublication driver raises it for owned
+    /// Namespaces.
     TeardownNamespacesRemain => "NYL-TEARDOWN-NAMESPACES-REMAIN",
-    /// Teardown readiness: a self-managing catalog Application and its
-    /// AppProjects remain after teardown (remnant).
+    /// Teardown readiness (remnant): the target's own catalog remains after
+    /// teardown. The KubernetesPublication driver raises it for a
+    /// self-managing catalog Application and its AppProjects.
     TeardownCatalogRemains => "NYL-TEARDOWN-CATALOG-REMAINS",
     /// Teardown readiness: the unit's teardown waits for an operator to
     /// confirm the removal, so an unattended removal, such as the expiry of a
