@@ -34,7 +34,8 @@
 //!   kind has no running-scoped attestations for its spec, so its entry
 //!   selects nothing (and a `require` would refuse every promotion).
 //! - [`Code::PromoteCoverageUnchecked`]: the driver could not list a unit's
-//!   deployments, such as when its target does not render. `nyl validate`
+//!   deployments, such as when what its declaration renders from cannot be
+//!   read. `nyl validate`
 //!   refuses it; commands that work on one environment report it as a
 //!   warning ([`split_unchecked`]).
 //! - [`Code::UnitKindUnknown`]: `coverage` names a unit whose kind no
@@ -580,7 +581,7 @@ fn check_coverage(
                 findings.push(Finding::new(
                     Code::PromoteCoverageUnchecked,
                     format!("PromotionPath {name}: the deployments of unit {unit} in Environment {from} cannot be listed, so coverage.{unit} is not checked: {error}"),
-                    format!("correct what the error names in unit {unit}'s declaration or its target; until then a promotion still refuses a coverage.{unit} name no attestation lists"),
+                    format!("correct what the error names in unit {unit}'s declaration or what it renders from; until then a promotion still refuses a coverage.{unit} name no attestation lists"),
                 ));
                 continue;
             }

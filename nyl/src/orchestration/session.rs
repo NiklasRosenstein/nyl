@@ -500,8 +500,8 @@ impl Session {
     /// The finding returned is the first; its message counts the others, and
     /// `nyl validate` lists them all. Without one, the warnings: the values
     /// promoted into this environment that the supersede check cannot check
-    /// (`NYL-PROMOTE-UNCHECKED`), which `nyl plan` lists, and the coverage a
-    /// unit of another environment could not be listed for
+    /// (`NYL-PROMOTE-UNCHECKED`), which `nyl plan` lists, and the coverage whose
+    /// unit's deployments could not be listed, in any environment
     /// (`NYL-PROMOTE-COVERAGE-UNCHECKED`), which every caller reports
     /// ([`coverage_warnings`]).
     pub fn check_promotion_paths(&self, wiring: &Wiring<'_>) -> Result<Vec<Finding>, Finding> {

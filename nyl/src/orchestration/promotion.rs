@@ -53,10 +53,11 @@ pub fn findings(
 /// environments its paths connect it to, as `nyl validate` does. The second
 /// list holds the warnings: the values the supersede check cannot check
 /// into `environment` (`NYL-PROMOTE-UNCHECKED`,
-/// [`promotion_paths::unchecked`]), and the coverage a unit of another
-/// environment could not be listed for (`NYL-PROMOTE-COVERAGE-UNCHECKED`,
-/// [`promotion_paths::split_unchecked`]), which a command working on this
-/// environment does not need.
+/// [`promotion_paths::unchecked`]), and the coverage whose unit's
+/// deployments could not be listed (`NYL-PROMOTE-COVERAGE-UNCHECKED`,
+/// [`promotion_paths::split_unchecked`]), in whichever environment the unit
+/// is: a promotion still fails closed on such coverage, so a command does
+/// not need the listing to proceed.
 pub fn findings_for(
     inventory: &GitOpsInventory,
     environment: &EnvironmentName,

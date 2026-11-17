@@ -466,14 +466,16 @@ mod tests {
     }
 
     /// Coverage is per unit, with each deployment counted by its own unit's
-    /// entry, and the record lists every unit's exclusions once. Catches an
-    /// exclusion of one unit leaking into another's aggregate.
+    /// entry, and the record lists each unit's exclusions under that unit,
+    /// sorted and each name once, leaving out a unit that excludes nothing.
+    /// Catches an exclusion of one unit leaking into another's aggregate.
     #[test]
     fn test_coverage_is_per_unit() {
         let mut spec = base();
         spec["coverage"] = json!({
             "kubernetes": {"groups": ["web"], "exclude": ["web-batch"], "require": ["web-gateway"]},
-            "edge": {"exclude": ["web-batch", "edge-canary"]},
+            "edge": {"exclude": ["web-batch", "edge-canary", "web-batch"]},
+            "gateway": {"require": ["gateway"]},
         });
         let path = path(spec).unwrap();
         let kubernetes = path.spec.unit_coverage("kubernetes").unwrap();
