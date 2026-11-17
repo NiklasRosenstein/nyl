@@ -320,8 +320,10 @@ impl GitRecordWriter {
     /// lists shows once the commit is made, before it is pushed.
     fn signing_configured(&self) -> Result<(), RecordWriteError> {
         let config = |key: &str| self.git(&["config", "--get", key]).unwrap_or_default();
+        // Git's own reading of a boolean (`yes`, `on`, `1`, …).
+        let bool_config = |key: &str| self.git(&["config", "--type=bool", "--get", key]).unwrap_or_default() == "true";
         let missing: Vec<&str> = [
-            ("commit.gpgsign", config("commit.gpgsign") == "true"),
+            ("commit.gpgsign", bool_config("commit.gpgsign")),
             ("gpg.format", config("gpg.format") == "ssh"),
             ("user.signingkey", !config("user.signingkey").is_empty()),
         ]
@@ -660,12 +662,16 @@ impl PromotionBlockVerifier for GitBlockVerifier<'_> {
                 "the allowed signers file {allowed_signers} does not exist"
             )));
         }
-        BlockSignatures {
+        let signatures = BlockSignatures {
             git_dir: self.git_dir.clone(),
             worktree: self.inventory.worktree_root.clone(),
             git_env: Vec::new(),
-        }
-        .verify(
+        };
+        // The allowed signers file is read from the commit too, so an
+        // uncommitted or untracked file on the runner cannot widen whom a
+        // run trusts.
+        signatures.committed(&signers, "the allowed signers file")?;
+        signatures.verify(
             &self.inventory.project_root.join(&resource.source_path),
             (resource.document_index, &resource.raw_document),
             &signers,
@@ -816,13 +822,10 @@ impl BlockSignatures {
         }
     }
 
-    /// The `git log -L` range of the block in `file`, once the file is
-    /// tracked, holds what `HEAD` carries, and the range parses to the block.
-    fn block_range(
-        &self,
-        file: &std::path::Path,
-        (index, document): (usize, &str),
-    ) -> Result<String, BlockSignatureError> {
+    /// `file`'s path relative to the worktree, once Git tracks it and it
+    /// holds exactly what `HEAD` carries, so what is read is what a commit
+    /// says. `what` names what the file carries, for the messages.
+    fn committed(&self, file: &std::path::Path, what: &str) -> Result<String, BlockSignatureError> {
         let unreadable = BlockSignatureError::Unreadable;
         let worktree = std::fs::canonicalize(&self.worktree).unwrap_or_else(|_| self.worktree.clone());
         let canonical = std::fs::canonicalize(file)
@@ -835,20 +838,32 @@ impl BlockSignatures {
         let pathspec = format!(":(literal){relative}");
         if self.git(&["ls-files", "--error-unmatch", "--", &pathspec]).is_err() {
             return Err(unreadable(format!(
-                "{relative} is not tracked by Git, so no commit carries its block"
+                "{relative} is not tracked by Git, so no commit carries {what}"
             )));
         }
         let committed = self
             .git(&["rev-parse", "--verify", "--quiet", &format!("HEAD:{relative}")])
-            .map_err(|_| unreadable(format!("{relative} is not in HEAD, so no commit carries its block")))?;
+            .map_err(|_| unreadable(format!("{relative} is not in HEAD, so no commit carries {what}")))?;
         let on_disk = self
             .git(&["hash-object", &format!("--path={relative}"), "--", &relative])
             .map_err(unreadable)?;
         if committed != on_disk {
             return Err(unreadable(format!(
-                "{relative} has uncommitted changes, so the block read is not the one a commit carries"
+                "{relative} has uncommitted changes, so {what} read is not what a commit carries"
             )));
         }
+        Ok(relative)
+    }
+
+    /// The `git log -L` range of the block in `file`, once the file is
+    /// tracked, holds what `HEAD` carries, and the range parses to the block.
+    fn block_range(
+        &self,
+        file: &std::path::Path,
+        (index, document): (usize, &str),
+    ) -> Result<String, BlockSignatureError> {
+        let unreadable = BlockSignatureError::Unreadable;
+        let relative = self.committed(file, "the block")?;
         let contents =
             std::fs::read_to_string(file).map_err(|error| unreadable(format!("cannot read {relative}: {error}")))?;
         let start = crate::cli::resource_file::document_start(&contents, index, document)
@@ -1345,6 +1360,26 @@ spec:
 
     fn verify_in(clone: &Path, document: &str, allowed: &Path) -> Result<CommitId, BlockSignatureError> {
         signatures(clone).verify(&clone.join("prod.yaml"), (2, document), allowed)
+    }
+
+    /// A file is read as committed only when Git tracks it and it holds what
+    /// `HEAD` carries, as the allowed signers file must. Catches an
+    /// untracked or locally edited signers file widening whom a run trusts.
+    #[test]
+    fn test_committed_refuses_untracked_and_edited_files() {
+        let world = world();
+        let signatures = signatures(&world.clone);
+        let tracked = world.clone.join("other.yaml");
+        assert_eq!(signatures.committed(&tracked, "the file").unwrap(), "other.yaml");
+        std::fs::write(&tracked, "a: 2\n").unwrap();
+        let edited = signatures.committed(&tracked, "the file").unwrap_err();
+        assert!(edited.to_string().contains("uncommitted changes"), "{edited}");
+        let untracked = world.clone.join("allowed_signers");
+        std::fs::write(&untracked, "someone ssh-ed25519 AAAA\n").unwrap();
+        let error = signatures
+            .committed(&untracked, "the allowed signers file")
+            .unwrap_err();
+        assert!(error.to_string().contains("not tracked"), "{error}");
     }
 
     /// An allowed signers file for tests that never reach `verify-commit`.

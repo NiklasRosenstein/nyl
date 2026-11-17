@@ -392,7 +392,7 @@ trusted, and dev's state is not read.
   signed with OpenPGP or X.509 (only an SSH signature header counts, and
   no keyring is consulted), and when the clone is shallow, the
   Environment's file differs from what the checked-out commit carries, the
-  allowed signers file is missing, or the tools are missing. A later hand
+  allowed signers file is missing, untracked, or differs from what the checked-out commit carries, or the tools are missing. A later hand
   edit inside the block is the block's last change and needs a signature
   of its own; an edit elsewhere in the file does not.
 - **Key validity.** `valid-after` and `valid-before` options in the allowed
