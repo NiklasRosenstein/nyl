@@ -63,7 +63,14 @@ names a unit the source does not select, or the path does not cover),
 `NYL-PROMOTE-SELECTOR-INVALID` (a pointer that resolves neither in the unit's
 rendered spec nor in its kind's schema, an undeclared or `sensitive` output, or a
 malformed selector), `NYL-PROMOTE-VALUE-TYPE` (a value's type does not fit a unit
-field that reads it; a Release input's declared type is not compared yet),
+field that reads it, or the type the unit's driver reads for a field its
+kind's schema cannot type, such as the declared type of the Release input a
+target's `releaseInputs` binding fills, `Driver::bound_field_types`),
+`NYL-PROMOTE-VALUE-TYPE-UNCHECKED` (the driver could not read that type, such
+as from a remote source neither fetched nor cached; offline, `nyl validate
+--offline` and `--local` runs, reads the cache only; an error in `nyl
+validate`, a warning in the commands that work on one environment, since
+resolution checks the value again),
 `NYL-PROMOTE-BINDING-UNKNOWN` (a `fromPromotion` binding names a path or value no
 path declares), `NYL-ATTESTATION-UNDECLARED` (a required attestation its scope
 does not declare), `NYL-PROMOTE-COVERAGE-UNKNOWN` (`coverage` names a unit

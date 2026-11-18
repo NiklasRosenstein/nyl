@@ -140,8 +140,8 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
         )
     };
     // A broken path, binding, or promoted source is refused as `plan` and `reconcile` refuse it.
-    let coverage_warnings = match session.check_promotion_paths(wiring) {
-        Ok(warnings) => crate::orchestration::session::coverage_warnings(&warnings),
+    let unchecked_warnings = match session.check_promotion_paths(wiring) {
+        Ok(warnings) => crate::orchestration::session::unchecked_warnings(&warnings),
         Err(finding) => return Ok(report_for(finding)),
     };
     match prepare(args, wiring, &session, &path) {
@@ -206,7 +206,7 @@ pub fn run(args: &PromoteArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
                 Err(Stop::Error(error)) => return Err(error),
             };
             let mut warnings = session.resolved.warnings.clone();
-            warnings.extend(coverage_warnings);
+            warnings.extend(unchecked_warnings);
             warnings.append(&mut report.warnings);
             report.warnings = warnings;
             Ok(render(&report, args.output))

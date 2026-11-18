@@ -40,20 +40,27 @@
 //!   warning ([`split_unchecked`]).
 //! - [`Code::UnitKindUnknown`]: `coverage` names a unit whose kind no
 //!   registered driver serves.
+//! - [`Code::PromoteValueTypeUnchecked`]: the driver could not read the
+//!   declared type of a field a binding fills (gathered by the shell into
+//!   [`BoundFieldTypes`]), such as a Release input declared in a remote
+//!   source that is neither fetched nor cached, so a value of known type is
+//!   not compared with it. `nyl validate` refuses it; commands that work on
+//!   one environment report it as a warning ([`split_unchecked`]).
 //!
 //! Types are checked when both sides are known: what a selector reads (a
 //! rendered literal, a declared output's type, the kind's schema at the
 //! pointer, or the schema the producing kind declares for an artifact,
 //! [`Driver::artifact_schema`]) against what the reading place accepts (the
-//! kind's schema at the field a unit's `fromPromotion` binding replaces). An
-//! unknown side fits anything; a Release input's declared type is not read
-//! yet.
+//! kind's schema at the field a unit's `fromPromotion` binding replaces, or,
+//! where the schema cannot type it, the type the unit's driver reads from
+//! what declares the field, [`Driver::bound_field_types`], such as a Release
+//! input's declaration). An unknown side fits anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::PromotionInputSource;
 use nyl_core::orchestration::codes::{Code, Finding};
-use nyl_core::orchestration::driver::{ArtifactSchema, Deployment, Driver, DriverSet};
+use nyl_core::orchestration::driver::{ArtifactSchema, BoundFieldType, Deployment, Driver, DriverSet};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_core::orchestration::ports::{RenderedSource, RenderedUnit};
 use nyl_core::resources::promotion::{PromotionPath, SelectForm};
@@ -104,6 +111,20 @@ impl ValueType {
     }
 }
 
+impl From<nyl_core::bindings::InputType> for ValueType {
+    fn from(declared: nyl_core::bindings::InputType) -> Self {
+        use nyl_core::bindings::InputType;
+        match declared {
+            InputType::String => Self::String,
+            InputType::Integer => Self::Integer,
+            InputType::Number => Self::Number,
+            InputType::Boolean => Self::Boolean,
+            InputType::Object => Self::Object,
+            InputType::Array => Self::Array,
+        }
+    }
+}
+
 fn is_reference(fields: &serde_json::Map<String, Value>) -> bool {
     fields.len() == 1 && (fields.contains_key("fromUnit") || fields.contains_key("fromPromotion"))
 }
@@ -119,6 +140,70 @@ pub struct ValueReader {
     pub binding: PromotionInputSource,
     /// The type the place accepts, when known.
     pub expected: Option<ValueType>,
+    /// The unit whose spec holds the binding and its JSON Pointer there,
+    /// when a unit's spec holds it: where [`BoundFieldTypes`] types a place
+    /// the kind's schema cannot.
+    pub field: Option<(UnitName, String)>,
+    /// Why the type the place accepts could not be read, when its driver
+    /// says it has one ([`BoundFieldType::Unchecked`]).
+    pub unchecked: Option<String>,
+}
+
+/// The types the drivers of units read for the fields their specs' bindings
+/// fill and their kinds' schemas cannot type ([`Driver::bound_field_types`]),
+/// by environment and unit, as the shell gathered them for
+/// [`untyped_fields`]: `Err` with why the driver could read none of them. A
+/// unit or pointer missing here is not typed, which fits any value.
+pub type BoundFieldTypes = BTreeMap<(EnvironmentName, UnitName), Result<BTreeMap<String, BoundFieldType>, String>>;
+
+/// The fields whose types [`check`] asks the units' drivers for: each
+/// binding in a unit's spec whose kind's schema cannot type it, by
+/// environment and unit, limited to `only`'s bindings when set, as
+/// [`check`] limits them.
+pub fn untyped_fields(
+    readers: &[ValueReader],
+    only: Option<&EnvironmentName>,
+) -> BTreeMap<(EnvironmentName, UnitName), Vec<String>> {
+    let mut wanted: BTreeMap<(EnvironmentName, UnitName), Vec<String>> = BTreeMap::new();
+    for reader in readers
+        .iter()
+        .filter(|reader| reader.expected.is_none() && only.is_none_or(|only| *only == reader.environment))
+    {
+        if let Some((unit, pointer)) = &reader.field {
+            let pointers = wanted.entry((reader.environment.clone(), unit.clone())).or_default();
+            if !pointers.contains(pointer) {
+                pointers.push(pointer.clone());
+            }
+        }
+    }
+    wanted
+}
+
+/// `readers` with the types `bound` holds for the places their kinds'
+/// schemas cannot type, and why a type could not be read.
+fn typed_readers(readers: &[ValueReader], bound: &BoundFieldTypes) -> Vec<ValueReader> {
+    readers
+        .iter()
+        .cloned()
+        .map(|mut reader| {
+            if reader.expected.is_some() {
+                return reader;
+            }
+            let Some((unit, pointer)) = &reader.field else {
+                return reader;
+            };
+            match bound.get(&(reader.environment.clone(), unit.clone())) {
+                Some(Ok(types)) => match types.get(pointer) {
+                    Some(BoundFieldType::Typed(declared)) => reader.expected = Some((*declared).into()),
+                    Some(BoundFieldType::Unchecked(reason)) => reader.unchecked = Some(reason.clone()),
+                    None => {}
+                },
+                Some(Err(reason)) => reader.unchecked = Some(reason.clone()),
+                None => {}
+            }
+            reader
+        })
+        .collect()
 }
 
 /// What each unit a path's `coverage` names runs as, by the path's source
@@ -215,17 +300,20 @@ pub struct PathChecks<'a> {
     /// The deployments of the units the paths' `coverage` names
     /// ([`coverage_units`]); a unit missing here is not checked.
     pub deployments: &'a DeploymentListings,
+    /// The types the drivers read for the places in `readers` their kinds'
+    /// schemas cannot type ([`untyped_fields`]).
+    pub bound_types: &'a BoundFieldTypes,
 }
 
 /// Every finding for every path: all are listed, never the first only.
 pub fn check(inputs: &PathChecks<'_>) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let typed = typed_readers(inputs.readers, inputs.bound_types);
     for path in inputs.paths {
         findings.extend(path.unsupported());
-        findings.extend(check_path(inputs, path));
+        findings.extend(check_path(inputs, &typed, path));
     }
-    let readers = inputs
-        .readers
+    let readers = typed
         .iter()
         .filter(|reader| inputs.only.is_none_or(|only| *only == reader.environment))
         .cloned()
@@ -242,7 +330,7 @@ pub fn check(inputs: &PathChecks<'_>) -> Vec<Finding> {
 }
 
 #[allow(clippy::too_many_lines)] // One path: endpoints, selectors, scopes, and readers, in the order the contract lists them.
-fn check_path(inputs: &PathChecks<'_>, path: &PromotionPath) -> Vec<Finding> {
+fn check_path(inputs: &PathChecks<'_>, readers: &[ValueReader], path: &PromotionPath) -> Vec<Finding> {
     let name = &path.metadata.name;
     let mut findings = Vec::new();
     let mut endpoints = BTreeMap::new();
@@ -317,7 +405,7 @@ fn check_path(inputs: &PathChecks<'_>, path: &PromotionPath) -> Vec<Finding> {
         findings.extend(check_coverage(inputs, path, source, from, target));
     }
 
-    for reader in inputs.readers {
+    for reader in readers {
         findings.extend(check_reader(path, &endpoints, &value_types, reader));
     }
     findings
@@ -400,14 +488,7 @@ fn select_type(
             if select.pointer.is_some() {
                 return Ok(None);
             }
-            Ok(Some(match declaration.output_type {
-                nyl_core::bindings::InputType::String => ValueType::String,
-                nyl_core::bindings::InputType::Integer => ValueType::Integer,
-                nyl_core::bindings::InputType::Number => ValueType::Number,
-                nyl_core::bindings::InputType::Boolean => ValueType::Boolean,
-                nyl_core::bindings::InputType::Object => ValueType::Object,
-                nyl_core::bindings::InputType::Array => ValueType::Array,
-            }))
+            Ok(Some(declaration.output_type.into()))
         }
         // An artifact's fields, as far as its producing kind describes them;
         // anything else is checked when `nyl promote` reads a receipt.
@@ -652,12 +733,18 @@ fn check_coverage(
 /// Split `findings` into the errors of a command that works on one
 /// environment and its warnings: a listing that could not be made
 /// ([`Code::PromoteCoverageUnchecked`]) concerns the source environment's
-/// declaration, which such a command does not need, so it warns there;
-/// `nyl validate` keeps it an error.
+/// declaration, which such a command does not need, and a declared type
+/// that could not be read ([`Code::PromoteValueTypeUnchecked`]) is checked
+/// again when the value resolves, so both warn there; `nyl validate` keeps
+/// them errors.
 pub fn split_unchecked(findings: Vec<Finding>) -> (Vec<Finding>, Vec<Finding>) {
-    findings
-        .into_iter()
-        .partition(|finding| finding.code != Code::PromoteCoverageUnchecked)
+    findings.into_iter().partition(|finding| !is_unchecked(finding.code))
+}
+
+/// Whether `code` says a check could not be made rather than failed:
+/// what [`split_unchecked`] makes a warning.
+pub fn is_unchecked(code: Code) -> bool {
+    matches!(code, Code::PromoteCoverageUnchecked | Code::PromoteValueTypeUnchecked)
 }
 
 fn list_set(names: &BTreeSet<&str>) -> String {
@@ -692,7 +779,22 @@ fn check_reader(
     if !means_this || !path.spec.values.contains_key(&binding.value) {
         return Vec::new();
     }
-    let (Some(Some(produced)), Some(expected)) = (value_types.get(binding.value.as_str()), reader.expected) else {
+    let Some(Some(produced)) = value_types.get(binding.value.as_str()) else {
+        return Vec::new();
+    };
+    if let Some(reason) = &reader.unchecked {
+        return vec![Finding::new(
+            Code::PromoteValueTypeUnchecked,
+            format!(
+                "PromotionPath {name} value {:?} is a {}, but the type that {} accepts cannot be read, so the two are not compared: {reason}",
+                binding.value,
+                produced.name(),
+                reader.location
+            ),
+            "make what the error names readable, such as by running once without --offline or --local to cache a remote source; resolution still checks the value against the declared type",
+        )];
+    }
+    let Some(expected) = reader.expected else {
         return Vec::new();
     };
     if produced.fits(expected) {
@@ -989,6 +1091,8 @@ pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers
                         SchemaType::Known(found) => Some(found),
                         _ => None,
                     }),
+                    field: Some(((*unit).clone(), pointer.to_owned())),
+                    unchecked: None,
                 });
             });
         }

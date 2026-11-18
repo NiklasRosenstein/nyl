@@ -231,32 +231,6 @@ scenario step yet; each gets one, or rule tests only, in the PR named:
   schema; `OciImage` and the fake image declare `ContainerImage`), so a
   pointer the artifact lacks is `NYL-PROMOTE-SELECTOR-INVALID` and its
   type is compared with the bindings that read it.
-- The declared type of the Release input a `fromPromotion` binding in a
-  DeploymentTarget's `releaseInputs` fills: still not compared by
-  `validate` and `plan` (the value is checked against the declaration only
-  when the publication unit resolves). The declaration is known only once
-  the target's ApplicationGroups are selected and their sources resolved,
-  which the publication driver does when it renders the target.
-  Proposal, following the shape `promotion/coverage-unit` gives
-  `shell::coverage::deployments`:
-  - The shell, not the rule, collects the types: for each rendered unit
-    whose spec holds `fromPromotion` bindings the kind's schema cannot
-    type, it asks the unit's driver for the declared types of the fields
-    those bindings fill, and passes the answers to
-    `rules::promotion_paths::check` as a snapshot (a map from unit and JSON
-    Pointer to `InputType`), so the rule stays pure and names no
-    `/releases/…` layout.
-  - The driver call reuses the context that branch gives
-    `Driver::deployments` (`DeploymentContext`: the checked-out project and
-    the environment, without effects beyond reading it), generalized if
-    needed into one read-only context for both questions, such as
-    `Driver::bound_field_types(&DeploymentContext, spec) -> Result<BTreeMap<String, InputType>, String>`.
-  - The publication driver answers through a new nyl-render function that
-    lists the literal input declarations of the Releases a target selects:
-    the group selection and group-source steps of `render_target`, without
-    rendering. A group whose source is remote stays unknown (fits any
-    type), with a note in the finding's context, so `validate` and `plan`
-    never fetch for it; the resolution-time check still covers it.
 - A target environment that rebuilds a unit its `fromPromotion` bindings
   replace: no warning and no "rebuilt" record (decided in the
   promote-fixes follow-up; `NYL-PROMOTE-REBUILT` is gone). Rebuilding and

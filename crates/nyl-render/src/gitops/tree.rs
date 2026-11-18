@@ -664,6 +664,7 @@ async fn compile_target_tree_recording(
                 &target,
                 &mut git_manager,
                 cache,
+                options.publication_read == super::inputs::PublicationRead::Cached,
             )?
         } else {
             ResolvedGroupSource::empty(inventory.project_root.clone())
@@ -3570,6 +3571,7 @@ fn resolve_remote_group_source(
     source: &ApplicationGroupSource,
     git_manager: &mut Option<GitManager>,
     cache: Option<&GitOpsCache>,
+    cached_only: bool,
     provenance_inputs: &mut Vec<PathBuf>,
 ) -> Result<(PathBuf, PathBuf, nyl_core::resources::ReadGitRepository)> {
     let (repository, repository_path) = resolve_source_repository(inventory, source)?;
@@ -3605,9 +3607,13 @@ fn resolve_remote_group_source(
         } else {
             git_manager.insert(GitManager::for_cache(cache).map_err(NylError::Git)?)
         };
-        let checkout = manager
-            .resolve_ref(&repository.repo_url, Some(commit), None)
-            .map_err(NylError::Git)?;
+        // Offline, the pinned commit comes from the Git cache or not at all.
+        let checkout = if cached_only {
+            manager.resolve_ref_cached(&repository.repo_url, Some(commit), None)
+        } else {
+            manager.resolve_ref(&repository.repo_url, Some(commit), None)
+        }
+        .map_err(NylError::Git)?;
         let archive = tempfile::NamedTempFile::new()?;
         crate::render::artifact::ArtifactResolver::archive_git_tree(&checkout, archive.path())?;
         let artifact = artifacts.store(
@@ -3620,6 +3626,73 @@ fn resolve_remote_group_source(
     };
     let selected = checked_checkout_subpath(&checkout, source.checkout_path(), "ApplicationGroup source.path")?;
     Ok((selected, checkout, repository))
+}
+
+/// The literal input declarations of one ApplicationGroup's Releases: by
+/// Release name, each declared input by its name.
+pub type GroupReleaseInputs = BTreeMap<String, BTreeMap<String, nyl_core::bindings::InputDeclaration>>;
+
+/// The declared inputs of the Releases `target_name` selects, by
+/// ApplicationGroup, read with only the group selection and group-source
+/// steps of a target compile: nothing renders, and a disabled group is not
+/// listed. A group whose source cannot be read, such as a remote source
+/// that is neither cached nor fetchable, is `Err` with why, so one group
+/// leaves the others readable.
+///
+/// Remote sources are read from the artifacts of `cache` first, then from
+/// the Git cache at `git_cache_dir` (beneath `cache` without one): with
+/// `offline` from there only, otherwise fetched when missing, falling back to
+/// the cached copy when the fetch fails, as `nyl validate` reads them.
+///
+/// Contract: [Declarations](../../../../design/release-inputs.md#declarations),
+/// read by promotion validation ([PromotionPath](../../../../design/promotion.md#promotionpath)).
+pub fn declared_release_inputs(
+    inventory: &GitOpsInventory,
+    target_name: &str,
+    cache: Option<&GitOpsCache>,
+    git_cache_dir: Option<&Path>,
+    offline: bool,
+) -> Result<BTreeMap<String, std::result::Result<GroupReleaseInputs, String>>> {
+    let target = match inventory
+        .get(GitOpsResourceKind::DeploymentTarget, target_name)
+        .and_then(|discovered| discovered.resource.as_ref())
+    {
+        Some(GitOpsResource::DeploymentTarget(target)) => target.clone(),
+        _ => {
+            return Err(NylError::config(format!(
+                "DeploymentTarget {target_name:?} was not found or is not static"
+            )))
+        }
+    };
+    let (cluster, _) = resolve_cluster(inventory, target.cluster_name())?;
+    let session = RenderSession::for_target(&inventory.project_root, &inventory.project_config, &target, &cluster)?
+        .with_cache(cache.cloned())
+        .with_git_offline(offline);
+    let (groups, _) = selected_groups(inventory, &target, &session)?;
+    let mut git_manager =
+        git_cache_dir.map(|directory| GitManager::with_cache_dir(directory).with_render_cache(cache.cloned()));
+    let mut declared = BTreeMap::new();
+    for (group_resource_path, group) in groups {
+        let inputs = resolve_group_source(
+            inventory,
+            &group_resource_path,
+            &group,
+            &target,
+            &mut git_manager,
+            cache,
+            offline,
+        )
+        .map(|source| {
+            source
+                .files
+                .into_iter()
+                .filter_map(|file| Some((file.name?, file.inputs)))
+                .collect::<GroupReleaseInputs>()
+        })
+        .map_err(|error| error.to_string());
+        declared.insert(group.metadata.name.clone(), inputs);
+    }
+    Ok(declared)
 }
 
 /// Enabled groups with their resource paths, and the names of disabled ones.
@@ -3732,12 +3805,19 @@ fn resolve_group_source(
     target: &DeploymentTarget,
     git_manager: &mut Option<GitManager>,
     cache: Option<&GitOpsCache>,
+    cached_only: bool,
 ) -> Result<ResolvedGroupSource> {
     let mut provenance_inputs = Vec::new();
     let (root, source, remote_root, source_repository, candidate_files) = match &group.spec.source {
         Some(source) if source.is_remote() => {
-            let (selected, checkout, repository) =
-                resolve_remote_group_source(inventory, source, git_manager, cache, &mut provenance_inputs)?;
+            let (selected, checkout, repository) = resolve_remote_group_source(
+                inventory,
+                source,
+                git_manager,
+                cache,
+                cached_only,
+                &mut provenance_inputs,
+            )?;
             ensure_group_source_root(&group.metadata.name, &selected)?;
             let files = select_candidate_files(inventory, &selected, source, collect_checkout_yaml(&selected)?);
             (selected, source.clone(), Some(checkout), Some(repository), files)

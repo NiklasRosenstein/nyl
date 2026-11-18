@@ -266,6 +266,15 @@ impl Driver for FakePublication {
         crate::kubernetes_publication::deployments(&self.resource_catalogue, ctx, spec)
     }
 
+    fn bound_field_types(
+        &self,
+        ctx: &nyl_core::orchestration::driver::DeploymentContext<'_>,
+        spec: &Value,
+        pointers: &[String],
+    ) -> DriverResult<std::collections::BTreeMap<String, nyl_core::orchestration::driver::BoundFieldType>> {
+        crate::kubernetes_publication::bound_field_types(&self.resource_catalogue, ctx, spec, pointers)
+    }
+
     /// None: the publication destination (repository, revision, and path
     /// prefix) belongs to the DeploymentTarget, which the spec names but
     /// does not contain, and claims are computed from the spec alone. Two

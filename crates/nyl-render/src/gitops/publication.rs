@@ -230,36 +230,115 @@ pub fn render_target(request: &TargetRender<'_>) -> Result<RenderedTarget> {
     })
 }
 
-async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<RenderedTarget> {
-    let project_dir = if request.project_dir.starts_with(request.worktree) {
-        request.project_dir.to_path_buf()
+/// The inventory a target renders from: the project at `project_dir` in
+/// `worktree` with `instances`, every environment's inline targets, and the
+/// target `target` declared by `inline` with `spec` when the unit declares
+/// it inline.
+fn target_inventory(
+    (worktree, project_dir): (&Path, &Path),
+    catalogue: &crate::config::ResourceCatalogue,
+    instances: &nyl_core::orchestration::instance::Instances,
+    target: &str,
+    inline: Option<(&InlineTarget, &serde_json::Value)>,
+) -> Result<GitOpsInventory> {
+    let project_dir = if project_dir.starts_with(worktree) {
+        project_dir.to_path_buf()
     } else {
         // A worktree-rooted project directory, such as `/nyl`.
-        let relative = request.project_dir.strip_prefix("/").unwrap_or(request.project_dir);
-        request.worktree.join(relative)
+        let relative = project_dir.strip_prefix("/").unwrap_or(project_dir);
+        worktree.join(relative)
     };
-    let mut inventory = super::discover_gitops_inventory(&project_dir, None, request.resource_catalogue.clone())?
-        .with_instances(request.instances.clone());
+    let mut inventory =
+        super::discover_gitops_inventory(&project_dir, None, catalogue.clone())?.with_instances(instances.clone());
     // Every environment's inline targets join the inventory, so the compile's
     // checks across targets see them whichever unit renders. The target this
     // render is for comes from the document it was given.
-    inventory =
-        super::units::with_inline_targets_except(&inventory, request.inline.map(|inline| inline.name.as_str()))?;
-    if let Some(inline) = request.inline {
-        let spec = pinned_inline_spec(&inline.spec, request.inputs);
-        inventory = inventory.with_inline_target(request.target, &inline.source_file, &spec)?;
+    inventory = super::units::with_inline_targets_except(&inventory, inline.map(|(inline, _)| inline.name.as_str()))?;
+    if let Some((inline, spec)) = inline {
+        inventory = inventory.with_inline_target(target, &inline.source_file, spec)?;
     }
-    super::resolve_deployment_target_name(&inventory, Some(request.target))?;
+    super::resolve_deployment_target_name(&inventory, Some(target))?;
+    Ok(inventory)
+}
+
+/// The render cache of a target render: beneath `cache_dir`, with its source
+/// checkouts, or a disabled one in `temporary`, never the user's default cache.
+fn target_cache(cache_dir: Option<&Path>, temporary: &tempfile::TempDir) -> Result<GitOpsCache> {
+    match cache_dir {
+        Some(directory) => Ok(
+            GitOpsCache::with_root(directory, CacheMode::Default)?.with_source_cache_root(directory.join("sources"))
+        ),
+        None => GitOpsCache::with_root(temporary.path(), CacheMode::Disabled),
+    }
+}
+
+/// What [`declared_release_inputs`] reads.
+#[derive(Debug, Clone)]
+pub struct DeclaredInputsRequest<'a> {
+    /// The checkout the target is declared in.
+    pub worktree: &'a Path,
+    /// The directory containing `nyl.toml` inside `worktree`.
+    pub project_dir: &'a Path,
+    /// The DeploymentTarget's name.
+    pub target: &'a str,
+    /// The target's declaration when the publication unit declares it inline.
+    pub inline: Option<&'a InlineTarget>,
+    /// The render cache directory, as [`TargetRender::cache_dir`]; callers
+    /// asking about several targets share one.
+    pub cache_dir: Option<&'a Path>,
+    /// The Git cache remote ApplicationGroup sources persist in between
+    /// invocations; `None` keeps them beneath `cache_dir`.
+    pub source_cache_dir: Option<&'a Path>,
+    /// Read remote sources from the caches only, never the network.
+    pub offline: bool,
+    /// Resource APIs registered by the caller.
+    pub resource_catalogue: crate::config::ResourceCatalogue,
+    /// The instances of EnvironmentTemplates the caller knows.
+    pub instances: &'a nyl_core::orchestration::instance::Instances,
+}
+
+/// The declared inputs of the Releases a target selects, by ApplicationGroup
+/// and Release, without rendering: only the group selection and group-source
+/// steps of [`render_target`] run
+/// ([`super::tree::declared_release_inputs`], which says how remote sources
+/// are read). A group whose source cannot be read is `Err` with why.
+pub fn declared_release_inputs(
+    request: &DeclaredInputsRequest<'_>,
+) -> Result<BTreeMap<String, std::result::Result<super::tree::GroupReleaseInputs, String>>> {
+    let inventory = target_inventory(
+        (request.worktree, request.project_dir),
+        &request.resource_catalogue,
+        request.instances,
+        request.target,
+        request.inline.map(|inline| (inline, &inline.spec)),
+    )?;
+    let temporary = tempfile::TempDir::new()?;
+    let cache = target_cache(request.cache_dir, &temporary)?;
+    super::tree::declared_release_inputs(
+        &inventory,
+        request.target,
+        Some(&cache),
+        request.source_cache_dir,
+        request.offline,
+    )
+}
+
+async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<RenderedTarget> {
+    let pinned = request
+        .inline
+        .map(|inline| (inline, pinned_inline_spec(&inline.spec, request.inputs)));
+    let inventory = target_inventory(
+        (request.worktree, request.project_dir),
+        &request.resource_catalogue,
+        request.instances,
+        request.target,
+        pinned.as_ref().map(|(inline, spec)| (*inline, spec)),
+    )?;
 
     // A render without a cache directory still keeps its source checkouts
     // in a temporary directory rather than the user's default cache.
     let temporary = tempfile::TempDir::new()?;
-    let cache = match request.cache_dir {
-        Some(directory) => {
-            GitOpsCache::with_root(directory, CacheMode::Default)?.with_source_cache_root(directory.join("sources"))
-        }
-        None => GitOpsCache::with_root(temporary.path(), CacheMode::Disabled)?,
-    };
+    let cache = target_cache(request.cache_dir, &temporary)?;
     let options = TreeRenderOptions {
         selection: request.selection.clone(),
         publication_base: request.publication_base.clone(),
@@ -4111,6 +4190,80 @@ metadata: {name: widgets.example.test, annotations: {argocd.argoproj.io/sync-opt
         assert!(
             error.contains("NYL-KUBERNETES-SHARED-CATALOG-CONFLICT") && error.contains("_nyl/shared"),
             "{error}"
+        );
+    }
+
+    /// The input declarations of the Releases a target selects are read
+    /// without rendering, from a local group source and a remote one alike:
+    /// a remote Release whose template cannot render still lists its
+    /// declarations. Offline, a remote source comes from the Git cache or
+    /// not at all: before anything fetched it, its group is unreadable while
+    /// the local group still reads; once fetched, it reads offline even
+    /// after its repository is gone. Catches promotion validation rendering
+    /// targets to learn input types, reaching the network offline, and one
+    /// unreadable group hiding the others.
+    #[test]
+    fn test_declared_release_inputs_read_group_sources_without_rendering() {
+        let (_publication, url) = publication_repository();
+        let remote = TempDir::new().unwrap();
+        let remote_repository = Repository::init(remote.path()).unwrap();
+        std::fs::create_dir(remote.path().join("releases")).unwrap();
+        std::fs::write(
+            remote.path().join("releases/api.yaml"),
+            RELEASE
+                .replace("name: web\n  namespace", "name: api\n  namespace")
+                .replace("image: {type: string}", "replicas: {type: integer}")
+                .replace("{{ inputs.image }}", "{{ inputs.replicas | no_such_filter }}"),
+        )
+        .unwrap();
+        let commit = commit_all(&remote_repository);
+        let remote_url = reqwest::Url::from_directory_path(remote.path()).unwrap().to_string();
+        let groups = format!(
+            "{GROUP}---\napiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: api\n  labels: {{app: web}}\nspec:\n  applicationNamespace: argocd\n  source:\n    repository: {{repoURL: '{remote_url}'}}\n    revision: HEAD\n    commit: '{commit}'\n    path: releases\n"
+        );
+        let worktree = project_with_group(&url, &groups);
+        let git_cache = TempDir::new().unwrap();
+        let declared = |offline: bool| {
+            let render_cache = TempDir::new().unwrap();
+            declared_release_inputs(&DeclaredInputsRequest {
+                worktree: worktree.path(),
+                project_dir: &worktree.path().join("nyl"),
+                target: "dev",
+                inline: None,
+                cache_dir: Some(render_cache.path()),
+                source_cache_dir: Some(git_cache.path()),
+                offline,
+                resource_catalogue: crate::config::test_catalogue(),
+                instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+            })
+            .unwrap()
+        };
+        let input_type =
+            |declared: &BTreeMap<String, std::result::Result<super::super::tree::GroupReleaseInputs, String>>,
+             group: &str,
+             release: &str,
+             input: &str| { declared[group].as_ref().unwrap()[release][input].input_type };
+
+        let offline = declared(true);
+        assert_eq!(
+            input_type(&offline, "web", "web", "image"),
+            nyl_core::bindings::InputType::String
+        );
+        let error = offline["api"].as_ref().unwrap_err();
+        assert!(error.contains("cache"), "{error}");
+
+        let fetched = declared(false);
+        assert_eq!(
+            input_type(&fetched, "api", "api", "replicas"),
+            nyl_core::bindings::InputType::Integer
+        );
+
+        drop(remote_repository);
+        drop(remote);
+        let cached = declared(true);
+        assert_eq!(
+            input_type(&cached, "api", "api", "replicas"),
+            nyl_core::bindings::InputType::Integer
         );
     }
 }
