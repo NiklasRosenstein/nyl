@@ -562,7 +562,10 @@ fn warn_log(sink: &Sink, output: &UnitOutput, message: String) {
     if error.is_some() {
         return;
     }
-    let warning = format!("warning NYL-UNIT-LOG: {message}; check log directory permissions and free space\n");
+    let warning = format!(
+        "warning {}: {message}; check log directory permissions and free space\n",
+        nyl_core::orchestration::codes::Code::UnitLog
+    );
     *error = Some(message);
     match sink {
         Some(buffer) => buffer.lock().unwrap().extend_from_slice(warning.as_bytes()),

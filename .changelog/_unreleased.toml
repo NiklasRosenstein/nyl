@@ -151,7 +151,7 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "4bc18392-ef42-4403-9853-50ebf34ac0b1"
 type = "improvement"
-description = "Teardown text that the orchestration engine writes for every kind no longer speaks of Argo CD or Applications: a teardown wait's terminal prompt says the unit waits for its deployments to be removed, and an `observe` wait with no observation is uncertain with `observation-failed: the driver made no removal observation`. KubernetesPublication's own messages keep their Argo CD terms. The released codes and reason tokens are unchanged, including `NYL-TEARDOWN-APPLICATIONS-ORPHANED` and the other KubernetesPublication teardown readiness codes, and `applications-remain`."
+description = "Teardown text that the orchestration engine writes for every kind no longer speaks of Argo CD or Applications: a teardown wait's terminal prompt says the unit waits for its deployments to be removed, and an `observe` wait with no observation is uncertain with `observation-failed: the driver made no removal observation`. KubernetesPublication's own messages keep their Argo CD terms."
 author = "@NiklasRosenstein"
 
 [[entries]]
@@ -164,4 +164,40 @@ author = "@NiklasRosenstein"
 id = "76b34f5f-effd-4e1b-b165-bdea559704ee"
 type = "fix"
 description = "Commands that render through the render cache, such as `nyl reconcile`, `publish-tree`, `render-tree`, and Helm chart renders, no longer read the whole `nyl` executable into memory to fingerprint it: they hash it in chunks, once per process, so peak memory no longer grows by the size of the binary (about 45 MB for a release build, several hundred megabytes for a debug build; `nyl reconcile` peaked at 310 MiB before and 37 MiB after). The fingerprint is unchanged, so existing cache entries are still reused"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "8a144124-7c5b-4910-ae42-c97464c74804"
+type = "breaking"
+description = "Unit drivers raise only generic codes, named for what happened to a unit, never for its kind or tool; the kind-specific specifics move into the message, the fix, and a new `detail` slug. Teardown readiness: `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, and `NYL-TEARDOWN-NAMESPACE-CONFIRM` become `NYL-TEARDOWN-BLOCKED` (detail `catalog-manual-sync`, `applications-orphaned`, `namespace-confirm`; an unreadable shared catalog is `shared-catalog-unreadable`), and `NYL-TEARDOWN-NAMESPACES-REMAIN` and `NYL-TEARDOWN-CATALOG-REMAINS` become `NYL-TEARDOWN-REMNANT` (`namespaces-remain`, `catalog-remains`). `NYL-TEARDOWN-WAIT-MANUAL` is unchanged. Scripts that match the old codes must match the new code and its `detail`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "bf7f2095-b04e-4af7-aab3-ce0aee76dd6d"
+type = "breaking"
+description = "KubernetesPublication warnings and failures use generic unit codes, each with a `detail`: `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` → `NYL-UNIT-SHARED-DIFFERS` (`shared-catalog-differs`); `NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION` → `NYL-UNIT-REMOVAL-UNCONFIRMED` (`prune-confirm`); `NYL-KUBERNETES-RELEASE-LEFT-BEHIND` → `NYL-UNIT-LEFT-BEHIND` (`release-left-behind`); `NYL-KUBERNETES-OWNER-FENCED` and `NYL-KUBERNETES-RELEASE-FENCED` → `NYL-UNIT-OWNER-FENCED` (`prefix-owned`, `shared-catalog-owned`, `release-owned`); `NYL-KUBERNETES-OWNER-UNKNOWN` and `NYL-KUBERNETES-RELEASE-OWNER-UNKNOWN` → `NYL-UNIT-OWNER-UNKNOWN` (`prefix-owned`, `release-owned`); `NYL-KUBERNETES-STATE-CHANGED` → `NYL-UNIT-INPUTS-CHANGED` (`publication-state-changed`); `NYL-KUBERNETES-TARGET-CHANGED` and `NYL-KUBERNETES-RECONCILER-CHANGED` → `NYL-UNIT-DESTINATION-CHANGED` (`target-changed`, `reconciler-changed`); `NYL-KUBERNETES-HEALTH-TIMEOUT` → `NYL-UNIT-HEALTH-TIMEOUT` and `NYL-KUBERNETES-HEALTH-DEGRADED` → `NYL-UNIT-HEALTH-DEGRADED` (`wait-healthy`); `NYL-KUBERNETES-CLUSTER-CONTEXT-MISSING` → `NYL-UNIT-ACCESS-UNDECLARED` (`cluster-context-missing`); `NYL-KUBERNETES-OBSERVATION-UNOWNED` → `NYL-OBSERVATION-UNOWNED` (`resource-not-rendered`); `NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP`, which was only in the message text, → `NYL-UNIT-HISTORY-TOO-DEEP` (`release-history`). A direct target's unit raises `NYL-UNIT-CAPABILITY-MISMATCH` (`scope-mismatch`) and `NYL-UNIT-HOOK-IGNORED` (`delete-hooks`) where it raised `NYL-KUBERNETES-SCOPE-MISMATCH` and `NYL-KUBERNETES-HOOK-IGNORED`; `nyl render`, `diff`, `apply`, and the `release` commands outside orchestration keep those two codes"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "d2b27fee-50c7-4eb8-9025-d0ab2a0b81e3"
+type = "breaking"
+description = "`nyl build` of a KubernetesPublication refuses with generic codes: `NYL-KUBERNETES-BUILD-ARGUMENT` and `NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG` → `NYL-BUILD-ARGUMENT` (`unknown-argument`, `conflicting-modes`, `lookup-value-missing`, `lookup-live`, `no-shared-catalog`; `--lookup=live` was `NYL-HELM-LOOKUP-LIVE-REFUSED` here, which the tree commands keep); `NYL-KUBERNETES-BUILD-TARGET-OWNED` → `NYL-BUILD-OWNED` (`target-owned`); `NYL-KUBERNETES-BUILD-DIRTY-SOURCE` → `NYL-BUILD-DIRTY-SOURCE` (`tree`, `shared-catalog`); `NYL-KUBERNETES-BUILD-IDENTITY` → `NYL-COMMIT-IDENTITY-MISSING` (`publication-push`); `NYL-KUBERNETES-BUILD-INLINE-TARGET` → `NYL-BUILD-ENVIRONMENT-REQUIRED`. The Terraform and OpenTofu driver's `NYL-TOFU-STATE-MISSING` → `NYL-UNIT-NATIVE-STATE-MISSING` (`backend-state-missing`)"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "f35a15d7-803c-4ea5-aa3e-445ee46cf305"
+type = "breaking"
+description = "An `observe` teardown wait whose deployments remain at the deadline is uncertain with the reason `deployments-remain: <names>` instead of `applications-remain: <names>`"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "7fa62688-8993-4cf7-a3ef-e2d7731678c2"
+type = "breaking"
+description = "Receipts that Nyl 0.7.0 wrote with one of the removed warning codes (`NYL-KUBERNETES-SHARED-CATALOG-DIFFERS`, `NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION`, `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`) no longer read: reading the environment's state fails as corrupt (`NYL-STATE-UNAVAILABLE`). The same holds for the checkpoints that a 0.7.0 run left on its run ref (or an evidence ref) when it died, which `nyl recover` and a takeover read. The state format version is unchanged, and Nyl does not map the old codes on read. Before upgrading, remove each `warnings` entry with an old code from `observed/units/<unit>.yaml` on the environment's state branch, and finish or recover every dead run with Nyl 0.7.0 so that no run ref holds such a checkpoint; the unit's next execution records a receipt with the new code"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "e20c7123-b445-4f16-9971-7aac2a58c459"
+type = "feature"
+description = "Findings and failures carry an optional `detail`, a driver-supplied slug that tells cases under one generic code apart, such as `catalog-manual-sync` under `NYL-TEARDOWN-BLOCKED`. It appears next to `code` in every `-o json` report and in receipts' recorded warnings; a unit's failure in a run report adds `code` and `detail` next to its `message`, and `teardownReadiness` adds the structured `blocking` findings next to its `reasons`. Nyl never acts on it"
 author = "@NiklasRosenstein"

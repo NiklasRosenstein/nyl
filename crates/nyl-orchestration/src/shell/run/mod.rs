@@ -1302,9 +1302,9 @@ impl<'r, 'a> Session<'r, 'a> {
                 cache_dir: self.context.cache_dir(),
             };
             let inputs = driver.execution_key_inputs(&context, spec).map_err(|error| {
-                Finding::new(
-                    Code::DriverError,
-                    format!("unit {name}: cannot read its execution key inputs: {error}"),
+                // When the driver said what went wrong, its code replaces the generic one.
+                error.finding(
+                    &format!("unit {name}: cannot read its execution key inputs: "),
                     "check the unit's source files and tools, then run again",
                 )
             })?;
@@ -1896,7 +1896,11 @@ fn plan_leaving(
                     crate::run_report::TeardownReadiness::Ready
                 } else {
                     crate::run_report::TeardownReadiness::Incomplete {
-                        reasons: blocking.iter().map(|finding| finding.message.clone()).collect(),
+                        reasons: blocking
+                            .iter()
+                            .map(|finding| format!("{}: {}", finding.code, finding.message))
+                            .collect(),
+                        blocking: blocking.clone(),
                     }
                 },
             );
@@ -3185,6 +3189,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 entry.change_digest.clone_from(&execution.change_digest);
                 entry.approval.clone_from(&execution.approval);
                 entry.message.clone_from(&execution.message);
+                entry.code = execution.code;
+                entry.detail.clone_from(&execution.detail);
                 entry.warnings.clone_from(&execution.warnings);
             } else if let Some(result) = imported_result(&taking, unit, current) {
                 entry.result = Some(result);
@@ -3865,6 +3871,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             let mut entry = UnitReport::new(kind);
             entry.result = Some(execution.result.clone());
             entry.message.clone_from(&execution.message);
+            entry.code = execution.code;
+            entry.detail.clone_from(&execution.detail);
             entry.warnings.clone_from(&execution.warnings);
             self.report.units.insert(name.clone(), entry);
         }

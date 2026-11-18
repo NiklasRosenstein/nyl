@@ -789,7 +789,7 @@ fn test_unmet_readiness_keeps_a_teardown_pending_until_allow_incomplete() {
     let status = invoke(&harness, &["status", "-e", "dev", "-o", "json"]);
     let readiness = &status.report["environments"][0]["units"]["kubernetes"]["teardownReadiness"];
     assert!(
-        readiness.to_string().contains("NYL-TEARDOWN-CATALOG-MANUAL-SYNC"),
+        readiness.to_string().contains("\"detail\":\"catalog-manual-sync\""),
         "{}",
         status.report
     );
@@ -813,7 +813,7 @@ fn test_unmet_readiness_keeps_a_teardown_pending_until_allow_incomplete() {
     assert_eq!(blocked.exit, 2, "{}", blocked.stderr);
     assert_eq!(result(&blocked, "kubernetes"), "pending-teardown");
     assert!(
-        blocked.report.to_string().contains("NYL-TEARDOWN-CATALOG-MANUAL-SYNC"),
+        blocked.report.to_string().contains("NYL-TEARDOWN-BLOCKED"),
         "{}",
         blocked.report
     );

@@ -198,7 +198,7 @@ impl Driver for FakeImage {
     }
 
     fn reconcile(&self, _ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Reconcile) {
+        if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Reconcile)? {
             return Ok(Supported::Supported(outcome));
         }
         let key = unit

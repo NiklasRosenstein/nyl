@@ -252,7 +252,9 @@ diff`](/nyl/reference/cli/diff/#hooks) lists them, for information. Hooks Argo C
 when it removes an Application (`PreDelete`, `PostDelete`, `pre-delete`,
 `post-delete`) are never run by Nyl when it removes a Release, and that matters:
 `nyl apply` warns once per Release with `NYL-KUBERNETES-HOOK-IGNORED`, naming them,
-and `release delete --purge` warns too, before it goes ahead. To act on the warning,
+and `release delete --purge` warns too, before it goes ahead. A
+[KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/#direct-targets)
+unit with a direct target raises the same warning as `NYL-UNIT-HOOK-IGNORED` (`delete-hooks`). To act on the warning,
 do what the hook does yourself before the Release is removed, drop the hook from the
 Release, or mark it `argocd.argoproj.io/hook: Skip`, which leaves it out of Argo CD's
 sync as well and ends the warning.
@@ -307,7 +309,9 @@ records differs from what the connected cluster reports, `apply`, `diff`, and
 `release rollback` still use the recorded scope and warn once per kind with
 `NYL-KUBERNETES-SCOPE-MISMATCH`; its fix is to re-run
 `nyl capture cluster <name> --crds` and commit the result. The direct reconciler
-reports the same warning in its run. A kind that none of these
+reports the same warning in its run as `NYL-UNIT-CAPABILITY-MISMATCH`
+(`scope-mismatch`), next to `NYL-UNIT-HOOK-IGNORED`
+(`delete-hooks`). A kind that none of these
 knows, such as one an APIService in the same manifest will serve, keeps no namespace:
 set `metadata.namespace` on it.
 

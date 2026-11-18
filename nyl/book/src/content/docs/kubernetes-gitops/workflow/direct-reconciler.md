@@ -80,10 +80,10 @@ until it does. A
 prune or purge never deletes an object whose `Prune` or `Delete` sync option it
 cannot read. A Release that left Git is purged after every Release applied, unless
 no unit owns it, such as one an apply by hand took over: that stays, with the
-warning `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`. Which Releases left is read from the
+warning `NYL-UNIT-LEFT-BEHIND` (`release-left-behind`). Which Releases left is read from the
 publication branch back to the last receipt; a history deeper than the walk limit
 that never reaches it (or with no receipt at all) fails with
-`NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP` instead of guessing.
+`NYL-UNIT-HISTORY-TOO-DEEP` (`release-history`) instead of guessing.
 
 ## Hooks
 
@@ -120,8 +120,9 @@ implementation with the unit.
   `post-delete`, and the rollback hooks, Argo CD's `PreDelete` and `PostDelete`) are
   not applied. Helm's `test` and the rollback hooks are left out silently, as in Argo CD.
   Delete hooks are never run: Nyl does not run them when a teardown removes a Release,
-  and each execution warns once per Release with `NYL-KUBERNETES-HOOK-IGNORED`, which
-  stays while the Release declares one.
+  and each execution warns once per Release with `NYL-UNIT-HOOK-IGNORED`
+  (`delete-hooks`), which stays while the Release declares one. `nyl apply` outside
+  orchestration warns with `NYL-KUBERNETES-HOOK-IGNORED` instead.
 
 ## Unchanged Releases
 
@@ -214,7 +215,7 @@ the repair runs the hooks again, as an Argo CD self-heal sync does.
 
 The release state in the cluster records the owning unit and the publication it was
 applied for. A second unit cannot apply a Release another unit owns
-(`NYL-KUBERNETES-RELEASE-FENCED`), and neither can a manual command: `nyl apply`,
+(`NYL-UNIT-OWNER-FENCED`, detail `release-owned`), and neither can a manual command: `nyl apply`,
 `nyl release rollback`, and `nyl release delete` refuse it with
 `NYL-RELEASE-OWNED-BY-UNIT`. `--take-over` records no owner and goes ahead; the
 owning unit's next reconcile adopts the Release again and reverts the change.
@@ -234,9 +235,9 @@ Release that tracked it until the Namespace is deleted, so a failed deletion is
 retried; a Namespace that still holds the state of a Release that is not removed
 stays, with a warning. A Release
 that another unit or an apply by hand took over is left with its objects and its
-Namespaces, and the teardown reports it with `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`.
+Namespaces, and the teardown reports it with `NYL-UNIT-LEFT-BEHIND` (`release-left-behind`).
 If the target's declaration changed reconciler since the unit published,
-the teardown refuses with `NYL-KUBERNETES-RECONCILER-CHANGED`; restore the
+the teardown refuses with `NYL-UNIT-DESTINATION-CHANGED` (`reconciler-changed`); restore the
 declaration so it can run. Only `deletePolicy` matters to a direct
 teardown; `prunePolicy` decides whether the next apply deletes a Namespace a
 Release stopped declaring (`Confirm`, the default, keeps it with a warning). A

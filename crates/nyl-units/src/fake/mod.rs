@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{DriverError, DriverOperation, DriverResult, Outcome, RecoveryPolicy};
 use nyl_core::orchestration::ids::UnitName;
 use nyl_core::orchestration::state::{Drift, FailureCategory};
@@ -91,6 +92,19 @@ pub enum Scripted {
     Failed {
         category: FailureCategory,
         retryable: bool,
+    },
+    /// Reconcile and teardown only: a non-retryable failure that carries a
+    /// generic code and the driver's `detail`.
+    CodedFailure {
+        code: Code,
+        detail: String,
+    },
+    /// Reconcile and teardown only: a driver error before any effect that
+    /// carries a generic code, the driver's `detail`, and its fix.
+    CodedError {
+        code: Code,
+        detail: String,
+        fix: String,
     },
     Uncertain,
     /// Succeed with these outputs instead of the derived ones.
@@ -168,7 +182,13 @@ impl Script {
             Some(Scripted::Uncertain) => Some(Drift::Unknown {
                 reason: "scripted unknown drift".to_owned(),
             }),
-            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. } | Scripted::Pending) => {
+            Some(
+                Scripted::Failed { .. }
+                | Scripted::CodedFailure { .. }
+                | Scripted::CodedError { .. }
+                | Scripted::RetryRequired { .. }
+                | Scripted::Pending,
+            ) => {
                 return Err(DriverError::before_effects("scripted drift detection failure"));
             }
         })
@@ -204,10 +224,10 @@ impl Script {
                     },
                 })
             }
-            Some(Scripted::Failed { .. }) => each(&|_| ObservedValue::Failed {
+            Some(Scripted::Failed { .. } | Scripted::CodedFailure { .. }) => each(&|_| ObservedValue::Failed {
                 reason: "scripted failure".to_owned(),
             }),
-            Some(Scripted::RetryRequired { .. }) => {
+            Some(Scripted::RetryRequired { .. } | Scripted::CodedError { .. }) => {
                 return Err(DriverError::before_effects("scripted observation failure"));
             }
         })
@@ -222,10 +242,10 @@ impl Script {
             None | Some(Scripted::Succeeded { .. } | Scripted::Drifted | Scripted::Pending) => {
                 Ok(ArtifactStatus::Present)
             }
-            Some(Scripted::Failed { .. }) => Ok(ArtifactStatus::Missing {
+            Some(Scripted::Failed { .. } | Scripted::CodedFailure { .. }) => Ok(ArtifactStatus::Missing {
                 reason: "scripted: the artifact is gone".to_owned(),
             }),
-            Some(Scripted::Uncertain | Scripted::RetryRequired { .. }) => {
+            Some(Scripted::Uncertain | Scripted::RetryRequired { .. } | Scripted::CodedError { .. }) => {
                 Err(DriverError::before_effects("scripted artifact verification failure"))
             }
         }
@@ -234,9 +254,10 @@ impl Script {
     /// The scripted outcome of a reconcile or teardown, when one is queued.
     /// A scripted success falls through to the fake's own behavior with
     /// replaced outputs, reported through `outputs`; a `drifted` script
-    /// only applies to `detect-drift`, so it falls through unchanged.
-    fn outcome(&self, unit: &UnitName, operation: DriverOperation) -> ScriptedOutcome {
-        match self.take(unit, operation) {
+    /// only applies to `detect-drift`, so it falls through unchanged. A
+    /// scripted coded error is the driver error the call returns.
+    fn outcome(&self, unit: &UnitName, operation: DriverOperation) -> DriverResult<ScriptedOutcome> {
+        Ok(match self.take(unit, operation) {
             None | Some(Scripted::Drifted | Scripted::Pending) => ScriptedOutcome::Run { outputs: None },
             Some(Scripted::Succeeded { outputs }) => ScriptedOutcome::Run { outputs },
             Some(Scripted::Uncertain) => ScriptedOutcome::Return(Outcome::Uncertain {
@@ -246,13 +267,30 @@ impl Script {
                 category: FailureCategory::Ownership,
                 message: "scripted retry acknowledgement".to_owned(),
                 context,
+                code: None,
+                detail: None,
             }),
-            Some(Scripted::Failed { category, retryable }) => ScriptedOutcome::Return(Outcome::Failed {
+            Some(Scripted::Failed { category, retryable }) => ScriptedOutcome::Return(Outcome::failed(
                 category,
                 retryable,
-                message: format!("scripted {} failure", operation.as_str()),
-            }),
-        }
+                format!("scripted {} failure", operation.as_str()),
+            )),
+            Some(Scripted::CodedFailure { code, detail }) => ScriptedOutcome::Return(
+                Outcome::failed(
+                    FailureCategory::ToolError,
+                    false,
+                    format!("scripted coded {} failure", operation.as_str()),
+                )
+                .coded(code, Some(&detail)),
+            ),
+            Some(Scripted::CodedError { code, detail, fix }) => {
+                return Err(
+                    DriverError::before_effects(format!("scripted coded {} error", operation.as_str()))
+                        .coded(code, Some(&detail))
+                        .with_fix(fix),
+                );
+            }
+        })
     }
 }
 

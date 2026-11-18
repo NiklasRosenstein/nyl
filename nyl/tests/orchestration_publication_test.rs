@@ -114,8 +114,8 @@ fn test_reconcile_publishes_resolved_from_unit_values_and_records_teardown_setti
     );
     let status = invoke(&harness, &["status", "-e", "dev", "-o", "json"]);
     let readiness = status.report["environments"][0]["units"]["kubernetes"]["teardownReadiness"].to_string();
-    for code in ["NYL-TEARDOWN-CATALOG-MANUAL-SYNC", "NYL-TEARDOWN-NAMESPACE-CONFIRM"] {
-        assert!(readiness.contains(code), "{readiness}");
+    for detail in ["catalog-manual-sync", "namespace-confirm"] {
+        assert!(readiness.contains(&format!("\"detail\":\"{detail}\"")), "{readiness}");
     }
 
     // `plan` and `reconcile` warn about every teardown requirement the
@@ -126,18 +126,19 @@ fn test_reconcile_publishes_resolved_from_unit_values_and_records_teardown_setti
         &invoke(&harness, &["plan", "-e", "dev", "-o", "json"]).report,
     ] {
         let warnings = report["environments"][0]["warnings"].as_array().unwrap();
+        // The generic code says blocking or remnant; the driver's `detail` says which.
         let codes = warnings
             .iter()
-            .map(|warning| warning["code"].as_str().unwrap())
-            .filter(|code| code.starts_with("NYL-TEARDOWN-"))
+            .map(|warning| (warning["code"].as_str().unwrap(), warning["detail"].as_str()))
+            .filter(|(code, _)| code.starts_with("NYL-TEARDOWN-"))
             .collect::<Vec<_>>();
         assert_eq!(
             codes,
             [
-                "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
-                "NYL-TEARDOWN-NAMESPACE-CONFIRM",
-                "NYL-TEARDOWN-NAMESPACES-REMAIN",
-                "NYL-TEARDOWN-CATALOG-REMAINS"
+                ("NYL-TEARDOWN-BLOCKED", Some("catalog-manual-sync")),
+                ("NYL-TEARDOWN-BLOCKED", Some("namespace-confirm")),
+                ("NYL-TEARDOWN-REMNANT", Some("namespaces-remain")),
+                ("NYL-TEARDOWN-REMNANT", Some("catalog-remains"))
             ],
             "{warnings:?}"
         );
@@ -186,10 +187,8 @@ fn test_ready_target_tears_down_in_two_phases() {
     assert!(settings.get("deletionConfirmations").is_none(), "{settings}");
     // Only the self-managing catalog is left behind, which warns without blocking.
     let warnings = reconcile.report["environments"][0]["warnings"].to_string();
-    assert!(warnings.contains("NYL-TEARDOWN-CATALOG-REMAINS"), "{warnings}");
-    for blocking in ["MANUAL-SYNC", "ORPHANED", "NAMESPACE-CONFIRM"] {
-        assert!(!warnings.contains(blocking), "{warnings}");
-    }
+    assert!(warnings.contains("\"detail\":\"catalog-remains\""), "{warnings}");
+    assert!(!warnings.contains("NYL-TEARDOWN-BLOCKED"), "{warnings}");
 
     let phase1 = invoke(
         &harness,
@@ -291,14 +290,14 @@ fn test_owner_fencing_follows_whether_the_owning_incarnation_still_exists_in_sta
             "dev",
             "web-image",
             image_uid.as_str(),
-            "NYL-KUBERNETES-OWNER-FENCED",
+            "NYL-UNIT-OWNER-FENCED",
             "still exists in the state of environment dev",
         ),
         (
             "ghost",
             "kubernetes",
             uid.as_str(),
-            "NYL-KUBERNETES-OWNER-UNKNOWN",
+            "NYL-UNIT-OWNER-UNKNOWN",
             "the project declares no Environment ghost",
         ),
     ] {

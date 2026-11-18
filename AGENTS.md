@@ -90,7 +90,8 @@ These rules keep it maintainable:
   add lifecycle transitions only to the transition table.
 - Render every output (tables, JSON/YAML, transition commit summaries, status,
   exit categories) from the operation's single typed report; give errors and
-  warnings stable codes with the fix attached.
+  warnings stable codes with the fix attached. A unit driver's codes are
+  generic core codes (see [Driver boundary](#driver-boundary)).
 - State-file formats are versioned with golden files. Before changing one,
   ask the user whether to bump or break, and do neither on your own: a bump
   adds a version and a migration, and a break changes the format in place.
@@ -107,7 +108,7 @@ semantics belong to the driver implementing the unit kind. This boundary applies
 to behavior and persisted data, not just crate dependencies.
 
 - Keep tool-specific validation, defaults, execution, ownership semantics,
-  recovery requirements, and diagnostic codes in the driver. Shared code owns
+  and recovery requirements in the driver. Shared code owns
   dependency resolution, coordination, lifecycle, and evidence through generic
   driver contracts.
 - Shared core protocols, orchestration, state storage, and CLI workflows must
@@ -118,6 +119,19 @@ to behavior and persisted data, not just crate dependencies.
   Do not add tool-specific variants or fields, such as a Terraform backend
   variant or an accepted-empty-backend flag. A generic name does not make a
   tool-specific rule generic.
+- Drivers raise only generic core codes (`nyl_core::orchestration::codes::Code`),
+  named for what happened to a unit, its deployments, or its teardown, never
+  for a kind, tool, or reconciler (no `NYL-KUBERNETES-*`, no
+  `NYL-TEARDOWN-APPLICATIONS-ORPHANED`). The driver supplies the kind-specific
+  message, fix, and an optional `detail` slug for scripts. The engine decides
+  from the code alone and never reads `detail`. A driver that needs an outcome
+  no code covers adds a generic code that another driver could raise too.
+  Codes from Nyl's shared rendering and resource validation (such as
+  `NYL-TARGET-*`, `NYL-HELM-*`, and the Kubernetes render checks) describe the
+  rendered resources, not the driver, and fall outside this rule, including
+  when a driver surfaces them: the same input gives the same code with or
+  without orchestration. Codes that only a unit driver raises, or that describe
+  what a driver did, are unit codes, even when they live in a shared crate.
 - Drivers expose their requirements and validate tool-specific decisions through
   the driver contract. The engine coordinates and records the result without
   interpreting driver-private data. A driver using existing capabilities must
@@ -137,6 +151,8 @@ Reviewers must check the boundary explicitly:
 - Could another driver use the same orchestration path without an engine edit?
   Reject special cases; require a driver-owned decision or a genuinely generic
   contract, with tests at the layer that owns the rule.
+- Does a new or changed code name a kind, tool, or reconciler, or exist for
+  one driver only? Does any shared code branch on a driver's `detail`?
 
 ## Repository Structure
 

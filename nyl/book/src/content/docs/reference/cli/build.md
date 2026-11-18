@@ -63,5 +63,5 @@ completed build, so a pipeline reads the document's `changes`. Exit 1 means
 preparation or a capability check failed, such as an unknown unit, an
 environment-dependent value without `-e`, or a kind that cannot build. Exit 3
 means the build failed: the driver's execution, argument validation, or
-refusal, with its code, such as `NYL-KUBERNETES-BUILD-TARGET-OWNED`. An interrupted push may already have
+refusal, with its code, such as `NYL-BUILD-OWNED` (`target-owned`). An interrupted push may already have
 published an image; a direct build records no receipt to adopt afterwards.

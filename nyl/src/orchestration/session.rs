@@ -1072,7 +1072,7 @@ pub fn readiness_cell(unit: &UnitReport) -> String {
     match &unit.teardown_readiness {
         None => "-".to_owned(),
         Some(TeardownReadiness::Ready) => "ready".to_owned(),
-        Some(TeardownReadiness::Incomplete { reasons }) => format!("incomplete: {}", reasons.join("; ")),
+        Some(TeardownReadiness::Incomplete { reasons, .. }) => format!("incomplete: {}", reasons.join("; ")),
     }
 }
 
@@ -1140,7 +1140,16 @@ pub fn write_finding(text: &mut String, level: &str, unit: Option<&UnitName>, fi
         write_field(text, label, value, width);
     }
     text.push('\n');
-    let _ = writeln!(text, "  {}", styled(&format!("{}{unit}", finding.code), Style::Dim));
+    let detail = finding
+        .detail
+        .as_deref()
+        .map(|detail| format!(" ({detail})"))
+        .unwrap_or_default();
+    let _ = writeln!(
+        text,
+        "  {}",
+        styled(&format!("{}{detail}{unit}", finding.code), Style::Dim)
+    );
 }
 
 fn write_field(text: &mut String, label: &str, value: &str, width: usize) {
@@ -1197,6 +1206,20 @@ mod tests {
         let action = Finding::new(Code::DriverError, "message", "repair").with_action("Retry", "run again");
         write_finding(&mut text, "error", None, &action);
         assert_eq!(text, "\nerror  message\n\n  Retry  run again\n\n  NYL-DRIVER-ERROR\n");
+    }
+
+    /// Catches a driver's `detail` going missing from human output, where it is
+    /// the only thing that tells cases under one generic code apart.
+    #[test]
+    fn test_a_finding_shows_its_detail_next_to_its_code() {
+        let mut text = String::new();
+        let finding = Finding::new(Code::TeardownRemnant, "the catalog remains", "let a parent own it")
+            .with_slug("catalog-remains");
+        write_finding(&mut text, "warning", Some(&UnitName::new("web").unwrap()), &finding);
+        assert!(
+            text.ends_with("\n  NYL-TEARDOWN-REMNANT (catalog-remains) (web)\n"),
+            "{text}"
+        );
     }
 
     #[test]

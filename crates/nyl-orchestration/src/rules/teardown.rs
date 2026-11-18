@@ -952,7 +952,7 @@ mod tests {
         let warnings = readiness_warnings(&drivers(), [&unready, &ready, &silent, &retained, &command]);
         assert_eq!(
             warnings.iter().map(|warning| warning.code).collect::<Vec<_>>(),
-            vec![Code::TeardownCatalogManualSync, Code::TeardownCatalogRemains]
+            vec![Code::TeardownBlocked, Code::TeardownRemnant]
         );
         assert!(warnings.iter().all(|warning| warning.message.starts_with("dev/web: ")));
     }

@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::codes::Finding;
+use super::codes::{Code, Finding};
 use super::ids::{ChangeDigest, CommitId, EnvironmentName, Uid, UnitAddress, UnitName};
 use super::ports::CommitIdentity;
 use super::state::{ArtifactDocument, AttestationResult, DesiredUnit, Drift, FailureCategory, ObservedUnit, Receipt};
@@ -26,12 +26,28 @@ use super::time::Timestamp;
 /// A Nyl-side failure of a driver call, such as an unreadable worktree. It
 /// gives the unit an `uncertain` condition when an effect may have started,
 /// and otherwise fails the invocation with exit 1.
+///
+/// A driver that knows what went wrong attaches a generic [`Code`] and an
+/// optional `detail` slug ([`DriverError::coded`]); its text then starts with
+/// the code. The engine records and shows both without interpreting them.
 #[derive(Debug, thiserror::Error)]
-#[error("{message}")]
 pub struct DriverError {
     message: String,
     /// Whether an effect may have started.
     effects_possible: bool,
+    code: Option<Code>,
+    detail: Option<String>,
+    /// How to fix it, when the driver knows better than the engine's generic advice.
+    fix: Option<String>,
+}
+
+impl std::fmt::Display for DriverError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            Some(code) => write!(formatter, "{code}: {}", self.message),
+            None => formatter.write_str(&self.message),
+        }
+    }
 }
 
 impl DriverError {
@@ -40,6 +56,9 @@ impl DriverError {
         Self {
             message: message.into(),
             effects_possible: false,
+            code: None,
+            detail: None,
+            fix: None,
         }
     }
 
@@ -48,11 +67,66 @@ impl DriverError {
         Self {
             message: message.into(),
             effects_possible: true,
+            code: None,
+            detail: None,
+            fix: None,
         }
+    }
+
+    /// Attach the stable code of what went wrong and the driver's `detail` slug.
+    #[must_use]
+    pub fn coded(mut self, code: Code, detail: Option<&str>) -> Self {
+        self.code = Some(code);
+        self.detail = detail.map(str::to_owned);
+        self
+    }
+
+    /// Attach how to fix it, shown in place of the engine's generic advice.
+    #[must_use]
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into());
+        self
     }
 
     pub fn effects_possible(&self) -> bool {
         self.effects_possible
+    }
+
+    /// The stable code the driver attached, if any.
+    pub fn code(&self) -> Option<Code> {
+        self.code
+    }
+
+    /// The driver's `detail` slug, if any.
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    /// How the driver says to fix it, if it said.
+    pub fn fix(&self) -> Option<&str> {
+        self.fix.as_deref()
+    }
+
+    /// The finding that reports this error: the driver's code, `detail`, and
+    /// fix when it gave them, else `NYL-DRIVER-ERROR` and `fallback_fix`.
+    /// `context` starts the message, such as `unit web: `.
+    pub fn finding(&self, context: &str, fallback_fix: &str) -> Finding {
+        let fix = self.fix.as_deref().unwrap_or(fallback_fix);
+        match self.code {
+            Some(code) => {
+                let finding = Finding::new(code, format!("{context}{}", self.message), fix);
+                match &self.detail {
+                    Some(detail) => finding.with_slug(detail.clone()),
+                    None => finding,
+                }
+            }
+            None => Finding::new(Code::DriverError, format!("{context}{}", self.message), fix),
+        }
+    }
+
+    /// The message without the code.
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
@@ -389,20 +463,67 @@ pub enum Outcome {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         published: Option<CommitId>,
     },
+    /// The execution failed without an effect it did not report.
+    ///
+    /// `code` is the generic stable code of what went wrong, when the driver
+    /// knows it, and `detail` the driver's slug for its specifics. The shell
+    /// records `message` prefixed with the code and shows both in the run
+    /// report; it never interprets either.
     Failed {
         category: FailureCategory,
         retryable: bool,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<Code>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     /// A failure requiring an operator's reason before retry. The context is
-    /// non-secret driver-owned data, recorded and returned without interpretation.
+    /// non-secret driver-owned data, recorded and returned without
+    /// interpretation; `code` and `detail` are as for [`Outcome::Failed`].
     RetryRequired {
         category: FailureCategory,
         message: String,
         context: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<Code>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     /// Effects may or may not have happened.
     Uncertain { reason: String },
+}
+
+impl Outcome {
+    /// A failure without a code.
+    pub fn failed(category: FailureCategory, retryable: bool, message: impl Into<String>) -> Self {
+        Self::Failed {
+            category,
+            retryable,
+            message: message.into(),
+            code: None,
+            detail: None,
+        }
+    }
+
+    /// Attach the stable code of a failure and the driver's `detail` slug; other
+    /// outcomes are returned unchanged.
+    #[must_use]
+    pub fn coded(mut self, with: Code, slug: Option<&str>) -> Self {
+        if let Self::Failed { code, detail, .. } | Self::RetryRequired { code, detail, .. } = &mut self {
+            *code = Some(with);
+            *detail = slug.map(str::to_owned);
+        }
+        self
+    }
+}
+
+/// A failure's message as state records it: prefixed with its code, if any.
+pub fn coded_message(code: Option<Code>, message: &str) -> String {
+    match code {
+        Some(code) => format!("{code}: {message}"),
+        None => message.to_owned(),
+    }
 }
 
 /// What a drift detection found for a current receipt.
@@ -1120,6 +1241,30 @@ impl DriverSet {
 impl std::fmt::Debug for DriverSet {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_list().entries(self.drivers.keys()).finish()
+    }
+}
+
+#[cfg(test)]
+mod driver_error_tests {
+    use super::*;
+
+    /// Catches a coded driver error reported under the generic driver code, or
+    /// with the engine's advice where the driver gave its own fix.
+    #[test]
+    fn test_a_coded_driver_error_reports_its_code_detail_and_fix() {
+        let plain = DriverError::before_effects("no tool").finding("unit web: ", "install it");
+        assert_eq!(
+            (plain.code, plain.message.as_str(), plain.fix.as_str(), plain.detail),
+            (Code::DriverError, "unit web: no tool", "install it", None)
+        );
+        let coded = DriverError::before_effects("no context")
+            .coded(Code::UnitAccessUndeclared, Some("cluster-context-missing"))
+            .with_fix("declare spec.live.context")
+            .finding("unit web: ", "install it");
+        assert_eq!(coded.code, Code::UnitAccessUndeclared);
+        assert_eq!(coded.message, "unit web: no context");
+        assert_eq!(coded.fix, "declare spec.live.context");
+        assert_eq!(coded.detail.as_deref(), Some("cluster-context-missing"));
     }
 }
 

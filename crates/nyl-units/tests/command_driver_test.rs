@@ -213,6 +213,7 @@ fn test_reconcile_rejects_missing_mistyped_and_empty_outputs() {
                 category: FailureCategory::OutputRejected,
                 retryable: false,
                 message,
+                ..
             } => assert!(message.contains(needle), "{body}: {message}"),
             other => panic!("{body}: expected output-rejected, got {other:?}"),
         }
@@ -234,7 +235,7 @@ fn test_reconcile_nonzero_exit_is_tool_error_retryable_only_when_idempotent() {
         assert!(
             matches!(
                 &outcome,
-                Outcome::Failed { category: FailureCategory::ToolError, retryable, message }
+                Outcome::Failed { category: FailureCategory::ToolError, retryable, message, .. }
                     if *retryable == idempotent && message.contains("code 4")
             ),
             "{outcome:?}"

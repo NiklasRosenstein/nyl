@@ -25,11 +25,11 @@ steps:
     exit: 0
     expect:
       executed: [web-image, database, kubernetes]
-      codes: [NYL-TEARDOWN-NAMESPACE-CONFIRM]
+      codes: [NYL-TEARDOWN-BLOCKED]
   - nyl: [plan, -e, pr-1]
     exit: 0
     expect:
-      codes: [NYL-TEARDOWN-NAMESPACE-CONFIRM]
+      codes: [NYL-TEARDOWN-BLOCKED]
 
   # The scheduled job finds pr-1 expired: its teardown does not start.
   - clock: {advance: 8d}

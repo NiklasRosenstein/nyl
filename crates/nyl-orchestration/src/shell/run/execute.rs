@@ -23,7 +23,7 @@
 #[allow(clippy::wildcard_imports)] // The run module's private helpers and imports.
 use super::*;
 use crate::rules::transitions::{self, Applied, Event};
-use nyl_core::orchestration::driver::{IncarnationDirectory, Inspection, RecoveryPolicy};
+use nyl_core::orchestration::driver::{coded_message, IncarnationDirectory, Inspection, RecoveryPolicy};
 use nyl_core::orchestration::state::{ApprovalRecord, Attestation, FailureCategory};
 
 /// One finished execution.
@@ -32,6 +32,9 @@ pub(super) struct Execution {
     pub(super) name: UnitName,
     pub(super) result: UnitResult,
     pub(super) message: Option<String>,
+    /// The stable code and `detail` slug the driver gave a failure.
+    pub(super) code: Option<Code>,
+    pub(super) detail: Option<String>,
     pub(super) change_digest: Option<nyl_core::orchestration::ids::ChangeDigest>,
     pub(super) approval: Option<ApprovalRecord>,
     pub(super) warnings: Vec<Finding>,
@@ -174,6 +177,8 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         reason: job.reason,
         result: UnitResult::Current,
         message: None,
+        code: None,
+        detail: None,
         change_digest: None,
         approval: job.approval.clone(),
         warnings: Vec::new(),
@@ -356,6 +361,13 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         }
         Err(error) if !error.effects_possible() => {
             before_effects(&mut execution, error.to_string());
+            if let Some(finding) = execution.errors.last_mut() {
+                // When the driver said what went wrong, its code and fix replace the generic ones.
+                let fallback = std::mem::take(&mut finding.fix);
+                *finding = error.finding(&format!("unit {name}: "), &fallback);
+            }
+            execution.code = error.code();
+            execution.detail = error.detail().map(str::to_owned);
             return execution;
         }
         Err(error) => Outcome::Uncertain {
@@ -431,12 +443,17 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             category,
             message,
             context,
+            code,
+            detail,
         } => {
             execution.result = UnitResult::Failed {
                 category,
                 retryable: false,
             };
+            let message = coded_message(code, &message);
             execution.message = Some(message.clone());
+            execution.code = code;
+            execution.detail = detail;
             Event::RetryRequired {
                 since: finished,
                 run: shared.run.clone(),
@@ -449,9 +466,14 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
             category,
             retryable,
             message,
+            code,
+            detail,
         } => {
             execution.result = UnitResult::Failed { category, retryable };
+            let message = coded_message(code, &message);
             execution.message = Some(message.clone());
+            execution.code = code;
+            execution.detail = detail;
             Event::Failed {
                 since: finished,
                 run: shared.run.clone(),

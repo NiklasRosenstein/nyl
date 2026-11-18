@@ -317,7 +317,7 @@ whose previews should expire unattended sets `observe` or `delay` on its
 publications; `state init --template` warns (`NYL-TEARDOWN-WAIT-MANUAL`)
 about a `manual` wait and about every unmet teardown requirement of the units
 it can resolve before their producers ran, such as a catalog that does not
-prune (`NYL-TEARDOWN-CATALOG-MANUAL-SYNC`). `plan` shows the rest once the units
+prune (`NYL-TEARDOWN-BLOCKED`, detail `catalog-manual-sync`). `plan` shows the rest once the units
 resolve.
 
 ## Source keep refs
@@ -417,7 +417,7 @@ is `catalog:<name>`, so no instance writes outside its prefix.
   leaves the winner's manifest. It records the result in the `PublishedTree`
   artifact (`nyl get artifact kubernetes/tree -e <instance>`):
   `sharedCatalog.result` is `created`, `current`, or `differs`, and for `differs`
-  it warns with `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` in the run, and in
+  it warns with `NYL-UNIT-SHARED-DIFFERS` (`shared-catalog-differs`) in the run, and in
   `plan` and `status` until the unit executes again. To replace the manifest,
   for example after a Nyl upgrade or a change of the `shared` block, run the
   build from the revision that should win, in the scheduled job on the default
@@ -456,7 +456,7 @@ is `catalog:<name>`, so no instance writes outside its prefix.
   is no Application is a blocking row. A teardown whose catalog no longer prunes
   is held by the driver even when the instance's stored settings said it did, so
   run the writer before instances expire. The
-  `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` warning is what the unit's last
+  `NYL-UNIT-SHARED-DIFFERS` (`shared-catalog-differs`) warning is what the unit's last
   execution found and stays until it executes again; `nyl build <unit> -e <env> --
   --shared-catalog --diff` shows the branch's state now. An instance
   leaves nothing of its catalog behind, because the shared catalog prunes its

@@ -269,7 +269,7 @@ and then resumes the unit or runs `nyl recover --retry`; Nyl never releases
 locks itself.
 
 A unit with a receipt whose backend now holds no state fails before planning
-with `NYL-TOFU-STATE-MISSING`, a non-retryable `ownership` failure, instead of
+with `NYL-UNIT-NATIVE-STATE-MISSING` (`backend-state-missing`), a non-retryable `ownership` failure, instead of
 planning to create everything again: a wrong `key`, a lost bucket, or a
 misconfigured backend looks exactly like that. `nyl recover --retry --reason`
 acknowledges the driver's recorded retry context when the empty state is

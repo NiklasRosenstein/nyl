@@ -132,7 +132,7 @@ diagnostics go to stderr.
 | `NYL-LEASE-BROKEN` | The lease was broken and its run is not imported yet. Run `nyl recover -e <env>`, then run the command again. |
 
 A [publication](/nyl/orchestration/resource-guides/kubernetes-publication/#observed-values)
-adds `NYL-KUBERNETES-OBSERVATION-UNOWNED` at resolution, and puts its own words
+adds `NYL-OBSERVATION-UNOWNED` (`resource-not-rendered`) at resolution, and puts its own words
 in the reasons it reports: `application-not-running-publication` and
 `field-not-set` for a value that is pending.
 

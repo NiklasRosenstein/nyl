@@ -9,7 +9,7 @@
 //!   {apiVersion, kind, namespace?, name}, pointer}` ([`super::spec`]).
 //! - **Recorded at resolution.** The driver renders the target anyway, so it
 //!   checks that the target renders each resource, with the code
-//!   `NYL-KUBERNETES-OBSERVATION-UNOWNED` otherwise ([`recorded`]), and
+//!   `NYL-OBSERVATION-UNOWNED` otherwise ([`recorded`]), and
 //!   records the deployment that owns it (`observationSources`, by the id
 //!   the reconciler facts give it) and the
 //!   workload Cluster with its local context (`workload`) in the resolved
@@ -53,8 +53,9 @@ use super::reconciler::{reader, ReadError, ReadRequest, KUBECONFIG_ENV};
 use super::spec::{observation_sources, OBSERVATION_SOURCES, WORKLOAD};
 use super::workload::{KubeResourceReader, ResourceReader};
 
-/// The stable code of an observation of a resource the target does not render.
-pub const UNOWNED: &str = "NYL-KUBERNETES-OBSERVATION-UNOWNED";
+/// The `detail` of an observation of a resource the target does not render
+/// (`NYL-OBSERVATION-UNOWNED`).
+pub const UNOWNED: &str = "resource-not-rendered";
 
 /// Why an observation is pending: no owning Application runs the publication yet.
 pub const NOT_RUNNING: &str = "application-not-running-publication";
@@ -143,7 +144,7 @@ pub(super) fn recorded(spec: &Value, rendered: &RenderedTarget, target: &str) ->
         let Some(owner) = owner else {
             let rendered_here = rendered_here.join(", ");
             return Err(DriverError::before_effects(format!(
-                "{UNOWNED}: observation {name} reads {}, which target {target} does not render (its deployments: {}); \
+                "observation {name} reads {}, which target {target} does not render (its deployments: {}); \
                  observe a resource one of its Releases renders, so that the cluster read stays the target's",
                 source.resource,
                 if rendered_here.is_empty() {
@@ -151,7 +152,8 @@ pub(super) fn recorded(spec: &Value, rendered: &RenderedTarget, target: &str) ->
                 } else {
                     rendered_here
                 }
-            )));
+            ))
+            .coded(nyl_core::orchestration::codes::Code::ObservationUnowned, Some(UNOWNED)));
         };
         sources.insert(name.clone(), json!({"deployment": owner}));
     }

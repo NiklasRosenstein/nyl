@@ -81,7 +81,7 @@ apply. Teardown creates and applies a native destroy plan using the same
 approval rules.
 
 A missing backend state for a unit with a receipt fails with
-`NYL-TOFU-STATE-MISSING`, instead of recreating resources. Restore it, or use
+`NYL-UNIT-NATIVE-STATE-MISSING` (`backend-state-missing`), instead of recreating resources. Restore it, or use
 `nyl recover --retry --reason` to accept an intentionally empty state for that
 ownership scope. The acknowledgement applies to the recorded unit incarnation,
 backend, and workspace, and expires after successful reconciliation. Changing any

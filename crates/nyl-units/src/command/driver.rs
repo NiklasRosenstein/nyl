@@ -415,16 +415,16 @@ fn step_failure(exit: &ToolExit) -> String {
 fn unsuccessful(spec: &CommandSpec, step: &str, exit: &ToolExit) -> Outcome {
     let retryable = spec.idempotent;
     match exit {
-        ToolExit::Exited { code, .. } => Outcome::Failed {
-            category: FailureCategory::ToolError,
+        ToolExit::Exited { code, .. } => Outcome::failed(
+            FailureCategory::ToolError,
             retryable,
-            message: format!("{step} exited with code {code}"),
-        },
-        ToolExit::NotStarted { reason } => Outcome::Failed {
-            category: FailureCategory::MissingTool,
+            format!("{step} exited with code {code}"),
+        ),
+        ToolExit::NotStarted { reason } => Outcome::failed(
+            FailureCategory::MissingTool,
             retryable,
-            message: format!("{step} could not start: {reason}"),
-        },
+            format!("{step} could not start: {reason}"),
+        ),
         ToolExit::Signaled { signal } => Outcome::Uncertain {
             reason: format!("{step} died from signal {signal}"),
         },
@@ -630,11 +630,7 @@ impl Driver for CommandDriver {
                         attestations: read_attestations(&spec, ran.prepared.attestations.as_deref()),
                         warnings: Vec::new(),
                     },
-                    Err(message) => Outcome::Failed {
-                        category: FailureCategory::OutputRejected,
-                        retryable: spec.idempotent,
-                        message,
-                    },
+                    Err(message) => Outcome::failed(FailureCategory::OutputRejected, spec.idempotent, message),
                 }
             }
             exit => unsuccessful(&spec, "command", exit),

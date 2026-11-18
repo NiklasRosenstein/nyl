@@ -165,12 +165,12 @@ steps:
     exit: 0
     expect:
       executed: [kubernetes]
-      codes: [NYL-KUBERNETES-SHARED-CATALOG-DIFFERS]
+      codes: [NYL-UNIT-SHARED-DIFFERS]
       deploy: {branch: previews, unchanged: ['_nyl/shared/previews/**']}
   - nyl: [status, -e, pr-126]
     exit: 0
     expect:
-      codes: [NYL-KUBERNETES-SHARED-CATALOG-DIFFERS]
+      codes: [NYL-UNIT-SHARED-DIFFERS]
   - nyl: [get, artifact, kubernetes/tree, -e, pr-126]
     exit: 0
     expect:

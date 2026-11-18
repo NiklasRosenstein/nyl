@@ -187,7 +187,8 @@ pub fn render_direct_unit(
 
 /// The stable code of the refusal to build a publication unit that declares
 /// its DeploymentTarget inline without an environment.
-pub const INLINE_TARGET_NEEDS_ENVIRONMENT: &str = "NYL-KUBERNETES-BUILD-INLINE-TARGET";
+pub const INLINE_TARGET_NEEDS_ENVIRONMENT: nyl_core::orchestration::codes::Code =
+    nyl_core::orchestration::codes::Code::BuildEnvironmentRequired;
 
 /// What a direct build of a publication unit renders beyond the other
 /// kinds: the unit as `environment` would render it, so its target is named
@@ -1327,7 +1328,7 @@ spec:
         let worktree = inline_project(&literal);
         fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
         let error = direct(&worktree, None).unwrap_err().to_string();
-        assert!(error.contains(INLINE_TARGET_NEEDS_ENVIRONMENT), "{error}");
+        assert!(error.contains(INLINE_TARGET_NEEDS_ENVIRONMENT.as_str()), "{error}");
         assert!(error.contains("pass -e <environment>"), "{error}");
         assert!(direct(&worktree, Some("dev")).is_ok());
     }

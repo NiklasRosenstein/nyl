@@ -299,7 +299,7 @@ warning  dev/kubernetes: the self-managing catalog Application and its AppProjec
 
   Action  let a parent Application or ApplicationSet own the target's catalog (catalogApplication.enabled: false) to remove them with the teardown
 
-  NYL-TEARDOWN-CATALOG-REMAINS
+  NYL-TEARDOWN-REMNANT (catalog-remains)
 ```
 
 The warning is the publication's teardown readiness: the catalog Application of
@@ -355,7 +355,7 @@ warning  dev/kubernetes: the self-managing catalog Application and its AppProjec
 
   Action  let a parent Application or ApplicationSet own the target's catalog (catalogApplication.enabled: false) to remove them with the teardown
 
-  NYL-TEARDOWN-CATALOG-REMAINS
+  NYL-TEARDOWN-REMNANT (catalog-remains)
 ```
 
 ### The same Release without orchestration
@@ -1009,7 +1009,7 @@ $ nyl build kubernetes -e pr-2 -- --shared-catalog --diff
 
 Publications of the instances never overwrite the shared manifest, so pull
 requests on different Nyl versions do not fight over it; one that renders
-another manifest warns with `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` and reports
+another manifest warns with `NYL-UNIT-SHARED-DIFFERS` (`shared-catalog-differs`) and reports
 `differs` in the tree artifact (`nyl get artifact kubernetes/tree -e pr-2
 --pointer /sharedCatalog/result`, which prints `current` here).
 See [One catalog for every instance](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance).

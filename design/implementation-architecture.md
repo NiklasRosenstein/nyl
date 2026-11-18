@@ -199,7 +199,7 @@ fn plan(snapshot: &EnvironmentSnapshot, source: &RenderedSource, now: Timestamp)
   from that report, so what people read, what CI parses, and what auditors
   replay agree by construction.
 - Errors and warnings have stable codes with the fix attached, such as
-  `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`, so the same problem reads the same in
+  `NYL-TEARDOWN-BLOCKED` (`catalog-manual-sync`), so the same problem reads the same in
   every place it appears.
 - Each crate has its own error type; `nyl-cli` alone maps them to exit
   categories.

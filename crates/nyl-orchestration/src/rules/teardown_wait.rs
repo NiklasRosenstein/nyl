@@ -3,7 +3,7 @@
 //! Contract: [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit),
 //! Teardown: `teardownWait` strategies `observe` (the driver reports that
 //! the deployments phase 1 removes are gone within the unit's `timeout`,
-//! else uncertain with `applications-remain` or `observation-failed`), `delay`
+//! else uncertain with `deployments-remain` or `observation-failed`), `delay`
 //! (`duration` after the phase 1 commit, recorded as not observed), and
 //! `manual` (an operator's `--confirm-removed`; never keeps a run waiting).
 //! The driver reads the strategy and its defaults from the stored spec
@@ -85,9 +85,8 @@ pub enum WaitDecision {
 ///   continues in a later run).
 /// - `observe` completes once the driver reports that nothing phase 1
 ///   removes remains, polls before the deadline, and is uncertain past it
-///   (`applications-remain`, a reason token kept as released, listing what
-///   the driver reports) or when the observation fails
-///   (`observation-failed`).
+///   (`deployments-remain`, listing what the driver reports) or when the
+///   observation fails (`observation-failed`).
 pub fn decide(inputs: &WaitInputs<'_>) -> WaitDecision {
     if let Some(signal) = inputs
         .confirmation
@@ -140,7 +139,7 @@ pub fn decide(inputs: &WaitInputs<'_>) -> WaitDecision {
             Some(RemovalObservation::Remaining(remaining)) => {
                 if inputs.now >= inputs.deadline {
                     WaitDecision::Uncertain {
-                        reason: format!("applications-remain: {}", remaining.join(", ")),
+                        reason: format!("deployments-remain: {}", remaining.join(", ")),
                     }
                 } else {
                     poll(None)
@@ -333,7 +332,7 @@ mod tests {
         assert_eq!(
             decide(&inputs(WaitStrategy::Observe, &waiting, 600, Some(&remaining))),
             WaitDecision::Uncertain {
-                reason: "applications-remain: web, api".to_owned()
+                reason: "deployments-remain: web, api".to_owned()
             }
         );
         let failed = RemovalObservation::Failed("no credentials for the reconciler".to_owned());

@@ -103,7 +103,13 @@ pub enum NylError {
     /// A published prefix is owned by another orchestration unit
     /// incarnation. See [`NylError::is_owner_fenced`].
     #[error("{0}")]
-    OwnerFenced(String),
+    OwnerFenced(crate::kubernetes::fence::Fenced),
+
+    /// The publication branch holds more publications since the last receipt
+    /// than a walk reads, so the Releases that left the tree cannot be told.
+    /// See [`NylError::is_history_too_deep`].
+    #[error("{0}")]
+    HistoryTooDeep(String),
 
     /// An apply was interrupted before it completed (Ctrl-C, or the unit's
     /// deadline).
@@ -232,6 +238,21 @@ impl NylError {
     /// ownership index names another owner.
     pub fn is_owner_fenced(&self) -> bool {
         matches!(self, NylError::OwnerFenced(_))
+    }
+
+    /// Whether a walk of the publication branch could not reach what bounds it,
+    /// so what left the tree cannot be told.
+    pub fn is_history_too_deep(&self) -> bool {
+        matches!(self, NylError::HistoryTooDeep(_))
+    }
+
+    /// The refusal of a publication or removal whose prefix, or of an apply
+    /// whose Release, another owner holds.
+    pub fn owner_fenced(&self) -> Option<&crate::kubernetes::fence::Fenced> {
+        match self {
+            NylError::OwnerFenced(fenced) => Some(fenced),
+            _ => None,
+        }
     }
 
     /// Whether a publication lost its race for the branch head, before the

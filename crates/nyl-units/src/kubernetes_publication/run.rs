@@ -22,7 +22,7 @@
 //! unit incarnation in its ownership index (environment, unit, uid). A publication or removal over a prefix whose index names another
 //! incarnation takes it over only when the incarnation directory
 //! (`ExecutionContext::incarnations`) reports it gone from its environment's
-//! state, and otherwise fails with `NYL-KUBERNETES-OWNER-FENCED`
+//! state, and otherwise fails with `NYL-UNIT-OWNER-FENCED`
 //! ([`fence`]); a prefix whose index names no owner (version 2, or version 3 as
 //! `publish-tree` writes it) is taken over and upgraded.
 //!
@@ -31,13 +31,14 @@
 //! read no state is built again as it is. A tree that read `fromPublication`
 //! state is rendered again on the new head: when the state it read is
 //! unchanged, it publishes there; when the state changed, the call ends
-//! without publishing as a retryable failure (`NYL-KUBERNETES-STATE-CHANGED`),
+//! without publishing as a retryable failure (`NYL-UNIT-INPUTS-CHANGED`),
 //! and the next run resolves the unit again with the new state. Each retry is
 //! bounded in number and by the unit's timeout. Any other failure ends the
 //! call: one before the push is a failure before effects, and a failed push
 //! may have published.
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
     Change, DriverError, DriverResult, ExecutionContext, IncarnationStatus, KeyInputs, Outcome, PlanReport,
     ResolutionContext,
@@ -48,13 +49,15 @@ use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, Artifac
 use nyl_core::orchestration::time::Timestamp;
 use nyl_render::gitops::inputs::InputSnapshot;
 use nyl_render::gitops::observation::{direct_deployments, Delivery, ReconcilerLocation};
+pub(crate) use nyl_render::gitops::publication::SHARED_CATALOG_DETAIL;
 use nyl_render::gitops::publication::{
     inspect_shared_catalog, prepare_target_publication_fenced, prepare_target_removal_fenced, render_target,
     without_workload_applications, without_workloads, PublicationAuthor, RenderedTarget, SharedCatalogState,
     TargetRender,
 };
-use nyl_render::gitops::reconcile::RenderIndexOwner;
+use nyl_render::gitops::reconcile::{RenderIndexOwner, PREFIX_DETAIL};
 use nyl_render::gitops::units::PublicationTarget;
+use nyl_render::kubernetes::fence::{FenceCode, Fenced};
 use serde_json::{json, Value};
 
 use super::direct::apply::{Direct, Step};
@@ -82,10 +85,13 @@ fn recorded_kind(unit: &DesiredUnit) -> Option<&str> {
 /// than the one the unit recorded.
 fn reconciler_mismatch(unit: &DesiredUnit, rendered: &RenderedTarget) -> Option<Outcome> {
     let recorded = recorded_kind(unit).unwrap_or("argocd");
-    (recorded != rendered.delivery.kind()).then(|| Outcome::Failed {
-        category: FailureCategory::Ownership,
-        retryable: true,
-        message: teardown_reconciler_changed(recorded, rendered.delivery.kind()),
+    (recorded != rendered.delivery.kind()).then(|| {
+        Outcome::failed(
+            FailureCategory::Ownership,
+            true,
+            teardown_reconciler_changed(recorded, rendered.delivery.kind()),
+        )
+        .coded(Code::UnitDestinationChanged, Some(RECONCILER_CHANGED))
     })
 }
 
@@ -149,43 +155,64 @@ pub(crate) fn unit_owner(unit: &DesiredUnit) -> DriverResult<RenderIndexOwner> {
 /// Owner fencing: whether `own` may publish to, or remove, a prefix whose
 /// ownership index names `owner`. `Ok` once that incarnation no longer
 /// exists in its environment's state; otherwise why the prefix stays fenced,
-/// with its stable code and the fix: `NYL-KUBERNETES-OWNER-FENCED` while the
-/// owner exists, and `NYL-KUBERNETES-OWNER-UNKNOWN`, which fails closed, when
+/// with its stable code and the fix: `NYL-UNIT-OWNER-FENCED` while the
+/// owner exists, and `NYL-UNIT-OWNER-UNKNOWN`, which fails closed, when
 /// state cannot say, such as for an environment that was renamed or removed.
+/// The `detail` says what is owned: [`PREFIX_DETAIL`], or
+/// [`SHARED_CATALOG_DETAIL`] for a prefix a shared catalog holds.
 pub(crate) fn fence<'a>(
     ctx: &'a ExecutionContext<'_>,
-) -> impl Fn(&RenderIndexOwner) -> std::result::Result<(), String> + 'a {
+) -> impl Fn(&RenderIndexOwner) -> std::result::Result<(), Fenced> + 'a {
     move |owner| {
+        let refused = |code: FenceCode, message: String| Err(Fenced { code, message });
         let RenderIndexOwner::Unit { environment, unit, uid } = owner else {
             // A shared catalog is no unit incarnation and never ceases to exist
             // by itself: its prefix is released only by removing the files or
             // the index's `owner` member by hand.
-            return Err(format!(
-                "NYL-KUBERNETES-OWNER-FENCED: the prefix is owned by {owner}, which no unit's teardown releases; a target's \
-                 publication prefix must not be the shared catalog's (_nyl/shared/<name>/). {}",
-                nyl_render::gitops::reconcile::OWNED_PREFIX_FIX
-            ));
+            return refused(
+                FenceCode::owned(SHARED_CATALOG_DETAIL),
+                format!(
+                    "the prefix is owned by {owner}, which no unit's teardown releases; a target's \
+                     publication prefix must not be the shared catalog's (_nyl/shared/<name>/). {}",
+                    nyl_render::gitops::reconcile::OWNED_PREFIX_FIX
+                ),
+            );
         };
         let (Ok(environment), Ok(unit), Ok(uid)) =
             (EnvironmentName::new(environment), UnitName::new(unit), Uid::new(uid))
         else {
-            return Err(format!(
-                "the ownership index names {owner}, which is not a valid unit identity"
-            ));
+            return refused(
+                FenceCode::owned(PREFIX_DETAIL),
+                format!("the ownership index names {owner}, which is not a valid unit identity"),
+            );
         };
         match ctx.incarnations.status(&environment, &unit, &uid) {
             IncarnationStatus::Gone => Ok(()),
-            IncarnationStatus::Exists => Err(format!(
-                "NYL-KUBERNETES-OWNER-FENCED: the prefix is owned by {owner}, which still exists in the state of environment \
-                 {environment}; it stays fenced until that unit's teardown completes or it is released with `nyl state forget`"
-            )),
-            IncarnationStatus::Unknown(reason) => Err(format!(
-                "NYL-KUBERNETES-OWNER-UNKNOWN: the prefix is owned by {owner}, and whether it still exists cannot be checked: \
-                 {reason}. If the environment was renamed or removed, declare it again and tear the unit down, or {}",
-                nyl_render::gitops::reconcile::OWNED_PREFIX_FIX
-            )),
+            IncarnationStatus::Exists => refused(
+                FenceCode::owned(PREFIX_DETAIL),
+                format!(
+                    "the prefix is owned by {owner}, which still exists in the state of environment \
+                     {environment}; it stays fenced until that unit's teardown completes or it is released with `nyl state forget`"
+                ),
+            ),
+            IncarnationStatus::Unknown(reason) => refused(
+                FenceCode::owner_unknown(PREFIX_DETAIL),
+                format!(
+                    "the prefix is owned by {owner}, and whether it still exists cannot be checked: \
+                     {reason}. If the environment was renamed or removed, declare it again and tear the unit down, or {}",
+                    nyl_render::gitops::reconcile::OWNED_PREFIX_FIX
+                ),
+            ),
         }
     }
+}
+
+/// The refusal an owner-fenced render error carries.
+fn fence_of(error: &nyl_render::NylError) -> Fenced {
+    error.owner_fenced().cloned().unwrap_or_else(|| Fenced {
+        code: FenceCode::owned(PREFIX_DETAIL),
+        message: error.to_string(),
+    })
 }
 
 /// The resolved `spec.releases` as the pinned input snapshot of the render.
@@ -364,7 +391,7 @@ enum Attempted<R> {
     Done(R),
     StateChanged(String),
     /// The prefix is owned by another unit incarnation that still exists.
-    Fenced(String),
+    Fenced(Fenced),
 }
 
 /// The time a call may spend, from the context's timeout, measured from its start.
@@ -409,7 +436,7 @@ fn with_retries<T, P, R>(
                 Err(error) => return Err(DriverError::after_effects(format!("cannot {pushed}: {error}"))),
             },
             Err(error) if error.is_stale_publication() => error,
-            Err(error) if error.is_owner_fenced() => return Ok(Attempted::Fenced(error.to_string())),
+            Err(error) if error.is_owner_fenced() => return Ok(Attempted::Fenced(fence_of(&error))),
             Err(error) => {
                 return Err(DriverError::before_effects(format!(
                     "cannot prepare {prepared}: {error}"
@@ -476,28 +503,35 @@ fn state_inputs(rendered: &RenderedTarget) -> DriverResult<std::collections::BTr
 /// The outcome of a call that ended without publishing because the state its
 /// render read changed.
 fn state_changed(message: &str) -> Outcome {
-    Outcome::Failed {
-        category: FailureCategory::ToolError,
-        retryable: true,
-        message: format!(
-            "NYL-KUBERNETES-STATE-CHANGED: {message}; nothing was published, and the next run resolves the unit again with the new state"
-        ),
-    }
+    Outcome::failed(
+        FailureCategory::ToolError,
+        true,
+        format!("{message}; nothing was published, and the next run resolves the unit again with the new state"),
+    )
+    .coded(Code::UnitInputsChanged, Some(STATE_CHANGED))
 }
+
+/// The `detail` of a publication that ended because the state its render read changed.
+pub(crate) const STATE_CHANGED: &str = "publication-state-changed";
+/// The `detail` of a unit whose spec renders another destination than its receipt published to.
+pub(crate) const TARGET_CHANGED: &str = "target-changed";
+/// The `detail` of a unit whose target declares another reconciler than it published for.
+pub(crate) const RECONCILER_CHANGED: &str = "reconciler-changed";
+/// The `detail` of the warning about a shared catalog the branch holds in another form.
+pub(crate) const SHARED_CATALOG_DIFFERS: &str = "shared-catalog-differs";
+/// The `detail` of the warning about a Release a teardown left in place.
+pub(crate) const RELEASE_LEFT_BEHIND: &str = "release-left-behind";
 
 /// The outcome of a call that ended without publishing or removing anything
 /// because another unit incarnation still owns the prefix. Nothing was
 /// written, and the next run reads state again, so it retries on its own once
 /// the other incarnation is gone.
-fn fenced(message: &str) -> Outcome {
-    Outcome::Failed {
-        category: FailureCategory::Ownership,
-        retryable: true,
-        message: if message.starts_with("NYL-") {
-            message.to_owned()
-        } else {
-            format!("NYL-KUBERNETES-OWNER-FENCED: {message}")
-        },
+fn fenced(fenced: &Fenced) -> Outcome {
+    match fenced.code {
+        FenceCode::Unit { code, detail } => {
+            Outcome::failed(FailureCategory::Ownership, true, fenced.message.clone()).coded(code, Some(detail))
+        }
+        FenceCode::Command(_) => Outcome::failed(FailureCategory::Ownership, true, fenced.to_string()),
     }
 }
 
@@ -533,34 +567,36 @@ fn target_changed(
     .collect::<Vec<_>>();
     if let (kind, Some(before)) = (rendered.delivery.kind(), recorded("reconciler")) {
         if kind != before {
-            return Some(Outcome::Failed {
-                category: FailureCategory::Ownership,
-                retryable: true,
-                message: reconciler_changed(unit, before, kind),
-            });
+            return Some(
+                Outcome::failed(FailureCategory::Ownership, true, reconciler_changed(unit, before, kind))
+                    .coded(Code::UnitDestinationChanged, Some(RECONCILER_CHANGED)),
+            );
         }
     }
     if changes.is_empty() {
         return None;
     }
-    Some(Outcome::Failed {
-        category: FailureCategory::Ownership,
-        retryable: true,
-        message: format!(
-            "NYL-KUBERNETES-TARGET-CHANGED: the unit published to a destination that its spec no longer renders ({}); \
-             nothing was published. Restore the previous target, or replace the unit: run \
-             `nyl teardown -e {env} --unit {name}`, which removes the tree it published, then reconcile to publish the new target",
-            changes.join(", "),
-            env = unit.unit.environment,
-            name = unit.unit.name,
-        ),
-    })
+    Some(
+        Outcome::failed(
+            FailureCategory::Ownership,
+            true,
+            format!(
+                "the unit published to a destination that its spec no longer renders ({}); \
+                 nothing was published. Restore the previous target, or replace the unit: run \
+                 `nyl teardown -e {env} --unit {name}`, which removes the tree it published, then reconcile to publish the new target",
+                changes.join(", "),
+                env = unit.unit.environment,
+                name = unit.unit.name,
+            ),
+        )
+        .coded(Code::UnitDestinationChanged, Some(TARGET_CHANGED)),
+    )
 }
 
 /// The refusal of a reconcile whose target changed reconciler.
 fn reconciler_changed(unit: &DesiredUnit, before: &str, now: &str) -> String {
     format!(
-        "NYL-KUBERNETES-RECONCILER-CHANGED: the unit published for the {before} reconciler and its target now declares {now}; \
+        "the unit published for the {before} reconciler and its target now declares {now}; \
          nothing was changed, because removing one reconciler's files lets it delete what the other runs. Restore the \
          declaration, or replace the unit: run `nyl teardown -e {env} --unit {name}`, which tears down what it published, \
          then reconcile",
@@ -573,7 +609,7 @@ fn reconciler_changed(unit: &DesiredUnit, before: &str, now: &str) -> String {
 /// cannot be the remedy for itself, so the only way out is the declaration.
 fn teardown_reconciler_changed(before: &str, now: &str) -> String {
     format!(
-        "NYL-KUBERNETES-RECONCILER-CHANGED: the unit published for the {before} reconciler and its target now declares {now}; \
+        "the unit published for the {before} reconciler and its target now declares {now}; \
          nothing was changed, because removing one reconciler's files lets it delete what the other runs. Restore the \
          declaration of the {before} reconciler so the teardown can run, then tear the unit down again"
     )
@@ -588,13 +624,14 @@ fn skipped_warnings(
         .iter()
         .map(|left| {
             nyl_core::orchestration::codes::Finding::new(
-                nyl_core::orchestration::codes::Code::KubernetesReleaseLeftBehind,
+                Code::UnitLeftBehind,
                 format!(
                     "{}/{}: the teardown left {} alone: {}",
                     unit.unit.environment, unit.unit.name, left.what, left.reason
                 ),
                 "remove it with `nyl release delete --take-over` if it is stale, or leave it to its owner",
             )
+            .with_slug(RELEASE_LEFT_BEHIND)
         })
         .collect()
 }
@@ -799,10 +836,20 @@ pub(crate) fn read_shared_catalog(
                     .to_string()
                     .contains(nyl_render::gitops::shared_catalog::SHARED_CATALOG_CONFLICT_CODE) =>
         {
-            return Err(DriverError::before_effects(format!(
-                "the shared catalog {}: {error}",
-                shared.destination.path_prefix
-            )))
+            let failure = match error.owner_fenced() {
+                Some(refusal) => DriverError::before_effects(format!(
+                    "the shared catalog {}: {}",
+                    shared.destination.path_prefix, refusal.message
+                )),
+                None => DriverError::before_effects(format!(
+                    "the shared catalog {}: {error}",
+                    shared.destination.path_prefix
+                )),
+            };
+            return Err(match error.owner_fenced().map(|refusal| refusal.code) {
+                Some(FenceCode::Unit { code, detail }) => failure.coded(code, Some(detail)),
+                _ => failure,
+            });
         }
         Err(error) => (
             "unreadable",
@@ -832,35 +879,40 @@ fn shared_catalog_hold(
     unit: &DesiredUnit,
     rendered: &RenderedTarget,
 ) -> DriverResult<Option<Outcome>> {
-    use nyl_core::orchestration::codes::Code;
+    use super::readiness::{APPLICATIONS_ORPHANED, CATALOG_MANUAL_SYNC, SHARED_CATALOG_UNREADABLE};
     let Some(reading) = read_shared_catalog(&ctx.env, &ctx.project_dir, rendered)? else {
         return Ok(None);
     };
     let readiness = super::readiness::evaluate_reading(&unit.unit.environment, &unit.unit.name, &reading)
         .map_err(DriverError::before_effects)?;
+    // The catalog's own rows, by the details this driver gave them.
     let held = readiness.blocking.iter().find(|finding| {
         matches!(
-            finding.code,
-            Code::TeardownCatalogManualSync | Code::TeardownApplicationsOrphaned
+            finding.detail.as_deref(),
+            Some(CATALOG_MANUAL_SYNC | SHARED_CATALOG_UNREADABLE | APPLICATIONS_ORPHANED)
         )
     });
-    Ok(held.map(|finding| Outcome::Failed {
-        category: FailureCategory::Ownership,
-        retryable: true,
-        message: format!("{}: {} ({})", finding.code, finding.message, finding.fix),
+    Ok(held.map(|finding| {
+        Outcome::failed(
+            FailureCategory::Ownership,
+            true,
+            format!("{} ({})", finding.message, finding.fix),
+        )
+        .coded(finding.code, finding.detail.as_deref())
     }))
 }
 
 /// The warning of a publication that found another manifest at the shared catalog's prefix.
 fn shared_catalog_differs(unit: &DesiredUnit, prefix: &str) -> nyl_core::orchestration::codes::Finding {
     nyl_core::orchestration::codes::Finding::new(
-        nyl_core::orchestration::codes::Code::KubernetesSharedCatalogDiffers,
+        Code::UnitSharedDiffers,
         format!(
             "{}/{}: the branch holds another manifest at the shared catalog {prefix} than this target renders (another Nyl version or declaration wrote it); the publication left it alone",
             unit.unit.environment, unit.unit.name
         ),
         "replace it from the revision that should win with `nyl build <unit> -e <environment> -- --shared-catalog --push`",
     )
+    .with_slug(SHARED_CATALOG_DIFFERS)
 }
 
 /// Create the shared catalog `shared` renders when the branch holds none, and
@@ -906,7 +958,7 @@ fn ensure_shared_catalog_between(
                 SharedCatalogState::Differs(_) => return Ok(Ok(SharedCatalogResult::Differs)),
                 SharedCatalogState::Missing => {}
             },
-            Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&error.to_string()))),
+            Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&fence_of(&error)))),
             Err(error) => {
                 return Err(DriverError::before_effects(format!(
                     "cannot read the shared catalog {}: {error}",
@@ -917,7 +969,7 @@ fn ensure_shared_catalog_between(
         let prepared =
             match prepare_target_publication_fenced(shared, &ctx.project_dir, &message, &author, &variable, None) {
                 Ok(prepared) => prepared,
-                Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&error.to_string()))),
+                Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&fence_of(&error)))),
                 Err(error) if error.is_stale_publication() => {
                     if attempts < PUBLISH_ATTEMPTS && !budget.spent() {
                         continue;
@@ -961,7 +1013,7 @@ pub(crate) fn publish_shared_catalog(
     // Another shared catalog on the branch, or a prefix another owner holds, refuses the writer too.
     match inspect_shared_catalog(shared, &ctx.project_dir, &variable) {
         Ok(_) => {}
-        Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&error.to_string()))),
+        Err(error) if error.is_owner_fenced() => return Ok(Err(fenced(&fence_of(&error)))),
         Err(error) => {
             return Err(DriverError::before_effects(format!(
                 "cannot publish the shared catalog {}: {error}",
@@ -1360,9 +1412,9 @@ mod tests {
             nyl_core::orchestration::driver::DriverOperation::Reconcile,
             None,
         );
-        let message = fence(&ctx)(&RenderIndexOwner::catalog("previews")).unwrap_err();
-        assert!(message.starts_with("NYL-KUBERNETES-OWNER-FENCED:"), "{message}");
-        assert!(message.contains("shared catalog previews"), "{message}");
+        let refusal = fence(&ctx)(&RenderIndexOwner::catalog("previews")).unwrap_err();
+        assert_eq!(refusal.code, FenceCode::owned(SHARED_CATALOG_DETAIL));
+        assert!(refusal.message.contains("shared catalog previews"), "{refusal}");
     }
 
     /// Catches an uncacheable render keeping one key across resolutions,
@@ -1640,11 +1692,21 @@ mod tests {
         let (outcome, renders) = publish_while(&world, || {
             push_to_deploy(&world, &[("dev/state/db.json", "{\"host\": \"db.moved.internal\"}\n")]);
         });
-        let Outcome::Failed { retryable, message, .. } = outcome else {
+        let Outcome::Failed {
+            retryable,
+            message,
+            code,
+            detail,
+            ..
+        } = outcome
+        else {
             panic!("the publication ends without publishing: {outcome:?}");
         };
         assert!(retryable);
-        assert!(message.starts_with("NYL-KUBERNETES-STATE-CHANGED:"), "{message}");
+        assert_eq!(
+            (code, detail.as_deref()),
+            (Some(Code::UnitInputsChanged), Some(STATE_CHANGED))
+        );
         assert!(message.contains("@publication/state/db.json"), "{message}");
         assert_eq!(renders, 2);
         let files = world.files("deploy");

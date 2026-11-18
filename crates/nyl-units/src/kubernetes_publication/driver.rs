@@ -35,7 +35,7 @@
 //!   resource its target renders from the workload Cluster, once the
 //!   Application that owns it runs the receipt's publication
 //!   ([`super::observed_values`]). Resolution checks the resource is the
-//!   target's (`NYL-KUBERNETES-OBSERVATION-UNOWNED`) and records its owning
+//!   target's (`NYL-OBSERVATION-UNOWNED`) and records its owning
 //!   Application and the workload Cluster.
 //! - **Observation.** A unit that declares `observe: {}` records the
 //!   reconciler of its target at resolution (`reconciler`: its kind and
@@ -49,6 +49,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 
 use super::run::{read_shared_catalog, SHARED_CATALOG_READING};
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
     AttestationCheck, Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecutionContext,
     Inspection, KeyInputs, ObservedValues, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
@@ -239,7 +240,7 @@ impl Driver for KubernetesPublicationDriver {
                     "properties": {
                         "waitHealthy": {
                             "type": "object",
-                            "description": "After the publish (and, for a direct target, the apply), reconcile polls the reconciler with backoff until `healthy` passes, then records the `accepted` and `healthy` attestations `nyl attest` would. On the timeout the unit fails, retryable, with NYL-KUBERNETES-HEALTH-TIMEOUT naming the worst deployment and its last health; a health that cannot recover, such as a rollout past its progress deadline, fails at once with NYL-KUBERNETES-HEALTH-DEGRADED. Without it, reconcile does not wait.",
+                            "description": "After the publish (and, for a direct target, the apply), reconcile polls the reconciler with backoff until `healthy` passes, then records the `accepted` and `healthy` attestations `nyl attest` would. On the timeout the unit fails, retryable, with NYL-UNIT-HEALTH-TIMEOUT naming the worst deployment and its last health; a health that cannot recover, such as a rollout past its progress deadline, fails at once with NYL-UNIT-HEALTH-DEGRADED. Without it, reconcile does not wait.",
                             "required": ["timeout"],
                             "properties": {
                                 "timeout": {"type": "string", "description": "How long to wait, such as 5m; never longer than the unit's own timeout."}
@@ -394,10 +395,11 @@ impl Driver for KubernetesPublicationDriver {
         if let nyl_render::gitops::observation::Delivery::Direct(location) = &rendered.delivery {
             if location.context.is_none() {
                 return Err(DriverError::before_effects(format!(
-                    "NYL-KUBERNETES-CLUSTER-CONTEXT-MISSING: Cluster {} declares no spec.live.context, which a direct target \
+                    "Cluster {} declares no spec.live.context, which a direct target \
                      is applied and read through (Nyl never uses the current context); declare it on the Cluster",
                     location.cluster
-                )));
+                ))
+                .coded(Code::UnitAccessUndeclared, Some(super::direct::CLUSTER_CONTEXT_MISSING)));
             }
         }
         if observe::observes(spec) || direct {

@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(
             end,
             WaitEnd::Uncertain {
-                reason: "applications-remain: web".to_owned()
+                reason: "deployments-remain: web".to_owned()
             }
         );
         assert_eq!(clock.now(), time(600));

@@ -14,12 +14,13 @@ use super::{ReleaseMeta, ReleasePublication, ReleaseState};
 use crate::gitops::reconcile::RenderIndexOwner;
 use crate::{NylError, Result};
 
-/// The code of a refusal because another unit's release lives here.
-pub const RELEASE_FENCED: &str = "NYL-KUBERNETES-RELEASE-FENCED";
-/// The code of a refusal because whether the owner exists cannot be told.
-pub const RELEASE_OWNER_UNKNOWN: &str = "NYL-KUBERNETES-RELEASE-OWNER-UNKNOWN";
 /// The code of a manual command's refusal of an owned release.
 pub const RELEASE_OWNED_BY_UNIT: &str = "NYL-RELEASE-OWNED-BY-UNIT";
+
+/// The `detail` of a unit's refusal of a release another incarnation owns, or
+/// whose owner cannot be told, under `NYL-UNIT-OWNER-FENCED` and
+/// `NYL-UNIT-OWNER-UNKNOWN`.
+pub const RELEASE_DETAIL: &str = "release-owned";
 
 /// Whether an incarnation still exists in its environment's state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,22 +81,63 @@ impl ReleaseClaim<'_> {
     }
 }
 
+/// The stable code of a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceCode {
+    /// An orchestrated unit's refusal: a generic unit code
+    /// (`NYL-UNIT-OWNER-FENCED`, `NYL-UNIT-OWNER-UNKNOWN`) and the `detail`
+    /// slug that says what is owned.
+    Unit {
+        code: nyl_core::orchestration::codes::Code,
+        detail: &'static str,
+    },
+    /// A command's refusal outside orchestration, such as
+    /// [`RELEASE_OWNED_BY_UNIT`].
+    Command(&'static str),
+}
+
+impl FenceCode {
+    /// The code as it is shown.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unit { code, .. } => code.as_str(),
+            Self::Command(code) => code,
+        }
+    }
+
+    /// A unit's refusal because another incarnation that still exists owns `detail`.
+    pub fn owned(detail: &'static str) -> Self {
+        Self::Unit {
+            code: nyl_core::orchestration::codes::Code::UnitOwnerFenced,
+            detail,
+        }
+    }
+
+    /// A unit's refusal because whether the owner of `detail` still exists cannot be told.
+    pub fn owner_unknown(detail: &'static str) -> Self {
+        Self::Unit {
+            code: nyl_core::orchestration::codes::Code::UnitOwnerUnknown,
+            detail,
+        }
+    }
+}
+
 /// A refusal, with its stable code and the fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fenced {
-    pub code: &'static str,
+    pub code: FenceCode,
     pub message: String,
 }
 
 impl std::fmt::Display for Fenced {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.message)
+        write!(formatter, "{}: {}", self.code.as_str(), self.message)
     }
 }
 
 impl From<Fenced> for NylError {
     fn from(fenced: Fenced) -> Self {
-        NylError::OwnerFenced(fenced.to_string())
+        NylError::OwnerFenced(fenced)
     }
 }
 
@@ -132,7 +174,7 @@ pub fn check_claim(
     match &claim.requester {
         Requester::Manual { take_over } => match &latest.meta.owner {
             Some(owner) if !take_over => Err(Fenced {
-                code: RELEASE_OWNED_BY_UNIT,
+                code: FenceCode::Command(RELEASE_OWNED_BY_UNIT),
                 message: format!(
                     "{what} is owned by {owner}, which this command cannot tell is gone; changing it by hand would be \
                      reverted by that unit's next reconcile. Pass --take-over to record no owner and change it anyway, \
@@ -150,14 +192,14 @@ pub fn check_claim(
             Some(recorded) => match probe(recorded) {
                 OwnerState::Gone => Ok(Admitted::default()),
                 OwnerState::Exists => Err(Fenced {
-                    code: RELEASE_FENCED,
+                    code: FenceCode::owned(RELEASE_DETAIL),
                     message: format!(
                         "{what} is owned by {recorded}, which still exists in its environment's state; it stays fenced \
                          until that unit's teardown completes or it is released with `nyl state forget`"
                     ),
                 }),
                 OwnerState::Unknown(reason) => Err(Fenced {
-                    code: RELEASE_OWNER_UNKNOWN,
+                    code: FenceCode::owner_unknown(RELEASE_DETAIL),
                     message: format!(
                         "{what} is owned by {recorded}, and whether it still exists cannot be checked: {reason}. If the \
                          environment was renamed or removed, declare it again and tear the unit down, or release the \
@@ -168,7 +210,7 @@ pub fn check_claim(
             None => match &latest.meta.publication {
                 Some(recorded) if recorded.same_destination(publication) => Ok(Admitted::default()),
                 Some(recorded) => Err(Fenced {
-                    code: RELEASE_FENCED,
+                    code: FenceCode::owned(RELEASE_DETAIL),
                     message: format!(
                         "{what} was applied for another publication ({}@{} {:?}), which no unit owns; apply it from \
                          there, or remove it with `nyl release delete` if it is stale",
@@ -183,7 +225,7 @@ pub fn check_claim(
                     ..Admitted::default()
                 }),
                 None => Err(Fenced {
-                    code: RELEASE_FENCED,
+                    code: FenceCode::owned(RELEASE_DETAIL),
                     message: format!(
                         "{what} was applied without a publication this unit can match, so it may belong to another \
                          target; apply it with `nyl apply --target <target>` first, or remove it with `nyl release delete` \
@@ -309,7 +351,7 @@ mod tests {
         let own = unit("a");
         let latest = revision(Some(unit("b")), Some(publication("targets/dev")));
         let fenced = check(Some(&latest), None, &own, OwnerState::Exists).unwrap_err();
-        assert_eq!(fenced.code, RELEASE_FENCED);
+        assert_eq!(fenced.code, FenceCode::owned(RELEASE_DETAIL));
         let unknown = check(
             Some(&latest),
             None,
@@ -317,7 +359,7 @@ mod tests {
             OwnerState::Unknown("state unreadable".into()),
         )
         .unwrap_err();
-        assert_eq!(unknown.code, RELEASE_OWNER_UNKNOWN);
+        assert_eq!(unknown.code, FenceCode::owner_unknown(RELEASE_DETAIL));
         assert!(check(Some(&latest), None, &own, OwnerState::Gone).is_ok());
     }
 
@@ -331,12 +373,12 @@ mod tests {
         let other = revision(None, Some(publication("targets/prod")));
         assert_eq!(
             check(Some(&other), None, &own, OwnerState::Exists).unwrap_err().code,
-            RELEASE_FENCED
+            FenceCode::owned(RELEASE_DETAIL)
         );
         let bare = revision(None, None);
         assert_eq!(
             check(Some(&bare), None, &own, OwnerState::Exists).unwrap_err().code,
-            RELEASE_FENCED
+            FenceCode::owned(RELEASE_DETAIL)
         );
     }
 
@@ -367,7 +409,10 @@ mod tests {
                 },
             )
         };
-        assert_eq!(refused(false).unwrap_err().code, RELEASE_OWNED_BY_UNIT);
+        assert_eq!(
+            refused(false).unwrap_err().code,
+            FenceCode::Command(RELEASE_OWNED_BY_UNIT)
+        );
         assert!(refused(true).is_ok());
         let unowned = revision(None, None);
         assert!(check_claim("web", "web", Some(&unowned), None, &ReleaseClaim::manual()).is_ok());
