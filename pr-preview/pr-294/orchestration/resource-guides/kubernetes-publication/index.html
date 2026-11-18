@@ -366,6 +366,35 @@ manual <code dir="auto">nyl apply</code> cannot take a Release over while its ow
 status of the workloads; a revision applied outside the unit is <code dir="auto">unreadable</code> until
 the next reconcile. Teardown deletes in two phases and keeps the Namespaces that hold
 the release state until its wait ends.</p>
+<p>A direct target’s unit raises these warnings and refusals of its own:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Code</th><th>Meaning and fix</th></tr></thead><tbody><tr><td><code dir="auto">NYL-UNIT-HOOK-IGNORED</code> (<code dir="auto">delete-hooks</code>)</td><td>A Release declares delete hooks (<code dir="auto">pre-delete</code>, <code dir="auto">post-delete</code>, <code dir="auto">PreDelete</code>, <code dir="auto">PostDelete</code>), which Nyl never runs; one warning per Release. Do what the hook does yourself before the Release is removed, drop the hook, or mark it <code dir="auto">argocd.argoproj.io/hook: Skip</code>.</td></tr><tr><td><code dir="auto">NYL-UNIT-CAPABILITY-MISMATCH</code> (<code dir="auto">scope-mismatch</code>)</td><td>A kind’s scope that the Cluster records differs from what the connected cluster reports, so the apply used the recorded scope; one warning per kind. Run <code dir="auto">nyl capture cluster &#x3C;name> --crds</code> and commit the result.</td></tr><tr><td><code dir="auto">NYL-UNIT-ACCESS-UNDECLARED</code> (<code dir="auto">cluster-context-missing</code>)</td><td>The target’s Cluster declares no <code dir="auto">spec.live.context</code>. Declare the context the unit connects through.</td></tr><tr><td><code dir="auto">NYL-UNIT-HISTORY-TOO-DEEP</code> (<code dir="auto">release-history</code>)</td><td>The publication branch holds more publications since the unit’s last receipt than Nyl reads, so it cannot tell which Releases left the tree, and removes none. Publish fewer commits between executions, or release the leftovers by hand with <code dir="auto">nyl release delete --target &#x3C;target> --take-over</code>.</td></tr></tbody></table>
+<p><code dir="auto">nyl apply</code>, <code dir="auto">diff</code>, and the <code dir="auto">release</code> commands raise the first two as
+<code dir="auto">NYL-KUBERNETES-HOOK-IGNORED</code> and <code dir="auto">NYL-KUBERNETES-SCOPE-MISMATCH</code>.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="observed-values">Observed values</h2><a class="sl-anchor-link" href="#observed-values"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Observed values”</span></a></div>
 <p>A unit that declares <code dir="auto">observe: {}</code> can read a field of a resource its target renders
 from the live cluster, such as the address a cloud load balancer assigns to a

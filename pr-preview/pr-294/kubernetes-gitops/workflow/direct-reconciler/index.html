@@ -113,7 +113,7 @@ no unit owns it, such as one an apply by hand took over: that stays, with the
 warning <code dir="auto">NYL-UNIT-LEFT-BEHIND</code> (<code dir="auto">release-left-behind</code>). Which Releases left is read from the
 publication branch back to the last receipt; a history deeper than the walk limit
 that never reaches it (or with no receipt at all) fails with
-<code dir="auto">NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP</code> instead of guessing.</p>
+<code dir="auto">NYL-UNIT-HISTORY-TOO-DEEP</code> (<code dir="auto">release-history</code>) instead of guessing.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="hooks">Hooks</h2><a class="sl-anchor-link" href="#hooks"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Hooks”</span></a></div>
 <p>A Release applied by Nyl handles its resource hooks (<code dir="auto">argocd.argoproj.io/hook</code> and
 <code dir="auto">helm.sh/hook</code>) the way Argo CD syncs the same manifests, so a Release behaves the same
