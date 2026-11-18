@@ -126,8 +126,12 @@ to behavior and persisted data, not just crate dependencies.
   message, fix, and an optional `detail` slug for scripts. The engine decides
   from the code alone and never reads `detail`. A driver that needs an outcome
   no code covers adds a generic code that another driver could raise too.
-  Codes that Nyl's own rendering and apply raise outside orchestration (direct
-  mode) are not unit codes and fall outside this rule.
+  Codes from Nyl's shared rendering and resource validation (such as
+  `NYL-TARGET-*`, `NYL-HELM-*`, and the Kubernetes render checks) describe the
+  rendered resources, not the driver, and fall outside this rule, including
+  when a driver surfaces them: the same input gives the same code with or
+  without orchestration. Codes that only a unit driver raises, or that describe
+  what a driver did, are unit codes, even when they live in a shared crate.
 - Drivers expose their requirements and validate tool-specific decisions through
   the driver contract. The engine coordinates and records the result without
   interpreting driver-private data. A driver using existing capabilities must
