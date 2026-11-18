@@ -93,6 +93,8 @@ data: {enabled: "on", affirmative: "yes", code: "001", date: "2024-01-01"}
     refreshed = client.render(source, target="development", offline=True)
     assert next(refreshed.one("Deployment").containers()).raw["image"] == "web:2"
     assert container.raw["image"] == "web:1"
+    settled = client.render(source, target="development", offline=True, release_only=True)
+    assert next(settled.one("Deployment").containers()).raw["image"] == "web:2"
 
 
 def test_project_validation_defaults_are_respected(tmp_path, cli):
@@ -103,3 +105,14 @@ def test_project_validation_defaults_are_respected(tmp_path, cli):
     # The project requires a validator but declares none: fail rather than bypassing it.
     with pytest.raises(RenderError, match="Validation requested but no validators configured"):
         NylClient(tmp_path, executable=cli).render("web.yaml", offline=True)
+
+
+def test_validation_overrides_reach_the_cli(tmp_path, cli):
+    (tmp_path / "nyl.toml").write_text("[validation]\nenabled = true\n")
+    (tmp_path / "web.yaml").write_text("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\n")
+    client = NylClient(tmp_path, executable=cli)
+    assert client.render("web.yaml", offline=True, no_validate=True).one("ConfigMap").name == "web"
+    # Desired CRDs enable validation, so the missing validator is reported.
+    (tmp_path / "nyl.toml").write_text("")
+    with pytest.raises(RenderError, match="no validators configured"):
+        client.render("web.yaml", offline=True, use_desired_crds=True)

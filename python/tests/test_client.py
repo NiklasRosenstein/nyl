@@ -62,6 +62,32 @@ def test_invocation_isolated_and_flags(tmp_path, monkeypatch):
     assert os.environ == environment
 
 
+def test_render_forwards_release_and_validation_flags(tmp_path, monkeypatch):
+    _, factory = stub_process(monkeypatch)
+    client = NylClient(tmp_path)
+    client.render("web.yaml", target="dev", release_only=True, use_desired_crds=True)
+    client.render("web.yaml", no_validate=True)
+    first, second = factory.call_args_list
+    assert first.args[0] == [
+        "nyl",
+        "render",
+        "--target",
+        "dev",
+        "--release-only",
+        "--use-desired-crds",
+        "--",
+        "web.yaml",
+    ]
+    assert second.args[0] == ["nyl", "render", "--no-validate", "--", "web.yaml"]
+
+
+def test_no_validate_and_use_desired_crds_conflict(tmp_path, monkeypatch):
+    _, factory = stub_process(monkeypatch)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        NylClient(tmp_path).render("web.yaml", no_validate=True, use_desired_crds=True)
+    factory.assert_not_called()
+
+
 @pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("-inf"), float("nan")])
 def test_timeout_must_be_positive_and_finite(tmp_path, timeout):
     with pytest.raises(ValueError, match="positive and finite"):

@@ -219,3 +219,9 @@ id = "21213f4b-602e-4913-8ec0-92a5bec12182"
 type = "fix"
 description = "`nyl validate` no longer fails with \"ApplicationGroup … source directory does not exist\" for a target that selects an ApplicationGroup with a remote source: the checkout it compiled from was removed before it was read"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6593ef51-ca36-456f-9983-e73a0d0f2393"
+type = "feature"
+description = "The Python client's `NylClient.render()` accepts `release_only`, `no_validate`, and `use_desired_crds` keyword arguments, forwarding `--release-only`, `--no-validate`, and `--use-desired-crds` to `nyl render`. All default to `False`; `no_validate` and `use_desired_crds` together raise `ValueError`"
+author = "@NiklasRosenstein"

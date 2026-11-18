@@ -33,12 +33,19 @@ class NylClient:
         target: str | None = None,
         offline: bool = False,
         allow_secret_inputs: bool = False,
+        release_only: bool = False,
+        no_validate: bool = False,
+        use_desired_crds: bool = False,
     ) -> ManifestSet:
         """Render one source file, preserving the project's validation defaults.
 
         Relative source paths are resolved by the CLI from ``project``. Each call
         executes the CLI afresh; its own cache decides which artifacts to reuse.
+        ``release_only``, ``no_validate``, and ``use_desired_crds`` forward the
+        ``render`` flags of the same names; the last two are mutually exclusive.
         """
+        if no_validate and use_desired_crds:
+            raise ValueError("no_validate and use_desired_crds are mutually exclusive")
         command = [self.executable, "render"]
         if target is not None:
             command.extend(["--target", target])
@@ -46,6 +53,12 @@ class NylClient:
             command.append("--offline")
         if allow_secret_inputs:
             command.append("--allow-secret-inputs")
+        if release_only:
+            command.append("--release-only")
+        if no_validate:
+            command.append("--no-validate")
+        if use_desired_crds:
+            command.append("--use-desired-crds")
         command.extend(["--", os.fspath(source)])
         try:
             with subprocess.Popen(
