@@ -149,6 +149,9 @@ fn test_build_of_an_environments_publication_renders_diffs_and_refuses_to_push()
     assert_eq!(refused.exit, 3, "a driver refusal is a failed build");
     assert!(refused.stderr.contains("NYL-BUILD-OWNED"), "{}", refused.stderr);
     assert!(refused.stderr.contains("nyl reconcile -e dev"), "{}", refused.stderr);
+    // Scripts read the refusal's code and `detail` next to its text.
+    assert_eq!(refused.report["code"], "NYL-BUILD-OWNED", "{}", refused.report);
+    assert_eq!(refused.report["detail"], "target-owned", "{}", refused.report);
     assert_eq!(harness.tip("refs/heads/deploy"), published, "nothing is published");
 }
 

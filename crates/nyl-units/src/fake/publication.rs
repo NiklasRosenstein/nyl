@@ -290,7 +290,7 @@ impl Driver for FakePublication {
     }
 
     fn reconcile(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        let outputs = match self.script.outcome(&unit.unit.name, DriverOperation::Reconcile) {
+        let outputs = match self.script.outcome(&unit.unit.name, DriverOperation::Reconcile)? {
             ScriptedOutcome::Return(outcome) => return Ok(Supported::Supported(outcome)),
             ScriptedOutcome::Run { outputs } => outputs,
         };
@@ -349,7 +349,7 @@ impl Driver for FakePublication {
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Teardown) {
+        if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Teardown)? {
             return Ok(Supported::Supported(outcome));
         }
         teardown(

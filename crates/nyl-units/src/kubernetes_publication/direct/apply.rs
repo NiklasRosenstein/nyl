@@ -114,6 +114,9 @@ impl From<NylError> for Failure {
 /// How a failure maps to an outcome.
 enum Why {
     Fenced(nyl_render::kubernetes::fence::Fenced),
+    /// The publication branch is deeper than the walk for Releases that left
+    /// the tree reads (`NYL-UNIT-HISTORY-TOO-DEEP`).
+    HistoryTooDeep(String),
     Connection(String),
     Timeout(String),
     Rejected(String),
@@ -143,6 +146,7 @@ fn why(failure: &Failure) -> Why {
                         message: text,
                     }
                 })),
+                _ if error.is_history_too_deep() => Why::HistoryTooDeep(history_too_deep(&text)),
                 Some(KubeErrorKind::Connection) => Why::Connection(text),
                 Some(KubeErrorKind::Rejected) => Why::Rejected(text),
                 _ if matches!(error, NylError::Interrupted(_)) => Why::Timeout(text),
@@ -175,7 +179,12 @@ fn outcome_of(context: &str, failures: &[Why]) -> Outcome {
         .map(|failure| match failure {
             Why::Fenced(fenced) if shared.is_some() => fenced.message.clone(),
             Why::Fenced(fenced) => fenced.to_string(),
-            Why::Connection(m) | Why::Timeout(m) | Why::Rejected(m) | Why::Failed(m) | Why::Credentials(m) => m.clone(),
+            Why::Connection(m)
+            | Why::Timeout(m)
+            | Why::Rejected(m)
+            | Why::Failed(m)
+            | Why::Credentials(m)
+            | Why::HistoryTooDeep(m) => m.clone(),
         })
         .collect::<Vec<_>>()
         .join("; ");
@@ -196,8 +205,24 @@ fn outcome_of(context: &str, failures: &[Why]) -> Outcome {
     let outcome = Outcome::failed(category, retryable, message);
     match shared {
         Some(FenceCode::Unit { code, detail }) => outcome.coded(code, Some(detail)),
+        _ if all(|f| matches!(f, Why::HistoryTooDeep(_))) => {
+            outcome.coded(Code::UnitHistoryTooDeep, Some(RELEASE_HISTORY))
+        }
         _ => outcome,
     }
+}
+
+/// The `detail` of a publication branch too deep to tell which Releases left
+/// the tree (`NYL-UNIT-HISTORY-TOO-DEEP`).
+const RELEASE_HISTORY: &str = "release-history";
+
+/// The message of a publication branch too deep to tell which Releases left
+/// the tree, with how to get past it.
+fn history_too_deep(message: &str) -> String {
+    format!(
+        "{message}; publish fewer commits between executions, or release the leftovers by hand with \
+         `nyl release delete --target <target> --take-over`"
+    )
 }
 
 /// The `detail` of a warning about objects whose `Prune=confirm` sync option
@@ -255,8 +280,7 @@ fn scope_warnings(scopes: &ScopeResolver) -> Vec<Finding> {
         .mismatches()
         .iter()
         .map(|mismatch| {
-            Finding::new(Code::UnitCapabilityMismatch, mismatch.message(), ScopeMismatch::FIX)
-                .with_detail_slug(SCOPE_MISMATCH)
+            Finding::new(Code::UnitCapabilityMismatch, mismatch.message(), ScopeMismatch::FIX).with_slug(SCOPE_MISMATCH)
         })
         .collect()
 }
@@ -600,7 +624,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                     awaiting.join(", ")
                 ),
                 "declare `namespace.prunePolicy: Automatic` in the ApplicationGroup to prune them, or delete them by hand",
-            ).with_detail_slug(PRUNE_CONFIRM));
+            ).with_slug(PRUNE_CONFIRM));
         }
         Ok(Step::Continue {
             warnings,
@@ -928,7 +952,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                     format!("{} left the tree but stays: {}", left.what, left.reason),
                     "remove it with `nyl release delete --target <target> --take-over`, or leave it",
                 )
-                .with_detail_slug(crate::kubernetes_publication::run::RELEASE_LEFT_BEHIND)
+                .with_slug(crate::kubernetes_publication::run::RELEASE_LEFT_BEHIND)
             })
             .collect())
     }
@@ -1188,7 +1212,18 @@ impl<'a, 'c> Direct<'a, 'c> {
             .and_then(Value::as_str);
         let previous = history
             .direct_releases_since(receipt, MATCH_WALK_LIMIT)
-            .map_err(|error| DriverError::before_effects(error.to_string()))?;
+            .map_err(|error| {
+                if error.is_history_too_deep() {
+                    DriverError::before_effects(history_too_deep(&error.to_string()))
+                        .coded(Code::UnitHistoryTooDeep, Some(RELEASE_HISTORY))
+                        .with_fix(
+                            "publish fewer commits between executions, or release the leftovers by hand with \
+                             `nyl release delete --target <target> --take-over`",
+                        )
+                } else {
+                    DriverError::before_effects(error.to_string())
+                }
+            })?;
         let mut all = std::collections::BTreeMap::new();
         for release in current.into_iter().chain(previous) {
             all.entry((release.release.namespace.clone(), release.release.name.clone()))
@@ -1362,6 +1397,25 @@ fn candidate_identities(documents: &[Value], default_namespace: &str) -> HashSet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a publication branch too deep to tell which Releases left the tree
+    /// reaching the run as text instead of its generic code, and the fix leaving the
+    /// message, which is the only place a failed outcome carries it.
+    #[test]
+    fn test_a_too_deep_publication_history_fails_with_its_generic_code() {
+        let error = NylError::HistoryTooDeep("the publication branch holds more than 2 publications".to_owned());
+        let outcome = outcome_of("the cluster cannot be applied to", &[why(&Failure::Nyl(error))]);
+        let Outcome::Failed {
+            message, code, detail, ..
+        } = outcome
+        else {
+            panic!("not a failure: {outcome:?}");
+        };
+        assert_eq!(code, Some(Code::UnitHistoryTooDeep));
+        assert_eq!(detail.as_deref(), Some(RELEASE_HISTORY));
+        assert!(!message.contains("NYL-"), "the code is not in the text: {message}");
+        assert!(message.contains("nyl release delete --target"), "{message}");
+    }
 
     /// Catches an apply whose waits can outlast the unit's deadline, which an interrupt then
     /// cuts short without the failure path, and one that keeps back so much that a hook

@@ -1214,7 +1214,7 @@ mod tests {
     fn test_a_finding_shows_its_detail_next_to_its_code() {
         let mut text = String::new();
         let finding = Finding::new(Code::TeardownRemnant, "the catalog remains", "let a parent own it")
-            .with_detail_slug("catalog-remains");
+            .with_slug("catalog-remains");
         write_finding(&mut text, "warning", Some(&UnitName::new("web").unwrap()), &finding);
         assert!(
             text.ends_with("\n  NYL-TEARDOWN-REMNANT (catalog-remains) (web)\n"),

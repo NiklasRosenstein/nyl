@@ -104,7 +104,7 @@ codes! {
     UnitOwnerUnknown => "NYL-UNIT-OWNER-UNKNOWN",
     /// The inputs a unit's driver read from state changed while it ran, so it changed nothing; the next run resolves the unit again.
     UnitInputsChanged => "NYL-UNIT-INPUTS-CHANGED",
-    /// The destination a unit delivered to, or the way it delivers, changed since its current receipt, which the engine does not replace; nothing was changed. Restore the declaration, or tear the unit down and reconcile it again.
+    /// The destination a unit delivered to, or the way it delivers, changed since its current receipt, which the engine does not replace; nothing was changed.
     UnitDestinationChanged => "NYL-UNIT-DESTINATION-CHANGED",
     /// A unit's deployments were not healthy within the time it waits for them. Its effects stay in place, and the next execution waits again.
     UnitHealthTimeout => "NYL-UNIT-HEALTH-TIMEOUT",
@@ -114,6 +114,8 @@ codes! {
     UnitAccessUndeclared => "NYL-UNIT-ACCESS-UNDECLARED",
     /// A unit has a receipt, but the native state its tool keeps of what it manages is missing, so the unit refuses to run until an operator restores it or accepts the empty state.
     UnitNativeStateMissing => "NYL-UNIT-NATIVE-STATE-MISSING",
+    /// A unit cannot tell what it delivered before because the history that records it is deeper than the driver reads, so it removed nothing it no longer delivers and failed closed.
+    UnitHistoryTooDeep => "NYL-UNIT-HISTORY-TOO-DEEP",
     /// A unit's tool output could not be written to its log file. A warning on the unit's output.
     UnitLog => "NYL-UNIT-LOG",
     /// A unit declares an observation of something it does not produce.
@@ -457,7 +459,7 @@ impl Finding {
 
     /// Set the driver's [`detail`](Self::detail) slug.
     #[must_use]
-    pub fn with_detail_slug(mut self, detail: impl Into<String>) -> Self {
+    pub fn with_slug(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
@@ -505,7 +507,7 @@ mod tests {
         let finding: Finding = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(serde_json::to_value(&finding).unwrap(), legacy);
         let rich = finding
-            .with_detail_slug("no-state-file")
+            .with_slug("no-state-file")
             .with_title("State missing")
             .with_detail("Environment", "dev")
             .with_action("Init", "nyl state init");

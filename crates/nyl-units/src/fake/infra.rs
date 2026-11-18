@@ -233,7 +233,7 @@ impl Driver for FakeInfra {
     }
 
     fn reconcile(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        let scripted_outputs = match self.script.outcome(&unit.unit.name, DriverOperation::Reconcile) {
+        let scripted_outputs = match self.script.outcome(&unit.unit.name, DriverOperation::Reconcile)? {
             ScriptedOutcome::Return(outcome) => return Ok(Supported::Supported(outcome)),
             ScriptedOutcome::Run { outputs } => outputs,
         };
@@ -295,9 +295,14 @@ impl Driver for FakeInfra {
                 artifacts: Vec::new(),
             },
             // A drift or pending result scripts `detect_drift` or `observe`, never `inspect`.
-            Some(Scripted::Failed { .. } | Scripted::RetryRequired { .. } | Scripted::Drifted | Scripted::Pending) => {
-                Inspection::NotApplied
-            }
+            Some(
+                Scripted::Failed { .. }
+                | Scripted::CodedFailure { .. }
+                | Scripted::CodedError { .. }
+                | Scripted::RetryRequired { .. }
+                | Scripted::Drifted
+                | Scripted::Pending,
+            ) => Inspection::NotApplied,
             Some(Scripted::Uncertain) => Inspection::Unknown {
                 reason: "scripted unknown inspect".to_owned(),
             },
@@ -306,7 +311,7 @@ impl Driver for FakeInfra {
     }
 
     fn teardown(&self, ctx: &ExecutionContext<'_>, unit: &DesiredUnit) -> DriverResult<Supported<Outcome>> {
-        if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Teardown) {
+        if let ScriptedOutcome::Return(outcome) = self.script.outcome(&unit.unit.name, DriverOperation::Teardown)? {
             return Ok(Supported::Supported(outcome));
         }
         let spec = resolved_spec(unit)?;

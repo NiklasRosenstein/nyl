@@ -713,18 +713,11 @@ impl Reconcile<'_, '_, '_> {
             }
             Err(error) if !error.effects_possible() => {
                 let message = error.to_string();
-                let mut finding = Finding::new(
-                    Code::DriverError,
-                    format!("unit {name}: its teardown could not start: {message}"),
+                // When the driver said what went wrong, its code replaces the generic one.
+                self.report.errors.push(error.finding(
+                    &format!("unit {name}: its teardown could not start: "),
                     "fix the cause, such as a missing tool, then run the teardown again",
-                );
-                if let Some(code) = error.code() {
-                    // The driver said what went wrong: its code replaces the generic one.
-                    finding.code = code;
-                    finding.message = format!("unit {name}: its teardown could not start: {}", error.message());
-                    finding.detail = error.detail().map(str::to_owned);
-                }
-                self.report.errors.push(finding);
+                ));
                 let entry = life.result(
                     name,
                     &kind,

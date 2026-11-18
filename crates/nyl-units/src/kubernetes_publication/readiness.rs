@@ -110,7 +110,7 @@ fn catalog_prune_finding(subject: &str, settings: &TeardownSettings) -> Option<F
             },
             "enable the catalog Application's syncPolicy.automated with prune: true, and remove Prune=confirm and Prune=false from its syncOptions and from the generated Applications' argocd.argoproj.io/sync-options annotation (catalogApplication.syncPolicy on the DeploymentTarget, catalogApplicationDefaults.syncPolicy on its ArgoCDInstance, or the ApplicationGroup annotations), or pass --allow-incomplete",
         )
-        .with_detail_slug(CATALOG_MANUAL_SYNC)
+        .with_slug(CATALOG_MANUAL_SYNC)
     })
 }
 
@@ -133,7 +133,7 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
             format!("{subject}: deleting a workload Application leaves its workloads running (applicationDeletionPolicy: Orphan)"),
             "set the catalog's applicationDeletionPolicy to Foreground or Background, or pass --allow-incomplete",
         )
-        .with_detail_slug(APPLICATIONS_ORPHANED)),
+        .with_slug(APPLICATIONS_ORPHANED)),
         Some(_) => {}
         None => readiness
             .not_checked
@@ -187,7 +187,7 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
             ),
             "remove Delete=confirm and Prune=confirm from the named resources and Applications (a Namespace's prunePolicy and deletePolicy to Automatic, or deletePolicy to Retain; an Application's ApplicationGroup syncPolicy.syncOptions or Release +syncOptions override), or pass --allow-incomplete",
         )
-        .with_detail_slug(NAMESPACE_CONFIRM));
+        .with_slug(NAMESPACE_CONFIRM));
     }
     let remaining = with_policy(&|policy| policy != "Automatic");
     if !remaining.is_empty() {
@@ -197,7 +197,7 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
                 format!("{subject}: Namespaces {} remain after teardown", remaining.join(", ")),
                 "set the Namespaces' deletePolicy to Automatic to remove them with the teardown",
             )
-            .with_detail_slug(NAMESPACES_REMAIN),
+            .with_slug(NAMESPACES_REMAIN),
         );
     }
     if !settings.catalog_owned_by_parent {
@@ -206,7 +206,7 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
             format!("{subject}: the self-managing catalog Application and its AppProjects remain after teardown"),
             "let a parent Application or ApplicationSet own the target's catalog (catalogApplication.enabled: false) to remove them with the teardown",
         )
-        .with_detail_slug(CATALOG_REMAINS));
+        .with_slug(CATALOG_REMAINS));
     }
     readiness
 }
@@ -243,7 +243,7 @@ pub fn evaluate_direct(
                 ),
                 "set the Namespaces' deletePolicy to Automatic to remove them with the teardown",
             )
-            .with_detail_slug(NAMESPACES_REMAIN),
+            .with_slug(NAMESPACES_REMAIN),
         );
     }
     readiness.not_checked.push(
@@ -275,7 +275,7 @@ pub fn evaluate_reading(
             format!("{environment}/{unit}: the shared catalog cannot be shown to prune removed workload Applications: {problem}"),
             "restore access to the publication branch, or publish a readable shared catalog with `nyl build <unit> -e <environment> -- --shared-catalog --push`, or pass --allow-incomplete",
         )
-        .with_detail_slug(SHARED_CATALOG_UNREADABLE));
+        .with_slug(SHARED_CATALOG_UNREADABLE));
     }
     Ok(readiness)
 }

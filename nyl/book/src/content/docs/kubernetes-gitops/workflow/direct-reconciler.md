@@ -83,7 +83,7 @@ no unit owns it, such as one an apply by hand took over: that stays, with the
 warning `NYL-UNIT-LEFT-BEHIND` (`release-left-behind`). Which Releases left is read from the
 publication branch back to the last receipt; a history deeper than the walk limit
 that never reaches it (or with no receipt at all) fails with
-`NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP` instead of guessing.
+`NYL-UNIT-HISTORY-TOO-DEEP` (`release-history`) instead of guessing.
 
 ## Hooks
 

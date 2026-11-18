@@ -1704,7 +1704,7 @@ minus the identities of the new tree. Without a receipt, no execution of the
 unit completed, so every publication up to the walk limit may be its own and the
 walk covers them all, not just the newest. When the walk reaches the limit without
 reaching its start (a receipt too far back, a receipt the branch no longer holds,
-or none), it fails with `NYL-KUBERNETES-RELEASE-HISTORY-TOO-DEEP` rather than
+or none), it fails with `NYL-UNIT-HISTORY-TOO-DEEP` (detail `release-history`) rather than
 guess. The span matters: a run that fails after
 publishing a tree without a Release, before purging it, leaves the receipt at
 the older commit, so the next run still finds it, whatever was published in
@@ -4693,7 +4693,10 @@ kebab-case slug that tells cases under one code apart for scripts, such as
 `catalog-manual-sync` under `NYL-TEARDOWN-BLOCKED`. Findings (warnings and
 teardown readiness) carry `detail` next to `code`; a failure carries `code`
 and `detail` in `Outcome::Failed` and `Outcome::RetryRequired`, and a
-Nyl-side `DriverError` can carry them too. The shell records a failure's
+`DriverError` can carry them too, with an optional fix that replaces the
+engine's generic advice. A coded `DriverError` keeps its code wherever the
+shell reports it: in an execution, a teardown, and at resolution (from
+`execution_key_inputs`), as well as in `nyl build`'s JSON output. The shell records a failure's
 message prefixed with its code, so a stored condition reads as before, and
 shows `code` and `detail` in the run report. The engine decides from the
 code alone, and only where the contract says so; it never reads `detail`.

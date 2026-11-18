@@ -103,12 +103,20 @@ pub fn run(args: &BuildArgs, wiring: &Wiring<'_>) -> Result<CommandOutcome> {
     let built = match driver.build(&context, &prepared.unit, &args.arguments) {
         Ok(built) => built,
         Err(error) => {
+            // The code and `detail` go next to the text, so scripts never parse it.
+            let mut report = serde_json::json!({ "error": error.to_string() });
+            if let Some(code) = error.code() {
+                report["code"] = serde_json::Value::String(code.to_string());
+            }
+            if let Some(detail) = error.detail() {
+                report["detail"] = serde_json::Value::String(detail.to_owned());
+            }
             return Ok(CommandOutcome {
                 exit: 3,
-                report: serde_json::json!({ "error": error.to_string() }),
+                report,
                 stdout: String::new(),
                 stderr: format!("error: {error}\n"),
-            })
+            });
         }
     };
     let artifacts = match built {

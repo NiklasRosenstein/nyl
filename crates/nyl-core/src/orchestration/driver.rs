@@ -37,6 +37,8 @@ pub struct DriverError {
     effects_possible: bool,
     code: Option<Code>,
     detail: Option<String>,
+    /// How to fix it, when the driver knows better than the engine's generic advice.
+    fix: Option<String>,
 }
 
 impl std::fmt::Display for DriverError {
@@ -56,6 +58,7 @@ impl DriverError {
             effects_possible: false,
             code: None,
             detail: None,
+            fix: None,
         }
     }
 
@@ -66,6 +69,7 @@ impl DriverError {
             effects_possible: true,
             code: None,
             detail: None,
+            fix: None,
         }
     }
 
@@ -74,6 +78,13 @@ impl DriverError {
     pub fn coded(mut self, code: Code, detail: Option<&str>) -> Self {
         self.code = Some(code);
         self.detail = detail.map(str::to_owned);
+        self
+    }
+
+    /// Attach how to fix it, shown in place of the engine's generic advice.
+    #[must_use]
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into());
         self
     }
 
@@ -89,6 +100,28 @@ impl DriverError {
     /// The driver's `detail` slug, if any.
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
+    }
+
+    /// How the driver says to fix it, if it said.
+    pub fn fix(&self) -> Option<&str> {
+        self.fix.as_deref()
+    }
+
+    /// The finding that reports this error: the driver's code, `detail`, and
+    /// fix when it gave them, else `NYL-DRIVER-ERROR` and `fallback_fix`.
+    /// `context` starts the message, such as `unit web: `.
+    pub fn finding(&self, context: &str, fallback_fix: &str) -> Finding {
+        let fix = self.fix.as_deref().unwrap_or(fallback_fix);
+        match self.code {
+            Some(code) => {
+                let finding = Finding::new(code, format!("{context}{}", self.message), fix);
+                match &self.detail {
+                    Some(detail) => finding.with_slug(detail.clone()),
+                    None => finding,
+                }
+            }
+            None => Finding::new(Code::DriverError, format!("{context}{}", self.message), fix),
+        }
     }
 
     /// The message without the code.
@@ -1208,6 +1241,30 @@ impl DriverSet {
 impl std::fmt::Debug for DriverSet {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_list().entries(self.drivers.keys()).finish()
+    }
+}
+
+#[cfg(test)]
+mod driver_error_tests {
+    use super::*;
+
+    /// Catches a coded driver error reported under the generic driver code, or
+    /// with the engine's advice where the driver gave its own fix.
+    #[test]
+    fn test_a_coded_driver_error_reports_its_code_detail_and_fix() {
+        let plain = DriverError::before_effects("no tool").finding("unit web: ", "install it");
+        assert_eq!(
+            (plain.code, plain.message.as_str(), plain.fix.as_str(), plain.detail),
+            (Code::DriverError, "unit web: no tool", "install it", None)
+        );
+        let coded = DriverError::before_effects("no context")
+            .coded(Code::UnitAccessUndeclared, Some("cluster-context-missing"))
+            .with_fix("declare spec.live.context")
+            .finding("unit web: ", "install it");
+        assert_eq!(coded.code, Code::UnitAccessUndeclared);
+        assert_eq!(coded.message, "unit web: no context");
+        assert_eq!(coded.fix, "declare spec.live.context");
+        assert_eq!(coded.detail.as_deref(), Some("cluster-context-missing"));
     }
 }
 

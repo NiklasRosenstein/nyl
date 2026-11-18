@@ -631,7 +631,7 @@ fn skipped_warnings(
                 ),
                 "remove it with `nyl release delete --take-over` if it is stale, or leave it to its owner",
             )
-            .with_detail_slug(RELEASE_LEFT_BEHIND)
+            .with_slug(RELEASE_LEFT_BEHIND)
         })
         .collect()
 }
@@ -912,7 +912,7 @@ fn shared_catalog_differs(unit: &DesiredUnit, prefix: &str) -> nyl_core::orchest
         ),
         "replace it from the revision that should win with `nyl build <unit> -e <environment> -- --shared-catalog --push`",
     )
-    .with_detail_slug(SHARED_CATALOG_DIFFERS)
+    .with_slug(SHARED_CATALOG_DIFFERS)
 }
 
 /// Create the shared catalog `shared` renders when the branch holds none, and

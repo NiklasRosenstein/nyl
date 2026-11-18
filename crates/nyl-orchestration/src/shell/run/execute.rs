@@ -361,14 +361,13 @@ fn execute_unit(shared: &Shared<'_>, job: Job<'_>) -> Execution {
         }
         Err(error) if !error.effects_possible() => {
             before_effects(&mut execution, error.to_string());
-            if let (Some(code), Some(finding)) = (error.code(), execution.errors.last_mut()) {
-                // The driver said what went wrong: its code replaces the generic one.
-                finding.code = code;
-                finding.message = format!("unit {name}: {}", error.message());
-                finding.detail = error.detail().map(str::to_owned);
-                execution.code = Some(code);
-                execution.detail.clone_from(&finding.detail);
+            if let Some(finding) = execution.errors.last_mut() {
+                // When the driver said what went wrong, its code and fix replace the generic ones.
+                let fallback = std::mem::take(&mut finding.fix);
+                *finding = error.finding(&format!("unit {name}: "), &fallback);
             }
+            execution.code = error.code();
+            execution.detail = error.detail().map(str::to_owned);
             return execution;
         }
         Err(error) => Outcome::Uncertain {

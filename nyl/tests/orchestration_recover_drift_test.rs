@@ -1582,3 +1582,70 @@ fn test_a_reconcile_cancelled_during_its_drift_check_records_nothing() {
     assert_eq!(harness.tip(OBSERVED), observed, "a cancelled run records nothing");
     assert!(harness.coordination_refs("").is_empty(), "the lease is released");
 }
+
+/// Catches a driver's generic code and `detail` going missing between the
+/// driver and what an operator or script reads: the unit's report entry, the
+/// finding, the condition state records, and the exit code. A failed outcome
+/// and a driver error before any effect both carry them, and the driver's own
+/// fix replaces the engine's generic advice.
+#[test]
+fn test_a_drivers_code_and_detail_reach_the_report_the_finding_and_state() {
+    let harness = Harness::new();
+    harness.init();
+    harness.script.push(
+        unit("web-image"),
+        DriverOperation::Reconcile,
+        &Scripted::CodedFailure {
+            code: Code::UnitNativeStateMissing,
+            detail: "backend-state-missing".to_owned(),
+        },
+        1,
+    );
+    let failed = harness.reconcile(&[]);
+    assert_eq!(failed.exit, 3, "{}", failed.stderr);
+    assert_eq!(
+        unit_field(&failed.report, "web-image", "code"),
+        "NYL-UNIT-NATIVE-STATE-MISSING"
+    );
+    assert_eq!(
+        unit_field(&failed.report, "web-image", "detail"),
+        "backend-state-missing"
+    );
+    let observed = harness.show(OBSERVED, "observed/units/web-image.yaml");
+    assert!(
+        observed.contains("NYL-UNIT-NATIVE-STATE-MISSING: scripted coded reconcile failure"),
+        "the stored condition keeps the code in front of the message:\n{observed}"
+    );
+
+    let recovered = harness.invoke(&["recover", "-e", "dev", "--unit", "web-image", "--retry", "-o", "json"]);
+    assert_eq!(recovered.exit, 0, "{}", recovered.stderr);
+    harness.script.push(
+        unit("web-image"),
+        DriverOperation::Reconcile,
+        &Scripted::CodedError {
+            code: Code::UnitAccessUndeclared,
+            detail: "endpoint-missing".to_owned(),
+            fix: "declare the registry endpoint".to_owned(),
+        },
+        1,
+    );
+    let refused = harness.reconcile(&[]);
+    // A driver error before any effect blocks the unit: an error, not a failed unit.
+    assert_eq!(refused.exit, 1, "{}", refused.stderr);
+    assert_eq!(
+        unit_field(&refused.report, "web-image", "code"),
+        "NYL-UNIT-ACCESS-UNDECLARED"
+    );
+    assert_eq!(unit_field(&refused.report, "web-image", "detail"), "endpoint-missing");
+    let errors = refused.report["environments"][0]["errors"].as_array().expect("errors");
+    let finding = errors
+        .iter()
+        .find(|error| error["code"] == "NYL-UNIT-ACCESS-UNDECLARED")
+        .unwrap_or_else(|| panic!("no finding with the driver's code in {errors:?}"));
+    assert_eq!(finding["detail"], "endpoint-missing", "{finding}");
+    assert_eq!(finding["fix"], "declare the registry endpoint", "{finding}");
+    assert_eq!(
+        finding["message"], "unit web-image: scripted coded reconcile error",
+        "{finding}"
+    );
+}

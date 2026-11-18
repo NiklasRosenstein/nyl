@@ -435,7 +435,7 @@ impl Driver for TestDriver {
                     format!("{}/{}: needs a manual sync", unit.unit.environment, unit.unit.name),
                     "enable pruning",
                 )
-                .with_detail_slug("manual-sync"),
+                .with_slug("manual-sync"),
             );
             readiness.remnants.push(
                 Finding::new(
@@ -443,7 +443,7 @@ impl Driver for TestDriver {
                     format!("{}/{}: leaves its catalog", unit.unit.environment, unit.unit.name),
                     "let a parent own the catalog",
                 )
-                .with_detail_slug("catalog-remains"),
+                .with_slug("catalog-remains"),
             );
         }
         Ok(Supported::Supported(readiness))

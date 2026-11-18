@@ -406,6 +406,18 @@ status of the workloads; a revision applied outside the unit is `unreadable` unt
 the next reconcile. Teardown deletes in two phases and keeps the Namespaces that hold
 the release state until its wait ends.
 
+A direct target's unit raises these warnings and refusals of its own:
+
+| Code | Meaning and fix |
+| --- | --- |
+| `NYL-UNIT-HOOK-IGNORED` (`delete-hooks`) | A Release declares delete hooks (`pre-delete`, `post-delete`, `PreDelete`, `PostDelete`), which Nyl never runs; one warning per Release. Do what the hook does yourself before the Release is removed, drop the hook, or mark it `argocd.argoproj.io/hook: Skip`. |
+| `NYL-UNIT-CAPABILITY-MISMATCH` (`scope-mismatch`) | A kind's scope that the Cluster records differs from what the connected cluster reports, so the apply used the recorded scope; one warning per kind. Run `nyl capture cluster <name> --crds` and commit the result. |
+| `NYL-UNIT-ACCESS-UNDECLARED` (`cluster-context-missing`) | The target's Cluster declares no `spec.live.context`. Declare the context the unit connects through. |
+| `NYL-UNIT-HISTORY-TOO-DEEP` (`release-history`) | The publication branch holds more publications since the unit's last receipt than Nyl reads, so it cannot tell which Releases left the tree, and removes none. Publish fewer commits between executions, or release the leftovers by hand with `nyl release delete --target <target> --take-over`. |
+
+`nyl apply`, `diff`, and the `release` commands raise the first two as
+`NYL-KUBERNETES-HOOK-IGNORED` and `NYL-KUBERNETES-SCOPE-MISMATCH`.
+
 ## Observed values
 
 A unit that declares `observe: {}` can read a field of a resource its target renders
