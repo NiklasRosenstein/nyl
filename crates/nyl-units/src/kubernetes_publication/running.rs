@@ -124,14 +124,7 @@ pub(crate) fn deployments(
         serde_json::from_value(recorded.clone())
             .map_err(|error| DriverError::before_effects(format!("spec.reconciler.expected: {error}")))?
     } else {
-        let rendered = super::render_for_validation(
-            catalogue,
-            ctx.worktree,
-            std::path::Path::new(ctx.project_dir),
-            ctx.instances,
-            ctx.cache_dir,
-            spec,
-        )?;
+        let rendered = super::render_for_validation(catalogue, ctx, spec)?;
         ReconcilerFacts::of(&rendered)
             .map_err(|error| {
                 DriverError::before_effects(format!("cannot list the deployments of the target: {error}"))

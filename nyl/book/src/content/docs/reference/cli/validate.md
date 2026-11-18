@@ -16,8 +16,11 @@ nyl validate [path] [--strict] [--offline]
 - `--strict`: treat warnings as errors.
 - `--offline`: never use the network, as `render-tree --offline` does: Git
   sources (charts and remote ApplicationGroup sources) come from the cache,
-  and `fromPublication` state from the cached publication branch head. A
-  remote source that was never fetched cannot be checked offline; see
+  and `fromPublication` state from the cached publication branch head. This
+  holds for the target compiles and the PromotionPath checks (Release input
+  types and `coverage` names) alike. A remote source that was never fetched
+  cannot be checked offline: the compile fails, and the checks report
+  `NYL-PROMOTE-VALUE-TYPE-UNCHECKED` or `NYL-PROMOTE-COVERAGE-UNCHECKED`; see
   [Units and placed targets](#units-and-placed-targets).
 
 ## Checks

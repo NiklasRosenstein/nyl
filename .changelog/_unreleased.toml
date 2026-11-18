@@ -205,11 +205,17 @@ author = "@NiklasRosenstein"
 [[entries]]
 id = "67bd41f5-19cc-4de6-b32c-d4bd972bbb06"
 type = "feature"
-description = "`nyl validate`, `nyl plan`, `nyl reconcile`, `nyl promote`, and `nyl get promotion-candidates` compare a promoted value with the type the Release declares for the input a DeploymentTarget's `releaseInputs` fills with `fromPromotion`, reading the declaration from the ApplicationGroups the target selects without rendering: a mismatch is `NYL-PROMOTE-VALUE-TYPE`. A remote group source is fetched at its pinned commit, or read from the Git cache when the fetch fails. The new `nyl validate --offline` never uses the network, as `render-tree --offline` does, and `nyl reconcile --local` reads remote sources from the cache only too; a source neither fetched nor cached leaves its inputs unchecked with `NYL-PROMOTE-VALUE-TYPE-UNCHECKED`, an error in `nyl validate` and a warning in the other commands. Resolution still checks the value against the declaration"
+description = "`nyl validate`, `nyl plan`, `nyl reconcile`, `nyl promote`, and `nyl get promotion-candidates` compare a promoted value with the type the Release declares for the input a DeploymentTarget's `releaseInputs` fills with `fromPromotion`, reading the declaration from the ApplicationGroups the target selects without rendering: a mismatch is `NYL-PROMOTE-VALUE-TYPE`. A remote group source is fetched at its pinned commit, or read from the Git cache when the fetch fails. The new `nyl validate --offline` never uses the network, as `render-tree --offline` does, for the target compiles and the PromotionPath checks (Release input types and the `coverage` listing) alike. `nyl reconcile --local` makes those PromotionPath checks read remote sources and `fromPublication` state from the caches only; the run itself still resolves its units' sources as without `--local`. A source neither fetched nor cached leaves the input types unchecked with `NYL-PROMOTE-VALUE-TYPE-UNCHECKED` (and the coverage names with `NYL-PROMOTE-COVERAGE-UNCHECKED`), an error in `nyl validate` and a warning in the other commands. Resolution still checks the value against the declaration"
 author = "@NiklasRosenstein"
 
 [[entries]]
 id = "9adb705f-17ed-4781-89ac-69f630270580"
 type = "fix"
-description = "`render-tree --offline` and `diff-tree --offline` read a remote ApplicationGroup source at its pinned commit from the Git cache only, instead of fetching it when the cache lacks it"
+description = "`render-tree --offline`, `diff-tree --offline`, and `render --offline` read a remote ApplicationGroup source at its pinned commit from the Git cache only, instead of fetching it when the cache lacks it. As with Git charts, `--offline --no-cache` with a remote ApplicationGroup source now fails, because that render keeps no Git cache to read from"
+author = "@NiklasRosenstein"
+
+[[entries]]
+id = "21213f4b-602e-4913-8ec0-92a5bec12182"
+type = "fix"
+description = "`nyl validate` no longer fails with \"ApplicationGroup … source directory does not exist\" for a target that selects an ApplicationGroup with a remote source: the checkout it compiled from was removed before it was read"
 author = "@NiklasRosenstein"

@@ -156,19 +156,60 @@ pub struct ValueReader {
 /// unit or pointer missing here is not typed, which fits any value.
 pub type BoundFieldTypes = BTreeMap<(EnvironmentName, UnitName), Result<BTreeMap<String, BoundFieldType>, String>>;
 
+/// The values of `paths` whose type is known, by the path's target
+/// environment, the path's name, and the value's name: the only values a
+/// place's type is compared with, so the only ones worth asking a driver
+/// about ([`untyped_fields`]).
+pub fn typed_values(
+    paths: &[PromotionPath],
+    sources: &BTreeMap<EnvironmentName, RenderedSource>,
+    drivers: &DriverSet,
+) -> BTreeSet<(EnvironmentName, String, String)> {
+    let mut typed = BTreeSet::new();
+    for path in paths {
+        let environment = |end: &Option<String>| end.as_deref().and_then(|name| EnvironmentName::new(name).ok());
+        let (Some(from), Some(to)) = (
+            environment(&path.spec.from.environment),
+            environment(&path.spec.to.environment),
+        ) else {
+            continue;
+        };
+        let Some(source) = sources.get(&from) else { continue };
+        for (name, value) in &path.spec.values {
+            if value.select.shape_problem().is_none()
+                && matches!(
+                    select_type(drivers, source, from.as_str(), &value.select, ""),
+                    Ok(Some(_))
+                )
+            {
+                typed.insert((to.clone(), path.metadata.name.clone(), name.clone()));
+            }
+        }
+    }
+    typed
+}
+
 /// The fields whose types [`check`] asks the units' drivers for: each
-/// binding in a unit's spec whose kind's schema cannot type it, by
-/// environment and unit, limited to `only`'s bindings when set, as
-/// [`check`] limits them.
+/// binding in a unit's spec whose kind's schema cannot type it and that
+/// reads a value of known type ([`typed_values`]) from a path into its
+/// environment, by environment and unit, limited to `only`'s bindings when
+/// set, as [`check`] limits them.
 pub fn untyped_fields(
     readers: &[ValueReader],
     only: Option<&EnvironmentName>,
+    typed: &BTreeSet<(EnvironmentName, String, String)>,
 ) -> BTreeMap<(EnvironmentName, UnitName), Vec<String>> {
+    let reads_typed = |reader: &ValueReader| {
+        typed.iter().any(|(to, path, value)| {
+            *to == reader.environment
+                && *value == reader.binding.value
+                && reader.binding.path.as_ref().is_none_or(|named| named == path)
+        })
+    };
     let mut wanted: BTreeMap<(EnvironmentName, UnitName), Vec<String>> = BTreeMap::new();
-    for reader in readers
-        .iter()
-        .filter(|reader| reader.expected.is_none() && only.is_none_or(|only| *only == reader.environment))
-    {
+    for reader in readers.iter().filter(|reader| {
+        reader.expected.is_none() && only.is_none_or(|only| *only == reader.environment) && reads_typed(reader)
+    }) {
         if let Some((unit, pointer)) = &reader.field {
             let pointers = wanted.entry((reader.environment.clone(), unit.clone())).or_default();
             if !pointers.contains(pointer) {
@@ -198,6 +239,10 @@ fn typed_readers(readers: &[ValueReader], bound: &BoundFieldTypes) -> Vec<ValueR
                     Some(BoundFieldType::Unchecked(reason)) => reader.unchecked = Some(reason.clone()),
                     None => {}
                 },
+                // The driver could answer for none of the unit's pointers, so the
+                // engine cannot tell which of them it would have typed: every
+                // pointer it was asked about (only ones the kind's schema cannot
+                // type, reading a typed value) is unchecked rather than guessed.
                 Some(Err(reason)) => reader.unchecked = Some(reason.clone()),
                 None => {}
             }
@@ -374,7 +419,7 @@ fn check_path(inputs: &PathChecks<'_>, readers: &[ValueReader], path: &Promotion
             if value.select.shape_problem().is_some() {
                 continue;
             }
-            match select_type(inputs, source, from, &value.select, &at) {
+            match select_type(inputs.drivers, source, from, &value.select, &at) {
                 Ok(found) => {
                     if let Some(unit) = &value.select.unit {
                         covered.insert(unit.to_string());
@@ -414,7 +459,7 @@ fn check_path(inputs: &PathChecks<'_>, readers: &[ValueReader], path: &Promotion
 /// The type a selector reads, or the finding for why it reads nothing.
 #[allow(clippy::too_many_lines)] // One arm per selector form, in the order the contract lists them.
 fn select_type(
-    inputs: &PathChecks<'_>,
+    drivers: &DriverSet,
     source: &RenderedSource,
     environment: &str,
     select: &nyl_core::orchestration::promotion::PromotionSelect,
@@ -450,7 +495,7 @@ fn select_type(
         ));
     };
     let spec = unit.spec.as_ref().expect("the ownership set holds rendered specs");
-    let driver = inputs.drivers.get(&unit.envelope.api_version, &unit.envelope.kind);
+    let driver = drivers.get(&unit.envelope.api_version, &unit.envelope.kind);
     match form {
         SelectForm::Input => {
             let pointer = select.input.as_deref().unwrap_or_default();

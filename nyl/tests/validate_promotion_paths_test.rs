@@ -597,3 +597,34 @@ fn test_an_unreadable_remote_input_type_fails_validate_and_warns_plan() {
     );
     assert!(!stderr.contains("PromotionPaths are invalid"), "{stderr}");
 }
+
+/// `validate --offline` lists a coverage unit's deployments without the
+/// network too: with dev's target selecting a remote ApplicationGroup that
+/// nothing cached yet, the listing fails (`NYL-PROMOTE-COVERAGE-UNCHECKED`)
+/// even though the remote is reachable; once `validate` cached it, the
+/// offline listing succeeds after the remote is gone. Catches the coverage
+/// listing fetching sources offline, or never finding the cached copy.
+#[test]
+fn test_validate_offline_lists_coverage_from_the_cache_only() {
+    let world = World::new(&scenario::shell::shared_project());
+    let remote = world.scenario_tmp().join("api-source");
+    let group = remote_group(&remote);
+    let checkout = observing_checkout_with(
+        &world,
+        "  from: {environment: dev}\n  to: {environment: prod}\n  coverage:\n    kubernetes: {exclude: [web], require: [api]}\n",
+    );
+    let platform = checkout.join("nyl/platform.yaml");
+    let mut contents = std::fs::read_to_string(&platform).unwrap();
+    contents.push_str(&group);
+    std::fs::write(&platform, contents).unwrap();
+    nyl(&world, &checkout, &["validate", "--offline"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("NYL-PROMOTE-COVERAGE-UNCHECKED")
+                .and(predicate::str::contains("cannot be listed")),
+        );
+    nyl(&world, &checkout, &["validate"]).assert().success();
+    std::fs::remove_dir_all(&remote).unwrap();
+    nyl(&world, &checkout, &["validate", "--offline"]).assert().success();
+}

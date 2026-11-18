@@ -154,7 +154,7 @@ fn findings_of(
     };
     let deployments = nyl_orchestration::shell::coverage::deployments(check, sources, drivers, &reads);
     let bound_types = nyl_orchestration::shell::coverage::bound_field_types(
-        &promotion_paths::untyped_fields(&readers, only),
+        &promotion_paths::untyped_fields(&readers, only, &promotion_paths::typed_values(known, sources, drivers)),
         sources,
         drivers,
         &reads,

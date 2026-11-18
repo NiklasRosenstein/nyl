@@ -3488,6 +3488,10 @@ struct ResolvedGroupSource {
     remote: bool,
     provenance_inputs: Vec<PathBuf>,
     repository: Option<nyl_core::resources::ReadGitRepository>,
+    /// The resolver a remote checkout was materialized by: without a render
+    /// cache it owns the temporary directory the checkout lives in, which
+    /// must outlive every reader of `root`.
+    _checkout: Option<Box<crate::render::artifact::ArtifactResolver>>,
 }
 
 impl ResolvedGroupSource {
@@ -3503,6 +3507,7 @@ impl ResolvedGroupSource {
             remote: false,
             provenance_inputs: Vec::new(),
             repository: None,
+            _checkout: None,
         }
     }
 }
@@ -3573,7 +3578,12 @@ fn resolve_remote_group_source(
     cache: Option<&GitOpsCache>,
     cached_only: bool,
     provenance_inputs: &mut Vec<PathBuf>,
-) -> Result<(PathBuf, PathBuf, nyl_core::resources::ReadGitRepository)> {
+) -> Result<(
+    PathBuf,
+    PathBuf,
+    nyl_core::resources::ReadGitRepository,
+    crate::render::artifact::ArtifactResolver,
+)> {
     let (repository, repository_path) = resolve_source_repository(inventory, source)?;
     if let Some(repository_path) = repository_path {
         provenance_inputs.push(repository_path);
@@ -3625,7 +3635,7 @@ fn resolve_remote_group_source(
         artifacts.materialize_git(&artifact)?
     };
     let selected = checked_checkout_subpath(&checkout, source.checkout_path(), "ApplicationGroup source.path")?;
-    Ok((selected, checkout, repository))
+    Ok((selected, checkout, repository, artifacts))
 }
 
 /// The literal input declarations of one ApplicationGroup's Releases: by
@@ -3808,9 +3818,9 @@ fn resolve_group_source(
     cached_only: bool,
 ) -> Result<ResolvedGroupSource> {
     let mut provenance_inputs = Vec::new();
-    let (root, source, remote_root, source_repository, candidate_files) = match &group.spec.source {
+    let (root, source, remote_root, source_repository, candidate_files, checkout) = match &group.spec.source {
         Some(source) if source.is_remote() => {
-            let (selected, checkout, repository) = resolve_remote_group_source(
+            let (selected, checkout, repository, artifacts) = resolve_remote_group_source(
                 inventory,
                 source,
                 git_manager,
@@ -3820,13 +3830,20 @@ fn resolve_group_source(
             )?;
             ensure_group_source_root(&group.metadata.name, &selected)?;
             let files = select_candidate_files(inventory, &selected, source, collect_checkout_yaml(&selected)?);
-            (selected, source.clone(), Some(checkout), Some(repository), files)
+            (
+                selected,
+                source.clone(),
+                Some(checkout),
+                Some(repository),
+                files,
+                Some(Box::new(artifacts)),
+            )
         }
         _ => {
             let (root, source) = local_group_source(inventory, group_resource_path, group)?
                 .expect("a source that is not remote is local");
             let files = local_candidate_files(inventory, &root, &source);
-            (root, source, None, None, files)
+            (root, source, None, None, files, None)
         }
     };
     let files = static_release_files(&candidate_files)?;
@@ -3843,6 +3860,7 @@ fn resolve_group_source(
         remote: remote_root.is_some(),
         provenance_inputs,
         repository: source_repository,
+        _checkout: checkout,
     })
 }
 

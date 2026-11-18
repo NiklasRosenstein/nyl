@@ -87,6 +87,11 @@ pub struct TargetRender<'a> {
     /// invocations and tests stay isolated and the result never depends on
     /// host state.
     pub cache_dir: Option<&'a Path>,
+    /// The Git cache that remote sources (Git charts, remote ApplicationGroup
+    /// sources) persist in between invocations, when the caller has one, such
+    /// as a validation render that must work offline; `None` keeps them
+    /// beneath `cache_dir`, or in a temporary directory without one.
+    pub source_cache_dir: Option<&'a Path>,
     /// Resource APIs registered by the caller.
     pub resource_catalogue: crate::config::ResourceCatalogue,
     /// The instances of EnvironmentTemplates the caller knows, whose inline
@@ -261,15 +266,24 @@ fn target_inventory(
     Ok(inventory)
 }
 
-/// The render cache of a target render: beneath `cache_dir`, with its source
-/// checkouts, or a disabled one in `temporary`, never the user's default cache.
-fn target_cache(cache_dir: Option<&Path>, temporary: &tempfile::TempDir) -> Result<GitOpsCache> {
-    match cache_dir {
-        Some(directory) => Ok(
+/// The render cache of a target render: beneath `cache_dir`, or a disabled
+/// one in `temporary`, never the user's default cache; its source checkouts
+/// in `source_cache_dir` when the caller names one, else beside the cache.
+fn target_cache(
+    cache_dir: Option<&Path>,
+    source_cache_dir: Option<&Path>,
+    temporary: &tempfile::TempDir,
+) -> Result<GitOpsCache> {
+    let cache = match cache_dir {
+        Some(directory) => {
             GitOpsCache::with_root(directory, CacheMode::Default)?.with_source_cache_root(directory.join("sources"))
-        ),
-        None => GitOpsCache::with_root(temporary.path(), CacheMode::Disabled),
-    }
+        }
+        None => GitOpsCache::with_root(temporary.path(), CacheMode::Disabled)?,
+    };
+    Ok(match source_cache_dir {
+        Some(sources) => cache.with_source_cache_root(sources),
+        None => cache,
+    })
 }
 
 /// What [`declared_release_inputs`] reads.
@@ -313,7 +327,7 @@ pub fn declared_release_inputs(
         request.inline.map(|inline| (inline, &inline.spec)),
     )?;
     let temporary = tempfile::TempDir::new()?;
-    let cache = target_cache(request.cache_dir, &temporary)?;
+    let cache = target_cache(request.cache_dir, None, &temporary)?;
     super::tree::declared_release_inputs(
         &inventory,
         request.target,
@@ -338,7 +352,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
     // A render without a cache directory still keeps its source checkouts
     // in a temporary directory rather than the user's default cache.
     let temporary = tempfile::TempDir::new()?;
-    let cache = target_cache(request.cache_dir, &temporary)?;
+    let cache = target_cache(request.cache_dir, request.source_cache_dir, &temporary)?;
     let options = TreeRenderOptions {
         selection: request.selection.clone(),
         publication_base: request.publication_base.clone(),
@@ -2309,6 +2323,7 @@ spec:
             placeholders: false,
             publication_read: crate::gitops::inputs::PublicationRead::Fresh,
             cache_dir,
+            source_cache_dir: None,
             resource_catalogue: crate::config::test_catalogue(),
         })
     }
@@ -2445,6 +2460,7 @@ spec:
             placeholders: false,
             publication_read: crate::gitops::inputs::PublicationRead::Fresh,
             cache_dir: None,
+            source_cache_dir: None,
             resource_catalogue: crate::config::test_catalogue(),
         })
     }
