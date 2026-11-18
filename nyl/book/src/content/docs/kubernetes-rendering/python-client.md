@@ -40,6 +40,33 @@ project's configured validation defaults. `offline=True` and
 [`render` flags](/nyl/reference/cli/render/). A nonzero exit, including validation
 failure, raises an error even if the CLI emits manifests.
 
+## Render a Release whose custom resources need CRDs from elsewhere
+
+A Release can declare custom resources whose CRDs another Release installs.
+Choose how the check validates them:
+
+```python
+manifests = client.render(
+    "applications/workloads/certificates.yaml",
+    target="development",
+    release_only=True,
+    use_desired_crds=True,
+)
+```
+
+- `use_desired_crds=True` forwards `--use-desired-crds`: validation runs and
+  resolves custom resource schemas from the
+  [desired CRDs](/nyl/kubernetes-rendering/validation/manifest-validation/#validate-an-operator-installation-or-upgrade)
+  the project declares.
+- `no_validate=True` forwards `--no-validate`, skipping validation for focused
+  assertions. It cannot be combined with `use_desired_crds` (`ValueError`).
+- `release_only=True` forwards `--release-only`: the Release is settled alone
+  instead of taken from the compiled target, which is faster for large targets
+  but leaves namespace conflicts with the target's other Releases undetected.
+
+All three default to `False`, keeping the project's validation defaults. The
+call keeps the client's timeout and raises the same errors as any other render.
+
 ## Select resources and inspect declarations
 
 `manifests.select(kind=None, name=None, *, namespace=..., api_version=None)` returns

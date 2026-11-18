@@ -27,7 +27,8 @@ even when the Release or Argo CD Application has a destination namespace.
 
 `NylClient(project, executable="nyl", timeout=120)` fixes the invocation directory
 and requires a positive, finite timeout in seconds. `render(source, *, target=None,
-offline=False, allow_secret_inputs=False)` invokes only `nyl render`. Relative
+offline=False, allow_secret_inputs=False, release_only=False, no_validate=False,
+use_desired_crds=False)` invokes only `nyl render`. Relative
 source paths are relative to `project`; absolute paths are passed through.
 Calls leave Python's working directory and environment unchanged and use no shell.
 Timeouts terminate the invocation's process group on POSIX and its process tree
@@ -41,6 +42,12 @@ the CLI emits manifests. `offline=True` forwards `--offline` (cached Git referen
 and publication inputs); it is not a universal network prohibition for validators
 or other external tools. `allow_secret_inputs=True` explicitly forwards the CLI's
 opt-in for project secrets and admitted environment inputs.
+`release_only=True` forwards `--release-only`, settling the Release alone instead of
+taking it from the compiled target. `use_desired_crds=True` forwards
+`--use-desired-crds`, which enables validation and resolves custom resource schemas
+from the CRDs the project declares elsewhere; `no_validate=True` forwards
+`--no-validate` to skip validation for focused assertions. The two validation
+options are mutually exclusive and raise `ValueError` together.
 
 Only single-file render entry points are supported. Full-tree loading needs a
 documented manifest inventory: a published tree can also contain ownership indexes

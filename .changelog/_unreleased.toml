@@ -201,3 +201,9 @@ id = "e20c7123-b445-4f16-9971-7aac2a58c459"
 type = "feature"
 description = "Findings and failures carry an optional `detail`, a driver-supplied slug that tells cases under one generic code apart, such as `catalog-manual-sync` under `NYL-TEARDOWN-BLOCKED`. It appears next to `code` in every `-o json` report and in receipts' recorded warnings; a unit's failure in a run report adds `code` and `detail` next to its `message`, and `teardownReadiness` adds the structured `blocking` findings next to its `reasons`. Nyl never acts on it"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "6593ef51-ca36-456f-9983-e73a0d0f2393"
+type = "feature"
+description = "The Python client's `NylClient.render()` accepts `release_only`, `no_validate`, and `use_desired_crds` keyword arguments, forwarding `--release-only`, `--no-validate`, and `--use-desired-crds` to `nyl render`. All default to `False`; `no_validate` and `use_desired_crds` together raise `ValueError`"
+author = "@NiklasRosenstein"
