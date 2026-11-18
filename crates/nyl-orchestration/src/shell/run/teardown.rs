@@ -12,7 +12,7 @@ use crate::rules::desired::{self as desired_rules, LifecycleOutcome, LifecycleWr
 use crate::rules::lifecycle::{self, Event as LifecycleEvent, Next};
 use crate::rules::teardown::{self as teardown_rules, Pending, TeardownInputs, TeardownOptions};
 use crate::rules::transitions::{self, Applied, Event};
-use nyl_core::orchestration::driver::{DriverError, DriverResult, IncarnationDirectory, WaitCompletion};
+use nyl_core::orchestration::driver::{coded_message, DriverError, DriverResult, IncarnationDirectory, WaitCompletion};
 use nyl_core::orchestration::state::{
     DeletionIntent, DeletionReason, Hold, Request, TeardownProgress, TeardownWaiting,
 };
@@ -713,11 +713,18 @@ impl Reconcile<'_, '_, '_> {
             }
             Err(error) if !error.effects_possible() => {
                 let message = error.to_string();
-                self.report.errors.push(Finding::new(
+                let mut finding = Finding::new(
                     Code::DriverError,
                     format!("unit {name}: its teardown could not start: {message}"),
                     "fix the cause, such as a missing tool, then run the teardown again",
-                ));
+                );
+                if let Some(code) = error.code() {
+                    // The driver said what went wrong: its code replaces the generic one.
+                    finding.code = code;
+                    finding.message = format!("unit {name}: its teardown could not start: {}", error.message());
+                    finding.detail = error.detail().map(str::to_owned);
+                }
+                self.report.errors.push(finding);
                 let entry = life.result(
                     name,
                     &kind,
@@ -726,6 +733,8 @@ impl Reconcile<'_, '_, '_> {
                     },
                 );
                 entry.message = Some(message);
+                entry.code = error.code();
+                entry.detail = error.detail().map(str::to_owned);
                 return Ok(false);
             }
             Err(error) => Outcome::Uncertain {
@@ -758,6 +767,12 @@ impl Reconcile<'_, '_, '_> {
         };
         let since = call.finished;
         let run = self.run.clone();
+        let (code, detail) = match &outcome {
+            Outcome::Failed { code, detail, .. } | Outcome::RetryRequired { code, detail, .. } => {
+                (*code, detail.clone())
+            }
+            _ => (None, None),
+        };
         let (result, message, document, waits) =
             match outcome {
                 Outcome::Succeeded { .. } => {
@@ -798,37 +813,47 @@ impl Reconcile<'_, '_, '_> {
                     category,
                     message,
                     context,
-                } => (
-                    UnitResult::Failed {
-                        category,
-                        retryable: false,
-                    },
-                    Some(message.clone()),
-                    condition(Event::RetryRequired {
-                        since,
-                        run,
-                        category,
-                        message,
-                        context,
-                    }),
-                    false,
-                ),
+                    code,
+                    ..
+                } => {
+                    let message = coded_message(code, &message);
+                    (
+                        UnitResult::Failed {
+                            category,
+                            retryable: false,
+                        },
+                        Some(message.clone()),
+                        condition(Event::RetryRequired {
+                            since,
+                            run,
+                            category,
+                            message,
+                            context,
+                        }),
+                        false,
+                    )
+                }
                 Outcome::Failed {
                     category,
                     retryable,
                     message,
-                } => (
-                    UnitResult::Failed { category, retryable },
-                    Some(message.clone()),
-                    condition(Event::Failed {
-                        since,
-                        run,
-                        category,
-                        retryable,
-                        message,
-                    }),
-                    false,
-                ),
+                    code,
+                    ..
+                } => {
+                    let message = coded_message(code, &message);
+                    (
+                        UnitResult::Failed { category, retryable },
+                        Some(message.clone()),
+                        condition(Event::Failed {
+                            since,
+                            run,
+                            category,
+                            retryable,
+                            message,
+                        }),
+                        false,
+                    )
+                }
                 Outcome::Uncertain { reason } => (
                     UnitResult::Uncertain { reason: reason.clone() },
                     Some(reason.clone()),
@@ -883,6 +908,8 @@ impl Reconcile<'_, '_, '_> {
         let failed = !waits;
         let entry = life.result(name, &kind, result);
         entry.message = message;
+        entry.code = code;
+        entry.detail = detail;
         if failed {
             self.fail_fast(life, name);
         }
@@ -1261,11 +1288,11 @@ fn call(
             ) {
                 Err(DriverError::before_effects(message))
             } else {
-                Ok(Supported::Supported(Outcome::Failed {
-                    category: nyl_core::orchestration::state::FailureCategory::Credentials,
-                    retryable: true,
+                Ok(Supported::Supported(Outcome::failed(
+                    nyl_core::orchestration::state::FailureCategory::Credentials,
+                    true,
                     message,
-                }))
+                )))
             };
             return finish(outcome, false);
         }

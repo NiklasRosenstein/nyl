@@ -764,7 +764,7 @@ Tier 1 variants:
   the publication states its settings in its declaration (the fake
   publication's `teardownSettings`); the real publication records them when
   its unit resolves, which waits for the outputs it reads, so its readiness
-  warning (`NYL-TEARDOWN-NAMESPACE-CONFIRM`) comes with an explicit
+  warning (`NYL-TEARDOWN-BLOCKED`, detail `namespace-confirm`) comes with an explicit
   `reconcile` or `plan` of the instance, and the scenario asserts it there.
   Scenario `reference/preview-not-ready` runs it with the real driver.
 - **Manual wait.** With `kubernetes` on the `manual` default, `state init

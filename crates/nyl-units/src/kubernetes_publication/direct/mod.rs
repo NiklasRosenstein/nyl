@@ -39,6 +39,10 @@ mod reader;
 
 pub use reader::DirectReader;
 
+/// The `detail` of a direct target whose Cluster declares no
+/// `spec.live.context` (`NYL-UNIT-ACCESS-UNDECLARED`).
+pub(crate) const CLUSTER_CONTEXT_MISSING: &str = "cluster-context-missing";
+
 /// Why this unit may not remove a Release whose latest revision is `latest`,
 /// or `None` when it may. The one rule a teardown, the purge of Releases that
 /// left the tree, and the removal reading share, so the first-phase wait never

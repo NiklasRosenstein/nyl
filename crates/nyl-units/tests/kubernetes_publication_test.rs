@@ -146,17 +146,23 @@ fn test_resolution_records_the_targets_effective_teardown_settings() {
         readiness
             .blocking
             .iter()
-            .map(|finding| finding.code)
+            .map(|finding| (finding.code, finding.detail.as_deref().unwrap_or_default()))
             .collect::<Vec<_>>(),
-        vec![Code::TeardownCatalogManualSync, Code::TeardownNamespaceConfirm]
+        vec![
+            (Code::TeardownBlocked, "catalog-manual-sync"),
+            (Code::TeardownBlocked, "namespace-confirm")
+        ]
     );
     assert_eq!(
         readiness
             .remnants
             .iter()
-            .map(|finding| finding.code)
+            .map(|finding| (finding.code, finding.detail.as_deref().unwrap_or_default()))
             .collect::<Vec<_>>(),
-        vec![Code::TeardownNamespacesRemain, Code::TeardownCatalogRemains]
+        vec![
+            (Code::TeardownRemnant, "namespaces-remain"),
+            (Code::TeardownRemnant, "catalog-remains")
+        ]
     );
     assert!(readiness.blocking[0].message.starts_with("dev/kubernetes: "));
     // A document resolved before settings were recorded has no requirements.
@@ -201,9 +207,9 @@ fn test_recorded_teardown_settings_follow_the_target_and_its_key() {
         readiness
             .blocking
             .iter()
-            .map(|finding| finding.code)
+            .map(|finding| (finding.code, finding.detail.as_deref().unwrap_or_default()))
             .collect::<Vec<_>>(),
-        vec![Code::TeardownNamespaceConfirm]
+        vec![(Code::TeardownBlocked, "namespace-confirm")]
     );
     assert_ne!(before.execution_key, after.execution_key);
 }
@@ -494,29 +500,35 @@ fn test_a_prefix_owned_by_an_existing_incarnation_is_fenced_until_it_is_gone() {
         };
         outcome
     };
-    for (status, code) in [
-        (IncarnationStatus::Exists, "NYL-KUBERNETES-OWNER-FENCED"),
+    for (status, expected) in [
+        (IncarnationStatus::Exists, Code::UnitOwnerFenced),
         (
             IncarnationStatus::Unknown("the state of environment dev cannot be read".to_owned()),
-            "NYL-KUBERNETES-OWNER-UNKNOWN",
+            Code::UnitOwnerUnknown,
         ),
     ] {
         let Outcome::Failed {
             category,
             retryable,
             message,
+            code,
+            detail,
         } = publish(&first_is(status.clone()))
         else {
             panic!("a fenced publication fails: {status:?}");
         };
         assert_eq!(category, nyl_core::orchestration::state::FailureCategory::Ownership);
         assert!(retryable, "the next run reads state again");
-        assert!(message.starts_with(&format!("{code}:")), "{message}");
+        assert_eq!(
+            (code, detail.as_deref()),
+            (Some(expected), Some("prefix-owned")),
+            "{message}"
+        );
         assert!(
             message.contains(&format!("unit dev/kubernetes (uid {FIRST})")),
             "{message}"
         );
-        if code.ends_with("UNKNOWN") {
+        if expected == Code::UnitOwnerUnknown {
             // The way out of an owner that state can no longer answer for.
             assert!(message.contains("remove the `owner` member"), "{message}");
         }
@@ -619,10 +631,10 @@ fn test_teardown_of_a_fenced_prefix_removes_nothing() {
         outcome
     };
     for completion in [None, Some(nyl_core::orchestration::driver::WaitCompletion::Delayed)] {
-        let Outcome::Failed { message, .. } = teardown(completion.clone()) else {
+        let Outcome::Failed { message, code, .. } = teardown(completion.clone()) else {
             panic!("a fenced teardown fails: {completion:?}");
         };
-        assert!(message.starts_with("NYL-KUBERNETES-OWNER-FENCED:"), "{message}");
+        assert_eq!(code, Some(Code::UnitOwnerFenced), "{message}");
         assert_eq!(git(&world.bare(), &["rev-parse", "refs/heads/deploy"]), head);
     }
 }
@@ -892,8 +904,11 @@ fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_b
         panic!("the publication succeeds");
     };
     assert_eq!(
-        warnings.iter().map(|finding| finding.code).collect::<Vec<_>>(),
-        vec![Code::KubernetesSharedCatalogDiffers]
+        warnings
+            .iter()
+            .map(|finding| (finding.code, finding.detail.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![(Code::UnitSharedDiffers, Some("shared-catalog-differs"))]
     );
     assert!(
         warnings[0].fix.contains("--shared-catalog --push"),
@@ -948,7 +963,7 @@ fn test_a_shared_catalog_is_created_by_the_first_target_and_replaced_only_by_a_b
         )
         .expect_err("a target without a shared catalog has none to build");
     assert!(
-        error.to_string().contains("NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG"),
+        (error.code(), error.detail()) == (Some(Code::BuildArgument), Some("no-shared-catalog")),
         "{error}"
     );
 }
@@ -980,7 +995,7 @@ fn test_readiness_reads_the_published_shared_catalog_and_another_catalog_conflic
         readiness
             .blocking
             .iter()
-            .any(|finding| finding.code == Code::TeardownCatalogManualSync),
+            .any(|finding| finding.detail.as_deref() == Some("catalog-manual-sync")),
         "{:?}",
         readiness.blocking
     );
@@ -1081,11 +1096,19 @@ fn test_the_writer_never_rekeys_previews_and_a_teardown_reads_the_catalog_again(
         };
         outcome
     };
-    let Outcome::Failed { message, retryable, .. } = teardown(&stale) else {
+    let Outcome::Failed {
+        message,
+        retryable,
+        code,
+        detail,
+        ..
+    } = teardown(&stale)
+    else {
         panic!("a teardown over a catalog that no longer prunes is held");
     };
     assert!(retryable);
-    assert!(message.starts_with("NYL-TEARDOWN-CATALOG-MANUAL-SYNC:"), "{message}");
+    assert_eq!(code, Some(Code::TeardownBlocked), "{message}");
+    assert_eq!(detail.as_deref(), Some("catalog-manual-sync"));
     assert_eq!(
         git(&world.bare(), &["rev-parse", "refs/heads/deploy"]),
         head,
@@ -1100,10 +1123,14 @@ fn test_the_writer_never_rekeys_previews_and_a_teardown_reads_the_catalog_again(
     });
     writer(&confirming);
     let head = git(&world.bare(), &["rev-parse", "refs/heads/deploy"]);
-    let Outcome::Failed { message, .. } = teardown(&stale) else {
+    let Outcome::Failed {
+        message, code, detail, ..
+    } = teardown(&stale)
+    else {
         panic!("a teardown over a catalog whose pruning waits for confirmation is held");
     };
-    assert!(message.starts_with("NYL-TEARDOWN-CATALOG-MANUAL-SYNC:"), "{message}");
+    assert_eq!(code, Some(Code::TeardownBlocked), "{message}");
+    assert_eq!(detail.as_deref(), Some("catalog-manual-sync"));
     assert!(message.contains("Prune=confirm"), "{message}");
     assert_eq!(
         git(&world.bare(), &["rev-parse", "refs/heads/deploy"]),
@@ -1135,7 +1162,7 @@ fn test_an_unreadable_branch_and_an_unparseable_manifest_are_recorded_and_block_
             panic!("the driver checks readiness");
         };
         readiness.blocking.into_iter().find(|finding| {
-            finding.code == Code::TeardownCatalogManualSync && finding.message.contains("cannot be shown to prune")
+            finding.code == Code::TeardownBlocked && finding.detail.as_deref() == Some("shared-catalog-unreadable")
         })
     };
     assert!(blocked(&resolved_unit(&driver, &world, preview_spec("pr-1", pruning.clone()))).is_none());
@@ -1180,7 +1207,7 @@ fn test_an_unreadable_branch_and_an_unparseable_manifest_are_recorded_and_block_
 /// Catches a renamed target publishing a second tree and orphaning the first,
 /// or failing in the ownership index with no way out: nothing in the engine
 /// replaces a unit when its destination changes, so the driver fails closed
-/// before any effect with `NYL-KUBERNETES-TARGET-CHANGED`, naming what changed
+/// before any effect with `NYL-UNIT-DESTINATION-CHANGED`, naming what changed
 /// and how to replace the unit. It holds with an explicit prefix, which stays
 /// while the name changes, and with the default prefix, which follows the name.
 #[test]
@@ -1221,13 +1248,19 @@ fn test_a_changed_target_destination_fails_before_publishing_anything() {
             .into_iter()
             .map(|artifact| ("tree".to_owned(), artifact))
             .collect();
-        let Supported::Supported(Outcome::Failed { retryable, message, .. }) =
-            driver.reconcile(&ctx, &published(renamed.clone())).unwrap()
+        let Supported::Supported(Outcome::Failed {
+            retryable,
+            message,
+            code,
+            detail,
+            ..
+        }) = driver.reconcile(&ctx, &published(renamed.clone())).unwrap()
         else {
             panic!("a changed destination fails");
         };
         assert!(retryable, "restoring the name needs no recovery");
-        assert!(message.starts_with("NYL-KUBERNETES-TARGET-CHANGED:"), "{message}");
+        assert_eq!(code, Some(Code::UnitDestinationChanged), "{message}");
+        assert_eq!(detail.as_deref(), Some("target-changed"));
         assert!(message.contains(changed), "{message}");
         assert!(message.contains("nyl teardown -e dev --unit kubernetes"), "{message}");
         assert_eq!(

@@ -341,7 +341,7 @@ fn test_attest_without_an_admitted_kubeconfig_is_unknown_and_says_how_to_admit_i
 
 /// The `observe` teardown wait, end to end: phase 1 is published, the run
 /// waits while Argo CD still has a workload Application (the catalog does
-/// not count) and ends uncertain with `applications-remain`; once only the
+/// not count) and ends uncertain with `deployments-remain`; once only the
 /// catalog is left, the wait is observed and phase 2 removes the tree.
 #[test]
 fn test_the_observe_teardown_wait_follows_what_argocd_reports() {
@@ -353,7 +353,7 @@ fn test_the_observe_teardown_wait_follows_what_argocd_reports() {
         .invoke(&["teardown", "-e", "dev", "--unit", "kubernetes", "-o", "json"]);
     assert_eq!(remaining.exit, 4, "{}\n{}", remaining.stderr, remaining.stdout);
     assert_eq!(unit(&remaining.report)["result"], "uncertain");
-    assert_eq!(unit(&remaining.report)["reason"], "applications-remain: web");
+    assert_eq!(unit(&remaining.report)["reason"], "deployments-remain: web");
     let files = git_output(
         &observed.shell.world.bare(),
         &["ls-tree", "-r", "--name-only", "refs/heads/deploy"],

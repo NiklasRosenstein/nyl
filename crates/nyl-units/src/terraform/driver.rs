@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use super::spec::TerraformSpec;
 use nyl_core::constants::API_VERSION_UNITS;
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
     Capabilities, DriftDetection, Driver, DriverError, DriverResult, ExecStatus, ExecTerminal, ExecutionContext,
     KeyInputs, LocalPathField, Outcome, OwnershipScope, PlanReport, RecoveryPolicies, RecoveryPolicy,
@@ -375,12 +376,18 @@ impl TerraformDriver {
     }
 }
 
+/// The `detail` of a unit with a receipt whose backend holds no state
+/// (`NYL-UNIT-NATIVE-STATE-MISSING`).
+const BACKEND_STATE_MISSING: &str = "backend-state-missing";
+
 struct Fault {
     category: FailureCategory,
     retryable: bool,
     message: String,
     uncertain: bool,
     retry_context: Option<Value>,
+    /// The generic stable code of the failure and the driver's `detail`.
+    code: Option<(Code, &'static str)>,
 }
 
 impl Fault {
@@ -391,6 +398,7 @@ impl Fault {
             message: message.into(),
             uncertain: false,
             retry_context: None,
+            code: None,
         }
     }
     fn outcome(self) -> Outcome {
@@ -401,12 +409,16 @@ impl Fault {
                 category: self.category,
                 message: self.message,
                 context,
+                code: self.code.map(|(code, _)| code),
+                detail: self.code.map(|(_, detail)| detail.to_owned()),
             }
         } else {
             Outcome::Failed {
                 category: self.category,
                 retryable: self.retryable,
                 message: self.message,
+                code: self.code.map(|(code, _)| code),
+                detail: self.code.map(|(_, detail)| detail.to_owned()),
             }
         }
     }
@@ -523,6 +535,7 @@ impl<'a, 'c> Native<'a, 'c> {
                 message: error.to_string(),
                 uncertain: error.effects_possible(),
                 retry_context: None,
+                code: None,
             })
     }
     fn checked(&self, args: Vec<OsString>, effects: bool, private_stdout: bool) -> Result<Vec<u8>, Fault> {
@@ -556,6 +569,7 @@ impl<'a, 'c> Native<'a, 'c> {
                 ),
                 uncertain: false,
                 retry_context: None,
+                code: None,
             });
         }
         let lock = self.module.join(".terraform.lock.hcl");
@@ -669,7 +683,7 @@ impl<'a, 'c> Native<'a, 'c> {
             return Ok(());
         }
         if !self.state_exists()? {
-            return Err(Fault { category:FailureCategory::Ownership, retryable:false, message:"NYL-TOFU-STATE-MISSING: this unit has a receipt but its backend has no state; restore state or accept the empty ownership scope with recover --retry --reason".to_owned(), uncertain:false, retry_context:Some(context) });
+            return Err(Fault { category:FailureCategory::Ownership, retryable:false, message:"this unit has a receipt but its backend has no state; restore state or accept the empty ownership scope with recover --retry --reason".to_owned(), uncertain:false, retry_context:Some(context), code: Some((Code::UnitNativeStateMissing, BACKEND_STATE_MISSING)) });
         }
         Ok(())
     }
@@ -773,6 +787,7 @@ impl<'a, 'c> Native<'a, 'c> {
             message,
             uncertain: false,
             retry_context: None,
+            code: None,
         })?;
         let report = super::plan::report(&json, changed, destroy, &self.secrets).map_err(Fault::configuration)?;
         Ok((changed, report))
@@ -855,6 +870,7 @@ impl<'a, 'c> Native<'a, 'c> {
             message,
             uncertain,
             retry_context: None,
+            code: None,
         }
     }
 }
@@ -890,6 +906,7 @@ fn rejected(message: String) -> Fault {
         message,
         uncertain: false,
         retry_context: None,
+        code: None,
     }
 }
 

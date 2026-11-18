@@ -21,13 +21,14 @@
 //! `catalogApplication.shared` instead of the target's own tree: it composes
 //! with `--diff` and `--push`, and is the one writer that replaces the shared
 //! manifest (a target's publication only creates it). No environment owns the
-//! shared catalog, so `--push` is never refused as `NYL-KUBERNETES-BUILD-TARGET-OWNED`.
+//! shared catalog, so `--push` is never refused as `NYL-BUILD-OWNED`.
 //!
 //! The documents are local build information, never recorded or referenced.
 
 use std::ffi::OsString;
 
 use nyl_core::constants::API_VERSION_ARTIFACTS;
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{DriverError, DriverResult, ExecutionContext, Outcome};
 use nyl_core::orchestration::state::{ArtifactDocument, ArtifactMetadata, ArtifactUnit, DesiredUnit};
 use nyl_render::gitops::publication::{diff_target_publication, index_digest, FileChange, RenderedTarget};
@@ -37,16 +38,19 @@ use serde_json::{json, Value};
 use super::run::{publish_rendered, publish_shared_catalog, render_at, unit_target};
 use crate::command::resolved_spec;
 
-/// The code of a build argument the driver does not accept.
-const ARGUMENT: &str = "NYL-KUBERNETES-BUILD-ARGUMENT";
-/// The code of a `--push` of a target an environment owns.
-const TARGET_OWNED: &str = "NYL-KUBERNETES-BUILD-TARGET-OWNED";
-/// The code of a `--push` from a worktree with uncommitted changes.
-const DIRTY_SOURCE: &str = "NYL-KUBERNETES-BUILD-DIRTY-SOURCE";
-/// The code of a `--push` without an identity to author the commit with.
-const IDENTITY: &str = "NYL-KUBERNETES-BUILD-IDENTITY";
-/// The code of `--shared-catalog` for a target that names none.
-const NO_SHARED_CATALOG: &str = "NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG";
+/// A build refused before any effect, with its generic code and `detail`.
+fn refused(code: Code, detail: &str, message: String) -> DriverError {
+    DriverError::before_effects(message).coded(code, Some(detail))
+}
+
+/// A publication's failure as a build error, keeping its code and `detail`.
+fn failed(message: String, code: Option<Code>, detail: Option<&str>) -> DriverError {
+    let error = DriverError::before_effects(message);
+    match code {
+        Some(code) => error.coded(code, detail),
+        None => error,
+    }
+}
 
 /// What a build does, from the arguments after `--`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,9 +90,12 @@ impl Arguments {
                     continue;
                 }
                 Some("--lookup") if args.as_slice().is_empty() => {
-                    return Err(DriverError::before_effects(format!(
-                        "{ARGUMENT}: --lookup takes a value; a publication accepts --lookup snapshot or --lookup=snapshot"
-                    )));
+                    return Err(refused(
+                        Code::BuildArgument,
+                        "lookup-value-missing",
+                        "--lookup takes a value; a publication accepts --lookup snapshot or --lookup=snapshot"
+                            .to_owned(),
+                    ));
                 }
                 Some(lookup) if lookup == "--lookup" || lookup.starts_with("--lookup=") => {
                     let named = if lookup == "--lookup" {
@@ -102,23 +109,32 @@ impl Arguments {
                     } else {
                         lookup.to_owned()
                     };
-                    return Err(DriverError::before_effects(format!(
-                        "{}: a publication renders what Git declares and publishes, so it reads the Helm lookups of its \
-                         charts from the target's last publication and never from a live cluster; {named} is not accepted",
-                        nyl_render::helm::lookup::LIVE_REFUSED_CODE
-                    )));
+                    return Err(refused(
+                        Code::BuildArgument,
+                        "lookup-live",
+                        format!(
+                            "a publication renders what Git declares and publishes, so it reads the Helm lookups of its \
+                             charts from the target's last publication and never from a live cluster; {named} is not accepted"
+                        ),
+                    ));
                 }
                 _ => {
-                    return Err(DriverError::before_effects(format!(
-                    "{ARGUMENT}: the publication driver accepts --diff, --push, or --shared-catalog after `--`, not {}",
-                    arg.to_string_lossy()
-                )))
+                    return Err(refused(
+                        Code::BuildArgument,
+                        "unknown-argument",
+                        format!(
+                            "the publication driver accepts --diff, --push, or --shared-catalog after `--`, not {}",
+                            arg.to_string_lossy()
+                        ),
+                    ))
                 }
             };
             if mode.is_some_and(|mode| mode != next) {
-                return Err(DriverError::before_effects(format!(
-                    "{ARGUMENT}: --diff and --push are alternatives: compare first, then publish"
-                )));
+                return Err(refused(
+                    Code::BuildArgument,
+                    "conflicting-modes",
+                    "--diff and --push are alternatives: compare first, then publish".to_owned(),
+                ));
             }
             mode = Some(next);
         }
@@ -171,7 +187,9 @@ pub(crate) fn build(
             let message = format!("nyl: build --push {}", unit.unit.name);
             match publish_rendered(&render, rendered, &message, ctx, unit, json!({}))? {
                 Outcome::Succeeded { artifacts, .. } => Ok(artifacts),
-                Outcome::Failed { message, .. } => Err(DriverError::before_effects(message)),
+                Outcome::Failed {
+                    message, code, detail, ..
+                } => Err(failed(message, code, detail.as_deref())),
                 other => Err(DriverError::after_effects(format!(
                     "the publication ended without a result: {other:?}"
                 ))),
@@ -191,10 +209,14 @@ fn build_shared_catalog(
     rendered: &RenderedTarget,
 ) -> DriverResult<Vec<ArtifactDocument>> {
     let Some(shared) = rendered.shared_catalog.as_deref() else {
-        return Err(DriverError::before_effects(format!(
-            "{NO_SHARED_CATALOG}: the target of unit {} declares no catalogApplication.shared, so there is no shared catalog to build",
-            unit.unit.name
-        )));
+        return Err(refused(
+            Code::BuildArgument,
+            "no-shared-catalog",
+            format!(
+                "the target of unit {} declares no catalogApplication.shared, so there is no shared catalog to build",
+                unit.unit.name
+            ),
+        ));
     };
     let label = shared_label(shared);
     match mode {
@@ -202,17 +224,24 @@ fn build_shared_catalog(
         Mode::Diff => Ok(vec![tree_diff(ctx, unit, &label, shared)?]),
         Mode::Push => {
             if ctx.dirty_source {
-                return Err(DriverError::before_effects(format!(
-                    "{DIRTY_SOURCE}: the worktree has uncommitted changes, so the shared catalog cannot be attributed to reviewed source; \
-                     commit them, or build a committed revision with `nyl build {name} --source <revision> -- --shared-catalog --push`",
-                    name = unit.unit.name,
-                )));
+                return Err(refused(
+                    Code::BuildDirtySource,
+                    "shared-catalog",
+                    format!(
+                        "the worktree has uncommitted changes, so the shared catalog cannot be attributed to reviewed source; \
+                         commit them, or build a committed revision with `nyl build {name} --source <revision> -- --shared-catalog --push`",
+                        name = unit.unit.name,
+                    ),
+                ));
             }
             if ctx.commit_identity.is_none() {
-                return Err(DriverError::before_effects(format!(
-                    "{IDENTITY}: --push commits to the publication branch and needs an identity to author the commit; \
+                return Err(refused(
+                    Code::CommitIdentityMissing,
+                    "publication-push",
+                    "--push commits to the publication branch and needs an identity to author the commit; \
                      set user.name and user.email in the repository's Git configuration"
-                )));
+                        .to_owned(),
+                ));
             }
             let message = format!("nyl: build --shared-catalog --push {}", shared.destination.path_prefix);
             match publish_shared_catalog(ctx, unit, shared, &message)? {
@@ -229,7 +258,9 @@ fn build_shared_catalog(
                         "indexDigest": published.index_digest,
                     }),
                 )?]),
-                Err(Outcome::Failed { message, .. }) => Err(DriverError::before_effects(message)),
+                Err(Outcome::Failed {
+                    message, code, detail, ..
+                }) => Err(failed(message, code, detail.as_deref())),
                 Err(other) => Err(DriverError::after_effects(format!(
                     "the publication ended without a result: {other:?}"
                 ))),
@@ -276,24 +307,35 @@ fn refuse_owned(
         DriverError::before_effects(format!("cannot read which environments place targets: {error}"))
     })?;
     if let Some(environment) = placements.get(target) {
-        return Err(DriverError::before_effects(format!(
-            "{TARGET_OWNED}: DeploymentTarget {target} is owned by Environment {environment}, whose publication unit places it; \
-             a direct build cannot publish it. Publish it with `nyl reconcile -e {environment}`, or deselect the unit from \
-             that environment first"
-        )));
+        return Err(refused(
+            Code::BuildOwned,
+            "target-owned",
+            format!(
+                "DeploymentTarget {target} is owned by Environment {environment}, whose publication unit places it; \
+                 a direct build cannot publish it. Publish it with `nyl reconcile -e {environment}`, or deselect the unit from \
+                 that environment first"
+            ),
+        ));
     }
     if ctx.dirty_source {
-        return Err(DriverError::before_effects(format!(
-            "{DIRTY_SOURCE}: the worktree has uncommitted changes, so the tree cannot be attributed to the source commit; \
-             commit them, or build a committed revision with `nyl build {name} --source <revision> -- --push`",
-            name = unit.unit.name,
-        )));
+        return Err(refused(
+            Code::BuildDirtySource,
+            "tree",
+            format!(
+                "the worktree has uncommitted changes, so the tree cannot be attributed to the source commit; \
+                 commit them, or build a committed revision with `nyl build {name} --source <revision> -- --push`",
+                name = unit.unit.name,
+            ),
+        ));
     }
     if ctx.commit_identity.is_none() {
-        return Err(DriverError::before_effects(format!(
-            "{IDENTITY}: --push commits to the publication branch and needs an identity to author the commit; \
+        return Err(refused(
+            Code::CommitIdentityMissing,
+            "publication-push",
+            "--push commits to the publication branch and needs an identity to author the commit; \
              set user.name and user.email in the repository's Git configuration"
-        )));
+                .to_owned(),
+        ));
     }
     Ok(())
 }

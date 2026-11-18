@@ -633,6 +633,14 @@ pub struct UnitReport {
     /// The failure or uncertainty message, kept out of the commit summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The stable code of this invocation's failure, when the driver gave
+    /// one; `message` starts with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<nyl_core::orchestration::codes::Code>,
+    /// The driver's slug for the failure's specifics under `code`. Never
+    /// interpreted by Nyl.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// The run of the unit's latest receipt or condition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run: Option<RunId>,
@@ -677,7 +685,13 @@ pub struct DriftAttribute {
 #[serde(tag = "readiness", rename_all = "kebab-case")]
 pub enum TeardownReadiness {
     Ready,
-    Incomplete { reasons: Vec<String> },
+    Incomplete {
+        /// Each unmet blocking requirement as `<code>: <message>`.
+        reasons: Vec<String>,
+        /// The same requirements as the driver raised them: code, message,
+        /// fix, and the driver's `detail` slug.
+        blocking: Vec<nyl_core::orchestration::codes::Finding>,
+    },
 }
 
 impl UnitReport {
@@ -705,6 +719,8 @@ impl UnitReport {
             check: None,
             drift_check: None,
             message: None,
+            code: None,
+            detail: None,
             last_run: None,
             condition: None,
             drift: None,

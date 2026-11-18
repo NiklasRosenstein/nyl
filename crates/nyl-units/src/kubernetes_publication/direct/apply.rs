@@ -113,7 +113,7 @@ impl From<NylError> for Failure {
 
 /// How a failure maps to an outcome.
 enum Why {
-    Fenced(String),
+    Fenced(nyl_render::kubernetes::fence::Fenced),
     Connection(String),
     Timeout(String),
     Rejected(String),
@@ -135,7 +135,14 @@ fn why(failure: &Failure) -> Why {
         Failure::Nyl(error) => {
             let text = error.to_string();
             match error.kube_kind() {
-                _ if error.is_owner_fenced() => Why::Fenced(text),
+                _ if error.is_owner_fenced() => Why::Fenced(error.owner_fenced().cloned().unwrap_or_else(|| {
+                    nyl_render::kubernetes::fence::Fenced {
+                        code: nyl_render::kubernetes::fence::FenceCode::owned(
+                            nyl_render::kubernetes::fence::RELEASE_DETAIL,
+                        ),
+                        message: text,
+                    }
+                })),
                 Some(KubeErrorKind::Connection) => Why::Connection(text),
                 Some(KubeErrorKind::Rejected) => Why::Rejected(text),
                 _ if matches!(error, NylError::Interrupted(_)) => Why::Timeout(text),
@@ -146,16 +153,29 @@ fn why(failure: &Failure) -> Why {
 }
 
 /// The outcome of failures that stopped the call, as the contract's table maps them.
+/// Refusals that all carry one unit code give the outcome that code, and their
+/// messages leave it out; otherwise each message keeps its own code.
 fn outcome_of(context: &str, failures: &[Why]) -> Outcome {
+    use nyl_render::kubernetes::fence::FenceCode;
+    let fence_codes = failures
+        .iter()
+        .map(|failure| match failure {
+            Why::Fenced(fenced) => Some(fenced.code),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let shared = match fence_codes.first() {
+        Some(Some(code @ FenceCode::Unit { .. })) if fence_codes.iter().all(|other| other == &Some(*code)) => {
+            Some(*code)
+        }
+        _ => None,
+    };
     let messages = failures
         .iter()
         .map(|failure| match failure {
-            Why::Fenced(m)
-            | Why::Connection(m)
-            | Why::Timeout(m)
-            | Why::Rejected(m)
-            | Why::Failed(m)
-            | Why::Credentials(m) => m.as_str(),
+            Why::Fenced(fenced) if shared.is_some() => fenced.message.clone(),
+            Why::Fenced(fenced) => fenced.to_string(),
+            Why::Connection(m) | Why::Timeout(m) | Why::Rejected(m) | Why::Failed(m) | Why::Credentials(m) => m.clone(),
         })
         .collect::<Vec<_>>()
         .join("; ");
@@ -173,11 +193,32 @@ fn outcome_of(context: &str, failures: &[Why]) -> Outcome {
     } else {
         (FailureCategory::ToolError, !all(|f| matches!(f, Why::Rejected(_))))
     };
-    Outcome::Failed {
-        category,
-        retryable,
-        message,
+    let outcome = Outcome::failed(category, retryable, message);
+    match shared {
+        Some(FenceCode::Unit { code, detail }) => outcome.coded(code, Some(detail)),
+        _ => outcome,
     }
+}
+
+/// The `detail` of a warning about objects whose `Prune=confirm` sync option
+/// keeps them (`NYL-UNIT-REMOVAL-UNCONFIRMED`).
+const PRUNE_CONFIRM: &str = "prune-confirm";
+/// The `detail` of a scope disagreement (`NYL-UNIT-CAPABILITY-MISMATCH`).
+const SCOPE_MISMATCH: &str = "scope-mismatch";
+/// The `detail` of delete hooks the apply left out (`NYL-UNIT-HOOK-IGNORED`).
+const DELETE_HOOKS: &str = "delete-hooks";
+
+/// A warning the shared apply raised under its direct-mode code, raised by the
+/// unit under the generic code with its `detail`. Other warnings pass unchanged.
+fn unit_warning(mut finding: Finding) -> Finding {
+    let (code, detail) = match finding.code {
+        Code::KubernetesHookIgnored => (Code::UnitHookIgnored, DELETE_HOOKS),
+        Code::KubernetesScopeMismatch => (Code::UnitCapabilityMismatch, SCOPE_MISMATCH),
+        _ => return finding,
+    };
+    finding.code = code;
+    finding.detail = Some(detail.to_owned());
+    finding
 }
 
 /// Which wave a Release applies in, and, reversed, is removed in: Releases that
@@ -213,7 +254,10 @@ fn scope_warnings(scopes: &ScopeResolver) -> Vec<Finding> {
     scopes
         .mismatches()
         .iter()
-        .map(|mismatch| Finding::new(Code::KubernetesScopeMismatch, mismatch.message(), ScopeMismatch::FIX))
+        .map(|mismatch| {
+            Finding::new(Code::UnitCapabilityMismatch, mismatch.message(), ScopeMismatch::FIX)
+                .with_detail_slug(SCOPE_MISMATCH)
+        })
         .collect()
 }
 
@@ -319,14 +363,17 @@ impl<'a, 'c> Direct<'a, 'c> {
     }
 
     fn missing_context(&self) -> Option<Outcome> {
-        self.location.context.is_none().then(|| Outcome::Failed {
-            category: FailureCategory::Credentials,
-            retryable: true,
-            message: format!(
-                "NYL-KUBERNETES-CLUSTER-CONTEXT-MISSING: Cluster {} declares no spec.live.context, which a direct target is \
-                 applied and read through (Nyl never uses the current context); declare it on the Cluster",
-                self.location.cluster
-            ),
+        self.location.context.is_none().then(|| {
+            Outcome::failed(
+                FailureCategory::Credentials,
+                true,
+                format!(
+                    "Cluster {} declares no spec.live.context, which a direct target is \
+                     applied and read through (Nyl never uses the current context); declare it on the Cluster",
+                    self.location.cluster
+                ),
+            )
+            .coded(Code::UnitAccessUndeclared, Some(super::CLUSTER_CONTEXT_MISSING))
         })
     }
 
@@ -499,7 +546,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                     Ok(done) => {
                         tracked.extend(done.tracked.iter().map(identity));
                         awaiting.extend(done.awaiting);
-                        hook_warnings.extend(done.warnings);
+                        hook_warnings.extend(done.warnings.into_iter().map(unit_warning));
                         if done.failures.is_empty() {
                             // Only a Release that applied registers kinds a later one waits for.
                             registered.extend(RegisteredKinds::of(&documents[index]));
@@ -546,14 +593,14 @@ impl<'a, 'c> Direct<'a, 'c> {
         let mut warnings = left_behind;
         if !awaiting.is_empty() {
             warnings.push(Finding::new(
-                Code::KubernetesPruneAwaitingConfirmation,
+                Code::UnitRemovalUnconfirmed,
                 format!(
                     "{} object(s) no Release declares any more stay in the cluster, because their Prune=confirm sync option awaits a confirmation the driver never gives: {}",
                     awaiting.len(),
                     awaiting.join(", ")
                 ),
                 "declare `namespace.prunePolicy: Automatic` in the ApplicationGroup to prune them, or delete them by hand",
-            ));
+            ).with_detail_slug(PRUNE_CONFIRM));
         }
         Ok(Step::Continue {
             warnings,
@@ -768,7 +815,7 @@ impl<'a, 'c> Direct<'a, 'c> {
                 } => applied
                     .failure_texts
                     .push((format!("{phase} hook {key}"), why.clone(), false)),
-                ApplyEvent::DeleteHooksIgnored { finding } => applied.warnings.push(finding.clone()),
+                ApplyEvent::DeleteHooksIgnored { finding } => applied.warnings.push(unit_warning(finding.clone())),
                 _ => {}
             };
             recorder
@@ -877,10 +924,11 @@ impl<'a, 'c> Direct<'a, 'c> {
             .chain(&run.left)
             .map(|left| {
                 Finding::new(
-                    Code::KubernetesReleaseLeftBehind,
+                    Code::UnitLeftBehind,
                     format!("{} left the tree but stays: {}", left.what, left.reason),
                     "remove it with `nyl release delete --target <target> --take-over`, or leave it",
                 )
+                .with_detail_slug(crate::kubernetes_publication::run::RELEASE_LEFT_BEHIND)
             })
             .collect())
     }
@@ -1198,11 +1246,11 @@ impl<'a, 'c> Direct<'a, 'c> {
                     TeardownResult { outcome: None, skipped }
                 } else {
                     TeardownResult {
-                        outcome: Some(Outcome::Failed {
-                            category: FailureCategory::ToolError,
-                            retryable: true,
-                            message: format!("the teardown could not delete everything: {}", run.failures.join("; ")),
-                        }),
+                        outcome: Some(Outcome::failed(
+                            FailureCategory::ToolError,
+                            true,
+                            format!("the teardown could not delete everything: {}", run.failures.join("; ")),
+                        )),
                         skipped,
                     }
                 }

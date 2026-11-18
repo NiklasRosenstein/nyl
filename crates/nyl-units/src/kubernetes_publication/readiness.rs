@@ -5,13 +5,13 @@
 //! teardown readiness and catalog ownership. The driver owns these
 //! semantics; the orchestration shell only coordinates and displays the
 //! findings. Three blocking requirements decide whether the teardown can
-//! succeed (the catalog prunes removed workload Applications on its own, with
-//! automated pruning and no `Prune=confirm` or `Prune=false` option,
-//! `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`; deleting an Application deletes its
-//! workloads, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`; no resource requires
-//! confirmation to delete, `NYL-TEARDOWN-NAMESPACE-CONFIRM`); two remnant rows leave
-//! objects behind (`NYL-TEARDOWN-NAMESPACES-REMAIN`,
-//! `NYL-TEARDOWN-CATALOG-REMAINS`). Settings a parent Application owns are
+//! succeed, each `NYL-TEARDOWN-BLOCKED` with its own `detail` (the catalog
+//! prunes removed workload Applications on its own, with automated pruning
+//! and no `Prune=confirm` or `Prune=false` option, [`CATALOG_MANUAL_SYNC`];
+//! deleting an Application deletes its workloads, [`APPLICATIONS_ORPHANED`];
+//! no resource requires confirmation to delete, [`NAMESPACE_CONFIRM`]); two
+//! remnant rows leave objects behind, each `NYL-TEARDOWN-REMNANT`
+//! ([`NAMESPACES_REMAIN`], [`CATALOG_REMAINS`]). Settings a parent Application owns are
 //! `external: not checked` and never block. An unmet blocking requirement
 //! keeps the unit pending teardown unless the invocation passes
 //! `--allow-incomplete`, and an incomplete teardown is recorded with a
@@ -21,6 +21,23 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::TeardownReadiness;
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
 use nyl_render::gitops::publication::{PruneHold, TeardownSettings};
+
+/// The `detail` of the blocking row: the catalog does not prune removed
+/// workload Applications on its own.
+pub const CATALOG_MANUAL_SYNC: &str = "catalog-manual-sync";
+/// The `detail` of the blocking row: the shared catalog the branch holds
+/// cannot be read, so it cannot be shown to prune.
+pub const SHARED_CATALOG_UNREADABLE: &str = "shared-catalog-unreadable";
+/// The `detail` of the blocking row: deleting a workload Application leaves
+/// its workloads running.
+pub const APPLICATIONS_ORPHANED: &str = "applications-orphaned";
+/// The `detail` of the blocking row: a resource a workload Application would
+/// delete requires confirmation, which holds the Application's deletion.
+pub const NAMESPACE_CONFIRM: &str = "namespace-confirm";
+/// The `detail` of the remnant row: owned Namespaces remain.
+pub const NAMESPACES_REMAIN: &str = "namespaces-remain";
+/// The `detail` of the remnant row: the self-managing catalog remains.
+pub const CATALOG_REMAINS: &str = "catalog-remains";
 
 /// What a removal nobody attends would wait for: a `manual` `teardownWait`
 /// stops it after phase 1 until an operator confirms the removal, so a
@@ -80,7 +97,7 @@ fn catalog_prune_finding(subject: &str, settings: &TeardownSettings) -> Option<F
     (!not_pruning.is_empty()).then(|| {
         let manual_sync = settings.catalog_prunes == Some(false);
         Finding::new(
-            Code::TeardownCatalogManualSync,
+            Code::TeardownBlocked,
             if manual_sync && settings.catalog_prune_holds.is_empty() {
                 format!(
                     "{subject}: the catalog does not prune removed workload Applications on its own, so they stay until someone syncs it with pruning"
@@ -93,6 +110,7 @@ fn catalog_prune_finding(subject: &str, settings: &TeardownSettings) -> Option<F
             },
             "enable the catalog Application's syncPolicy.automated with prune: true, and remove Prune=confirm and Prune=false from its syncOptions and from the generated Applications' argocd.argoproj.io/sync-options annotation (catalogApplication.syncPolicy on the DeploymentTarget, catalogApplicationDefaults.syncPolicy on its ArgoCDInstance, or the ApplicationGroup annotations), or pass --allow-incomplete",
         )
+        .with_detail_slug(CATALOG_MANUAL_SYNC)
     })
 }
 
@@ -111,10 +129,11 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
     }
     match settings.application_deletion_policy.as_deref() {
         Some("Orphan") => readiness.blocking.push(Finding::new(
-            Code::TeardownApplicationsOrphaned,
+            Code::TeardownBlocked,
             format!("{subject}: deleting a workload Application leaves its workloads running (applicationDeletionPolicy: Orphan)"),
             "set the catalog's applicationDeletionPolicy to Foreground or Background, or pass --allow-incomplete",
-        )),
+        )
+        .with_detail_slug(APPLICATIONS_ORPHANED)),
         Some(_) => {}
         None => readiness
             .not_checked
@@ -160,29 +179,34 @@ pub fn evaluate(environment: &EnvironmentName, unit: &UnitName, settings: &Teard
             .collect::<Vec<_>>();
         let more = holding.len() - shown.len();
         readiness.blocking.push(Finding::new(
-            Code::TeardownNamespaceConfirm,
+            Code::TeardownBlocked,
             format!(
                 "{subject}: {}{} require confirmation to delete, which holds their Application and its workloads until the deletion is confirmed in Argo CD",
                 shown.join(", "),
                 if more > 0 { format!(", and {more} more") } else { String::new() },
             ),
             "remove Delete=confirm and Prune=confirm from the named resources and Applications (a Namespace's prunePolicy and deletePolicy to Automatic, or deletePolicy to Retain; an Application's ApplicationGroup syncPolicy.syncOptions or Release +syncOptions override), or pass --allow-incomplete",
-        ));
+        )
+        .with_detail_slug(NAMESPACE_CONFIRM));
     }
     let remaining = with_policy(&|policy| policy != "Automatic");
     if !remaining.is_empty() {
-        readiness.remnants.push(Finding::new(
-            Code::TeardownNamespacesRemain,
-            format!("{subject}: Namespaces {} remain after teardown", remaining.join(", ")),
-            "set the Namespaces' deletePolicy to Automatic to remove them with the teardown",
-        ));
+        readiness.remnants.push(
+            Finding::new(
+                Code::TeardownRemnant,
+                format!("{subject}: Namespaces {} remain after teardown", remaining.join(", ")),
+                "set the Namespaces' deletePolicy to Automatic to remove them with the teardown",
+            )
+            .with_detail_slug(NAMESPACES_REMAIN),
+        );
     }
     if !settings.catalog_owned_by_parent {
         readiness.remnants.push(Finding::new(
-            Code::TeardownCatalogRemains,
+            Code::TeardownRemnant,
             format!("{subject}: the self-managing catalog Application and its AppProjects remain after teardown"),
             "let a parent Application or ApplicationSet own the target's catalog (catalogApplication.enabled: false) to remove them with the teardown",
-        ));
+        )
+        .with_detail_slug(CATALOG_REMAINS));
     }
     readiness
 }
@@ -210,14 +234,17 @@ pub fn evaluate_direct(
         .map(|(namespace, _)| namespace.as_str())
         .collect::<Vec<_>>();
     if !remaining.is_empty() {
-        readiness.remnants.push(Finding::new(
-            Code::TeardownNamespacesRemain,
-            format!(
-                "{environment}/{unit}: Namespaces {} remain after teardown",
-                remaining.join(", ")
-            ),
-            "set the Namespaces' deletePolicy to Automatic to remove them with the teardown",
-        ));
+        readiness.remnants.push(
+            Finding::new(
+                Code::TeardownRemnant,
+                format!(
+                    "{environment}/{unit}: Namespaces {} remain after teardown",
+                    remaining.join(", ")
+                ),
+                "set the Namespaces' deletePolicy to Automatic to remove them with the teardown",
+            )
+            .with_detail_slug(NAMESPACES_REMAIN),
+        );
     }
     readiness.not_checked.push(
         "resources with Delete=false or Delete=confirm, and the credentials' permission to delete: not checked"
@@ -244,10 +271,11 @@ pub fn evaluate_reading(
     let mut readiness = evaluate(environment, unit, &settings);
     if let Some(problem) = reading.get("problem").and_then(serde_json::Value::as_str) {
         readiness.blocking.push(Finding::new(
-            Code::TeardownCatalogManualSync,
+            Code::TeardownBlocked,
             format!("{environment}/{unit}: the shared catalog cannot be shown to prune removed workload Applications: {problem}"),
             "restore access to the publication branch, or publish a readable shared catalog with `nyl build <unit> -e <environment> -- --shared-catalog --push`, or pass --allow-incomplete",
-        ));
+        )
+        .with_detail_slug(SHARED_CATALOG_UNREADABLE));
     }
     Ok(readiness)
 }
@@ -317,7 +345,7 @@ mod tests {
             assert_eq!(
                 codes(&readiness.remnants),
                 if remnant {
-                    vec![Code::TeardownNamespacesRemain]
+                    vec![(Code::TeardownRemnant, NAMESPACES_REMAIN)]
                 } else {
                     Vec::new()
                 },
@@ -326,8 +354,12 @@ mod tests {
         }
     }
 
-    fn codes(findings: &[Finding]) -> Vec<Code> {
-        findings.iter().map(|finding| finding.code).collect()
+    /// Each finding's code and `detail`.
+    fn codes(findings: &[Finding]) -> Vec<(Code, &str)> {
+        findings
+            .iter()
+            .map(|finding| (finding.code, finding.detail.as_deref().unwrap_or_default()))
+            .collect()
     }
 
     /// Only a `manual` wait needs an operator, so only it warns an unattended
@@ -364,7 +396,7 @@ mod tests {
                     catalog_prunes: Some(false),
                     ..ready_settings()
                 },
-                Code::TeardownCatalogManualSync,
+                (Code::TeardownBlocked, CATALOG_MANUAL_SYNC),
                 "syncPolicy.automated",
             ),
             (
@@ -372,18 +404,18 @@ mod tests {
                     application_deletion_policy: Some("Orphan".to_owned()),
                     ..ready_settings()
                 },
-                Code::TeardownApplicationsOrphaned,
+                (Code::TeardownBlocked, APPLICATIONS_ORPHANED),
                 "applicationDeletionPolicy",
             ),
             (
                 confirming(vec![confirmation("web", Some("Namespace web"), &["Delete", "Prune"])]),
-                Code::TeardownNamespaceConfirm,
+                (Code::TeardownBlocked, NAMESPACE_CONFIRM),
                 "prunePolicy and deletePolicy",
             ),
         ];
         for (settings, code, setting) in cases {
             let readiness = evaluate(&env(), &name("kubernetes"), &settings);
-            assert!(!readiness.ready(), "{code}");
+            assert!(!readiness.ready(), "{code:?}");
             assert_eq!(codes(&readiness.blocking), vec![code]);
             assert!(
                 readiness.blocking[0].fix.contains(setting),
@@ -411,7 +443,10 @@ mod tests {
                 confirmation("web", Some("Namespace shop"), &["Delete", "Prune"]),
             ]),
         );
-        assert_eq!(codes(&readiness.blocking), vec![Code::TeardownNamespaceConfirm]);
+        assert_eq!(
+            codes(&readiness.blocking),
+            vec![(Code::TeardownBlocked, NAMESPACE_CONFIRM)]
+        );
         let finding = &readiness.blocking[0];
         assert!(
             finding
@@ -469,7 +504,10 @@ mod tests {
                 hold(Some("api"), PruneHold::False),
             ]),
         );
-        assert_eq!(codes(&readiness.blocking), vec![Code::TeardownCatalogManualSync]);
+        assert_eq!(
+            codes(&readiness.blocking),
+            vec![(Code::TeardownBlocked, CATALOG_MANUAL_SYNC)]
+        );
         let finding = &readiness.blocking[0];
         for part in [
             "dev/kubernetes: ",
@@ -505,7 +543,10 @@ mod tests {
             ..ready_settings()
         };
         let readiness = evaluate(&env(), &name("kubernetes"), &both);
-        assert_eq!(codes(&readiness.blocking), vec![Code::TeardownCatalogManualSync]);
+        assert_eq!(
+            codes(&readiness.blocking),
+            vec![(Code::TeardownBlocked, CATALOG_MANUAL_SYNC)]
+        );
         let message = &readiness.blocking[0].message;
         assert!(message.contains("it has no syncPolicy.automated with prune: true; its spec.syncPolicy.syncOptions skip pruning (Prune=false)"), "{message}");
 
@@ -554,7 +595,10 @@ mod tests {
         assert!(readiness.ready());
         assert_eq!(
             codes(&readiness.remnants),
-            vec![Code::TeardownNamespacesRemain, Code::TeardownCatalogRemains]
+            vec![
+                (Code::TeardownRemnant, NAMESPACES_REMAIN),
+                (Code::TeardownRemnant, CATALOG_REMAINS)
+            ]
         );
         assert!(readiness.remnants[0].message.contains("Namespaces web remain"));
 
@@ -564,7 +608,10 @@ mod tests {
             ..ready_settings()
         };
         let readiness = evaluate(&env(), &name("kubernetes"), &confirm);
-        assert_eq!(codes(&readiness.remnants), vec![Code::TeardownNamespacesRemain]);
+        assert_eq!(
+            codes(&readiness.remnants),
+            vec![(Code::TeardownRemnant, NAMESPACES_REMAIN)]
+        );
     }
 
     /// Catches a parent-owned catalog, whose settings Nyl cannot see,

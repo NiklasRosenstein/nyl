@@ -245,7 +245,7 @@ fn test_push_refuses_a_target_an_environment_places_by_declaration() {
     let error = build(&ctx, &["--push"], &unit()).unwrap_err();
     assert!(!error.effects_possible());
     let message = error.to_string();
-    assert!(message.starts_with("NYL-KUBERNETES-BUILD-TARGET-OWNED:"), "{message}");
+    assert!(message.starts_with("NYL-BUILD-OWNED:"), "{message}");
     assert!(message.contains("Environment dev"), "{message}");
     assert!(message.contains("nyl reconcile -e dev"), "{message}");
     assert!(!deploy_exists(&world));
@@ -282,12 +282,12 @@ fn test_push_needs_a_committed_source_and_a_commit_identity() {
     dirty.dirty_source = true;
     let error = build(&dirty, &["--push"], &unit()).unwrap_err();
     let message = error.to_string();
-    assert!(message.starts_with("NYL-KUBERNETES-BUILD-DIRTY-SOURCE:"), "{message}");
+    assert!(message.starts_with("NYL-BUILD-DIRTY-SOURCE:"), "{message}");
     assert!(message.contains("--source <revision>"), "{message}");
 
     let anonymous = context(&world, DriverOperation::Build, None);
     let message = build(&anonymous, &["--push"], &unit()).unwrap_err().to_string();
-    assert!(message.starts_with("NYL-KUBERNETES-BUILD-IDENTITY:"), "{message}");
+    assert!(message.starts_with("NYL-COMMIT-IDENTITY-MISSING:"), "{message}");
     assert!(!deploy_exists(&world));
 
     // A dirty source still renders and compares: only publishing is refused.
@@ -347,8 +347,12 @@ fn test_build_refuses_live_lookups() {
     for args in [vec!["--push", "--lookup=live"], vec!["--lookup", "live"]] {
         let error = build(&ctx, &args, &unit()).unwrap_err();
         assert!(!error.effects_possible());
-        assert!(
-            error.to_string().starts_with("NYL-HELM-LOOKUP-LIVE-REFUSED:"),
+        assert_eq!(
+            (error.code(), error.detail()),
+            (
+                Some(nyl_core::orchestration::codes::Code::BuildArgument),
+                Some("lookup-live")
+            ),
             "{error}"
         );
     }
@@ -375,10 +379,7 @@ fn test_build_rejects_arguments_it_does_not_define() {
     ] {
         let error = build(&ctx, &args, &unit()).unwrap_err();
         assert!(!error.effects_possible());
-        assert!(
-            error.to_string().starts_with("NYL-KUBERNETES-BUILD-ARGUMENT:"),
-            "{error}"
-        );
+        assert!(error.to_string().starts_with("NYL-BUILD-ARGUMENT:"), "{error}");
     }
     assert!(!deploy_exists(&world));
 }

@@ -409,7 +409,7 @@ Requirements:
 | `NYL-HELM-LOOKUP-LIVE-UNAVAILABLE` | `--lookup=live` couldn't read the cluster or the Release's revisions. Check the connection, or drop `--lookup=live`. |
 | `NYL-HELM-LOOKUP-LIVE-UNRECORDED` | The cluster holds an object no revision or publication of the Release lists. Run `nyl apply --lookup=snapshot` once, or `--refresh-lookup` the object. |
 | `NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER` | `--lookup=live` without a cluster. Pass `--target`, or `--context` without GitOps configuration. |
-| `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree or publication command got `--lookup=live`. Use `render`, `diff` or `apply` for live lookups. |
+| `NYL-HELM-LOOKUP-LIVE-REFUSED` | A tree command got `--lookup=live`. Use `render`, `diff` or `apply` for live lookups. `nyl build` of a publication unit refuses it as `NYL-BUILD-ARGUMENT` (`lookup-live`). |
 | `NYL-HELM-LOOKUP-ANNOTATION-INVALID` | A Component's `k8s.nyl/helm-lookup` annotation is not `"true"` or `"false"`. Quote the value. |
 | `NYL-HELM-LOOKUP-ANNOTATION-MISPLACED` | A HelmChart carries `k8s.nyl/helm-lookup`. Set `spec.lookup: true` or `false` and remove the annotation. |
 | `NYL-HELM-LOOKUP-UNDECLARED` | Warning: a chart calls `lookup` but lookup is not enabled or disabled. Opt in or out as above. |

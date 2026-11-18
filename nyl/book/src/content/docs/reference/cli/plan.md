@@ -34,10 +34,9 @@ asks each ready unit's driver what executing it would change, and reports:
   publication's unmet teardown readiness. Retained tombstones are listed as
   `retained`. See [Deletion and holds](/nyl/orchestration/deletion/);
 - warnings for each unmet teardown requirement, and each remnant, of every
-  publication that would be torn down (`NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
-  `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM`,
-  `NYL-TEARDOWN-NAMESPACES-REMAIN`, `NYL-TEARDOWN-CATALOG-REMAINS`), each naming
-  the setting that fixes it;
+  publication that would be torn down (`NYL-TEARDOWN-BLOCKED` and
+  `NYL-TEARDOWN-REMNANT`, whose `detail` names the requirement or the
+  remnant), each naming the setting that fixes it;
 - for an environment that two or more PromotionPaths promote into, a
   `NYL-PROMOTE-UNCHECKED` warning for each value they both carry that has no
   known source commit, such as a command's output or a Release input written

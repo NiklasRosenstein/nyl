@@ -246,12 +246,14 @@ impl Script {
                 category: FailureCategory::Ownership,
                 message: "scripted retry acknowledgement".to_owned(),
                 context,
+                code: None,
+                detail: None,
             }),
-            Some(Scripted::Failed { category, retryable }) => ScriptedOutcome::Return(Outcome::Failed {
+            Some(Scripted::Failed { category, retryable }) => ScriptedOutcome::Return(Outcome::failed(
                 category,
                 retryable,
-                message: format!("scripted {} failure", operation.as_str()),
-            }),
+                format!("scripted {} failure", operation.as_str()),
+            )),
         }
     }
 }

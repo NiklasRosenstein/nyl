@@ -30,6 +30,15 @@ reads the reconciler that runs its target, Argo CD (see
 [Observed values](#observed-values)). The common unit fields
 (`dependsOn`, `timeout`, `env`, and so on) apply; `timeout` defaults to `10m`.
 
+The unit raises the generic codes every unit kind shares, such as
+`NYL-UNIT-OWNER-FENCED` or `NYL-TEARDOWN-BLOCKED`; its messages and fixes
+name the Kubernetes and Argo CD specifics. Where one code covers several
+cases, the finding or failure carries a `detail` that tells them apart, shown
+in parentheses in this guide (`NYL-TEARDOWN-BLOCKED` (`catalog-manual-sync`))
+and as `detail` in `-o json` output. Match scripts on the code and the
+`detail`, never on the message. `nyl render`, `diff`, and `apply` outside
+orchestration keep their own codes, such as `NYL-KUBERNETES-SCOPE-MISMATCH`.
+
 ## Inline targets
 
 A unit can declare its DeploymentTarget in `spec.target.inline`, as a
@@ -68,7 +77,7 @@ that declares the unit.
 A unit publishes to one destination, its target's name and publication
 repository, branch, and prefix. Changing any of them, such as renaming the
 target or the prefix, does not move the published tree: the next publication
-fails before writing anything with `NYL-KUBERNETES-TARGET-CHANGED`, naming what
+fails before writing anything with `NYL-UNIT-DESTINATION-CHANGED` (`target-changed`), naming what
 changed, until you restore the previous destination or replace the unit. To
 replace it, run `nyl teardown -e <env> --unit <unit>`, which removes the tree
 the unit published (its stored document still names the old target), and then
@@ -149,7 +158,7 @@ first, nothing was published, and the unit builds its commit again on the new
 head, up to three times and within its `timeout`. A target with
 `fromPublication` bindings is rendered again on the new head: when the state
 files it read are unchanged, it publishes there. When one changed, the unit
-ends without publishing as a retryable failure, `NYL-KUBERNETES-STATE-CHANGED`,
+ends without publishing as a retryable failure, `NYL-UNIT-INPUTS-CHANGED` (`publication-state-changed`),
 and the next run resolves it again with the new state.
 
 `detect-drift` publishes nothing: it compares the branch with the tree the unit
@@ -174,11 +183,11 @@ environment, the unit, and the incarnation's uid (the `owner` member of the
 version 3 index; indexes without one, as `publish-tree` writes them, stay
 readable). The tree of a [shared catalog](/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance)
 records the string `catalog:<name>` instead. No unit incarnation owns it, so no
-unit takes its prefix over (`NYL-KUBERNETES-OWNER-FENCED`) and a target's
+unit takes its prefix over (`NYL-UNIT-OWNER-FENCED`, detail `prefix-owned`) and a target's
 `pathPrefix` may not lie in the reserved `_nyl/shared` directory. A publication or teardown refuses a prefix that names another
 incarnation while that incarnation still exists in its environment's state,
 active, held, deleting, or retained. It fails with
-`NYL-KUBERNETES-OWNER-FENCED`, naming the owner, and publishes and removes
+`NYL-UNIT-OWNER-FENCED` (`prefix-owned`), naming the owner, and publishes and removes
 nothing; the failure is retryable, because the next run reads state again. A
 target moves between environments once the old environment's incarnation is
 gone: its teardown completed, or `nyl state forget` released it. The first
@@ -192,10 +201,10 @@ Each refusal has a code and a way out:
 
 | Code | Meaning and fix |
 | --- | --- |
-| `NYL-KUBERNETES-OWNER-FENCED` | Another unit incarnation that still exists owns the prefix. Tear that unit down or release it with `nyl state forget`, then run again. |
-| `NYL-KUBERNETES-OWNER-UNKNOWN` | The owner's environment was renamed or removed, or its state cannot be read, so Nyl cannot tell whether the owner exists. Declare the environment again and tear its unit down, or release the prefix deliberately (below). |
+| `NYL-UNIT-OWNER-FENCED` (`prefix-owned`) | Another unit incarnation that still exists owns the prefix. Tear that unit down or release it with `nyl state forget`, then run again. |
+| `NYL-UNIT-OWNER-UNKNOWN` (`prefix-owned`) | The owner's environment was renamed or removed, or its state cannot be read, so Nyl cannot tell whether the owner exists. Declare the environment again and tear its unit down, or release the prefix deliberately (below). |
 | `NYL-TREE-OWNED-BY-UNIT` | `publish-tree`, `render-tree`, or `nyl build -- --push` met a prefix an orchestrated unit owns, for example after `nyl state forget` released the unit. Publish through the environment that owns it, or release the prefix deliberately (below). |
-| `NYL-KUBERNETES-TARGET-CHANGED` | The unit's destination changed since it last published. Restore it, or replace the unit as described under [Inline targets](#inline-targets). |
+| `NYL-UNIT-DESTINATION-CHANGED` (`target-changed`) | The unit's destination changed since it last published. Restore it, or replace the unit as described under [Inline targets](#inline-targets). |
 
 To release a prefix deliberately, commit to the publication branch a change to
 `<prefix>/_nyl/index.json` that removes its `owner` member and sets `version`
@@ -362,9 +371,9 @@ spec:
   says to apply it.
 - A `Degraded` reading ends the wait early only when it cannot recover, such as a
   Deployment past its progress deadline or a failed Job
-  (`NYL-KUBERNETES-HEALTH-DEGRADED`). Argo CD's `Degraded` is never final, because
+  (`NYL-UNIT-HEALTH-DEGRADED`, detail `wait-healthy`). Argo CD's `Degraded` is never final, because
   its controllers retry.
-- On the timeout the unit fails, retryable, with `NYL-KUBERNETES-HEALTH-TIMEOUT`
+- On the timeout the unit fails, retryable, with `NYL-UNIT-HEALTH-TIMEOUT` (`wait-healthy`)
   naming the worst deployment and its last health. It fails rather than warns
   because you asked for the wait; the tree is published and applied, so the next
   reconcile publishes nothing, applies again, and waits again. The wait never
@@ -392,7 +401,7 @@ then:
 A failure after step 2 leaves Git ahead of the cluster, never behind: the unit has no
 receipt, and the next execution applies again. A second unit, environment, or
 manual `nyl apply` cannot take a Release over while its owner exists
-(`NYL-KUBERNETES-RELEASE-FENCED`). `nyl attest` reads the release state and the rollout
+(`NYL-UNIT-OWNER-FENCED`, detail `release-owned`). `nyl attest` reads the release state and the rollout
 status of the workloads; a revision applied outside the unit is `unreadable` until
 the next reconcile. Teardown deletes in two phases and keeps the Namespaces that hold
 the release state until its wait ends.
@@ -430,7 +439,7 @@ credentials that publishing alone does not need.
 
 - **Only what the target renders.** Resolution renders the target and checks
   that one of its Releases renders the resource. A resource outside the
-  rendered tree is rejected with `NYL-KUBERNETES-OBSERVATION-UNOWNED`, so the
+  rendered tree is rejected with `NYL-OBSERVATION-UNOWNED` (`resource-not-rendered`), so the
   cluster the unit reads is the target's Cluster and nothing outside the
   declaration. A manifest without `metadata.namespace` belongs to the namespace
   its Application deploys to. Secrets are never read. Resolution records the
@@ -494,12 +503,12 @@ with `--diff` and `--push`. The documents then describe the catalog's tree
 (`pathPrefix` `_nyl/shared/<name>`, `target` `catalog:<name>`, and in a `TreeDiff`
 the `owner` `catalog:<name>`). `--push` is the one writer that replaces the
 manifest, and no environment owns the catalog, so it is not refused as
-`NYL-KUBERNETES-BUILD-TARGET-OWNED`; the dirty-source and identity refusals
+`NYL-BUILD-OWNED` (`target-owned`); the dirty-source and identity refusals
 apply. A target that shares no catalog fails with
-`NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG`. A run's publication only creates the
+`NYL-BUILD-ARGUMENT` (`no-shared-catalog`). A run's publication only creates the
 manifest (by compare-and-swap), and records `sharedCatalog.result` (`created`,
 `current`, or `differs`) in its `PublishedTree`; `differs` also warns with
-`NYL-KUBERNETES-SHARED-CATALOG-DIFFERS`, shown in the run, `plan`, and `status`.
+`NYL-UNIT-SHARED-DIFFERS` (`shared-catalog-differs`), shown in the run, `plan`, and `status`.
 Another `_nyl/shared/<name>/` tree on the branch refuses with
 `NYL-KUBERNETES-SHARED-CATALOG-CONFLICT`.
 
@@ -511,24 +520,24 @@ other tools committed, are not part of the tree.
 
 `--push` publishes the render as one commit authored by the identity of the
 repository's Git configuration, and only for a target no environment owns. It
-refuses, before anything is published, with the codes below. The first, `NYL-KUBERNETES-BUILD-TARGET-OWNED`, then `NYL-KUBERNETES-BUILD-DIRTY-SOURCE` and `NYL-KUBERNETES-BUILD-IDENTITY`, are checked before the build's own render; `NYL-TREE-OWNED-BY-UNIT` is found when the publication prepares, after it. A refusal is a failed build, exit 3:
+refuses, before anything is published, with the codes below. The first, `NYL-BUILD-OWNED` (`target-owned`), then `NYL-BUILD-DIRTY-SOURCE` and `NYL-COMMIT-IDENTITY-MISSING` (`publication-push`), are checked before the build's own render; `NYL-TREE-OWNED-BY-UNIT` is found when the publication prepares, after it. A refusal is a failed build, exit 3:
 
 | Code | Meaning and fix |
 | --- | --- |
-| `NYL-KUBERNETES-BUILD-TARGET-OWNED` | An Environment selects a publication unit that places the target, even one being torn down. Publish with `nyl reconcile -e <environment>`, or deselect the unit from that environment first. |
+| `NYL-BUILD-OWNED` (`target-owned`) | An Environment selects a publication unit that places the target, even one being torn down. Publish with `nyl reconcile -e <environment>`, or deselect the unit from that environment first. |
 | `NYL-TREE-OWNED-BY-UNIT` | The published index names a unit incarnation. A direct publication records no owner, so it cannot tell whether that unit still exists; release the prefix deliberately (see [Ownership](#ownership)). |
-| `NYL-KUBERNETES-BUILD-DIRTY-SOURCE` | The worktree has uncommitted changes, which the index could not attribute to a commit. Commit them, or build a revision with `--source <revision>`. |
-| `NYL-KUBERNETES-BUILD-IDENTITY` | No identity to author the commit. Set `user.name` and `user.email` in the repository's Git configuration. |
+| `NYL-BUILD-DIRTY-SOURCE` | The worktree has uncommitted changes, which the index could not attribute to a commit. Commit them, or build a revision with `--source <revision>`. |
+| `NYL-COMMIT-IDENTITY-MISSING` (`publication-push`) | No identity to author the commit. Set `user.name` and `user.email` in the repository's Git configuration. |
 
 The index of a direct publication has version 3 and no owner, as `publish-tree`
 writes it, so an environment that later selects the unit adopts the prefix.
 `--diff` and `--push` are alternatives; any other argument than those and
-`--shared-catalog` fails with `NYL-KUBERNETES-BUILD-ARGUMENT`.
+`--shared-catalog` fails with `NYL-BUILD-ARGUMENT`.
 
 A unit that declares its target [inline](#inline-targets) builds only with
 `-e`: the target is named `<environment>-<unit>` and rendered with the
 environment's values, so without it the build fails with
-`NYL-KUBERNETES-BUILD-INLINE-TARGET`. An environment that selects the unit owns
+`NYL-BUILD-ENVIRONMENT-REQUIRED`. An environment that selects the unit owns
 its inline target, so `--push` is refused there too; `--diff` and the plain
 render work.
 
@@ -569,11 +578,11 @@ agree:
 
 | Requirement | Unmet, and the fix |
 | --- | --- |
-| The catalog prunes removed workload Applications | Blocking, `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`: enable the catalog's `syncPolicy.automated` with `prune: true`, and remove `Prune=confirm` and `Prune=false`. Argo CD resolves `Prune` for each Application the catalog prunes: the Application's own `argocd.argoproj.io/sync-options` annotation (an ApplicationGroup's `annotations` set it on every workload Application), else the catalog's `syncPolicy.syncOptions` (`catalogApplication.syncPolicy` on the DeploymentTarget, `catalogApplicationDefaults.syncPolicy` on the ArgoCDInstance, or the shared catalog's own). `Prune=confirm` keeps the catalog's sync waiting for a confirmation in Argo CD, and `Prune=false` skips the Application; the finding names which. `Delete=confirm` on the catalog is not checked, because it only applies when the catalog Application itself is deleted. |
-| Deleting an Application deletes its workloads | Blocking, `NYL-TEARDOWN-APPLICATIONS-ORPHANED`: set `applicationDeletionPolicy` to `Foreground` or `Background`. |
-| No resource requires confirmation to delete | Blocking, `NYL-TEARDOWN-NAMESPACE-CONFIRM`: Argo CD holds an Application's deletion while any resource it would delete requires confirmation, which a resource's own `argocd.argoproj.io/sync-options` annotation or its Application's `spec.syncPolicy.syncOptions` sets with `Delete=confirm` or `Prune=confirm`. The finding names each such resource, or the Application whose options do it for all of its resources. For a Namespace, set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`; the default of `Confirm` for either blocks. For an Application, remove the option from the ApplicationGroup's `syncPolicy.syncOptions` or from a Release's `+syncOptions` override. |
-| Owned Namespaces are removed | Remnant, `NYL-TEARDOWN-NAMESPACES-REMAIN`: set `deletePolicy: Automatic`. |
-| The catalog Application and AppProjects are removed | Remnant, `NYL-TEARDOWN-CATALOG-REMAINS`: let a parent own the catalog (`catalogApplication.enabled: false`), or share one (`catalogApplication.shared`), whose Application is read for the rows above and prunes the target's objects. |
+| The catalog prunes removed workload Applications | Blocking, `NYL-TEARDOWN-BLOCKED` (`catalog-manual-sync`): enable the catalog's `syncPolicy.automated` with `prune: true`, and remove `Prune=confirm` and `Prune=false`. Argo CD resolves `Prune` for each Application the catalog prunes: the Application's own `argocd.argoproj.io/sync-options` annotation (an ApplicationGroup's `annotations` set it on every workload Application), else the catalog's `syncPolicy.syncOptions` (`catalogApplication.syncPolicy` on the DeploymentTarget, `catalogApplicationDefaults.syncPolicy` on the ArgoCDInstance, or the shared catalog's own). `Prune=confirm` keeps the catalog's sync waiting for a confirmation in Argo CD, and `Prune=false` skips the Application; the finding names which. `Delete=confirm` on the catalog is not checked, because it only applies when the catalog Application itself is deleted. |
+| Deleting an Application deletes its workloads | Blocking, `NYL-TEARDOWN-BLOCKED` (`applications-orphaned`): set `applicationDeletionPolicy` to `Foreground` or `Background`. |
+| No resource requires confirmation to delete | Blocking, `NYL-TEARDOWN-BLOCKED` (`namespace-confirm`): Argo CD holds an Application's deletion while any resource it would delete requires confirmation, which a resource's own `argocd.argoproj.io/sync-options` annotation or its Application's `spec.syncPolicy.syncOptions` sets with `Delete=confirm` or `Prune=confirm`. The finding names each such resource, or the Application whose options do it for all of its resources. For a Namespace, set `prunePolicy` and `deletePolicy` to `Automatic`, or `deletePolicy` to `Retain`; the default of `Confirm` for either blocks. For an Application, remove the option from the ApplicationGroup's `syncPolicy.syncOptions` or from a Release's `+syncOptions` override. |
+| Owned Namespaces are removed | Remnant, `NYL-TEARDOWN-REMNANT` (`namespaces-remain`): set `deletePolicy: Automatic`. |
+| The catalog Application and AppProjects are removed | Remnant, `NYL-TEARDOWN-REMNANT` (`catalog-remains`): let a parent own the catalog (`catalogApplication.enabled: false`), or share one (`catalogApplication.shared`), whose Application is read for the rows above and prunes the target's objects. |
 
 A resource's own option wins over its Application's, one option at a time, as in
 Argo CD (`Prune=confirm` on the Application with `Prune=false` on a resource leaves

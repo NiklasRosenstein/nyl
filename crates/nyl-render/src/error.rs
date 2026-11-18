@@ -103,7 +103,7 @@ pub enum NylError {
     /// A published prefix is owned by another orchestration unit
     /// incarnation. See [`NylError::is_owner_fenced`].
     #[error("{0}")]
-    OwnerFenced(String),
+    OwnerFenced(crate::kubernetes::fence::Fenced),
 
     /// An apply was interrupted before it completed (Ctrl-C, or the unit's
     /// deadline).
@@ -232,6 +232,15 @@ impl NylError {
     /// ownership index names another owner.
     pub fn is_owner_fenced(&self) -> bool {
         matches!(self, NylError::OwnerFenced(_))
+    }
+
+    /// The refusal of a publication or removal whose prefix, or of an apply
+    /// whose Release, another owner holds.
+    pub fn owner_fenced(&self) -> Option<&crate::kubernetes::fence::Fenced> {
+        match self {
+            NylError::OwnerFenced(fenced) => Some(fenced),
+            _ => None,
+        }
     }
 
     /// Whether a publication lost its race for the branch head, before the

@@ -308,24 +308,20 @@ fn tool(ctx: &impl Call, env: &DockerEnv, args: Vec<String>, private_stdout: boo
 fn completed(exit: ToolExit, effects: bool) -> Result<Vec<u8>, Outcome> {
     match exit {
         ToolExit::Exited { code: 0, stdout, .. } => Ok(stdout),
-        ToolExit::Exited { code, .. } => Err(Outcome::Failed {
-            category: FailureCategory::ToolError,
-            retryable: true,
-            message: format!("docker buildx exited {code}"),
-        }),
-        ToolExit::NotStarted { reason } => Err(Outcome::Failed {
-            category: FailureCategory::MissingTool,
-            retryable: false,
-            message: reason,
-        }),
+        ToolExit::Exited { code, .. } => Err(Outcome::failed(
+            FailureCategory::ToolError,
+            true,
+            format!("docker buildx exited {code}"),
+        )),
+        ToolExit::NotStarted { reason } => Err(Outcome::failed(FailureCategory::MissingTool, false, reason)),
         _ if effects => Err(Outcome::Uncertain {
             reason: "docker buildx was interrupted; the image may already have been pushed".into(),
         }),
-        _ => Err(Outcome::Failed {
-            category: FailureCategory::ToolError,
-            retryable: true,
-            message: "docker buildx inspection was interrupted".into(),
-        }),
+        _ => Err(Outcome::failed(
+            FailureCategory::ToolError,
+            true,
+            "docker buildx inspection was interrupted",
+        )),
     }
 }
 fn artifact(

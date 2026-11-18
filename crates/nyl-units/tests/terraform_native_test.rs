@@ -99,9 +99,14 @@ fn real_native(driver: &TerraformDriver, binary: &str) {
     let Supported::Supported(missing) = driver.reconcile(&context, &unit).unwrap() else {
         panic!("native reconcile unsupported")
     };
-    assert!(
-        matches!(missing, Outcome::RetryRequired { category: FailureCategory::Ownership, message, .. } if message.starts_with("NYL-TOFU-STATE-MISSING"))
-    );
+    assert!(matches!(
+        missing,
+        Outcome::RetryRequired {
+            category: FailureCategory::Ownership,
+            code: Some(nyl_core::orchestration::codes::Code::UnitNativeStateMissing),
+            ..
+        }
+    ));
 }
 
 #[test]

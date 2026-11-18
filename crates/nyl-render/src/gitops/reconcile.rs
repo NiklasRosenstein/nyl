@@ -518,18 +518,28 @@ fn ensure_same_owner(
         return Ok(());
     }
     Err(NylError::OwnerFenced(match &expected.owner {
-        Some(next) => format!(
-            "NYL-KUBERNETES-OWNER-FENCED: rendered ownership index {} is owned by {owner}, not by {next}; \
-             it stays fenced while that incarnation exists in its environment's state",
-            path.display()
-        ),
-        None => format!(
-            "{OWNED_PREFIX_CODE}: rendered ownership index {} is owned by {owner}, and a publication outside \
-             orchestration cannot overwrite or remove it; {OWNED_PREFIX_FIX}",
-            path.display()
-        ),
+        Some(next) => crate::kubernetes::fence::Fenced {
+            code: crate::kubernetes::fence::FenceCode::owned(PREFIX_DETAIL),
+            message: format!(
+                "rendered ownership index {} is owned by {owner}, not by {next}; \
+                 it stays fenced while that incarnation exists in its environment's state",
+                path.display()
+            ),
+        },
+        None => crate::kubernetes::fence::Fenced {
+            code: crate::kubernetes::fence::FenceCode::Command(OWNED_PREFIX_CODE),
+            message: format!(
+                "rendered ownership index {} is owned by {owner}, and a publication outside \
+                 orchestration cannot overwrite or remove it; {OWNED_PREFIX_FIX}",
+                path.display()
+            ),
+        },
     }))
 }
+
+/// The `detail` of a unit's refusal of a published prefix another incarnation
+/// owns, or whose owner cannot be told.
+pub const PREFIX_DETAIL: &str = "prefix-owned";
 
 /// The stable code of a refusal by a publication that records no owner, such
 /// as `publish-tree` and `render-tree`, of a prefix an orchestrated unit owns.

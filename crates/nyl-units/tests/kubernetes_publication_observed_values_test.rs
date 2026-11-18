@@ -349,14 +349,14 @@ fn test_an_observation_must_read_a_resource_the_target_renders_and_never_a_secre
     let error = live
         .resolve(&driver, Live::spec(json!({"ready": elsewhere})))
         .unwrap_err();
-    assert!(error.starts_with("NYL-KUBERNETES-OBSERVATION-UNOWNED:"), "{error}");
+    assert!(error.starts_with("NYL-OBSERVATION-UNOWNED:"), "{error}");
     assert!(error.contains("Deployment web/another"), "{error}");
     let mut other_namespace = replicas();
     other_namespace["from"]["resource"]["namespace"] = json!("other");
     assert!(live
         .resolve(&driver, Live::spec(json!({"ready": other_namespace})))
         .unwrap_err()
-        .starts_with("NYL-KUBERNETES-OBSERVATION-UNOWNED:"));
+        .starts_with("NYL-OBSERVATION-UNOWNED:"));
     let secret = json!({"type": "string", "from": {
         "resource": {"apiVersion": "v1", "kind": "Secret", "namespace": "web", "name": "web"},
         "pointer": "/data/token"

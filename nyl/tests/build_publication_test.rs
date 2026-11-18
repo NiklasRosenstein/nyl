@@ -147,11 +147,7 @@ fn test_build_of_an_environments_publication_renders_diffs_and_refuses_to_push()
 
     let refused = build(&harness, &["-e", "dev", "--", "--push"]);
     assert_eq!(refused.exit, 3, "a driver refusal is a failed build");
-    assert!(
-        refused.stderr.contains("NYL-KUBERNETES-BUILD-TARGET-OWNED"),
-        "{}",
-        refused.stderr
-    );
+    assert!(refused.stderr.contains("NYL-BUILD-OWNED"), "{}", refused.stderr);
     assert!(refused.stderr.contains("nyl reconcile -e dev"), "{}", refused.stderr);
     assert_eq!(harness.tip("refs/heads/deploy"), published, "nothing is published");
 }
@@ -214,11 +210,7 @@ fn test_push_refuses_a_worktree_with_uncommitted_changes() {
     let run = |extra: &[&str]| build_in(&harness, &clone, extra);
     let refused = run(&["--", "--push"]);
     assert_eq!(refused.exit, 3);
-    assert!(
-        refused.stderr.contains("NYL-KUBERNETES-BUILD-DIRTY-SOURCE"),
-        "{}",
-        refused.stderr
-    );
+    assert!(refused.stderr.contains("NYL-BUILD-DIRTY-SOURCE"), "{}", refused.stderr);
     assert!(!deploy_branch_exists(&harness));
     assert_eq!(run(&["--", "--diff"]).exit, 0);
     assert_eq!(run(&["--source", "HEAD", "--", "--push"]).exit, 0);
@@ -271,7 +263,7 @@ fn test_inline_target_builds_only_with_an_environment() {
     let refused = build(&harness, &[]);
     assert_eq!(refused.exit, 1);
     assert!(
-        refused.stderr.contains("NYL-KUBERNETES-BUILD-INLINE-TARGET") && refused.stderr.contains("-e <environment>"),
+        refused.stderr.contains("NYL-BUILD-ENVIRONMENT-REQUIRED") && refused.stderr.contains("-e <environment>"),
         "{}",
         refused.stderr
     );
@@ -284,11 +276,7 @@ fn test_inline_target_builds_only_with_an_environment() {
 
     let pushed = build(&harness, &["-e", "dev", "--", "--push"]);
     assert_eq!(pushed.exit, 3);
-    assert!(
-        pushed.stderr.contains("NYL-KUBERNETES-BUILD-TARGET-OWNED"),
-        "{}",
-        pushed.stderr
-    );
+    assert!(pushed.stderr.contains("NYL-BUILD-OWNED"), "{}", pushed.stderr);
     assert!(!deploy_branch_exists(&harness));
 }
 

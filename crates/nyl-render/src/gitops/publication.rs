@@ -789,11 +789,14 @@ pub fn inspect_shared_catalog(
     };
     let owner = parse_index(&index, DEFAULT_INDEX_PATH)?.owner;
     if let Some(owner) = owner.as_ref().filter(|owner| Some(*owner) != expected.as_ref()) {
-        return Err(NylError::OwnerFenced(format!(
-            "NYL-KUBERNETES-OWNER-FENCED: the shared catalog prefix {prefix} is owned by {owner}, not by {}; {}",
-            expected.map_or_else(String::new, |owner| owner.to_string()),
-            super::reconcile::OWNED_PREFIX_FIX
-        )));
+        return Err(NylError::OwnerFenced(crate::kubernetes::fence::Fenced {
+            code: crate::kubernetes::fence::FenceCode::owned(SHARED_CATALOG_DETAIL),
+            message: format!(
+                "the shared catalog prefix {prefix} is owned by {owner}, not by {}; {}",
+                expected.map_or_else(String::new, |owner| owner.to_string()),
+                super::reconcile::OWNED_PREFIX_FIX
+            ),
+        }));
     }
     let manifest = read_tree_file(&repository, &tree, prefix, super::shared_catalog::SHARED_MANIFEST)?;
     let published = manifest
@@ -938,7 +941,11 @@ pub struct TreePublication<'a> {
 
 /// A decision on a prefix owned by another orchestration unit incarnation;
 /// see [`TreePublication::takeover`].
-pub type OwnerTakeover<'a> = dyn Fn(&RenderIndexOwner) -> std::result::Result<(), String> + 'a;
+pub type OwnerTakeover<'a> =
+    dyn Fn(&RenderIndexOwner) -> std::result::Result<(), crate::kubernetes::fence::Fenced> + 'a;
+
+/// The `detail` of a unit's refusal of a shared catalog prefix another owner holds.
+pub const SHARED_CATALOG_DETAIL: &str = "shared-catalog-owned";
 
 /// The reconcile options that let `next` take over the prefix beneath
 /// `output_root` from another owner, if `takeover` allows it. Nothing

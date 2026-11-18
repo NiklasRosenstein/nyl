@@ -72,7 +72,7 @@ codes! {
     EnvironmentGroupOverlap => "NYL-ENVIRONMENT-GROUP-OVERLAP",
     /// An environment name no Environment declares.
     EnvironmentUnknown => "NYL-ENVIRONMENT-UNKNOWN",
-    /// Neither `--author` nor Git's `user.name` and `user.email` name who writes state commits.
+    /// Neither `--author` nor Git's `user.name` and `user.email` name who writes a commit Nyl makes: a state commit, or a commit a driver pushes, such as `nyl build --push`.
     CommitIdentityMissing => "NYL-COMMIT-IDENTITY-MISSING",
     /// Two unit documents share a name; names are unique per environment across kinds.
     UnitNameDuplicate => "NYL-UNIT-NAME-DUPLICATE",
@@ -84,16 +84,48 @@ codes! {
     UnitOwnershipOverlap => "NYL-UNIT-OWNERSHIP-OVERLAP",
     /// A reference names a unit outside the ownership set, an undeclared or sensitive output, a mismatched artifact kind, or a value of the wrong type.
     ReferenceInvalid => "NYL-REFERENCE-INVALID",
-    /// A target's publication found the shared catalog manifest on the branch different from the one it renders; it left it alone. A warning.
-    KubernetesSharedCatalogDiffers => "NYL-KUBERNETES-SHARED-CATALOG-DIFFERS",
-    /// A direct target's apply kept objects whose `Prune=confirm` sync option awaits a confirmation the driver never gives. A warning.
-    KubernetesPruneAwaitingConfirmation => "NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION",
-    /// A Cluster's recorded capabilities (vendored CRDs included) give a kind one scope and the live cluster another; the command used the recorded one. A warning.
+    /// Direct mode (`nyl render`, `diff`, `apply` outside orchestration): a Cluster's recorded capabilities (vendored CRDs included) give a kind one scope and the live cluster another; the command used the recorded one. A unit raises `NYL-UNIT-CAPABILITY-MISMATCH` instead. A warning.
     KubernetesScopeMismatch => "NYL-KUBERNETES-SCOPE-MISMATCH",
-    /// A Release declares delete hooks (Helm's `pre-delete` and `post-delete`, Argo CD's `PreDelete` and `PostDelete`), which Argo CD would run when it removes the Release and Nyl never runs; the apply left them out. A warning.
+    /// Direct mode (`nyl apply` and the `release` commands outside orchestration): a Release declares delete hooks (Helm's `pre-delete` and `post-delete`, Argo CD's `PreDelete` and `PostDelete`), which Argo CD would run when it removes the Release and Nyl never runs; the apply left them out. A unit raises `NYL-UNIT-HOOK-IGNORED` instead. A warning.
     KubernetesHookIgnored => "NYL-KUBERNETES-HOOK-IGNORED",
-    /// A direct target's apply found a Release that left the tree and is not this unit's to purge, and left it. A warning.
-    KubernetesReleaseLeftBehind => "NYL-KUBERNETES-RELEASE-LEFT-BEHIND",
+    /// A unit left a shared object it does not own alone because it differs from what the unit renders. A warning; the `detail` names the object, such as `shared-catalog`.
+    UnitSharedDiffers => "NYL-UNIT-SHARED-DIFFERS",
+    /// A unit's removal of some of its objects waits for a confirmation the driver never gives, so they remain. A warning.
+    UnitRemovalUnconfirmed => "NYL-UNIT-REMOVAL-UNCONFIRMED",
+    /// A unit left something in place that is not its to remove, such as a deployment another owner placed. A warning.
+    UnitLeftBehind => "NYL-UNIT-LEFT-BEHIND",
+    /// What a unit's declaration records about the system it changes disagrees with what the live system reports; the unit used the recorded value. A warning.
+    UnitCapabilityMismatch => "NYL-UNIT-CAPABILITY-MISMATCH",
+    /// A unit's deployment declares hooks its driver never runs; they were left out. A warning.
+    UnitHookIgnored => "NYL-UNIT-HOOK-IGNORED",
+    /// Another unit incarnation that still exists owns what this unit would change, so nothing was changed. The unit retries on its own once that incarnation is gone.
+    UnitOwnerFenced => "NYL-UNIT-OWNER-FENCED",
+    /// Something this unit would change names an owning incarnation whose existence state cannot confirm, so the unit failed closed and changed nothing.
+    UnitOwnerUnknown => "NYL-UNIT-OWNER-UNKNOWN",
+    /// The inputs a unit's driver read from state changed while it ran, so it changed nothing; the next run resolves the unit again.
+    UnitInputsChanged => "NYL-UNIT-INPUTS-CHANGED",
+    /// The destination a unit delivered to, or the way it delivers, changed since its current receipt, which the engine does not replace; nothing was changed. Restore the declaration, or tear the unit down and reconcile it again.
+    UnitDestinationChanged => "NYL-UNIT-DESTINATION-CHANGED",
+    /// A unit's deployments were not healthy within the time it waits for them. Its effects stay in place, and the next execution waits again.
+    UnitHealthTimeout => "NYL-UNIT-HEALTH-TIMEOUT",
+    /// A unit's deployments reached a health they do not recover from without a change, so the unit stopped waiting.
+    UnitHealthDegraded => "NYL-UNIT-HEALTH-DEGRADED",
+    /// A unit's declaration does not say how its driver reaches the system it changes, such as a missing context or endpoint; Nyl never falls back to an ambient one.
+    UnitAccessUndeclared => "NYL-UNIT-ACCESS-UNDECLARED",
+    /// A unit has a receipt, but the native state its tool keeps of what it manages is missing, so the unit refuses to run until an operator restores it or accepts the empty state.
+    UnitNativeStateMissing => "NYL-UNIT-NATIVE-STATE-MISSING",
+    /// A unit's tool output could not be written to its log file. A warning on the unit's output.
+    UnitLog => "NYL-UNIT-LOG",
+    /// A unit declares an observation of something it does not produce.
+    ObservationUnowned => "NYL-OBSERVATION-UNOWNED",
+    /// `nyl build` was given arguments after `--` the unit's kind does not accept, or that do not apply to its spec.
+    BuildArgument => "NYL-BUILD-ARGUMENT",
+    /// `nyl build --push` would write where an orchestrated unit owns the destination.
+    BuildOwned => "NYL-BUILD-OWNED",
+    /// `nyl build` of a unit whose declaration renders only for an environment, such as one that declares what it deploys to inline, was not given `-e <environment>`.
+    BuildEnvironmentRequired => "NYL-BUILD-ENVIRONMENT-REQUIRED",
+    /// `nyl build --push` refuses a worktree with uncommitted changes, which it could not attribute to a source commit.
+    BuildDirtySource => "NYL-BUILD-DIRTY-SOURCE",
     /// A cross-environment reference or `dependsOn` entry names an instance of an EnvironmentTemplate as its producer. Instances are consumers only.
     ReferenceInstanceProducer => "NYL-REFERENCE-INSTANCE-PRODUCER",
     /// A `nyl get` value form found no current receipt to read.
@@ -259,35 +291,16 @@ codes! {
     /// A teardown proceeded, or would proceed, without everything removed:
     /// an unmet readiness requirement or an unconfirmed removal.
     TeardownIncomplete => "NYL-TEARDOWN-INCOMPLETE",
-    /// Teardown readiness (blocking): the target would not remove a
-    /// deployment that leaves it on its own. The KubernetesPublication
-    /// driver raises it when the catalog does not prune removed workload
-    /// Applications, because it does not sync with pruning or its `Prune`
-    /// sync option waits for confirmation or skips them. The code's name is
-    /// kept as released.
-    TeardownCatalogManualSync => "NYL-TEARDOWN-CATALOG-MANUAL-SYNC",
-    /// Teardown readiness (blocking): removing a deployment would leave its
-    /// workloads running. The KubernetesPublication driver raises it when
-    /// deleting an Application orphans its workloads. The code's name is
-    /// kept as released.
-    TeardownApplicationsOrphaned => "NYL-TEARDOWN-APPLICATIONS-ORPHANED",
-    /// Teardown readiness (blocking): a resource a deployment's removal
-    /// deletes waits for someone to confirm its deletion. The
-    /// KubernetesPublication driver raises it when a resource a workload
-    /// Application would delete, whose own sync options or the
-    /// Application's `syncPolicy.syncOptions` resolve `Delete` or `Prune` to
-    /// `confirm`, holds the Application's finalizer until someone confirms
-    /// the deletion in Argo CD; an owned Namespace with the default
-    /// `prunePolicy` or `deletePolicy` of `Confirm` is the usual case.
-    TeardownNamespaceConfirm => "NYL-TEARDOWN-NAMESPACE-CONFIRM",
-    /// Teardown readiness (remnant): resources the target owns remain after
-    /// teardown. The KubernetesPublication driver raises it for owned
-    /// Namespaces.
-    TeardownNamespacesRemain => "NYL-TEARDOWN-NAMESPACES-REMAIN",
-    /// Teardown readiness (remnant): the target's own catalog remains after
-    /// teardown. The KubernetesPublication driver raises it for a
-    /// self-managing catalog Application and its AppProjects.
-    TeardownCatalogRemains => "NYL-TEARDOWN-CATALOG-REMAINS",
+    /// Teardown readiness (blocking): an unmet requirement decides that the
+    /// unit's teardown cannot complete, such as a deployment it would not
+    /// remove, workloads a removal would leave running, or a deletion that
+    /// waits for a confirmation. The driver names the requirement in the
+    /// message, the setting that fixes it, and the `detail`.
+    TeardownBlocked => "NYL-TEARDOWN-BLOCKED",
+    /// Teardown readiness (remnant): something the unit owns remains after a
+    /// teardown that succeeds. The driver names it in the message and the
+    /// `detail`.
+    TeardownRemnant => "NYL-TEARDOWN-REMNANT",
     /// Teardown readiness: the unit's teardown waits for an operator to
     /// confirm the removal, so an unattended removal, such as the expiry of a
     /// template instance, stops after its first phase. A warning.
@@ -420,6 +433,12 @@ pub struct Finding {
     pub code: Code,
     pub message: String,
     pub fix: String,
+    /// A short kebab-case slug the driver that raised the finding supplies to
+    /// tell its specifics apart under a generic code, such as
+    /// `catalog-manual-sync` under `NYL-TEARDOWN-BLOCKED`. For scripts; the
+    /// engine never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// Optional facts for human presentation, serialized at the top level.
     #[serde(flatten)]
     pub presentation: Box<DiagnosticPresentation>,
@@ -431,8 +450,16 @@ impl Finding {
             code,
             message: message.into(),
             fix: fix.into(),
+            detail: None,
             presentation: Box::default(),
         }
+    }
+
+    /// Set the driver's [`detail`](Self::detail) slug.
+    #[must_use]
+    pub fn with_detail_slug(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
     /// Set the headline used for structured presentation.
     #[must_use]
@@ -478,6 +505,7 @@ mod tests {
         let finding: Finding = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(serde_json::to_value(&finding).unwrap(), legacy);
         let rich = finding
+            .with_detail_slug("no-state-file")
             .with_title("State missing")
             .with_detail("Environment", "dev")
             .with_action("Init", "nyl state init");
@@ -485,7 +513,7 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "code": "NYL-STATE-MISSING", "message": "missing", "fix": "init",
+                "code": "NYL-STATE-MISSING", "message": "missing", "fix": "init", "detail": "no-state-file",
                 "title": "State missing", "details": [{"label": "Environment", "value": "dev"}],
                 "actions": [{"label": "Init", "value": "nyl state init"}]
             })

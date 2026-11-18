@@ -1897,6 +1897,7 @@ fn plan_leaving(
                 } else {
                     crate::run_report::TeardownReadiness::Incomplete {
                         reasons: blocking.iter().map(|finding| finding.message.clone()).collect(),
+                        blocking: blocking.clone(),
                     }
                 },
             );
@@ -3185,6 +3186,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
                 entry.change_digest.clone_from(&execution.change_digest);
                 entry.approval.clone_from(&execution.approval);
                 entry.message.clone_from(&execution.message);
+                entry.code = execution.code;
+                entry.detail.clone_from(&execution.detail);
                 entry.warnings.clone_from(&execution.warnings);
             } else if let Some(result) = imported_result(&taking, unit, current) {
                 entry.result = Some(result);
@@ -3865,6 +3868,8 @@ impl<'r, 'a> Reconcile<'_, 'r, 'a> {
             let mut entry = UnitReport::new(kind);
             entry.result = Some(execution.result.clone());
             entry.message.clone_from(&execution.message);
+            entry.code = execution.code;
+            entry.detail.clone_from(&execution.detail);
             entry.warnings.clone_from(&execution.warnings);
             self.report.units.insert(name.clone(), entry);
         }

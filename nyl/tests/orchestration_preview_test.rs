@@ -230,11 +230,7 @@ fn test_two_instances_publish_side_by_side_and_close_independently() {
     // The instance owns its target: a direct publication refuses.
     let refused = build(&harness, &["-e", "pr-1", "--", "--push"]);
     assert_eq!(refused.exit, 3, "{}", refused.stderr);
-    assert!(
-        refused.stderr.contains("NYL-KUBERNETES-BUILD-TARGET-OWNED"),
-        "{}",
-        refused.stderr
-    );
+    assert!(refused.stderr.contains("NYL-BUILD-OWNED"), "{}", refused.stderr);
     assert!(refused.stderr.contains("pr-1"), "{}", refused.stderr);
 
     // Closing pr-1: phase 1 waits for the removal to be confirmed.
@@ -383,7 +379,7 @@ fn reconcile_instance(harness: &harness::Harness, pr: &str) -> CommandOutcome {
 /// An instance that starts over (`state init --fresh`) gets a new incarnation
 /// of its publication, and takes over the prefix its previous incarnation
 /// published: the fence must answer for the instance's own state, where the old
-/// owner no longer exists. Catches an instance stuck on `NYL-KUBERNETES-OWNER-UNKNOWN`
+/// owner no longer exists. Catches an instance stuck on `NYL-UNIT-OWNER-UNKNOWN`
 /// after a fresh start.
 #[test]
 fn test_an_instance_that_starts_over_takes_over_its_own_prefix() {
@@ -458,7 +454,7 @@ fn test_a_prefix_owned_by_a_live_instance_fences_until_the_instance_is_deleted()
     let fenced = teardown(&harness);
     assert_eq!(fenced.exit, 3, "{}\n{}", fenced.stderr, fenced.stdout);
     let message = fenced.report.to_string();
-    assert!(message.contains("NYL-KUBERNETES-OWNER-FENCED"), "{message}");
+    assert!(message.contains("NYL-UNIT-OWNER-FENCED"), "{message}");
     assert!(
         message.contains("still exists in the state of environment pr-1"),
         "{message}"
@@ -528,11 +524,7 @@ fn test_state_init_warns_what_an_unattended_removal_would_wait_for() {
         ],
     );
     assert_eq!(init.exit, 0, "{}\n{}", init.stderr, init.stdout);
-    assert!(
-        init.stderr.contains("NYL-TEARDOWN-CATALOG-MANUAL-SYNC"),
-        "{}",
-        init.stderr
-    );
+    assert!(init.stderr.contains("NYL-TEARDOWN-BLOCKED"), "{}", init.stderr);
     assert!(init.stderr.contains("NYL-TEARDOWN-WAIT-MANUAL"), "{}", init.stderr);
     assert!(init.stderr.contains("pr-1/kubernetes"), "{}", init.stderr);
 }

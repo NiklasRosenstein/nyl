@@ -11,6 +11,7 @@ mod publication_world;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{
     Driver, DriverOperation, IncarnationStatus, Outcome, ResolutionContext, Supported, WaitCompletion,
 };
@@ -203,13 +204,19 @@ async fn test_another_units_release_is_fenced_before_anything_is_published() {
         category,
         retryable,
         message,
+        code,
+        detail,
     } = outcome
     else {
         panic!("the second unit is refused: {outcome:?}");
     };
     assert_eq!(category, FailureCategory::Ownership);
     assert!(retryable);
-    assert!(message.contains("NYL-KUBERNETES-RELEASE-FENCED"), "{message}");
+    assert_eq!(
+        (code, detail.as_deref()),
+        (Some(Code::UnitOwnerFenced), Some("release-owned")),
+        "{message}"
+    );
     assert_eq!(git(&world.bare(), &["rev-parse", "refs/heads/deploy"]), head);
     let state = cluster.storage.get_latest_release("web", "web").await.unwrap().unwrap();
     assert_eq!(state.revision, 1, "the owner's release is untouched");
@@ -367,7 +374,8 @@ fn test_a_direct_cluster_without_a_context_fails_resolution_before_effects() {
     .unwrap();
     let driver = KubernetesPublicationDriver::new(catalogue());
     let error = publication_world::resolve_error(&driver, &world, &spec());
-    assert!(error.contains("NYL-KUBERNETES-CLUSTER-CONTEXT-MISSING"), "{error}");
+    assert!(error.starts_with("NYL-UNIT-ACCESS-UNDECLARED: "), "{error}");
+    assert!(error.contains("declares no spec.live.context"), "{error}");
 }
 
 /// A clock that moves only when the driver waits, so a wait for health takes no time.
@@ -426,13 +434,19 @@ async fn test_a_wait_for_health_that_times_out_fails_naming_the_worst_deployment
         category,
         retryable,
         message,
+        code,
+        detail,
     } = outcome
     else {
         panic!("the wait fails: {outcome:?}");
     };
     assert_eq!(category, FailureCategory::Timeout);
     assert!(retryable);
-    assert!(message.starts_with("NYL-KUBERNETES-HEALTH-TIMEOUT:"), "{message}");
+    assert_eq!(
+        (code, detail.as_deref()),
+        (Some(Code::UnitHealthTimeout), Some("wait-healthy")),
+        "{message}"
+    );
     assert!(message.contains("web/web is accepted (Progressing"), "{message}");
     assert!(cluster.exists("apps/v1", "Deployment", Some("web"), "web").await);
     assert!(world.files("deploy").iter().any(|path| path.starts_with("dev/web/")));
@@ -699,9 +713,10 @@ async fn test_a_release_taken_over_by_hand_is_left_and_reported_when_it_leaves_t
         panic!("the apply still succeeds: {outcome:?}");
     };
     assert!(
-        warnings.iter().any(|warning| warning.code
-            == nyl_core::orchestration::codes::Code::KubernetesReleaseLeftBehind
-            && warning.message.contains("extra/extra")),
+        warnings.iter().any(
+            |warning| warning.code == nyl_core::orchestration::codes::Code::UnitLeftBehind
+                && warning.message.contains("extra/extra")
+        ),
         "{warnings:?}"
     );
     assert!(cluster.exists("v1", "ConfigMap", Some("extra"), "extra").await);
@@ -752,7 +767,7 @@ async fn test_a_teardown_leaves_a_release_another_unit_took_over_and_reports_it(
     assert!(
         warnings
             .iter()
-            .any(|warning| warning.code == nyl_core::orchestration::codes::Code::KubernetesReleaseLeftBehind),
+            .any(|warning| warning.code == nyl_core::orchestration::codes::Code::UnitLeftBehind),
         "{warnings:?}"
     );
     assert!(cluster.storage.list_revisions("web", "web").await.unwrap().is_empty());
@@ -1234,10 +1249,17 @@ async fn test_a_teardown_after_a_reconciler_change_says_to_restore_the_declarati
     ctx.deadline = ctx.now + chrono::Duration::minutes(10);
     let outcome = driver.teardown(&ctx, &deleting);
 
-    let Ok(Supported::Supported(Outcome::Failed { message, .. })) = outcome else {
+    let Ok(Supported::Supported(Outcome::Failed {
+        message, code, detail, ..
+    })) = outcome
+    else {
         panic!("the teardown is refused: {outcome:?}");
     };
-    assert!(message.contains("NYL-KUBERNETES-RECONCILER-CHANGED"), "{message}");
+    assert_eq!(
+        (code, detail.as_deref()),
+        (Some(Code::UnitDestinationChanged), Some("reconciler-changed")),
+        "{message}"
+    );
     assert!(message.contains("Restore the declaration"), "{message}");
     assert!(!message.contains("nyl teardown"), "{message}");
 }
@@ -2328,7 +2350,7 @@ async fn test_a_direct_unit_runs_hooks_tracks_none_and_never_reports_them_as_dri
     };
     let ignored: Vec<_> = warnings
         .iter()
-        .filter(|warning| warning.code == nyl_core::orchestration::codes::Code::KubernetesHookIgnored)
+        .filter(|warning| warning.code == Code::UnitHookIgnored && warning.detail.as_deref() == Some("delete-hooks"))
         .collect();
     assert_eq!(ignored.len(), 1, "{warnings:?}");
     assert!(

@@ -163,6 +163,7 @@ pub fn teardown_readiness(
                             .iter()
                             .map(|finding| format!("{}: {}", finding.code, finding.message))
                             .collect(),
+                        blocking: readiness.blocking.clone(),
                     }
                 },
             ))

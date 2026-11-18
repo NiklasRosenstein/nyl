@@ -271,6 +271,7 @@ fn test_nochange_skips_apply_and_state_lock_failure_is_nonretryable() {
         category,
         retryable,
         message,
+        ..
     } = locked
     else {
         panic!("{locked:?}")
@@ -294,12 +295,21 @@ fn test_missing_state_requires_explicit_acceptance_for_the_same_scope() {
         category,
         message,
         context: retry_context,
+        code,
+        detail,
     } = outcome(&driver, &context, &desired)
     else {
         panic!("missing retry requirement")
     };
     assert_eq!(category, FailureCategory::Ownership);
-    assert!(message.starts_with("NYL-TOFU-STATE-MISSING"));
+    assert_eq!(
+        (code, detail.as_deref()),
+        (
+            Some(nyl_core::orchestration::codes::Code::UnitNativeStateMissing),
+            Some("backend-state-missing")
+        ),
+        "{message}"
+    );
     assert_eq!(tool.count("plan"), 0);
     drop(context);
     observed.retry = Some(nyl_core::orchestration::state::RetryAcknowledgement::Acknowledged {

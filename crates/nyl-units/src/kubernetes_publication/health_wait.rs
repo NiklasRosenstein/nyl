@@ -26,11 +26,12 @@
 //!   terminal (a rollout past its progress deadline, a failed Job); Argo CD's
 //!   `Degraded` is never terminal, because controllers retry.
 //! - On the timeout the unit fails, retryable, with
-//!   `NYL-KUBERNETES-HEALTH-TIMEOUT` naming the worst deployment and its last
+//!   `NYL-UNIT-HEALTH-TIMEOUT` naming the worst deployment and its last
 //!   health. A failure, not a warning, because the author asked for the wait;
 //!   the tree is published and applied, so the next execution publishes
 //!   nothing, applies again, and waits again.
 
+use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::driver::{AttestationOutcome, ExecutionContext, Outcome};
 use nyl_core::orchestration::ports::Clock;
 use nyl_core::orchestration::state::{DesiredUnit, FailureCategory};
@@ -43,10 +44,9 @@ use super::observe::{budget, facts_of};
 use super::reconciler::evaluate::{ensure_provable, evaluate, Conclusion, EvaluateError, Evaluation, State};
 use super::reconciler::{reader_with, Health, ReadError, ReadErrorKind, ReadRequest, Reading};
 
-/// The code of a wait that ran out of time.
-pub const HEALTH_TIMEOUT: &str = "NYL-KUBERNETES-HEALTH-TIMEOUT";
-/// The code of a wait that ended early on a health that cannot recover.
-pub const HEALTH_DEGRADED: &str = "NYL-KUBERNETES-HEALTH-DEGRADED";
+/// The `detail` of a wait that ran out of time (`NYL-UNIT-HEALTH-TIMEOUT`) or
+/// ended early on a health that cannot recover (`NYL-UNIT-HEALTH-DEGRADED`).
+pub const WAIT_HEALTHY: &str = "wait-healthy";
 
 /// The first pause between polls, and the longest.
 const FIRST_PAUSE: u64 = 2;
@@ -88,14 +88,17 @@ pub fn wait_until_healthy(
         let last = match poll() {
             Poll::Healthy(attestations) => return Waited::Healthy(attestations),
             Poll::NotYet { worst, terminal: true } => {
-                return Waited::Failed(Outcome::Failed {
-                    category: FailureCategory::ToolError,
-                    retryable: true,
-                    message: format!(
-                        "{HEALTH_DEGRADED}: the target is degraded and will not recover without a change: {worst}. \
-                         The tree is published and applied; fix what runs and reconcile again"
-                    ),
-                })
+                return Waited::Failed(
+                    Outcome::failed(
+                        FailureCategory::ToolError,
+                        true,
+                        format!(
+                            "the target is degraded and will not recover without a change: {worst}. \
+                             The tree is published and applied; fix what runs and reconcile again"
+                        ),
+                    )
+                    .coded(Code::UnitHealthDegraded, Some(WAIT_HEALTHY)),
+                )
             }
             Poll::NotYet { worst, terminal: false } => worst,
             Poll::Unread(error)
@@ -107,29 +110,32 @@ pub fn wait_until_healthy(
                         | ReadErrorKind::Rejected
                 ) =>
             {
-                return Waited::Failed(Outcome::Failed {
-                    category: FailureCategory::Credentials,
-                    retryable: true,
-                    message: format!(
+                return Waited::Failed(Outcome::failed(
+                    FailureCategory::Credentials,
+                    true,
+                    format!(
                         "the target cannot be waited on, because the reconciler cannot be read: {}",
                         error.message
                     ),
-                })
+                ))
             }
             Poll::Unread(error) => format!("the reconciler could not be read: {}", error.message),
         };
         let now = clock.now();
         if now >= end || polls >= MAX_POLLS {
             let allowed = (end - started).num_seconds().max(0);
-            return Waited::Failed(Outcome::Failed {
-                category: FailureCategory::Timeout,
-                retryable: true,
-                message: format!(
-                    "{HEALTH_TIMEOUT}: the target was not healthy within {allowed}s: {last}. The tree is published and \
-                     applied, so the next execution publishes nothing, applies again, and waits again; raise \
-                     observe.waitHealthy.timeout if the rollout needs longer"
-                ),
-            });
+            return Waited::Failed(
+                Outcome::failed(
+                    FailureCategory::Timeout,
+                    true,
+                    format!(
+                        "the target was not healthy within {allowed}s: {last}. The tree is published and \
+                         applied, so the next execution publishes nothing, applies again, and waits again; raise \
+                         observe.waitHealthy.timeout if the rollout needs longer"
+                    ),
+                )
+                .coded(Code::UnitHealthTimeout, Some(WAIT_HEALTHY)),
+            );
         }
         let remaining = u64::try_from((end - now).num_seconds()).unwrap_or(0).max(1);
         clock.wait(Duration::from_secs(pause.min(remaining)));
@@ -279,11 +285,11 @@ pub(super) fn wait_for_target(
     let facts = match facts_of(unit) {
         Ok(facts) => facts,
         Err(reason) => {
-            return Waited::Failed(Outcome::Failed {
-                category: FailureCategory::ToolError,
-                retryable: false,
-                message: format!("the unit cannot wait for health: {reason}"),
-            })
+            return Waited::Failed(Outcome::failed(
+                FailureCategory::ToolError,
+                false,
+                format!("the unit cannot wait for health: {reason}"),
+            ))
         }
     };
     wait_until_healthy(ctx.clock, ctx.clock.now(), ctx.deadline, timeout, || {
@@ -353,11 +359,21 @@ mod tests {
 
     fn failed(waited: Waited) -> (FailureCategory, bool, String) {
         match waited {
+            // The message as state records it, prefixed with its code.
             Waited::Failed(Outcome::Failed {
                 category,
                 retryable,
                 message,
-            }) => (category, retryable, message),
+                code,
+                detail,
+            }) => {
+                assert_eq!(detail.is_some(), code.is_some(), "a coded wait failure has its detail");
+                (
+                    category,
+                    retryable,
+                    nyl_core::orchestration::driver::coded_message(code, &message),
+                )
+            }
             _ => panic!("the wait should have failed"),
         }
     }
@@ -387,7 +403,7 @@ mod tests {
         let (category, retryable, message) = failed(waited);
         assert_eq!(category, FailureCategory::Timeout);
         assert!(retryable);
-        assert!(message.starts_with("NYL-KUBERNETES-HEALTH-TIMEOUT:"), "{message}");
+        assert!(message.starts_with("NYL-UNIT-HEALTH-TIMEOUT:"), "{message}");
         assert!(
             message.contains("Deployment web/web is accepted (Progressing"),
             "{message}"
@@ -501,7 +517,7 @@ mod tests {
         let (category, retryable, message) = failed(waited);
         assert_eq!(category, FailureCategory::Timeout);
         assert!(retryable);
-        assert!(message.starts_with("NYL-KUBERNETES-HEALTH-TIMEOUT:"), "{message}");
+        assert!(message.starts_with("NYL-UNIT-HEALTH-TIMEOUT:"), "{message}");
         assert!(
             message.contains("catalog Application argocd/dev-catalog is not in the reading"),
             "{message}"
@@ -580,7 +596,7 @@ mod tests {
         let (waited, pauses, count) = run(3600, 3600, polls);
         let (_, retryable, message) = failed(waited);
         assert!(retryable);
-        assert!(message.starts_with("NYL-KUBERNETES-HEALTH-DEGRADED:"), "{message}");
+        assert!(message.starts_with("NYL-UNIT-HEALTH-DEGRADED:"), "{message}");
         assert!(pauses.is_empty());
         assert_eq!(count, 1);
         let transient: VecDeque<Poll> = (0..3).map(|_| not_yet("app is Degraded")).collect();

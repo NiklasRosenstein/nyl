@@ -614,7 +614,7 @@ spec:
   records. The engine has no generic replacement on an identity change (only
   a kind change replaces an incarnation), so a changed destination does not
   move the published tree: the driver fails before any effect with
-  `NYL-KUBERNETES-TARGET-CHANGED`, retryable (restoring the destination
+  `NYL-UNIT-DESTINATION-CHANGED` (`target-changed`), retryable (restoring the destination
   heals it), whose fix is to replace the unit with
   `nyl teardown -e <env> --unit <u>`, which tears down the stored document's
   old target, and then reconcile. A later milestone may let a driver declare
@@ -704,8 +704,8 @@ spec:
     Direct builds below).
   - A refused publication or removal fails with category `ownership`,
     retryable, because the next run reads state again; nothing was written.
-    The code says why: `NYL-KUBERNETES-OWNER-FENCED` while the owner exists,
-    and `NYL-KUBERNETES-OWNER-UNKNOWN` when state cannot say (an environment
+    The code says why: `NYL-UNIT-OWNER-FENCED` (`prefix-owned`) while the owner exists,
+    and `NYL-UNIT-OWNER-UNKNOWN` (`prefix-owned`) when state cannot say (an environment
     that was renamed or removed, or unreadable state). Publication outside
     orchestration refuses with `NYL-TREE-OWNED-BY-UNIT`. The way out of the
     last two, when the owner can no longer release the prefix, is deliberate:
@@ -810,7 +810,7 @@ spec:
 
   - The resource must be one the target renders. The driver checks this when
     it renders the target to resolve the unit, and rejects one outside the
-    rendered tree with its own code, `NYL-KUBERNETES-OBSERVATION-UNOWNED`, so
+    rendered tree with its own code, `NYL-OBSERVATION-UNOWNED` (`resource-not-rendered`), so
     the cluster is the target's Cluster and nothing outside the declaration
     is read. It rejects Secrets and the whole-resource pointer (`pointer: ""`), but a
     ConfigMap or a custom resource can still hold sensitive data, which the
@@ -882,9 +882,9 @@ reader-specific code (owner: `nyl_units::kubernetes_publication::health_wait`).
   when the reader marks it terminal (`Observed::terminal`): the direct reader
   does for a rollout past its progress deadline and a failed Job, and Argo CD's
   reader never does, because its controllers retry. A terminal reading fails the
-  unit with `NYL-KUBERNETES-HEALTH-DEGRADED`.
+  unit with `NYL-UNIT-HEALTH-DEGRADED` (`wait-healthy`).
 - **Timeout.** The unit fails, retryable, with category `timeout` and
-  `NYL-KUBERNETES-HEALTH-TIMEOUT`, naming the worst deployment and its last
+  `NYL-UNIT-HEALTH-TIMEOUT` (`wait-healthy`), naming the worst deployment and its last
   health. It fails rather than succeeds with a warning because the author asked
   for the wait: a receipt would tell dependents that the target is healthy, or
   at least settled, which it is not. The tree is published and applied, so the
@@ -910,7 +910,7 @@ orchestration:
   reference (`-e` names the way out). A unit that declares its target inline
   cannot be built without `-e`: the inline target is named
   `<environment>-<unit>` and rendered with the environment's values, so the
-  build refuses with `NYL-KUBERNETES-BUILD-INLINE-TARGET`.
+  build refuses with `NYL-BUILD-ENVIRONMENT-REQUIRED`.
 - With no argument, the build prints a `RenderedTree` document: the target's
   publication `repository`, `branch`, and `pathPrefix`, the `target`, the
   digest of every file beneath the prefix (`files`, by path in the
@@ -932,12 +932,12 @@ orchestration:
   retries of a run's publication, and prints the `PublishedTree` document a
   run records, without recording it. It publishes only a target no
   environment owns, and refuses otherwise, before anything is published,
-  with a stable code and the fix. `NYL-KUBERNETES-BUILD-TARGET-OWNED`,
-  `NYL-KUBERNETES-BUILD-DIRTY-SOURCE`, and `NYL-KUBERNETES-BUILD-IDENTITY`,
+  with a stable code and the fix. `NYL-BUILD-OWNED` (`target-owned`),
+  `NYL-BUILD-DIRTY-SOURCE`, and `NYL-COMMIT-IDENTITY-MISSING` (`publication-push`),
   checked in that order, come before the build's own render and clone (the
   unit was prepared, and so rendered for its key, before the driver ran);
   `NYL-TREE-OWNED-BY-UNIT` comes when the publication prepares, after them:
-  - `NYL-KUBERNETES-BUILD-TARGET-OWNED` when a publication unit that an
+  - `NYL-BUILD-OWNED` (`target-owned`) when a publication unit that an
     Environment selects places the target (`target_placements`: even a unit
     being torn down, because it owns its target until its teardown
     completes). The fix names `nyl reconcile -e <environment>`.
@@ -945,10 +945,10 @@ orchestration:
     incarnation. The publication records no owner, so it cannot tell whether
     that unit still exists; the way out is the one above, a deliberate
     release of the prefix.
-  - `NYL-KUBERNETES-BUILD-DIRTY-SOURCE` when the worktree has uncommitted
+  - `NYL-BUILD-DIRTY-SOURCE` when the worktree has uncommitted
     changes, because the index attributes the tree to a commit that must hold
     it; the fix is to commit, or to build a revision with `--source`.
-  - `NYL-KUBERNETES-BUILD-IDENTITY` when no identity is known to author the
+  - `NYL-COMMIT-IDENTITY-MISSING` (`publication-push`) when no identity is known to author the
     commit (`user.name` and `user.email` of the repository's Git
     configuration, or the wiring's author).
 
@@ -962,12 +962,12 @@ orchestration:
   `--diff` a `TreeDiff` whose `owner` is the string `catalog:<name>` when the
   branch holds the tree, and `--push` publishes it, creating or replacing the
   manifest as the one writer of it. No environment owns a shared catalog, so
-  `--push` is not refused as `NYL-KUBERNETES-BUILD-TARGET-OWNED`; the dirty
+  `--push` is not refused as `NYL-BUILD-OWNED` (`target-owned`); the dirty
   source and identity refusals apply, and a prefix owned by anything but
   `catalog:<name>` is fenced. A target that shares no catalog is refused with
-  `NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG`.
+  `NYL-BUILD-ARGUMENT` (`no-shared-catalog`).
 - Any other argument, or `--diff` with `--push`, is refused with
-  `NYL-KUBERNETES-BUILD-ARGUMENT`. The documents are local build information:
+  `NYL-BUILD-ARGUMENT`. The documents are local build information:
   nothing records them, and no reference reads them.
 
 **Teardown.** A publication unit supports teardown when its target is
@@ -1027,7 +1027,7 @@ most three times and within the unit's `timeout`. A target with
 `fromPublication` bindings is rendered again on the new head: when the state
 it read (the `@input/`, `@publication/`, and `@carried/` digests of its
 index) is unchanged, it publishes there; when it changed, the execution ends
-without publishing as a retryable failure with `NYL-KUBERNETES-STATE-CHANGED`,
+without publishing as a retryable failure with `NYL-UNIT-INPUTS-CHANGED` (`publication-state-changed`),
 and the next run resolves the unit again with the new state. A file the target
 owns that changed outside Nyl fails the execution, as reconciliation does.
 Any other failure of the push may have published and ends the call. Drift
@@ -1062,7 +1062,7 @@ path to the publication are not held back by its wait (see
 
 | Strategy | Phase 1 completes when | Default for |
 | --- | --- | --- |
-| `observe` | The driver reports that Argo CD no longer has any of the target's workload Applications (every Application except the catalog's), within the unit's `timeout`. Otherwise the teardown is uncertain, with the reason `applications-remain` (listing them) or `observation-failed` (with the driver's error, such as a missing credential or an unreachable Argo CD) | a unit that declares `observe` |
+| `observe` | The driver reports that Argo CD no longer has any of the target's workload Applications (every Application except the catalog's), within the unit's `timeout`. Otherwise the teardown is uncertain, with the reason `deployments-remain` (listing them) or `observation-failed` (with the driver's error, such as a missing credential or an unreachable Argo CD) | a unit that declares `observe` |
 | `delay` | `duration` has passed since the phase 1 commit, such as `{strategy: delay, duration: 10m}`; the teardown is recorded as not observed | |
 | `manual` | An operator confirms with `nyl teardown -e <env> --unit <u> --confirm-removed`; until then the unit is `tearing-down` and its dependencies wait, exit 2 | a unit without `observe` |
 
@@ -1233,7 +1233,7 @@ previews branch
   defaults; the index records no source commit, so two targets that share the
   catalog render byte-identical trees. `catalog:<name>` is no unit
   incarnation that a teardown could remove, so no unit takes the prefix over
-  (`NYL-KUBERNETES-OWNER-FENCED`), and the catalog's publication refuses a
+  (`NYL-UNIT-OWNER-FENCED`, detail `prefix-owned`), and the catalog's publication refuses a
   prefix whose index names another owner.
 - The manifest has one writer, and a target's publication only creates it:
   when the publication branch holds no tree at the catalog's prefix, the
@@ -1245,7 +1245,7 @@ previews branch
   requests running different Nyl versions never overwrite each other. It records
   the result (`created`, `current`, or `differs`) as `sharedCatalog` in the
   `PublishedTree` artifact it records, and for `differs` returns the warning
-  `NYL-KUBERNETES-SHARED-CATALOG-DIFFERS` (fix: the writer below) through the
+  `NYL-UNIT-SHARED-DIFFERS` (`shared-catalog-differs`) (fix: the writer below) through the
   driver's `warnings`, which the shell records with the receipt and shows in the
   run report, `plan`, and `status` until the unit executes again. That is what
   the unit's last execution found, not the branch's state now: `nyl build <unit>
@@ -1261,7 +1261,7 @@ previews branch
   job that reconciles the fleet runs the writer after it. The same arguments without `--push` print
   the rendered tree, and with `--diff` compare it with the branch. No
   environment owns the shared catalog, so that push is never refused as
-  `NYL-KUBERNETES-BUILD-TARGET-OWNED`.
+  `NYL-BUILD-OWNED` (`target-owned`).
 - Nothing is reconciled from state: Git holds the other targets' files, and
   a publish removes only files in the publishing target's index.
 - Nyl renders the shared catalog, so the readiness table checks its settings,
@@ -1280,7 +1280,7 @@ previews branch
   Application, is recorded as a blocking row (an offline run of `plan` shows it
   too, because resolution reads the branch and has no cached fallback). Whether it prunes, and its deletion policy, are the rows. The shared catalog prunes each target's objects as phase 1 and
   phase 2 remove them, so the target leaves no catalog remnant
-  (`NYL-TEARDOWN-CATALOG-REMAINS` does not apply).
+  (`NYL-TEARDOWN-REMNANT` (`catalog-remains`) does not apply).
   With `enabled: false`, Nyl cannot see the parent's sync and prune settings:
   the catalog rows become `external: not checked`, which the preflight reports
   without blocking, and `observe: {}` still checks that the Applications
@@ -1336,10 +1336,13 @@ Nyl reports unmet requirements where they matter:
   under `--allow-incomplete`, or ends a wait without a claim of removal, is
   recorded in the run's transition commit under `details.incomplete`, listing
   per unit what may remain, so state never claims a clean teardown that did
-  not happen. The blocking rows raise `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
-  `NYL-TEARDOWN-APPLICATIONS-ORPHANED`, and `NYL-TEARDOWN-NAMESPACE-CONFIRM`;
-  the remnant rows warn with `NYL-TEARDOWN-NAMESPACES-REMAIN` and
-  `NYL-TEARDOWN-CATALOG-REMAINS`; each names the setting that fixes it.
+  not happen. The blocking rows raise the generic `NYL-TEARDOWN-BLOCKED` and the
+  remnant rows warn with `NYL-TEARDOWN-REMNANT`; the driver tells the rows
+  apart with its `detail` (`catalog-manual-sync`, `shared-catalog-unreadable`,
+  `applications-orphaned`, `namespace-confirm`; `namespaces-remain`,
+  `catalog-remains`), and each names the setting that fixes it. The engine
+  decides from the readiness's typed blocking and remnant lists, never from a
+  code or a `detail`.
 - `nyl validate` does not check teardown readiness, because it cannot know
   whether a target will ever be torn down.
 
@@ -1397,7 +1400,7 @@ spec:
   unchanged), and a publication, because the tree is still published (see
   below). A unit that applies or reads a direct target also needs the
   Cluster's `spec.live.context`: resolution fails before effects with
-  `NYL-KUBERNETES-CLUSTER-CONTEXT-MISSING`, whose fix names the Cluster and
+  `NYL-UNIT-ACCESS-UNDECLARED` (`cluster-context-missing`), whose fix names the Cluster and
   the field. Rendering and `publish-tree` never need it.
 - **What it no longer needs.** No ArgoCDInstance (explicit or implicit), no
   catalog Application, no AppProject, no Application manifests, and no
@@ -1486,10 +1489,10 @@ the release revisions in the cluster cite. It holds:
   `_nyl/catalog`, and a self-managing catalog that prunes would then delete
   the Applications and, through their finalizers, the workloads. Switching is
   refused in this version, never an edit. The unit adds
-  `NYL-KUBERNETES-RECONCILER-CHANGED`, retryable, whose fix is to restore the
+  `NYL-UNIT-DESTINATION-CHANGED` (`reconciler-changed`), retryable, whose fix is to restore the
   declaration or replace the unit with `nyl teardown -e <env> --unit <u>`,
   before any effect. The receipt's `PublishedTree` now records `reconciler` and
-  `cluster` beside `target`, and `NYL-KUBERNETES-TARGET-CHANGED` compares the
+  `cluster` beside `target`, and `NYL-UNIT-DESTINATION-CHANGED` (`target-changed`) compares the
   Cluster as well, because the old Cluster would keep the workloads. The
   non-destructive way from Argo CD to direct, for workloads that must keep
   running, is a documented procedure: delete the catalog and workload
@@ -1528,7 +1531,7 @@ A receipt is written only after every Release applied and pruned, and Releases
 that left the tree are purged only then. Objects
 that a `Prune=confirm` Namespace policy keeps are not failures: the
 driver never confirms (confirmation is an input outside the declaration), keeps
-them tracked, and returns the warning `NYL-KUBERNETES-PRUNE-AWAITING-CONFIRMATION`
+them tracked, and returns the warning `NYL-UNIT-REMOVAL-UNCONFIRMED` (`prune-confirm`)
 naming them, with the fix of declaring `namespace.prunePolicy: Automatic` in
 Git. Both recovery policies are `Converge`; `inspect` stays unsupported.
 
@@ -1546,7 +1549,7 @@ deleted in a plain loop), so the one rule serves both; the second Ctrl-C's
 `process::exit(130)` leaves library code and becomes part of the interruption
 parameter below; and `nyl apply --target` resolves its context by the rule in
 the entry-point table. Each is a changelog entry, with the owner refusal and
-`NYL-KUBERNETES-TARGET-CHANGED` comparing the Cluster:
+`NYL-UNIT-DESTINATION-CHANGED` (`target-changed`) comparing the Cluster:
 
 - `prepare_manifests` (namespace resolution from the destination namespace,
   duplicate collapse), `apply_release`, and `purge_release`, which carry
@@ -1712,7 +1715,7 @@ release namespace, destination namespace, or additional namespace. A vanished
 Release is purged only if its latest revision names this unit incarnation as
 owner, or an incarnation of the same environment and unit that is gone; an
 unowned or foreign one is left and reported with
-`NYL-KUBERNETES-RELEASE-LEFT-BEHIND`, a warning, so a Release an apply by hand
+`NYL-UNIT-LEFT-BEHIND` (`release-left-behind`), a warning, so a Release an apply by hand
 took over stays until it is removed with `nyl release delete --take-over`. The
 purge of vanished Releases and the teardown are one planning and one purge
 (`classify_releases`, `execute_purge`): every Release of the set is classified
@@ -1725,7 +1728,7 @@ revisions after it, never the union of every stored revision, so an object kept
 by `Prune=false` and later untracked is not deleted), by each object's `Delete`
 option, in reverse order with waits. Only when every resource went does it delete
 state: first that of the Releases that track no deferred Namespace, then each
-deferred Namespace (left, with a `NYL-KUBERNETES-RELEASE-LEFT-BEHIND` warning, if
+deferred Namespace (left, with a `NYL-UNIT-LEFT-BEHIND` (`release-left-behind`) warning, if
 release state that is not the purge's own remains in it), and last the state of
 the Releases that tracked them, because that state is the only record of those
 Namespaces and a failure before then must leave it for the retry. The apply's
@@ -1753,7 +1756,8 @@ follow Argo CD's gitops-engine (`pkg/sync/hook`, `pkg/sync/sync_tasks.go`,
   apply. Only the delete hooks among them (`pre-delete`, `post-delete`, `PreDelete`,
   `PostDelete`) are reported, once per Release, as the warning
   `NYL-KUBERNETES-HOOK-IGNORED` (`ApplyEvent::DeleteHooksIgnored` carries the
-  `Finding`, which the driver adds to its warnings), because Argo CD would run them
+  `Finding`; the unit driver raises it as `NYL-UNIT-HOOK-IGNORED` with detail
+  `delete-hooks` and adds it to its warnings), because Argo CD would run them
   when it removes the Release and Nyl never does. `test` and the rollback hooks are
   left out silently, as Argo CD leaves them out (`nyl diff` lists them for
   information); every `helm create` chart declares a `test` hook. Delete policies
@@ -1873,11 +1877,11 @@ fail instead of being skipped over.
 | No revision | Create it, owned by this incarnation |
 | Owner is this incarnation | Proceed |
 | Unowned, with a `publication` destination equal to this target's | Adopt: the new revision records the owner, as the first orchestrated publication adopts an unowned index |
-| Unowned, with another destination, or none | `NYL-KUBERNETES-RELEASE-FENCED`: a Release of this name that this target did not apply lives here (a manual `nyl apply` with `--target` always records the destination, so only one applied without a target, or for another one, is refused) |
+| Unowned, with another destination, or none | `NYL-UNIT-OWNER-FENCED` (`release-owned`): a Release of this name that this target did not apply lives here (a manual `nyl apply` with `--target` always records the destination, so only one applied without a target, or for another one, is refused) |
 | A revision without `meta` after an owned one (an older `nyl` applied it) | Adopted with a warning, since the owner's earlier revision shows whose Release it is |
 | Owner is another incarnation that is `gone` | Take it over (the new owner's apply prunes what its own revision no longer holds) |
-| Owner is another incarnation that `exists` | `NYL-KUBERNETES-RELEASE-FENCED`: fenced until that unit's teardown completes or it is released with `nyl state forget` |
-| Owner is another incarnation whose existence state cannot say | `NYL-KUBERNETES-RELEASE-OWNER-UNKNOWN`, failing closed |
+| Owner is another incarnation that `exists` | `NYL-UNIT-OWNER-FENCED` (`release-owned`): fenced until that unit's teardown completes or it is released with `nyl state forget` |
+| Owner is another incarnation whose existence state cannot say | `NYL-UNIT-OWNER-UNKNOWN` (`release-owned`), failing closed |
 
 A refusal is category `ownership`, retryable, and happens in the preflight,
 before Git is touched, and again at `reserve` for the race. Two units that
@@ -2074,7 +2078,7 @@ declaration: the recorded reconciler kind (`/reconciler/kind`, which a direct
 unit records whether or not it observes), the location, and the recorded
 teardown settings decide how the unit is torn down. A declaration that now
 renders another reconciler fails the teardown before effects with
-`NYL-KUBERNETES-RECONCILER-CHANGED`, whose fix is to restore the declaration
+`NYL-UNIT-DESTINATION-CHANGED` (`reconciler-changed`), whose fix is to restore the declaration
 (a teardown cannot be the remedy for itself). The engine hands every driver's
 teardown the unit's stored artifacts, as it does a reconcile, so a driver can
 tell what the unit published before, such as a tree's last commit; that is a
@@ -2098,7 +2102,7 @@ generic engine rule, with no kind-specific branch.
    anchor with it. A Release this unit may not remove (one another unit owns,
    or one applied for another publication) is left with its objects, and its
    state Namespaces are protected like the rest; the phase reports each one with
-   `NYL-KUBERNETES-RELEASE-LEFT-BEHIND`, a warning, and the wait does not wait
+   `NYL-UNIT-LEFT-BEHIND` (`release-left-behind`), a warning, and the wait does not wait
    for it. Release state is kept. Git first, like a publication, so the record never lags the cluster;
    that commit is phase 1's `published` evidence. A purge failure is a
    `Failed` outcome that a new run converges. The simpler alternative to
@@ -2137,7 +2141,7 @@ shell displays the findings unchanged.
 
 | Requirement | Setting | If unmet |
 | --- | --- | --- |
-| Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain (`NYL-TEARDOWN-NAMESPACES-REMAIN`) |
+| Owned Namespaces are removed | namespace `deletePolicy` is `Automatic` | Remnant: empty Namespaces remain (`NYL-TEARDOWN-REMNANT`, detail `namespaces-remain`) |
 | Resources with `Delete=false` or `Delete=confirm` | Not statically knowable beyond Namespaces | Not checked |
 | The credentials may delete | RBAC | Not checked |
 
@@ -2145,9 +2149,8 @@ The Argo CD rows that stop a teardown (the catalog prunes, an Application
 deletion policy deletes workloads, a resource or Application requiring confirmation through `Prune=confirm` or
 `Delete=confirm` holds an Application's finalizer) have no counterpart, because nothing here holds a
 finalizer: a kept Namespace is a remnant, not a blocker, so a direct target
-has no blocking requirement and `NYL-TEARDOWN-CATALOG-MANUAL-SYNC`,
-`NYL-TEARDOWN-APPLICATIONS-ORPHANED`, `NYL-TEARDOWN-NAMESPACE-CONFIRM`, and
-`NYL-TEARDOWN-CATALOG-REMAINS` never arise. Namespace policies mean: `prunePolicy`
+has no blocking requirement and `NYL-TEARDOWN-BLOCKED` (`catalog-manual-sync`, `applications-orphaned`, `namespace-confirm`), and
+`NYL-TEARDOWN-REMNANT` (`catalog-remains`) never arise. Namespace policies mean: `prunePolicy`
 decides whether a Namespace a Release stops declaring is deleted by the next
 apply (`Confirm`, the default, keeps it tracked with the warning above),
 and `deletePolicy` whether the teardown deletes it. Unlike Argo CD's readiness,
@@ -2204,7 +2207,7 @@ At reading time the gate "the deployment runs the current publication" is the
 same restricted evaluation (`restricted_to` the owning deployment, the same
 `evaluate`) over the `DirectReader`, and the field is then read from the
 workload Cluster through the same context, which for a direct target is the
-delivery Cluster. `pending`, `failed`, and `NYL-KUBERNETES-OBSERVATION-UNOWNED`
+delivery Cluster. `pending`, `failed`, and `NYL-OBSERVATION-UNOWNED` (`resource-not-rendered`)
 mean what they mean today.
 
 #### Previews and the shared catalog
@@ -2224,7 +2227,7 @@ mean what they mean today.
   teardown above.
 - The Argo CD name uniqueness rule is not evaluated for direct targets.
 - `nyl build --shared-catalog` on a direct target is refused with the
-  existing `NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG`.
+  existing `NYL-BUILD-ARGUMENT` (`no-shared-catalog`).
 
 #### End-to-end harness
 
@@ -2278,7 +2281,7 @@ The engine, the state formats, and the CLI workflows learn nothing: the
 driver already reports a deployment set, a reading, a removal, an owner
 fence, and an outcome through generic contracts, and the unit's `observe`
 stays kind-agnostic. The reader, health rules, fence variants, and codes
-(`NYL-KUBERNETES-RELEASE-FENCED`, `-RELEASE-OWNER-UNKNOWN`, `-RECONCILER-CHANGED`,
+(`NYL-UNIT-OWNER-FENCED` (`release-owned`), `-RELEASE-OWNER-UNKNOWN`, `-RECONCILER-CHANGED`,
 `-CLUSTER-CONTEXT-MISSING`, `-DIRECT-RELEASE-COLLISION`,
 `-PRUNE-AWAITING-CONFIRMATION`) are the publication driver's. The only
 additions outside the driver are declaration and rendering of the target
@@ -4676,10 +4679,26 @@ enum Outcome {
     Succeeded { outputs: Outputs, artifacts: Vec<Artifact>, attestations: Vec<AttestationResult> },
     AwaitingApproval { digest: ChangeDigest },               // plan changed since approval; no effects
     Waiting { phase: String, reason: String, until: Option<Timestamp>, published: Option<CommitId> }, // effects so far are recorded; call again
-    Failed { category: FailureCategory, retryable: bool, message: String },
+    Failed { category: FailureCategory, retryable: bool, message: String, code: Option<Code>, detail: Option<String> },
+    RetryRequired { category: FailureCategory, message: String, context: Value, code: Option<Code>, detail: Option<String> },
     Uncertain { reason: String },
 }
 ```
+
+**Codes.** A driver raises only Nyl's generic stable codes, named for what
+happened to a unit, its deployments, or its teardown (`NYL-UNIT-OWNER-FENCED`,
+`NYL-TEARDOWN-BLOCKED`), never for a kind, tool, or reconciler. The driver
+supplies the kind-specific message and fix, and an optional `detail`: a
+kebab-case slug that tells cases under one code apart for scripts, such as
+`catalog-manual-sync` under `NYL-TEARDOWN-BLOCKED`. Findings (warnings and
+teardown readiness) carry `detail` next to `code`; a failure carries `code`
+and `detail` in `Outcome::Failed` and `Outcome::RetryRequired`, and a
+Nyl-side `DriverError` can carry them too. The shell records a failure's
+message prefixed with its code, so a stored condition reads as before, and
+shows `code` and `detail` in the run report. The engine decides from the
+code alone, and only where the contract says so; it never reads `detail`.
+Codes that Nyl's own rendering and apply raise outside orchestration (direct
+mode) are not unit codes.
 
 | Type | Content |
 | --- | --- |

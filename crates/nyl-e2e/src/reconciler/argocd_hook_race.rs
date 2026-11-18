@@ -20,7 +20,7 @@
 //! The new Job keeps the finalizer. When the Application is deleted with
 //! cascade, the Job never goes, and Argo CD logs "2 objects remaining for
 //! deletion" until a teardown that waits for it times out. Nyl reports that
-//! correctly (`applications-remain`), so without this workaround the suite
+//! correctly (`deployments-remain`), so without this workaround the suite
 //! would fail on Argo CD's bug, not on Nyl's behavior.
 //!
 //! The suite plays the operator here: after Argo CD's last operation on the

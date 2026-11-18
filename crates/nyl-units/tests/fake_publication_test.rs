@@ -67,9 +67,12 @@ fn test_fake_publication_readiness_comes_from_the_stored_document() {
         readiness
             .blocking
             .iter()
-            .map(|finding| finding.code)
+            .map(|finding| (finding.code, finding.detail.as_deref().unwrap_or_default()))
             .collect::<Vec<_>>(),
-        vec![Code::TeardownCatalogManualSync, Code::TeardownNamespaceConfirm]
+        vec![
+            (Code::TeardownBlocked, "catalog-manual-sync"),
+            (Code::TeardownBlocked, "namespace-confirm")
+        ]
     );
 
     // A catalog that prunes automatically but waits for confirmation to prune is held on the catalog's code.
@@ -89,9 +92,9 @@ fn test_fake_publication_readiness_comes_from_the_stored_document() {
         readiness
             .blocking
             .iter()
-            .map(|finding| finding.code)
+            .map(|finding| (finding.code, finding.detail.as_deref().unwrap_or_default()))
             .collect::<Vec<_>>(),
-        vec![Code::TeardownCatalogManualSync]
+        vec![(Code::TeardownBlocked, "catalog-manual-sync")]
     );
 
     // A parent-owned catalog records its settings as external: nothing blocks.
