@@ -262,7 +262,7 @@ whose previews should expire unattended sets <code dir="auto">observe</code> or 
 publications; <code dir="auto">state init --template</code> warns (<code dir="auto">NYL-TEARDOWN-WAIT-MANUAL</code>)
 about a <code dir="auto">manual</code> wait and about every unmet teardown requirement of the units
 it can resolve before their producers ran, such as a catalog that does not
-prune (<code dir="auto">NYL-TEARDOWN-CATALOG-MANUAL-SYNC</code>). <code dir="auto">plan</code> shows the rest once the units
+prune (<code dir="auto">NYL-TEARDOWN-BLOCKED</code>, detail <code dir="auto">catalog-manual-sync</code>). <code dir="auto">plan</code> shows the rest once the units
 resolve.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="source-keep-refs">Source keep refs</h2><a class="sl-anchor-link" href="#source-keep-refs"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Source keep refs”</span></a></div>
 <p>Teardown needs the instance’s source files, and a closed pull request’s branch
@@ -342,7 +342,7 @@ compare-and-swap: a publication that loses the race reads the new head and
 leaves the winner’s manifest. It records the result in the <code dir="auto">PublishedTree</code>
 artifact (<code dir="auto">nyl get artifact kubernetes/tree -e &#x3C;instance></code>):
 <code dir="auto">sharedCatalog.result</code> is <code dir="auto">created</code>, <code dir="auto">current</code>, or <code dir="auto">differs</code>, and for <code dir="auto">differs</code>
-it warns with <code dir="auto">NYL-KUBERNETES-SHARED-CATALOG-DIFFERS</code> in the run, and in
+it warns with <code dir="auto">NYL-UNIT-SHARED-DIFFERS</code> (<code dir="auto">shared-catalog-differs</code>) in the run, and in
 <code dir="auto">plan</code> and <code dir="auto">status</code> until the unit executes again. To replace the manifest,
 for example after a Nyl upgrade or a change of the <code dir="auto">shared</code> block, run the
 build from the revision that should win, in the scheduled job on the default
@@ -380,7 +380,7 @@ read (including offline: resolution has no cached fallback) or a manifest that
 is no Application is a blocking row. A teardown whose catalog no longer prunes
 is held by the driver even when the instance’s stored settings said it did, so
 run the writer before instances expire. The
-<code dir="auto">NYL-KUBERNETES-SHARED-CATALOG-DIFFERS</code> warning is what the unit’s last
+<code dir="auto">NYL-UNIT-SHARED-DIFFERS</code> (<code dir="auto">shared-catalog-differs</code>) warning is what the unit’s last
 execution found and stays until it executes again; <code dir="auto">nyl build &#x3C;unit> -e &#x3C;env> -- --shared-catalog --diff</code> shows the branch’s state now. An instance
 leaves nothing of its catalog behind, because the shared catalog prunes its
 objects; the catalog itself stays until it is decommissioned.</p>

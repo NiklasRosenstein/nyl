@@ -303,7 +303,9 @@ by <code dir="auto">helm create</code> declares a <code dir="auto">test</code> h
 when it removes an Application (<code dir="auto">PreDelete</code>, <code dir="auto">PostDelete</code>, <code dir="auto">pre-delete</code>,
 <code dir="auto">post-delete</code>) are never run by Nyl when it removes a Release, and that matters:
 <code dir="auto">nyl apply</code> warns once per Release with <code dir="auto">NYL-KUBERNETES-HOOK-IGNORED</code>, naming them,
-and <code dir="auto">release delete --purge</code> warns too, before it goes ahead. To act on the warning,
+and <code dir="auto">release delete --purge</code> warns too, before it goes ahead. A
+<a href="/nyl/orchestration/resource-guides/kubernetes-publication/#direct-targets">KubernetesPublication</a>
+unit with a direct target raises the same warning as <code dir="auto">NYL-UNIT-HOOK-IGNORED</code> (<code dir="auto">delete-hooks</code>). To act on the warning,
 do what the hook does yourself before the Release is removed, drop the hook from the
 Release, or mark it <code dir="auto">argocd.argoproj.io/hook: Skip</code>, which leaves it out of Argo CD’s
 sync as well and ends the warning.</p>
@@ -356,7 +358,9 @@ records differs from what the connected cluster reports, <code dir="auto">apply<
 <code dir="auto">release rollback</code> still use the recorded scope and warn once per kind with
 <code dir="auto">NYL-KUBERNETES-SCOPE-MISMATCH</code>; its fix is to re-run
 <code dir="auto">nyl capture cluster &#x3C;name> --crds</code> and commit the result. The direct reconciler
-reports the same warning in its run. A kind that none of these
+reports the same warning in its run as <code dir="auto">NYL-UNIT-CAPABILITY-MISMATCH</code>
+(<code dir="auto">scope-mismatch</code>), next to <code dir="auto">NYL-UNIT-HOOK-IGNORED</code>
+(<code dir="auto">delete-hooks</code>). A kind that none of these
 knows, such as one an APIService in the same manifest will serve, keeps no namespace:
 set <code dir="auto">metadata.namespace</code> on it.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="examples">Examples</h2><a class="sl-anchor-link" href="#examples"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Examples”</span></a></div>

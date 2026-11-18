@@ -106,7 +106,7 @@ output marked sensitive must be declared sensitive; Nyl checks this before
 apply. Teardown creates and applies a native destroy plan using the same
 approval rules.</p>
 <p>A missing backend state for a unit with a receipt fails with
-<code dir="auto">NYL-TOFU-STATE-MISSING</code>, instead of recreating resources. Restore it, or use
+<code dir="auto">NYL-UNIT-NATIVE-STATE-MISSING</code> (<code dir="auto">backend-state-missing</code>), instead of recreating resources. Restore it, or use
 <code dir="auto">nyl recover --retry --reason</code> to accept an intentionally empty state for that
 ownership scope. The acknowledgement applies to the recorded unit incarnation,
 backend, and workspace, and expires after successful reconciliation. Changing any

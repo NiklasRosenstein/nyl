@@ -79,10 +79,9 @@ matches, so a selector typo reads as one;</li>
 publication’s unmet teardown readiness. Retained tombstones are listed as
 <code dir="auto">retained</code>. See <a href="/nyl/orchestration/deletion/">Deletion and holds</a>;</li>
 <li>warnings for each unmet teardown requirement, and each remnant, of every
-publication that would be torn down (<code dir="auto">NYL-TEARDOWN-CATALOG-MANUAL-SYNC</code>,
-<code dir="auto">NYL-TEARDOWN-APPLICATIONS-ORPHANED</code>, <code dir="auto">NYL-TEARDOWN-NAMESPACE-CONFIRM</code>,
-<code dir="auto">NYL-TEARDOWN-NAMESPACES-REMAIN</code>, <code dir="auto">NYL-TEARDOWN-CATALOG-REMAINS</code>), each naming
-the setting that fixes it;</li>
+publication that would be torn down (<code dir="auto">NYL-TEARDOWN-BLOCKED</code> and
+<code dir="auto">NYL-TEARDOWN-REMNANT</code>, whose <code dir="auto">detail</code> names the requirement or the
+remnant), each naming the setting that fixes it;</li>
 <li>for an environment that two or more PromotionPaths promote into, a
 <code dir="auto">NYL-PROMOTE-UNCHECKED</code> warning for each value they both carry that has no
 known source commit, such as a command’s output or a Release input written

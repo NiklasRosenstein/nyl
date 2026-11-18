@@ -72,6 +72,14 @@ reads the reconciler that runs its target, Argo CD (see
 <a href="#observing-argo-cd">Observing Argo CD</a>), and the live cluster (see
 <a href="#observed-values">Observed values</a>). The common unit fields
 (<code dir="auto">dependsOn</code>, <code dir="auto">timeout</code>, <code dir="auto">env</code>, and so on) apply; <code dir="auto">timeout</code> defaults to <code dir="auto">10m</code>.</p>
+<p>The unit raises the generic codes every unit kind shares, such as
+<code dir="auto">NYL-UNIT-OWNER-FENCED</code> or <code dir="auto">NYL-TEARDOWN-BLOCKED</code>; its messages and fixes
+name the Kubernetes and Argo CD specifics. Where one code covers several
+cases, the finding or failure carries a <code dir="auto">detail</code> that tells them apart, shown
+in parentheses in this guide (<code dir="auto">NYL-TEARDOWN-BLOCKED</code> (<code dir="auto">catalog-manual-sync</code>))
+and as <code dir="auto">detail</code> in <code dir="auto">-o json</code> output. Match scripts on the code and the
+<code dir="auto">detail</code>, never on the message. <code dir="auto">nyl render</code>, <code dir="auto">diff</code>, and <code dir="auto">apply</code> outside
+orchestration keep their own codes, such as <code dir="auto">NYL-KUBERNETES-SCOPE-MISMATCH</code>.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="inline-targets">Inline targets</h2><a class="sl-anchor-link" href="#inline-targets"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Inline targets”</span></a></div>
 <p>A unit can declare its DeploymentTarget in <code dir="auto">spec.target.inline</code>, as a
 DeploymentTarget <code dir="auto">spec</code> rendered with the unit for each environment, so one
@@ -86,7 +94,7 @@ that declares the unit.</p>
 <p>A unit publishes to one destination, its target’s name and publication
 repository, branch, and prefix. Changing any of them, such as renaming the
 target or the prefix, does not move the published tree: the next publication
-fails before writing anything with <code dir="auto">NYL-KUBERNETES-TARGET-CHANGED</code>, naming what
+fails before writing anything with <code dir="auto">NYL-UNIT-DESTINATION-CHANGED</code> (<code dir="auto">target-changed</code>), naming what
 changed, until you restore the previous destination or replace the unit. To
 replace it, run <code dir="auto">nyl teardown -e &#x3C;env> --unit &#x3C;unit></code>, which removes the tree
 the unit published (its stored document still names the old target), and then
@@ -140,7 +148,7 @@ first, nothing was published, and the unit builds its commit again on the new
 head, up to three times and within its <code dir="auto">timeout</code>. A target with
 <code dir="auto">fromPublication</code> bindings is rendered again on the new head: when the state
 files it read are unchanged, it publishes there. When one changed, the unit
-ends without publishing as a retryable failure, <code dir="auto">NYL-KUBERNETES-STATE-CHANGED</code>,
+ends without publishing as a retryable failure, <code dir="auto">NYL-UNIT-INPUTS-CHANGED</code> (<code dir="auto">publication-state-changed</code>),
 and the next run resolves it again with the new state.</p>
 <p><code dir="auto">detect-drift</code> publishes nothing: it compares the branch with the tree the unit
 renders. It reports <code dir="auto">drifted</code> when they differ, or when an owned file was
@@ -161,11 +169,11 @@ environment, the unit, and the incarnation’s uid (the <code dir="auto">owner</
 version 3 index; indexes without one, as <code dir="auto">publish-tree</code> writes them, stay
 readable). The tree of a <a href="/nyl/orchestration/resource-guides/environment-template/#one-catalog-for-every-instance">shared catalog</a>
 records the string <code dir="auto">catalog:&#x3C;name></code> instead. No unit incarnation owns it, so no
-unit takes its prefix over (<code dir="auto">NYL-KUBERNETES-OWNER-FENCED</code>) and a target’s
+unit takes its prefix over (<code dir="auto">NYL-UNIT-OWNER-FENCED</code>, detail <code dir="auto">prefix-owned</code>) and a target’s
 <code dir="auto">pathPrefix</code> may not lie in the reserved <code dir="auto">_nyl/shared</code> directory. A publication or teardown refuses a prefix that names another
 incarnation while that incarnation still exists in its environment’s state,
 active, held, deleting, or retained. It fails with
-<code dir="auto">NYL-KUBERNETES-OWNER-FENCED</code>, naming the owner, and publishes and removes
+<code dir="auto">NYL-UNIT-OWNER-FENCED</code> (<code dir="auto">prefix-owned</code>), naming the owner, and publishes and removes
 nothing; the failure is retryable, because the next run reads state again. A
 target moves between environments once the old environment’s incarnation is
 gone: its teardown completed, or <code dir="auto">nyl state forget</code> released it. The first
@@ -200,7 +208,7 @@ prefix an orchestrated unit owns.</p>
 
 
 
-<table><thead><tr><th>Code</th><th>Meaning and fix</th></tr></thead><tbody><tr><td><code dir="auto">NYL-KUBERNETES-OWNER-FENCED</code></td><td>Another unit incarnation that still exists owns the prefix. Tear that unit down or release it with <code dir="auto">nyl state forget</code>, then run again.</td></tr><tr><td><code dir="auto">NYL-KUBERNETES-OWNER-UNKNOWN</code></td><td>The owner’s environment was renamed or removed, or its state cannot be read, so Nyl cannot tell whether the owner exists. Declare the environment again and tear its unit down, or release the prefix deliberately (below).</td></tr><tr><td><code dir="auto">NYL-TREE-OWNED-BY-UNIT</code></td><td><code dir="auto">publish-tree</code>, <code dir="auto">render-tree</code>, or <code dir="auto">nyl build -- --push</code> met a prefix an orchestrated unit owns, for example after <code dir="auto">nyl state forget</code> released the unit. Publish through the environment that owns it, or release the prefix deliberately (below).</td></tr><tr><td><code dir="auto">NYL-KUBERNETES-TARGET-CHANGED</code></td><td>The unit’s destination changed since it last published. Restore it, or replace the unit as described under <a href="#inline-targets">Inline targets</a>.</td></tr></tbody></table>
+<table><thead><tr><th>Code</th><th>Meaning and fix</th></tr></thead><tbody><tr><td><code dir="auto">NYL-UNIT-OWNER-FENCED</code> (<code dir="auto">prefix-owned</code>)</td><td>Another unit incarnation that still exists owns the prefix. Tear that unit down or release it with <code dir="auto">nyl state forget</code>, then run again.</td></tr><tr><td><code dir="auto">NYL-UNIT-OWNER-UNKNOWN</code> (<code dir="auto">prefix-owned</code>)</td><td>The owner’s environment was renamed or removed, or its state cannot be read, so Nyl cannot tell whether the owner exists. Declare the environment again and tear its unit down, or release the prefix deliberately (below).</td></tr><tr><td><code dir="auto">NYL-TREE-OWNED-BY-UNIT</code></td><td><code dir="auto">publish-tree</code>, <code dir="auto">render-tree</code>, or <code dir="auto">nyl build -- --push</code> met a prefix an orchestrated unit owns, for example after <code dir="auto">nyl state forget</code> released the unit. Publish through the environment that owns it, or release the prefix deliberately (below).</td></tr><tr><td><code dir="auto">NYL-UNIT-DESTINATION-CHANGED</code> (<code dir="auto">target-changed</code>)</td><td>The unit’s destination changed since it last published. Restore it, or replace the unit as described under <a href="#inline-targets">Inline targets</a>.</td></tr></tbody></table>
 <p>To release a prefix deliberately, commit to the publication branch a change to
 <code dir="auto">&#x3C;prefix>/_nyl/index.json</code> that removes its <code dir="auto">owner</code> member and sets <code dir="auto">version</code>
 to <code dir="auto">3</code>. The prefix is then unowned, and the next publication adopts it.</p>
@@ -325,9 +333,9 @@ any other not-yet-healthy state; if it never appears, the timeout names it and
 says to apply it.</li>
 <li>A <code dir="auto">Degraded</code> reading ends the wait early only when it cannot recover, such as a
 Deployment past its progress deadline or a failed Job
-(<code dir="auto">NYL-KUBERNETES-HEALTH-DEGRADED</code>). Argo CD’s <code dir="auto">Degraded</code> is never final, because
+(<code dir="auto">NYL-UNIT-HEALTH-DEGRADED</code>, detail <code dir="auto">wait-healthy</code>). Argo CD’s <code dir="auto">Degraded</code> is never final, because
 its controllers retry.</li>
-<li>On the timeout the unit fails, retryable, with <code dir="auto">NYL-KUBERNETES-HEALTH-TIMEOUT</code>
+<li>On the timeout the unit fails, retryable, with <code dir="auto">NYL-UNIT-HEALTH-TIMEOUT</code> (<code dir="auto">wait-healthy</code>)
 naming the worst deployment and its last health. It fails rather than warns
 because you asked for the wait; the tree is published and applied, so the next
 reconcile publishes nothing, applies again, and waits again. The wait never
@@ -354,10 +362,39 @@ as a new release revision that records the unit, the publication, and its commit
 <p>A failure after step 2 leaves Git ahead of the cluster, never behind: the unit has no
 receipt, and the next execution applies again. A second unit, environment, or
 manual <code dir="auto">nyl apply</code> cannot take a Release over while its owner exists
-(<code dir="auto">NYL-KUBERNETES-RELEASE-FENCED</code>). <code dir="auto">nyl attest</code> reads the release state and the rollout
+(<code dir="auto">NYL-UNIT-OWNER-FENCED</code>, detail <code dir="auto">release-owned</code>). <code dir="auto">nyl attest</code> reads the release state and the rollout
 status of the workloads; a revision applied outside the unit is <code dir="auto">unreadable</code> until
 the next reconcile. Teardown deletes in two phases and keeps the Namespaces that hold
 the release state until its wait ends.</p>
+<p>A direct target’s unit raises these warnings and refusals of its own:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Code</th><th>Meaning and fix</th></tr></thead><tbody><tr><td><code dir="auto">NYL-UNIT-HOOK-IGNORED</code> (<code dir="auto">delete-hooks</code>)</td><td>A Release declares delete hooks (<code dir="auto">pre-delete</code>, <code dir="auto">post-delete</code>, <code dir="auto">PreDelete</code>, <code dir="auto">PostDelete</code>), which Nyl never runs; one warning per Release. Do what the hook does yourself before the Release is removed, drop the hook, or mark it <code dir="auto">argocd.argoproj.io/hook: Skip</code>.</td></tr><tr><td><code dir="auto">NYL-UNIT-CAPABILITY-MISMATCH</code> (<code dir="auto">scope-mismatch</code>)</td><td>A kind’s scope that the Cluster records differs from what the connected cluster reports, so the apply used the recorded scope; one warning per kind. Run <code dir="auto">nyl capture cluster &#x3C;name> --crds</code> and commit the result.</td></tr><tr><td><code dir="auto">NYL-UNIT-ACCESS-UNDECLARED</code> (<code dir="auto">cluster-context-missing</code>)</td><td>The target’s Cluster declares no <code dir="auto">spec.live.context</code>. Declare the context the unit connects through.</td></tr><tr><td><code dir="auto">NYL-UNIT-HISTORY-TOO-DEEP</code> (<code dir="auto">release-history</code>)</td><td>The publication branch holds more publications since the unit’s last receipt than Nyl reads, so it cannot tell which Releases left the tree, and removes none. Publish fewer commits between executions, or release the leftovers by hand with <code dir="auto">nyl release delete --target &#x3C;target> --take-over</code>.</td></tr></tbody></table>
+<p><code dir="auto">nyl apply</code>, <code dir="auto">diff</code>, and the <code dir="auto">release</code> commands raise the first two as
+<code dir="auto">NYL-KUBERNETES-HOOK-IGNORED</code> and <code dir="auto">NYL-KUBERNETES-SCOPE-MISMATCH</code>.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="observed-values">Observed values</h2><a class="sl-anchor-link" href="#observed-values"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Observed values”</span></a></div>
 <p>A unit that declares <code dir="auto">observe: {}</code> can read a field of a resource its target renders
 from the live cluster, such as the address a cloud load balancer assigns to a
@@ -377,7 +414,7 @@ credentials that publishing alone does not need.</p>
 <ul>
 <li><strong>Only what the target renders.</strong> Resolution renders the target and checks
 that one of its Releases renders the resource. A resource outside the
-rendered tree is rejected with <code dir="auto">NYL-KUBERNETES-OBSERVATION-UNOWNED</code>, so the
+rendered tree is rejected with <code dir="auto">NYL-OBSERVATION-UNOWNED</code> (<code dir="auto">resource-not-rendered</code>), so the
 cluster the unit reads is the target’s Cluster and nothing outside the
 declaration. A manifest without <code dir="auto">metadata.namespace</code> belongs to the namespace
 its Application deploys to. Secrets are never read. Resolution records the
@@ -449,12 +486,12 @@ with <code dir="auto">--diff</code> and <code dir="auto">--push</code>. The docu
 (<code dir="auto">pathPrefix</code> <code dir="auto">_nyl/shared/&#x3C;name></code>, <code dir="auto">target</code> <code dir="auto">catalog:&#x3C;name></code>, and in a <code dir="auto">TreeDiff</code>
 the <code dir="auto">owner</code> <code dir="auto">catalog:&#x3C;name></code>). <code dir="auto">--push</code> is the one writer that replaces the
 manifest, and no environment owns the catalog, so it is not refused as
-<code dir="auto">NYL-KUBERNETES-BUILD-TARGET-OWNED</code>; the dirty-source and identity refusals
+<code dir="auto">NYL-BUILD-OWNED</code> (<code dir="auto">target-owned</code>); the dirty-source and identity refusals
 apply. A target that shares no catalog fails with
-<code dir="auto">NYL-KUBERNETES-BUILD-NO-SHARED-CATALOG</code>. A run’s publication only creates the
+<code dir="auto">NYL-BUILD-ARGUMENT</code> (<code dir="auto">no-shared-catalog</code>). A run’s publication only creates the
 manifest (by compare-and-swap), and records <code dir="auto">sharedCatalog.result</code> (<code dir="auto">created</code>,
 <code dir="auto">current</code>, or <code dir="auto">differs</code>) in its <code dir="auto">PublishedTree</code>; <code dir="auto">differs</code> also warns with
-<code dir="auto">NYL-KUBERNETES-SHARED-CATALOG-DIFFERS</code>, shown in the run, <code dir="auto">plan</code>, and <code dir="auto">status</code>.
+<code dir="auto">NYL-UNIT-SHARED-DIFFERS</code> (<code dir="auto">shared-catalog-differs</code>), shown in the run, <code dir="auto">plan</code>, and <code dir="auto">status</code>.
 Another <code dir="auto">_nyl/shared/&#x3C;name>/</code> tree on the branch refuses with
 <code dir="auto">NYL-KUBERNETES-SHARED-CATALOG-CONFLICT</code>.</p>
 <p><code dir="auto">--diff</code> reads the destination and writes nothing, so it also compares a tree
@@ -464,7 +501,7 @@ prefix that the published <code dir="auto">_nyl/index.json</code> does not recor
 other tools committed, are not part of the tree.</p>
 <p><code dir="auto">--push</code> publishes the render as one commit authored by the identity of the
 repository’s Git configuration, and only for a target no environment owns. It
-refuses, before anything is published, with the codes below. The first, <code dir="auto">NYL-KUBERNETES-BUILD-TARGET-OWNED</code>, then <code dir="auto">NYL-KUBERNETES-BUILD-DIRTY-SOURCE</code> and <code dir="auto">NYL-KUBERNETES-BUILD-IDENTITY</code>, are checked before the build’s own render; <code dir="auto">NYL-TREE-OWNED-BY-UNIT</code> is found when the publication prepares, after it. A refusal is a failed build, exit 3:</p>
+refuses, before anything is published, with the codes below. The first, <code dir="auto">NYL-BUILD-OWNED</code> (<code dir="auto">target-owned</code>), then <code dir="auto">NYL-BUILD-DIRTY-SOURCE</code> and <code dir="auto">NYL-COMMIT-IDENTITY-MISSING</code> (<code dir="auto">publication-push</code>), are checked before the build’s own render; <code dir="auto">NYL-TREE-OWNED-BY-UNIT</code> is found when the publication prepares, after it. A refusal is a failed build, exit 3:</p>
 
 
 
@@ -490,15 +527,15 @@ refuses, before anything is published, with the codes below. The first, <code di
 
 
 
-<table><thead><tr><th>Code</th><th>Meaning and fix</th></tr></thead><tbody><tr><td><code dir="auto">NYL-KUBERNETES-BUILD-TARGET-OWNED</code></td><td>An Environment selects a publication unit that places the target, even one being torn down. Publish with <code dir="auto">nyl reconcile -e &#x3C;environment></code>, or deselect the unit from that environment first.</td></tr><tr><td><code dir="auto">NYL-TREE-OWNED-BY-UNIT</code></td><td>The published index names a unit incarnation. A direct publication records no owner, so it cannot tell whether that unit still exists; release the prefix deliberately (see <a href="#ownership">Ownership</a>).</td></tr><tr><td><code dir="auto">NYL-KUBERNETES-BUILD-DIRTY-SOURCE</code></td><td>The worktree has uncommitted changes, which the index could not attribute to a commit. Commit them, or build a revision with <code dir="auto">--source &#x3C;revision></code>.</td></tr><tr><td><code dir="auto">NYL-KUBERNETES-BUILD-IDENTITY</code></td><td>No identity to author the commit. Set <code dir="auto">user.name</code> and <code dir="auto">user.email</code> in the repository’s Git configuration.</td></tr></tbody></table>
+<table><thead><tr><th>Code</th><th>Meaning and fix</th></tr></thead><tbody><tr><td><code dir="auto">NYL-BUILD-OWNED</code> (<code dir="auto">target-owned</code>)</td><td>An Environment selects a publication unit that places the target, even one being torn down. Publish with <code dir="auto">nyl reconcile -e &#x3C;environment></code>, or deselect the unit from that environment first.</td></tr><tr><td><code dir="auto">NYL-TREE-OWNED-BY-UNIT</code></td><td>The published index names a unit incarnation. A direct publication records no owner, so it cannot tell whether that unit still exists; release the prefix deliberately (see <a href="#ownership">Ownership</a>).</td></tr><tr><td><code dir="auto">NYL-BUILD-DIRTY-SOURCE</code></td><td>The worktree has uncommitted changes, which the index could not attribute to a commit. Commit them, or build a revision with <code dir="auto">--source &#x3C;revision></code>.</td></tr><tr><td><code dir="auto">NYL-COMMIT-IDENTITY-MISSING</code> (<code dir="auto">publication-push</code>)</td><td>No identity to author the commit. Set <code dir="auto">user.name</code> and <code dir="auto">user.email</code> in the repository’s Git configuration.</td></tr></tbody></table>
 <p>The index of a direct publication has version 3 and no owner, as <code dir="auto">publish-tree</code>
 writes it, so an environment that later selects the unit adopts the prefix.
 <code dir="auto">--diff</code> and <code dir="auto">--push</code> are alternatives; any other argument than those and
-<code dir="auto">--shared-catalog</code> fails with <code dir="auto">NYL-KUBERNETES-BUILD-ARGUMENT</code>.</p>
+<code dir="auto">--shared-catalog</code> fails with <code dir="auto">NYL-BUILD-ARGUMENT</code>.</p>
 <p>A unit that declares its target <a href="#inline-targets">inline</a> builds only with
 <code dir="auto">-e</code>: the target is named <code dir="auto">&#x3C;environment>-&#x3C;unit></code> and rendered with the
 environment’s values, so without it the build fails with
-<code dir="auto">NYL-KUBERNETES-BUILD-INLINE-TARGET</code>. An environment that selects the unit owns
+<code dir="auto">NYL-BUILD-ENVIRONMENT-REQUIRED</code>. An environment that selects the unit owns
 its inline target, so <code dir="auto">--push</code> is refused there too; <code dir="auto">--diff</code> and the plain
 render work.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="teardown">Teardown</h2><a class="sl-anchor-link" href="#teardown"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Teardown”</span></a></div>
@@ -560,7 +597,7 @@ agree:</p>
 
 
 
-<table><thead><tr><th>Requirement</th><th>Unmet, and the fix</th></tr></thead><tbody><tr><td>The catalog prunes removed workload Applications</td><td>Blocking, <code dir="auto">NYL-TEARDOWN-CATALOG-MANUAL-SYNC</code>: enable the catalog’s <code dir="auto">syncPolicy.automated</code> with <code dir="auto">prune: true</code>, and remove <code dir="auto">Prune=confirm</code> and <code dir="auto">Prune=false</code>. Argo CD resolves <code dir="auto">Prune</code> for each Application the catalog prunes: the Application’s own <code dir="auto">argocd.argoproj.io/sync-options</code> annotation (an ApplicationGroup’s <code dir="auto">annotations</code> set it on every workload Application), else the catalog’s <code dir="auto">syncPolicy.syncOptions</code> (<code dir="auto">catalogApplication.syncPolicy</code> on the DeploymentTarget, <code dir="auto">catalogApplicationDefaults.syncPolicy</code> on the ArgoCDInstance, or the shared catalog’s own). <code dir="auto">Prune=confirm</code> keeps the catalog’s sync waiting for a confirmation in Argo CD, and <code dir="auto">Prune=false</code> skips the Application; the finding names which. <code dir="auto">Delete=confirm</code> on the catalog is not checked, because it only applies when the catalog Application itself is deleted.</td></tr><tr><td>Deleting an Application deletes its workloads</td><td>Blocking, <code dir="auto">NYL-TEARDOWN-APPLICATIONS-ORPHANED</code>: set <code dir="auto">applicationDeletionPolicy</code> to <code dir="auto">Foreground</code> or <code dir="auto">Background</code>.</td></tr><tr><td>No resource requires confirmation to delete</td><td>Blocking, <code dir="auto">NYL-TEARDOWN-NAMESPACE-CONFIRM</code>: Argo CD holds an Application’s deletion while any resource it would delete requires confirmation, which a resource’s own <code dir="auto">argocd.argoproj.io/sync-options</code> annotation or its Application’s <code dir="auto">spec.syncPolicy.syncOptions</code> sets with <code dir="auto">Delete=confirm</code> or <code dir="auto">Prune=confirm</code>. The finding names each such resource, or the Application whose options do it for all of its resources. For a Namespace, set <code dir="auto">prunePolicy</code> and <code dir="auto">deletePolicy</code> to <code dir="auto">Automatic</code>, or <code dir="auto">deletePolicy</code> to <code dir="auto">Retain</code>; the default of <code dir="auto">Confirm</code> for either blocks. For an Application, remove the option from the ApplicationGroup’s <code dir="auto">syncPolicy.syncOptions</code> or from a Release’s <code dir="auto">+syncOptions</code> override.</td></tr><tr><td>Owned Namespaces are removed</td><td>Remnant, <code dir="auto">NYL-TEARDOWN-NAMESPACES-REMAIN</code>: set <code dir="auto">deletePolicy: Automatic</code>.</td></tr><tr><td>The catalog Application and AppProjects are removed</td><td>Remnant, <code dir="auto">NYL-TEARDOWN-CATALOG-REMAINS</code>: let a parent own the catalog (<code dir="auto">catalogApplication.enabled: false</code>), or share one (<code dir="auto">catalogApplication.shared</code>), whose Application is read for the rows above and prunes the target’s objects.</td></tr></tbody></table>
+<table><thead><tr><th>Requirement</th><th>Unmet, and the fix</th></tr></thead><tbody><tr><td>The catalog prunes removed workload Applications</td><td>Blocking, <code dir="auto">NYL-TEARDOWN-BLOCKED</code> (<code dir="auto">catalog-manual-sync</code>): enable the catalog’s <code dir="auto">syncPolicy.automated</code> with <code dir="auto">prune: true</code>, and remove <code dir="auto">Prune=confirm</code> and <code dir="auto">Prune=false</code>. Argo CD resolves <code dir="auto">Prune</code> for each Application the catalog prunes: the Application’s own <code dir="auto">argocd.argoproj.io/sync-options</code> annotation (an ApplicationGroup’s <code dir="auto">annotations</code> set it on every workload Application), else the catalog’s <code dir="auto">syncPolicy.syncOptions</code> (<code dir="auto">catalogApplication.syncPolicy</code> on the DeploymentTarget, <code dir="auto">catalogApplicationDefaults.syncPolicy</code> on the ArgoCDInstance, or the shared catalog’s own). <code dir="auto">Prune=confirm</code> keeps the catalog’s sync waiting for a confirmation in Argo CD, and <code dir="auto">Prune=false</code> skips the Application; the finding names which. <code dir="auto">Delete=confirm</code> on the catalog is not checked, because it only applies when the catalog Application itself is deleted.</td></tr><tr><td>Deleting an Application deletes its workloads</td><td>Blocking, <code dir="auto">NYL-TEARDOWN-BLOCKED</code> (<code dir="auto">applications-orphaned</code>): set <code dir="auto">applicationDeletionPolicy</code> to <code dir="auto">Foreground</code> or <code dir="auto">Background</code>.</td></tr><tr><td>No resource requires confirmation to delete</td><td>Blocking, <code dir="auto">NYL-TEARDOWN-BLOCKED</code> (<code dir="auto">namespace-confirm</code>): Argo CD holds an Application’s deletion while any resource it would delete requires confirmation, which a resource’s own <code dir="auto">argocd.argoproj.io/sync-options</code> annotation or its Application’s <code dir="auto">spec.syncPolicy.syncOptions</code> sets with <code dir="auto">Delete=confirm</code> or <code dir="auto">Prune=confirm</code>. The finding names each such resource, or the Application whose options do it for all of its resources. For a Namespace, set <code dir="auto">prunePolicy</code> and <code dir="auto">deletePolicy</code> to <code dir="auto">Automatic</code>, or <code dir="auto">deletePolicy</code> to <code dir="auto">Retain</code>; the default of <code dir="auto">Confirm</code> for either blocks. For an Application, remove the option from the ApplicationGroup’s <code dir="auto">syncPolicy.syncOptions</code> or from a Release’s <code dir="auto">+syncOptions</code> override.</td></tr><tr><td>Owned Namespaces are removed</td><td>Remnant, <code dir="auto">NYL-TEARDOWN-REMNANT</code> (<code dir="auto">namespaces-remain</code>): set <code dir="auto">deletePolicy: Automatic</code>.</td></tr><tr><td>The catalog Application and AppProjects are removed</td><td>Remnant, <code dir="auto">NYL-TEARDOWN-REMNANT</code> (<code dir="auto">catalog-remains</code>): let a parent own the catalog (<code dir="auto">catalogApplication.enabled: false</code>), or share one (<code dir="auto">catalogApplication.shared</code>), whose Application is read for the rows above and prunes the target’s objects.</td></tr></tbody></table>
 <p>A resource’s own option wins over its Application’s, one option at a time, as in
 Argo CD (<code dir="auto">Prune=confirm</code> on the Application with <code dir="auto">Prune=false</code> on a resource leaves
 the resource unconfirmed). Resources Argo CD does not delete with the Application
