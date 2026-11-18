@@ -7,8 +7,11 @@ changes yet.
 renders, or that decides a value's shape or type (`{{ x | tojson }}`,
 `{% if %}`, `{% for %}`). Quoted string interpolation
 (`'pr-{{ environment.name }}'`) is not the problem and stays. This note
-replaces structural templating with a few typed source clauses. It deliberately
-does **not** add a general mechanism that resolves sources anywhere.
+replaces structural templating with a few typed source clauses. Jinja stays
+for string interpolation and is otherwise a last resort: an example that still
+needs structural Jinja is a gap to close with a clause, not a pattern to
+document. The note deliberately does **not** add a general mechanism that
+resolves sources anywhere.
 
 ## Proposal
 
@@ -57,6 +60,29 @@ approval: {fromValues: {pointer: /approval, optional: true}}
 `includeCrds` and `lookup` accept `{fromInput: {name, pointer?}}`. There is no
 `default` on the clause: the Release input's declared default applies.
 
+### 4. `fromParameter` in `EnvironmentTemplate.spec.values`
+
+```yaml
+kind: EnvironmentTemplate
+spec:
+  parameters:
+    pr: {type: integer}
+    crds: {type: boolean, default: false}
+  values:
+    networkFrom: dev
+    target:
+      inline:
+        releaseInputs:
+          rise/rise:
+            clusterWide: {value: {fromParameter: {name: crds}}}
+```
+
+- **Where clauses are resolved.** A reference object `{fromParameter: {name, pointer?}}` is resolved at any depth of the template's `spec.values`, and nowhere else. This is the same reference-object rule as `fromUnit` in unit `values`: exactly one field, no siblings, anything else is data. That includes inline targets and their bindings, which is the case that needed `| tojson`.
+- **What a clause resolves to.** The value is the instance's bound parameter, which is already type-checked against the declaration when `--param` is parsed, with the declared default applied. The clause has no `default` of its own.
+- **When it is resolved.** Parameters are stored in the instance's `state.yaml`, so resolution happens whenever the instance's effective values are computed: at `state init`, at `reconcile --template`, and at every later command. That is before units render, so `fromValues` reads resolved values.
+- **What is an error.** An unknown parameter name is an error, and so is a clause anywhere outside the template's `values`, for example in a declared Environment.
+- **What `validate` checks.** `nyl validate` resolves the clauses for every sample instance, so a template whose values reference a missing parameter fails before any instance exists.
+
 ## Case study
 
 **Subjects:**
@@ -83,24 +109,17 @@ approval: {fromValues: {pointer: /approval, optional: true}}
 - **Resolvable fields declared by their owner.** `teardownWait` and `target` are driver-owned (`COMMON_UNIT_FIELDS` lists only common ones), so a shared list would break the driver boundary.
 - **Fail-closed invariant added.** Several readers parse references with `if let Ok` (`rules/multi_environment.rs:260`), so an unresolved clause inside `fromUnit` would silently drop a cross-environment edge.
 - **A defaulted pointer still fails silently on a typo.** `validate` therefore checks pointers against all selecting environments, and error messages suggest the nearest key.
+- **Template parameters had no clause.** A typed parameter reaching a binding still needed `| tojson`, which led to §4.
 
 **Usefulness:**
 - The gains are documents that are valid YAML before rendering, lintable, and written with flow-style labels; type errors before execution; and a defined merge instead of a loop that could emit duplicate keys.
 - Editing is not cheaper. The benefit is correctness and readability.
 
-## Open decision
-
-Typed **template parameters** still need Jinja. A boolean parameter that
-reaches a binding (`clusterWide: {value: {{ params.crds | tojson }}}`) cannot
-be written with these clauses. There are two options:
-- add `{fromParameter: name}` inside `EnvironmentTemplate.spec.values`, resolved when an instance is created; parameters are declared and typed;
-- accept the remaining `| tojson` in templates.
-
 ## Not proposed
 
 - **Resolving sources anywhere.** It collides with real data, lets chart output become input, has no type at the site, and leaves the scope rules implicit.
 - **Type-preserving `'{{ x }}'` interpolation.** It is implicit and changes the output of existing documents.
-- **A promise that every field becomes resolvable.** That would be a second templating language arriving one field at a time. `| tojson` stays acceptable for rare fields.
+- **A promise that every field becomes resolvable.** That would be a second templating language arriving one field at a time. New clause sites are added by decision, when a real project still needs structural Jinja.
 
 ## Compatibility
 
