@@ -19,6 +19,10 @@ pub struct ValidateArgs {
     /// Strict validation mode (treat warnings as errors)
     #[arg(short, long)]
     pub strict: bool,
+
+    /// Resolve Git sources from cached refs and read fromPublication state at the cached publication branch head; never use the network.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 pub async fn execute(args: ValidateArgs) -> Result<()> {
@@ -27,7 +31,7 @@ pub async fn execute(args: ValidateArgs) -> Result<()> {
         args.path, args.strict
     );
     let mut report = ValidationReport::default();
-    let gitops = collect(Path::new(&args.path), &mut report).await;
+    let gitops = collect(Path::new(&args.path), args.offline, &mut report).await;
     if let Err(error) = gitops {
         // Report what passed before the failure; the error itself follows.
         print!("{}", report.render(None));
@@ -122,8 +126,9 @@ impl ValidationReport {
 }
 
 /// Run every check, recording results in `report`. GitOps validation errors
-/// end the run.
-async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()> {
+/// end the run. `offline` reads remote sources and publication branches from
+/// the caches only.
+async fn collect(project_dir: &Path, offline: bool, report: &mut ValidationReport) -> Result<()> {
     let config_file = ProjectConfig::find(Some(project_dir))?;
     let config = ProjectConfig::load(config_file.clone(), crate::resource_catalogue())?;
     report.config_dir = config_file.as_deref().and_then(Path::parent).map(Path::to_path_buf);
@@ -173,8 +178,8 @@ async fn collect(project_dir: &Path, report: &mut ValidationReport) -> Result<()
     // publication unit's reference comes from. Both run and both are reported: a target that no environment places any more (a removed
     // Environment) fails its own check, and the path that lost its source is the cause to name.
     match (
-        validate_targets(&inventory).await,
-        validate_environment_units(&inventory),
+        validate_targets(&inventory, offline).await,
+        validate_environment_units(&inventory, offline),
     ) {
         (Ok(()), Ok(())) => {}
         (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
@@ -208,8 +213,9 @@ fn slash_path(path: &Path) -> String {
 /// they use: specs, ownership scopes, unknown dependencies,
 /// cycles, and references to undeclared or sensitive outputs. The project's
 /// PromotionPaths are checked against the same rendered units
-/// ([`crate::orchestration::promotion`]).
-fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
+/// ([`crate::orchestration::promotion`]); `offline` reads the remote sources
+/// that declare the types of promoted values' places from the caches only.
+fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory, offline: bool) -> Result<()> {
     use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
     use nyl_core::orchestration::ports::SourceRenderer;
 
@@ -243,7 +249,7 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
     // The paths read what the environments render, so they are checked last and
     // with the units' own findings when those exist.
     issues.extend(
-        crate::orchestration::promotion::findings(inventory, &rendered_sources, &wiring.drivers)
+        crate::orchestration::promotion::findings(inventory, &rendered_sources, &wiring.drivers, offline)
             .iter()
             .map(ToString::to_string),
     );
@@ -268,7 +274,8 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory) -
 /// placeholders for the bindings orchestration resolves, and its `fromUnit`
 /// references are checked against that environment's units instead. Other
 /// targets compile as `render-tree` does, so those bindings stay rejected.
-async fn validate_targets(declared: &nyl_render::gitops::GitOpsInventory) -> Result<()> {
+/// `offline` compiles as `render-tree --offline` does.
+async fn validate_targets(declared: &nyl_render::gitops::GitOpsInventory, offline: bool) -> Result<()> {
     // The inline targets of the environments' publication units are targets
     // like any other: they compile, and their generated names join the check.
     let extended = nyl_render::gitops::units::with_inline_targets(declared)?;
@@ -281,9 +288,13 @@ async fn validate_targets(declared: &nyl_render::gitops::GitOpsInventory) -> Res
         .collect::<Vec<_>>();
     // Like `vendor --check`, validation reads fromPublication state at
     // the refreshed branch head and falls back to the cached head, so
-    // it also works offline.
+    // it also works without a network; `--offline` never refreshes.
     let options = nyl_render::gitops::TreeRenderOptions {
-        publication_read: nyl_render::gitops::inputs::PublicationRead::FreshOrCached,
+        publication_read: if offline {
+            nyl_render::gitops::inputs::PublicationRead::Cached
+        } else {
+            nyl_render::gitops::inputs::PublicationRead::FreshOrCached
+        },
         ..nyl_render::gitops::TreeRenderOptions::default()
     };
     let placements = nyl_render::gitops::units::target_placements(inventory)?;
@@ -327,7 +338,7 @@ mod tests {
     /// which names `nyl.toml` relative to the current directory.
     async fn rendered(dir: &Path, strict: bool) -> String {
         let mut report = ValidationReport::default();
-        collect(dir, &mut report).await.unwrap();
+        collect(dir, false, &mut report).await.unwrap();
         assert!(report.config_file.is_some());
         let rendered = report.render(Some(strict));
         rendered.split_once('\n').unwrap().1.to_string()
@@ -393,6 +404,7 @@ mod tests {
         let args = ValidateArgs {
             path: temp.path().to_str().unwrap().to_string(),
             strict: false,
+            offline: false,
         };
 
         let result = execute(args).await;
@@ -409,6 +421,7 @@ mod tests {
         let args = ValidateArgs {
             path: temp.path().to_str().unwrap().to_string(),
             strict: true,
+            offline: false,
         };
 
         let result = execute(args).await;

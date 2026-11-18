@@ -16,7 +16,8 @@ nyl render-tree --target production --output-dir deploy --offline
 
 When a target has `fromPublication` Release inputs, `render-tree` fetches its
 publication branch and reports the commit it read the state from; `--offline`
-reads the cached branch head instead and says so.
+reads the cached branch head instead and says so. `--offline` also reads Git
+charts and remote ApplicationGroup sources from the Git cache only.
 
 `--check` renders and validates without writing files.
 By default, reconciliation rejects indexed files that are missing or differ

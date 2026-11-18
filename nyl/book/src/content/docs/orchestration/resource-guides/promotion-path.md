@@ -87,7 +87,8 @@ environment. Every finding has a stable code and a fix:
 | `NYL-PROMOTE-ENVIRONMENT-UNKNOWN` | `from` or `to` is not a declared Environment (an instance of a template is not one) |
 | `NYL-PROMOTE-SELECTOR-UNIT` | A selector, or an `attestations` scope, names a unit the source environment does not select or the path does not cover |
 | `NYL-PROMOTE-SELECTOR-INVALID` | A pointer resolves neither in the unit's rendered spec nor in its kind's schema, or an output is undeclared or `sensitive` |
-| `NYL-PROMOTE-VALUE-TYPE` | A value's type does not fit a unit field that reads it |
+| `NYL-PROMOTE-VALUE-TYPE` | A value's type does not fit a unit field or Release input that reads it |
+| `NYL-PROMOTE-VALUE-TYPE-UNCHECKED` | The declared type of a field a binding fills cannot be read, such as a Release input declared in a remote ApplicationGroup source that is neither fetched nor cached; an error in `nyl validate`, a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates` |
 | `NYL-PROMOTE-BINDING-UNKNOWN` | A `fromPromotion` binding names a path or value no path declares |
 | `NYL-ATTESTATION-UNDECLARED` | The path requires an attestation its unit or environment scope does not declare |
 | `NYL-PROMOTE-COVERAGE-UNKNOWN` | `coverage` names a unit the source does not declare, select, or enable, a unit whose kind runs no deployments, or a group or deployment the unit does not run; the message lists the names it has |
@@ -96,9 +97,21 @@ environment. Every finding has a stable code and a fix:
 | `NYL-PROMOTE-UNSUPPORTED` | `changeGate: pullRequest`, or a DeploymentTarget in `from` or `to`: both arrive with M11 |
 
 Types are compared when both sides are known: what a selector reads (a rendered
-literal, a declared output's type, or the kind's schema at the pointer) against
-the field a unit's `fromPromotion` binding replaces. A Release input's declared
-type is not compared yet.
+literal, a declared output's type, the kind's schema at the pointer, or the
+schema the producing kind declares for an artifact) against the place a
+`fromPromotion` binding fills: the field of a unit's spec as its kind's schema
+types it, or, for a binding in a DeploymentTarget's `releaseInputs`, the type
+the Release declares for that input (`spec.inputs.<name>.type`). An unknown
+side fits anything.
+
+The Release's declaration is read from the ApplicationGroups the target
+selects, without rendering the target. A group with a remote source is
+fetched at its pinned commit, or read from the Git cache when the fetch fails;
+`nyl validate --offline` and `nyl reconcile --local` read the cache only and
+never use the network. When the source is neither fetched nor cached, the
+input stays unchecked (`NYL-PROMOTE-VALUE-TYPE-UNCHECKED`), and resolution
+still checks the promoted value against the declaration when the publication
+unit runs.
 
 ## Where records live
 

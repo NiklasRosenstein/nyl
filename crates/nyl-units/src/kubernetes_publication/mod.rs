@@ -18,7 +18,8 @@
 //!   Kubernetes API of the control-plane Cluster, or the Argo CD API
 //!   server). [`observe`] is the driver's use of them, for `nyl attest` and
 //!   the `observe` teardown wait. [`running`] says, for promotion, what
-//!   those attestations show each deployment runs.
+//!   those attestations show each deployment runs, and [`bound_types`] the
+//!   declared types of the Release inputs its `fromPromotion` bindings fill.
 //! - [`observed_values`] reads a field of a rendered resource from the
 //!   workload Cluster for the unit's observed values, once the Application
 //!   that owns the resource runs the current publication ([`workload`] reads
@@ -30,6 +31,7 @@
 //!   the teardown settings recorded at resolution, and drift detection.
 
 pub mod argocd;
+mod bound_types;
 mod build;
 pub mod direct;
 mod driver;
@@ -47,6 +49,7 @@ pub use driver::KubernetesPublicationDriver;
 pub use observed_values::{ClusterReader, LiveReader, LiveRequest, ObservedSource};
 pub use workload::{KubeResourceReader, ResourceReader};
 
+pub(crate) use bound_types::bound_field_types;
 pub(crate) use build::build;
 #[cfg(any(test, feature = "test-kinds"))]
 pub(crate) use observe::{attest_with, observes, record_facts};

@@ -10,7 +10,14 @@
 //! walking the units' specs finds those bindings too, with the environment
 //! that reads them. The units a path's `coverage` names are listed by their
 //! drivers ([`nyl_orchestration::shell::coverage`]), so their names are
-//! checked against what each unit runs.
+//! checked against what each unit runs, and the drivers of units whose
+//! bindings fill fields their kinds' schemas cannot type say those fields'
+//! declared types, such as a Release input's.
+//!
+//! `offline` (`nyl validate --offline`, a `--local` run) reads the remote
+//! sources those answers need from the caches only; a source neither cached
+//! nor fetched leaves the types it declares unchecked
+//! (`NYL-PROMOTE-VALUE-TYPE-UNCHECKED`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,6 +27,7 @@ use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
 use nyl_core::orchestration::ports::{RenderedSource, SourceRenderer};
 use nyl_core::resources::promotion::PromotionPath;
 use nyl_orchestration::rules::promotion_paths::{self, PathChecks};
+use nyl_orchestration::shell::coverage::ProjectReads;
 use nyl_render::gitops::GitOpsInventory;
 use nyl_render::resources::GitOpsResource;
 use nyl_render::{NylError, Result};
@@ -43,9 +51,10 @@ pub fn findings(
     inventory: &GitOpsInventory,
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     drivers: &DriverSet,
+    offline: bool,
 ) -> Vec<Finding> {
     let paths = declared_paths(inventory);
-    findings_of(inventory, &paths, &paths, None, sources, drivers)
+    findings_of(inventory, &paths, &paths, None, sources, drivers, offline)
 }
 
 /// The findings of the paths that touch `environment`: what `nyl plan` reports
@@ -57,12 +66,15 @@ pub fn findings(
 /// deployments could not be listed (`NYL-PROMOTE-COVERAGE-UNCHECKED`,
 /// [`promotion_paths::split_unchecked`]), in whichever environment the unit
 /// is: a promotion still fails closed on such coverage, so a command does
-/// not need the listing to proceed.
+/// not need the listing to proceed; and the bindings whose declared types
+/// could not be read (`NYL-PROMOTE-VALUE-TYPE-UNCHECKED`), which resolution
+/// checks again.
 pub fn findings_for(
     inventory: &GitOpsInventory,
     environment: &EnvironmentName,
     drivers: &DriverSet,
     renderer: &dyn SourceRenderer,
+    offline: bool,
 ) -> Result<(Vec<Finding>, Vec<Finding>)> {
     let known = declared_paths(inventory);
     let paths: Vec<PromotionPath> = known
@@ -106,6 +118,7 @@ pub fn findings_for(
         Some(environment),
         &sources,
         drivers,
+        offline,
     ));
     warnings.extend(promotion_paths::unchecked(&paths, environment, &sources, drivers));
     Ok((findings, warnings))
@@ -118,6 +131,7 @@ fn findings_of(
     only: Option<&EnvironmentName>,
     sources: &BTreeMap<EnvironmentName, RenderedSource>,
     drivers: &DriverSet,
+    offline: bool,
 ) -> Vec<Finding> {
     let declared: BTreeSet<EnvironmentName> = super::project::declared(inventory)
         .0
@@ -125,15 +139,25 @@ fn findings_of(
         .filter_map(|environment| environment.name().ok())
         .collect();
     let readers = promotion_paths::unit_readers(sources, drivers);
-    // One render cache for the check, so units that share a target render it once.
+    // One render cache for the check, so units that share a target render it
+    // once. Remote sources a type is declared in persist in the user's Git
+    // cache, which `render-tree` and `validate`'s target compile share, so
+    // an offline check finds what an earlier invocation fetched.
     let cache = tempfile::TempDir::new().ok();
-    let deployments = nyl_orchestration::shell::coverage::deployments(
-        check,
+    let source_cache = nyl_render::git::CacheLayout::new().ok();
+    let reads = ProjectReads {
+        worktree: &inventory.worktree_root,
+        instances: &inventory.instances,
+        cache_dir: cache.as_ref().map(tempfile::TempDir::path),
+        source_cache_dir: source_cache.as_ref().map(nyl_render::git::CacheLayout::root),
+        offline,
+    };
+    let deployments = nyl_orchestration::shell::coverage::deployments(check, sources, drivers, &reads);
+    let bound_types = nyl_orchestration::shell::coverage::bound_field_types(
+        &promotion_paths::untyped_fields(&readers, only, &promotion_paths::typed_values(known, sources, drivers)),
         sources,
         drivers,
-        &inventory.worktree_root,
-        &inventory.instances,
-        cache.as_ref().map(tempfile::TempDir::path),
+        &reads,
     );
     promotion_paths::check(&PathChecks {
         paths: check,
@@ -144,6 +168,7 @@ fn findings_of(
         drivers,
         readers: &readers,
         deployments: &deployments,
+        bound_types: &bound_types,
     })
 }
 

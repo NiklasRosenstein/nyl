@@ -8,8 +8,20 @@ Validate project configuration and search paths.
 
 ```bash
 nyl validate [path]
-nyl validate [path] [--strict]
+nyl validate [path] [--strict] [--offline]
 ```
+
+## Options
+
+- `--strict`: treat warnings as errors.
+- `--offline`: never use the network, as `render-tree --offline` does: Git
+  sources (charts and remote ApplicationGroup sources) come from the cache,
+  and `fromPublication` state from the cached publication branch head. This
+  holds for the target compiles and the PromotionPath checks (Release input
+  types and `coverage` names) alike. A remote source that was never fetched
+  cannot be checked offline: the compile fails, and the checks report
+  `NYL-PROMOTE-VALUE-TYPE-UNCHECKED` or `NYL-PROMOTE-COVERAGE-UNCHECKED`; see
+  [Units and placed targets](#units-and-placed-targets).
 
 ## Checks
 
@@ -38,6 +50,7 @@ nyl validate [path] [--strict]
 ```bash
 nyl validate
 nyl validate --strict
+nyl validate --offline
 nyl validate /path/to/project
 ```
 
@@ -104,12 +117,26 @@ lists it; a KubernetesPublication renders its target to list them),
 `NYL-PROMOTE-COVERAGE-INEFFECTIVE` for `groups` on a path that promotes only
 values or coverage of a unit that records nothing per deployment,
 `NYL-PROMOTE-COVERAGE-UNCHECKED` when a coverage unit's deployments cannot be
-listed (with the render error), and `NYL-PROMOTE-UNSUPPORTED` for
+listed (with the render error), `NYL-PROMOTE-VALUE-TYPE-UNCHECKED` when the
+declared type of a Release input a `fromPromotion` binding fills cannot be
+read (see below), and `NYL-PROMOTE-UNSUPPORTED` for
 `changeGate: pullRequest` or a DeploymentTarget in `from` or `to`, which M11
 delivers. `nyl plan -e <environment>`, `nyl reconcile`, `nyl promote`, and
 `nyl get promotion-candidates` report the same findings for the paths that
-touch the environment, except that `NYL-PROMOTE-COVERAGE-UNCHECKED` is a
-warning there: they judge another environment only by what they need.
+touch the environment, except that `NYL-PROMOTE-COVERAGE-UNCHECKED` and
+`NYL-PROMOTE-VALUE-TYPE-UNCHECKED` are warnings there: they judge another
+environment only by what they need, and resolution checks a value against its
+declaration again.
+
+A `fromPromotion` binding in a DeploymentTarget's `releaseInputs` is compared
+with the type the Release declares for that input
+([PromotionPath validation](/nyl/orchestration/resource-guides/promotion-path/#validation)).
+The declaration is read from the ApplicationGroups the target selects without
+rendering. A remote group source is fetched, falling back to the Git cache when
+the fetch fails; with `--offline` (or `--local` on `nyl reconcile`) it comes
+from the cache only. A source that is neither fetched nor cached leaves its
+inputs unchecked with `NYL-PROMOTE-VALUE-TYPE-UNCHECKED`; run once without
+`--offline` to cache it.
 
 A unit that declares its target inline (`spec.target.inline`) places the
 inline target, named `<environment>-<unit>` or by `spec.target.name`. Validation

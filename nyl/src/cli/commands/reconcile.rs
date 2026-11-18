@@ -594,7 +594,7 @@ fn reconcile(
             Disposition::Reconcile { extend: false } => {}
         }
     }
-    let coverage_warnings = crate::orchestration::session::coverage_warnings(&session.check_promotion_paths(wiring)?);
+    let unchecked_warnings = crate::orchestration::session::unchecked_warnings(&session.check_promotion_paths(wiring)?);
     let mut request = session.request(&RunOptions {
         units: &args.units,
         concurrency: args.concurrency,
@@ -649,7 +649,7 @@ fn reconcile(
                 instance.expired = false;
             }
         }
-        environment.warnings.extend(coverage_warnings);
+        environment.warnings.extend(unchecked_warnings);
         for name in &evicted {
             environment.warnings.push(Finding::new(
                 Code::InstanceExpired,

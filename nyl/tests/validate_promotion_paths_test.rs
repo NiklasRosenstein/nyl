@@ -442,3 +442,189 @@ fn test_a_malformed_selector_is_a_finding_and_the_path_is_still_listed() {
         .success()
         .stdout(predicate::str::contains("dev-to-prod"));
 }
+
+/// [`checkout_with`] plus a prod Cluster and DeploymentTarget whose
+/// `releaseInputs` are `bindings` (YAML at the Release-key level), placed by
+/// a publication unit prod selects, and the extra ApplicationGroup documents
+/// `groups`. Commits the result, as `plan` renders the committed source.
+fn bound_checkout(world: &World, path: &str, bindings: &str, groups: &str) -> std::path::PathBuf {
+    let checkout = checkout_with(world, path);
+    let platform = checkout.join("nyl/platform.yaml");
+    let mut contents = std::fs::read_to_string(&platform).unwrap();
+    contents.push_str(&format!(
+        "---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: prod\nspec:\n  destination:\n    server: https://prod.invalid\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment, v1/ConfigMap]\n    clusterScopedKinds: [core/Namespace]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: prod\nspec:\n  reconciler: {{argocd: {{}}}}\n  clusterRef: {{name: prod}}\n  applicationGroupSelector:\n    matchLabels: {{app: web}}\n  publication:\n    repositoryRef: {{name: platform}}\n    revision: deploy\n    pathPrefix: prod\n  releaseInputs:\n{bindings}{groups}"
+    ));
+    std::fs::write(&platform, contents).unwrap();
+    let units = checkout.join("nyl/units.yaml");
+    let mut text = std::fs::read_to_string(&units).unwrap();
+    text.push_str("---\napiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: prod-kubernetes\n  labels: {prod: 'true'}\nspec:\n  target: prod\n  timeout: 10m\n");
+    std::fs::write(&units, text).unwrap();
+    git(&checkout, &["add", "-A"]);
+    git(
+        &checkout,
+        &["commit", "-q", "--no-gpg-sign", "-m", "Bind prod's Release inputs"],
+    );
+    checkout
+}
+
+/// Run Git in `directory` with no user or system configuration.
+fn git(directory: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(nyl_git::cli_path(directory))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "user.name=Nyl Test", "-c", "user.email=test@example.invalid"])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A Git repository with a Release `api` declaring the integer input
+/// `replicas` beneath `releases/`, and the ApplicationGroup `api` sourcing
+/// it at its commit, as a document to append.
+fn remote_group(directory: &Path) -> String {
+    std::fs::create_dir_all(directory.join("releases")).unwrap();
+    std::fs::write(
+        directory.join("releases/api.yaml"),
+        "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: api\n  namespace: api\nspec:\n  inputs:\n    replicas: {type: integer, default: 1}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: api\n  namespace: api\ndata:\n  replicas: '{{ inputs.replicas }}'\n",
+    )
+    .unwrap();
+    git(directory, &["init", "-q", "-b", "main"]);
+    git(directory, &["add", "-A"]);
+    git(directory, &["commit", "-q", "--no-gpg-sign", "-m", "Release api"]);
+    let commit = String::from_utf8(
+        std::process::Command::new("git")
+            .current_dir(nyl_git::cli_path(directory))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let url = reqwest::Url::from_directory_path(directory).unwrap();
+    format!(
+        "---\napiVersion: k8s.gitops.nyl/v1\nkind: ApplicationGroup\nmetadata:\n  name: api\n  labels: {{app: web}}\nspec:\n  applicationNamespace: argocd\n  source:\n    repository: {{repoURL: '{url}'}}\n    revision: HEAD\n    commit: '{}'\n    path: releases\n",
+        commit.trim()
+    )
+}
+
+/// A promoted value is compared with the declared type of the Release input
+/// a DeploymentTarget's `fromPromotion` binding fills, which the Release in
+/// the target's selected ApplicationGroup declares: a string fits the
+/// string input `image`, and an object does not. Catches the mismatch
+/// passing `validate` and surfacing only when prod's publication resolves.
+#[test]
+fn test_validate_compares_promoted_values_with_release_input_types() {
+    let world = World::new(&scenario::shell::shared_project());
+    let bindings = "    web/web:\n      image: {fromPromotion: {value: webImage}}\n      databaseHost: {fromPromotion: {value: dbHost}}\n";
+    let sound = bound_checkout(&world, SOUND, bindings, "");
+    nyl(&world, &sound, &["validate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("GitOps configuration is valid"));
+    let object = SOUND.replace("input: /source/path}", "input: /source}");
+    let mismatch = bound_checkout(&world, &object, bindings, "");
+    nyl(&world, &mismatch, &["validate"]).assert().failure().stderr(
+        predicate::str::contains("NYL-PROMOTE-VALUE-TYPE:")
+            .and(predicate::str::contains("value \"dbHost\" is a object"))
+            .and(predicate::str::contains("/releases/web~1web/databaseHost"))
+            .and(predicate::str::contains("accepts a string")),
+    );
+}
+
+/// A Release input declared in a remote ApplicationGroup source is typed
+/// from that source: `validate` fetches it, and `validate --offline` reads
+/// it from the cache only, so before any fetch the input is unchecked
+/// (`NYL-PROMOTE-VALUE-TYPE-UNCHECKED`, an error in `validate`), and after
+/// one the offline check finds the mismatch too. Catches `--offline`
+/// reaching the network, and an unreadable declaration passing as checked.
+#[test]
+fn test_validate_offline_types_remote_inputs_from_the_cache_only() {
+    let world = World::new(&scenario::shell::shared_project());
+    let remote = world.scenario_tmp().join("api-source");
+    let group = remote_group(&remote);
+    let bindings = "    web/web:\n      image: {fromPromotion: {value: webImage}}\n    api/api:\n      replicas: {fromPromotion: {value: webImage}}\n";
+    let checkout = bound_checkout(&world, SOUND, bindings, &group);
+    nyl(&world, &checkout, &["validate", "--offline"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("NYL-PROMOTE-VALUE-TYPE-UNCHECKED")
+                .and(predicate::str::contains("/releases/api~1api/replicas"))
+                .and(predicate::str::contains("ApplicationGroup \"api\"")),
+        );
+    let mismatch = || {
+        predicate::str::contains("NYL-PROMOTE-VALUE-TYPE:")
+            .and(predicate::str::contains("/releases/api~1api/replicas"))
+            .and(predicate::str::contains("accepts a integer"))
+            .and(predicate::str::contains("NYL-PROMOTE-VALUE-TYPE-UNCHECKED").not())
+    };
+    nyl(&world, &checkout, &["validate"])
+        .assert()
+        .failure()
+        .stderr(mismatch());
+    nyl(&world, &checkout, &["validate", "--offline"])
+        .assert()
+        .failure()
+        .stderr(mismatch());
+}
+
+/// When a remote group's source can be neither fetched nor read from the
+/// cache, `validate` refuses the unchecked input while `plan` warns and goes
+/// on: resolution still checks the value. Catches one environment's
+/// unreachable source blocking its plan.
+#[test]
+fn test_an_unreadable_remote_input_type_fails_validate_and_warns_plan() {
+    let world = World::new(&scenario::shell::shared_project());
+    let remote = world.scenario_tmp().join("api-source");
+    let group = remote_group(&remote);
+    let bindings = "    api/api:\n      replicas: {fromPromotion: {value: webImage}}\n";
+    let checkout = bound_checkout(&world, SOUND, bindings, &group);
+    std::fs::remove_dir_all(&remote).unwrap();
+    nyl(&world, &checkout, &["validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NYL-PROMOTE-VALUE-TYPE-UNCHECKED"));
+    let output = nyl(&world, &checkout, &["plan", "-e", "prod"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A warning, beside prod's uninitialized state, which is not what this test is about.
+    assert!(
+        stderr.contains("warning  PromotionPath dev-to-prod value \"webImage\"")
+            && stderr.contains("NYL-PROMOTE-VALUE-TYPE-UNCHECKED"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("PromotionPaths are invalid"), "{stderr}");
+}
+
+/// `validate --offline` lists a coverage unit's deployments without the
+/// network too: with dev's target selecting a remote ApplicationGroup that
+/// nothing cached yet, the listing fails (`NYL-PROMOTE-COVERAGE-UNCHECKED`)
+/// even though the remote is reachable; once `validate` cached it, the
+/// offline listing succeeds after the remote is gone. Catches the coverage
+/// listing fetching sources offline, or never finding the cached copy.
+#[test]
+fn test_validate_offline_lists_coverage_from_the_cache_only() {
+    let world = World::new(&scenario::shell::shared_project());
+    let remote = world.scenario_tmp().join("api-source");
+    let group = remote_group(&remote);
+    let checkout = observing_checkout_with(
+        &world,
+        "  from: {environment: dev}\n  to: {environment: prod}\n  coverage:\n    kubernetes: {exclude: [web], require: [api]}\n",
+    );
+    let platform = checkout.join("nyl/platform.yaml");
+    let mut contents = std::fs::read_to_string(&platform).unwrap();
+    contents.push_str(&group);
+    std::fs::write(&platform, contents).unwrap();
+    nyl(&world, &checkout, &["validate", "--offline"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("NYL-PROMOTE-COVERAGE-UNCHECKED")
+                .and(predicate::str::contains("cannot be listed")),
+        );
+    nyl(&world, &checkout, &["validate"]).assert().success();
+    std::fs::remove_dir_all(&remote).unwrap();
+    nyl(&world, &checkout, &["validate", "--offline"]).assert().success();
+}
