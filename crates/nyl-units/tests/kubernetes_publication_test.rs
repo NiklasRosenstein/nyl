@@ -1324,6 +1324,8 @@ fn test_deployments_are_the_targets_expected_deployments() {
         project_dir: "/nyl",
         instances: &nyl_core::orchestration::instance::NO_INSTANCES,
         cache_dir: None,
+        source_cache_dir: None,
+        offline: false,
     };
     let rendered = json!({
         "target": "dev",
@@ -1355,4 +1357,51 @@ fn test_deployments_are_the_targets_expected_deployments() {
             .collect::<Vec<_>>(),
         recorded
     );
+}
+
+/// The types promotion validation compares a promoted value with: each
+/// Release input a binding fills is typed by the declaration of the Release
+/// the target selects, read without rendering and without the network; a
+/// field that is no declared input of a selected Release is left untyped,
+/// for resolution to report. Catches `validate` comparing a promoted value
+/// with nothing, or with the type of another Release's input.
+#[test]
+fn test_bound_field_types_are_the_declared_release_input_types() {
+    use nyl_core::bindings::InputType;
+    use nyl_core::orchestration::driver::{BoundFieldType, DeploymentContext};
+
+    let world = World::new();
+    let driver = real();
+    let ctx = DeploymentContext {
+        worktree: &world.work(),
+        project_dir: "/nyl",
+        instances: &nyl_core::orchestration::instance::NO_INSTANCES,
+        cache_dir: None,
+        source_cache_dir: None,
+        offline: true,
+    };
+    let rendered = json!({
+        "target": "dev",
+        "releases": {"web/web": {
+            "image": {"fromPromotion": {"value": "webImage"}},
+            "ghost": {"fromPromotion": {"value": "ghost"}},
+        }},
+    });
+    let pointers = [
+        "/releases/web~1web/image",
+        "/releases/web~1web/ghost",
+        "/releases/jobs~1worker/image",
+        "/target",
+    ]
+    .map(str::to_owned);
+    let types = driver.bound_field_types(&ctx, &rendered, &pointers).unwrap();
+    assert_eq!(
+        types,
+        BTreeMap::from([(pointers[0].clone(), BoundFieldType::Typed(InputType::String))])
+    );
+    // Nothing asked of a Release input needs no declaration read.
+    assert!(driver
+        .bound_field_types(&ctx, &json!({"target": "nowhere"}), &["/target".to_owned()])
+        .unwrap()
+        .is_empty());
 }

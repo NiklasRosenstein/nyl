@@ -205,6 +205,8 @@ codes! {
     PromoteCoverageIneffective => "NYL-PROMOTE-COVERAGE-INEFFECTIVE",
     /// The deployments of a unit a PromotionPath's `coverage` names could not be listed, such as when what the unit's declaration renders from cannot be read, so its names are not checked. An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`, which judge the source by what they need. A promotion still refuses a name no attestation lists.
     PromoteCoverageUnchecked => "NYL-PROMOTE-COVERAGE-UNCHECKED",
+    /// The declared type of a field a `fromPromotion` binding fills could not be read, so the promoted value's type is not compared with it: the unit's driver could not read what declares the type, such as a remote source that is neither fetched nor cached (`nyl validate --offline`, a `--local` run). An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`. Resolution still checks the value against the declaration.
+    PromoteValueTypeUnchecked => "NYL-PROMOTE-VALUE-TYPE-UNCHECKED",
     /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing, or a publication's running-scoped attestation that no longer describes what runs (only its current receipt's counts; `--state-revision` judges an older state on its own). Nothing was written. Exit 2.
     PromoteNoEvidence => "NYL-PROMOTE-NO-EVIDENCE",
     /// `--evidence published` promoted a state whose evidence is below the path's level; the record says so. A warning.

@@ -283,6 +283,7 @@ pub(crate) fn render_at(
         placeholders: false,
         publication_read: nyl_render::gitops::inputs::PublicationRead::Fresh,
         cache_dir: Some(cache_dir),
+        source_cache_dir: None,
         resource_catalogue: catalogue.clone(),
         instances,
     })
@@ -293,14 +294,14 @@ pub(crate) fn render_at(
 /// `nyl validate` compiles a placed target: every Release input binding
 /// orchestration resolves takes a placeholder of its declared type, so the
 /// unit's spec need not be resolved, and `fromPublication` inputs fall back
-/// to the cached branch, so it works offline. It shows what the target
-/// generates (its deployments) and is never published.
+/// to the cached branch, so it works without a network. With `ctx.offline`
+/// it never uses the network: Git sources and `fromPublication` state come
+/// from the caches only, Git sources from `ctx.source_cache_dir` when the
+/// caller has one. It shows what the target generates (its deployments) and
+/// is never published.
 pub(crate) fn render_for_validation(
     catalogue: &nyl_render::config::ResourceCatalogue,
-    worktree: &std::path::Path,
-    project_dir: &std::path::Path,
-    instances: &nyl_core::orchestration::instance::Instances,
-    cache_dir: Option<&std::path::Path>,
+    ctx: &nyl_core::orchestration::driver::DeploymentContext<'_>,
     spec: &Value,
 ) -> DriverResult<RenderedTarget> {
     let target = publication_target(spec)?;
@@ -313,17 +314,22 @@ pub(crate) fn render_for_validation(
         source_commit: None,
         selection: nyl_render::gitops::tree::partial::PublicationSelection::default(),
         publication_base: None,
-        worktree,
-        project_dir,
+        worktree: ctx.worktree,
+        project_dir: std::path::Path::new(ctx.project_dir),
         target: &target,
         inline,
         owner: None,
         inputs: &InputSnapshot::new(),
         placeholders: true,
-        publication_read: nyl_render::gitops::inputs::PublicationRead::FreshOrCached,
-        cache_dir,
+        publication_read: if ctx.offline {
+            nyl_render::gitops::inputs::PublicationRead::Cached
+        } else {
+            nyl_render::gitops::inputs::PublicationRead::FreshOrCached
+        },
+        cache_dir: ctx.cache_dir,
+        source_cache_dir: ctx.source_cache_dir,
         resource_catalogue: catalogue.clone(),
-        instances,
+        instances: ctx.instances,
     })
     .map_err(|error| DriverError::before_effects(format!("cannot render DeploymentTarget {target:?}: {error}")))
 }

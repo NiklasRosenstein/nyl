@@ -511,14 +511,22 @@ impl Session {
     /// The finding returned is the first; its message counts the others, and
     /// `nyl validate` lists them all. Without one, the warnings: the values
     /// promoted into this environment that the supersede check cannot check
-    /// (`NYL-PROMOTE-UNCHECKED`), which `nyl plan` lists, and the coverage whose
-    /// unit's deployments could not be listed, in any environment
-    /// (`NYL-PROMOTE-COVERAGE-UNCHECKED`), which every caller reports
-    /// ([`coverage_warnings`]).
+    /// (`NYL-PROMOTE-UNCHECKED`), which `nyl plan` lists, and the checks that
+    /// could not be made, in any environment: coverage whose unit's
+    /// deployments could not be listed (`NYL-PROMOTE-COVERAGE-UNCHECKED`) and
+    /// bindings whose declared types could not be read
+    /// (`NYL-PROMOTE-VALUE-TYPE-UNCHECKED`; with `--local` remote sources are
+    /// read from the caches only), which every caller reports
+    /// ([`unchecked_warnings`]).
     pub fn check_promotion_paths(&self, wiring: &Wiring<'_>) -> Result<Vec<Finding>, Finding> {
-        let (findings, warnings) =
-            super::promotion::findings_for(&self.inventory, &self.resolved.name, wiring.drivers, &self.renderer())
-                .unwrap_or_default();
+        let (findings, warnings) = super::promotion::findings_for(
+            &self.inventory,
+            &self.resolved.name,
+            wiring.drivers,
+            &self.renderer(),
+            self.offline,
+        )
+        .unwrap_or_default();
         let Some(first) = findings.first() else {
             return Ok(warnings);
         };
@@ -574,12 +582,14 @@ impl Session {
 }
 
 /// The warnings of [`Session::check_promotion_paths`] that every command
-/// reports, not only `nyl plan`: coverage whose deployments could not be
-/// listed (`NYL-PROMOTE-COVERAGE-UNCHECKED`).
-pub fn coverage_warnings(warnings: &[Finding]) -> Vec<Finding> {
+/// reports, not only `nyl plan`: the checks that could not be made, such as
+/// coverage whose deployments could not be listed
+/// (`NYL-PROMOTE-COVERAGE-UNCHECKED`) and bindings whose declared types could
+/// not be read (`NYL-PROMOTE-VALUE-TYPE-UNCHECKED`).
+pub fn unchecked_warnings(warnings: &[Finding]) -> Vec<Finding> {
     warnings
         .iter()
-        .filter(|finding| finding.code == Code::PromoteCoverageUnchecked)
+        .filter(|finding| nyl_orchestration::rules::promotion_paths::is_unchecked(finding.code))
         .cloned()
         .collect()
 }

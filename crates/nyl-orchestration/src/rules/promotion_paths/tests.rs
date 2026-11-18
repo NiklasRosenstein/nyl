@@ -115,6 +115,7 @@ fn run(world: &World, paths: &[PromotionPath], readers: &[ValueReader]) -> Vec<F
         drivers: &drivers(),
         readers,
         deployments: &DeploymentListings::new(),
+        bound_types: &BoundFieldTypes::new(),
     })
 }
 
@@ -136,6 +137,8 @@ fn reader(environment: &str, path: Option<&str>, value: &str, expected: Option<V
             path: path.map(str::to_owned),
         },
         expected,
+        field: None,
+        unchecked: None,
     }
 }
 
@@ -304,6 +307,144 @@ fn test_value_types_must_fit_every_reading_binding() {
         "{}",
         findings[1]
     );
+}
+
+/// A reader the kind's schema cannot type, at `pointer` of prod's unit `web`.
+fn bound_reader(value: &str, pointer: &str) -> ValueReader {
+    ValueReader {
+        location: format!("unit web of Environment prod at {pointer:?}"),
+        field: Some((UnitName::new("web").unwrap(), pointer.to_owned())),
+        ..reader("prod", Some("dev-to-prod"), value, None)
+    }
+}
+
+fn run_bound(world: &World, paths: &[PromotionPath], readers: &[ValueReader], bound: &BoundFieldTypes) -> Vec<Finding> {
+    check(&PathChecks {
+        paths,
+        known: paths,
+        only: None,
+        declared: &world.declared,
+        sources: &world.sources,
+        drivers: &drivers(),
+        readers,
+        deployments: &DeploymentListings::new(),
+        bound_types: bound,
+    })
+}
+
+/// Where the kind's schema cannot type a binding's field, the type its
+/// driver reads from what declares the field (`Driver::bound_field_types`,
+/// such as a field a file the spec names declares) is compared with the value's: a
+/// match passes, a mismatch is `NYL-PROMOTE-VALUE-TYPE`, a field the driver
+/// does not type fits anything, and one whose declaration it could not
+/// read is `NYL-PROMOTE-VALUE-TYPE-UNCHECKED`, which a command working on
+/// one environment reports as a warning. Catches a value promoted into a
+/// field of another declared type passing `validate` and `plan` and failing only at
+/// resolution, and an unreadable declaration passing as if checked.
+#[test]
+fn test_bound_field_types_are_compared_with_the_value() {
+    let paths = [path(base(json!({
+        "replicas": {"select": {"unit": "web", "input": "/replicas"}},
+    })))];
+    let world = world();
+    let readers = [
+        bound_reader("replicas", "/inputs/count"),
+        bound_reader("replicas", "/inputs/name"),
+        bound_reader("replicas", "/inputs/free"),
+        bound_reader("replicas", "/remote/count"),
+    ];
+    let typed = |declared| Ok(BoundFieldType::Typed(declared));
+    let answer: BTreeMap<String, BoundFieldType> = [
+        ("/inputs/count", typed(nyl_core::bindings::InputType::Number)),
+        ("/inputs/name", typed(nyl_core::bindings::InputType::String)),
+        ("/remote/count", Err("what declares it is not cached".to_owned())),
+    ]
+    .into_iter()
+    .map(|(pointer, found): (&str, Result<BoundFieldType, String>)| {
+        (pointer.to_owned(), found.unwrap_or_else(BoundFieldType::Unchecked))
+    })
+    .collect();
+    let bound = BoundFieldTypes::from([((environment("prod"), UnitName::new("web").unwrap()), Ok(answer))]);
+    let findings = run_bound(&world, &paths, &readers, &bound);
+    assert_eq!(
+        codes(&findings),
+        [Code::PromoteValueType, Code::PromoteValueTypeUnchecked],
+        "{findings:?}"
+    );
+    assert!(
+        findings[0].message.contains("is a integer, but")
+            && findings[0].message.contains("/inputs/name")
+            && findings[0].message.contains("accepts a string"),
+        "{}",
+        findings[0]
+    );
+    assert!(findings[1].message.contains("is not cached"), "{}", findings[1]);
+    let (errors, warnings) = split_unchecked(findings);
+    assert_eq!(codes(&errors), [Code::PromoteValueType]);
+    assert_eq!(codes(&warnings), [Code::PromoteValueTypeUnchecked]);
+
+    // A driver that could read none of them leaves every one unchecked.
+    let failed = BoundFieldTypes::from([(
+        (environment("prod"), UnitName::new("web").unwrap()),
+        Err("the target is not declared".to_owned()),
+    )]);
+    assert_eq!(
+        codes(&run_bound(&world, &paths, &readers[..1], &failed)),
+        [Code::PromoteValueTypeUnchecked]
+    );
+    // A value of unknown type is compared with nothing, so nothing is unchecked.
+    let unknown = [path(base(
+        json!({"replicas": {"select": {"unit": "web", "input": "/nowhere"}}}),
+    ))];
+    assert!(
+        run_bound(&world, &unknown, &readers, &bound)
+            .iter()
+            .all(|finding| !matches!(finding.code, Code::PromoteValueType | Code::PromoteValueTypeUnchecked)),
+        "an unknown value type fits anything"
+    );
+}
+
+/// The shell asks the drivers only for bindings their kinds' schemas cannot
+/// type, of the environment a command works on, that read a value of known
+/// type: comparing anything else needs no driver call and no fetch.
+#[test]
+fn test_untyped_fields_are_the_bindings_the_schema_cannot_type() {
+    let typed = ValueReader {
+        expected: Some(ValueType::Integer),
+        ..bound_reader("replicas", "/replicas")
+    };
+    let readers = [
+        typed,
+        bound_reader("replicas", "/inputs/count"),
+        bound_reader("other", "/inputs/count"),
+        ValueReader {
+            field: Some((UnitName::new("web").unwrap(), "/inputs/other".to_owned())),
+            ..reader("dev", None, "replicas", None)
+        },
+    ];
+    let typed = typed_values(
+        &[path(base(
+            json!({"replicas": {"select": {"unit": "web", "input": "/replicas"}}}),
+        ))],
+        &world().sources,
+        &drivers(),
+    );
+    assert_eq!(
+        typed,
+        BTreeSet::from([(environment("prod"), "dev-to-prod".to_owned(), "replicas".to_owned())])
+    );
+    let wanted = untyped_fields(&readers, Some(&environment("prod")), &typed);
+    assert_eq!(
+        wanted,
+        BTreeMap::from([(
+            (environment("prod"), UnitName::new("web").unwrap()),
+            vec!["/inputs/count".to_owned()]
+        )])
+    );
+    // Every environment, but still only bindings of a typed value: `other`
+    // is no value of the path, and dev reads replicas from no path into it.
+    assert_eq!(untyped_fields(&readers, None, &typed).len(), 1);
+    assert!(untyped_fields(&readers, None, &BTreeSet::new()).is_empty());
 }
 
 /// A selector's pointer into an artifact is typed by the schema its
@@ -476,6 +617,7 @@ fn test_a_chain_resolves_every_binding_against_all_paths() {
         drivers: &drivers(),
         readers: &readers,
         deployments: &DeploymentListings::new(),
+        bound_types: &BoundFieldTypes::new(),
     });
     assert!(findings.is_empty(), "{findings:?}");
 }
@@ -628,6 +770,7 @@ fn test_only_checks_the_bindings_of_one_environment() {
             drivers: &drivers(),
             readers: &readers,
             deployments: &DeploymentListings::new(),
+            bound_types: &BoundFieldTypes::new(),
         })
     };
     assert_eq!(check_for(None).len(), 2);
@@ -730,6 +873,7 @@ fn run_coverage(world: &World, paths: &[PromotionPath], deployments: &Deployment
         drivers: &drivers(),
         readers: &[],
         deployments,
+        bound_types: &BoundFieldTypes::new(),
     })
 }
 

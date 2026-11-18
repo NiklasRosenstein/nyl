@@ -358,6 +358,17 @@ impl Driver for KubernetesPublicationDriver {
         super::deployments(&self.resource_catalogue, ctx, spec)
     }
 
+    /// The declared type of each Release input a binding fills, from the
+    /// Releases the target selects, read without rendering.
+    fn bound_field_types(
+        &self,
+        ctx: &nyl_core::orchestration::driver::DeploymentContext<'_>,
+        spec: &Value,
+        pointers: &[String],
+    ) -> DriverResult<std::collections::BTreeMap<String, nyl_core::orchestration::driver::BoundFieldType>> {
+        super::bound_field_types(&self.resource_catalogue, ctx, spec, pointers)
+    }
+
     fn ownership_scopes(&self, _environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope> {
         unit_target(spec)
             .ok()

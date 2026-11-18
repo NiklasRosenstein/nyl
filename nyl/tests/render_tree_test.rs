@@ -7264,6 +7264,7 @@ fn partial_publication_shared_api_refuses_a_destination_move_without_publication
         placeholders: false,
         publication_read: nyl_render::gitops::inputs::PublicationRead::Fresh,
         cache_dir: None,
+        source_cache_dir: None,
     })
     .unwrap();
     let concurrent = push_publication_state(&seed, "production/unowned.txt", "concurrent\n");
@@ -7492,6 +7493,7 @@ fn publication_history_limit_is_orthogonal_to_full_and_partial_publishing() {
         placeholders: false,
         publication_read: nyl_render::gitops::inputs::PublicationRead::Fresh,
         cache_dir: None,
+        source_cache_dir: None,
     })
     .unwrap();
     let author = PublicationAuthor {
@@ -9008,4 +9010,56 @@ fn test_live_lookup_needs_a_cluster() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("NYL-HELM-LOOKUP-LIVE-NEEDS-CLUSTER"));
+}
+
+/// `render-tree --offline` reads a remote ApplicationGroup source at its
+/// pinned commit from the Git cache only: before anything cached it, the
+/// render fails naming the cache, although the remote is reachable; once an
+/// online render cached it, an offline render succeeds after the remote is
+/// gone. Catches `--offline` reaching the network for a group source.
+#[test]
+fn render_tree_offline_reads_remote_group_sources_from_the_cache_only() {
+    let fixture = fixture();
+    let remote = TempDir::new().unwrap();
+    let repository = Repository::init(remote.path()).unwrap();
+    fs::create_dir(remote.path().join("releases")).unwrap();
+    fs::copy(
+        fixture.path().join("applications/workloads/api.yaml"),
+        remote.path().join("releases/api.yaml"),
+    )
+    .unwrap();
+    commit_all(&repository, "Remote release");
+    let commit = repository.head().unwrap().target().unwrap().to_string();
+    let url = reqwest::Url::from_directory_path(remote.path()).unwrap().to_string();
+    let group = fixture.path().join("config/application-groups/workloads.yaml");
+    fs::write(
+        &group,
+        format!(
+            "{}\n  source:\n    repository: {{repoURL: '{url}'}}\n    revision: HEAD\n    commit: '{commit}'\n    path: releases\n",
+            fs::read_to_string(&group).unwrap()
+        ),
+    )
+    .unwrap();
+    let output = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    let render = |offline: bool| {
+        let mut command = Command::cargo_bin("nyl").unwrap();
+        command
+            .current_dir(fixture.path())
+            .env("NYL_CACHE_DIR", cache.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["render-tree", "--check", "--output-dir"])
+            .arg(output.path());
+        if offline {
+            command.arg("--offline");
+        }
+        command.assert()
+    };
+    render(true)
+        .failure()
+        .stderr(predicate::str::contains("No cached copy").and(predicate::str::contains("--offline")));
+    render(false).success();
+    drop(repository);
+    drop(remote);
+    render(true).success();
 }

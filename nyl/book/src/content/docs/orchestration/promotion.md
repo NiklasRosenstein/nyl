@@ -38,6 +38,33 @@ promoting an older one:
 nyl promote dev-to-prod --revision 3e7b9c… --evidence published --reason "Roll back release 2"
 ```
 
+## Types checked before promotion
+
+`nyl validate`, `nyl plan`, `nyl reconcile`, `nyl promote`, and `nyl get
+promotion-candidates` compare the type of each promoted value with every place
+that reads it, before any promotion runs. A value's type comes from what its
+selector reads: a rendered literal, a declared output, the kind's schema, or
+an artifact's schema. A place is a field of a unit's spec, typed by its
+kind's schema, or a Release input a DeploymentTarget's `releaseInputs` fills
+with `fromPromotion`, typed by the Release's `spec.inputs.<name>.type`. A
+mismatch is `NYL-PROMOTE-VALUE-TYPE`:
+
+```yaml
+releaseInputs:
+  web/web:
+    image: {fromPromotion: {value: webImage}}   # Release web declares image: {type: string}
+```
+
+The Release's declaration is read from the ApplicationGroups the target
+selects, without rendering. A remote group source is fetched at its pinned
+commit, or read from the Git cache when the fetch fails. `nyl validate
+--offline` and `nyl reconcile --local` read the cache only, so a remote group
+never fetched before leaves its inputs unchecked
+(`NYL-PROMOTE-VALUE-TYPE-UNCHECKED`): an error in `nyl validate`, a warning in
+the other commands. Resolution still checks the promoted value against the
+declaration when the publication unit runs, so an unchecked input is never
+deployed with the wrong type.
+
 ## What runs now
 
 A KubernetesPublication that declares `observe: {}` attests `accepted` and

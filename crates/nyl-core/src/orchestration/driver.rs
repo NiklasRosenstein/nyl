@@ -368,9 +368,10 @@ pub struct Deployment {
     pub group: Option<String>,
 }
 
-/// What a driver may read to list the deployments of a unit as the worktree
-/// declares it ([`Driver::deployments`]): the project's files, never state,
-/// a cluster, or the process environment.
+/// What a driver may read to answer a question about a unit as the worktree
+/// declares it ([`Driver::deployments`], [`Driver::bound_field_types`]): the
+/// project's files and the sources they name, never state, a cluster, or the
+/// process environment.
 pub struct DeploymentContext<'a> {
     /// The worktree the unit's spec was rendered from.
     pub worktree: &'a std::path::Path,
@@ -381,6 +382,29 @@ pub struct DeploymentContext<'a> {
     /// A cache directory of the invocation's workspace, when it has one; a
     /// driver that renders keeps nothing between calls without it.
     pub cache_dir: Option<&'a std::path::Path>,
+    /// The cache of remote sources that outlives the invocation, when the
+    /// caller has one: what a source fetched before is read from when the
+    /// network is not used, and where a fetch keeps what it fetched.
+    pub source_cache_dir: Option<&'a std::path::Path>,
+    /// Read remote sources from the caches only and never use the network
+    /// (`nyl validate --offline`, a `--local` run): a source neither cached
+    /// nor fetched leaves what depends on it unanswered.
+    pub offline: bool,
+}
+
+/// What a driver says about the type of one field of a unit's spec that its
+/// kind's schema cannot type ([`Driver::bound_field_types`]).
+///
+/// Contract: [PromotionPath](../../../../design/promotion.md#promotionpath),
+/// "Validation checks every path". Computed when it is read and never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundFieldType {
+    /// The field accepts values of this type.
+    Typed(crate::bindings::InputType),
+    /// The field has a declared type, but the driver could not read it, such
+    /// as when what declares it is in a source neither fetched nor cached;
+    /// the reason says why.
+    Unchecked(String),
 }
 
 /// What a deployment runs, as a running-scoped attestation shows it.
@@ -1047,6 +1071,25 @@ pub trait Driver: Send + Sync {
     fn deployments(&self, ctx: &DeploymentContext<'_>, spec: &Value) -> DriverResult<Option<Vec<Deployment>>> {
         let _ = (ctx, spec);
         Ok(None)
+    }
+    /// The declared type of each field of `spec` at `pointers` (JSON
+    /// Pointers into the spec, each holding a `fromPromotion` binding) that
+    /// the kind types beyond its schema, such as a field whose type a file
+    /// the spec names declares. A pointer missing from the answer is one the
+    /// kind does not type, which fits any value; the default answers none,
+    /// meaning the kind types nothing beyond [`Self::spec_schema`]. `Err`
+    /// says why none of them could be read. Promotion validation compares
+    /// each answer with the type of the value the binding reads, so the
+    /// engine never reads what declares it. Contract:
+    /// [PromotionPath](../../../../design/promotion.md#promotionpath).
+    fn bound_field_types(
+        &self,
+        ctx: &DeploymentContext<'_>,
+        spec: &Value,
+        pointers: &[String],
+    ) -> DriverResult<BTreeMap<String, BoundFieldType>> {
+        let _ = (ctx, spec, pointers);
+        Ok(BTreeMap::new())
     }
     /// The native resources a spec claims in an environment; an image tag prefix names the environment.
     fn ownership_scopes(&self, environment: &EnvironmentName, spec: &Value) -> Vec<OwnershipScope>;
