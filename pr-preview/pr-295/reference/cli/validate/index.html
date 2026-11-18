@@ -64,8 +64,11 @@
 <li><code dir="auto">--strict</code>: treat warnings as errors.</li>
 <li><code dir="auto">--offline</code>: never use the network, as <code dir="auto">render-tree --offline</code> does: Git
 sources (charts and remote ApplicationGroup sources) come from the cache,
-and <code dir="auto">fromPublication</code> state from the cached publication branch head. A
-remote source that was never fetched cannot be checked offline; see
+and <code dir="auto">fromPublication</code> state from the cached publication branch head. This
+holds for the target compiles and the PromotionPath checks (Release input
+types and <code dir="auto">coverage</code> names) alike. A remote source that was never fetched
+cannot be checked offline: the compile fails, and the checks report
+<code dir="auto">NYL-PROMOTE-VALUE-TYPE-UNCHECKED</code> or <code dir="auto">NYL-PROMOTE-COVERAGE-UNCHECKED</code>; see
 <a href="#units-and-placed-targets">Units and placed targets</a>.</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="checks">Checks</h2><a class="sl-anchor-link" href="#checks"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Checks”</span></a></div>
