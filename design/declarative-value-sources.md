@@ -1,130 +1,109 @@
 # Declarative value sources
 
-**Status:** proposed. No schema or state changes yet.
+**Status:** proposed, revised after a case study (below). No schema or state
+changes yet.
 
-Three places force *structural* templating, where the document is invalid YAML
-until it renders and the template decides its shape or types. Quoted string
-interpolation (`'rise-{{ environment.name }}'`) is not the problem and stays.
-This note replaces each of the three with a typed, declarative form.
+*Structural* templating is Jinja that makes a document invalid YAML before it
+renders, or that decides a value's shape or type (`{{ x | tojson }}`,
+`{% if %}`, `{% for %}`). Quoted string interpolation
+(`'pr-{{ environment.name }}'`) is not the problem and stays. This note
+replaces structural templating with a few typed source clauses. It deliberately
+does **not** add a general mechanism that resolves sources anywhere.
 
-The trigger is a Nyl setup for rise-deploy/rise. One Release renders the
-repository's chart for `develop` and for every pull-request preview. Its
-HelmChart looks like this today:
+## Proposal
 
-```yaml
-spec:
-  includeCrds: {{ inputs.clusterWide | tojson }}          # (2) typed scalar
-  values:
-    metacontroller:
-      install: {{ inputs.clusterWide | tojson }}          # (2)
-{%- for key, value in inputs.chartValues | items %}       # (1) object merge
-    {{ key }}: {{ value | tojson }}
-{%- endfor %}
-```
-
-The publication unit it belongs to does this:
+### 1. `HelmChart.spec.valuesFrom`
 
 ```yaml
-spec:
-  target: {{ values.target | tojson }}                    # (3) target per environment
-```
-
-## 1. `HelmChart.spec.valuesFrom`
-
-```yaml
-apiVersion: k8s.nyl/v1
 kind: HelmChart
 spec:
   chart: {name: ../helm/rise}
   valuesFrom:
-    - file: ../helm/rise/values-preview.yaml
-    - input: chartValues
-    - input: database
-      pointer: /helm
-      key: postgresql
-  values:
-    fullnameOverride: '{{ inputs.name }}'
+    - file: ../helm/rise/values-preview.yaml   # same rules as Cluster/DeploymentTarget valuesFrom
+    - input: chartValues                       # an object-typed Release input
+      pointer: /optional
+      key: optionalMountKey
+  values: {fullnameOverride: '{{ inputs.name }}'}
 ```
 
-- An entry sets exactly one of `file` or `input`.
-  - `file` follows `ValuesFromFile` on Cluster and DeploymentTarget: the same path rule, Git visibility, and a single YAML mapping document.
-  - `input` names a Release input whose effective value, after the optional `pointer`, must be an object.
-- `key` mounts the mapping under one literal key, as in `ValuesFromFile`.
-- **Merge:** entries apply in order, then inline `values` on top. Each step uses `deep_merge_value`: maps merge and everything else replaces. This is also Helm's rule for repeated `-f` files.
-- **Where it applies:**
-  - `input` entries are allowed only in a Release bundle that declares the input. Outside a Release, `input` is a configuration error naming the HelmChart.
-  - `file` entries work everywhere.
-- **Cache key:** every cache that covers a HelmChart's output must key on the merged values, file bytes included. The implementation verifies this rather than assuming it.
+- Entries `deep_merge_value` in order, then inline `values`. Maps merge and everything else replaces, which is also Helm's `-f` rule.
+- `input` entries are allowed only in a Release bundle that declares the input.
+- The merged values are data. Nyl never walks them for source clauses, before or after the merge, and that includes values that embed Nyl resources.
+- Every cache that covers a HelmChart's output must key on the merged values, file bytes included.
 
-## 2. `fromInput` for typed fields
+### 2. `fromValues` on declared unit fields
 
-`includeCrds` and `lookup` accept `{fromInput: {name, pointer?}}` as well as a literal. The resolved value must be a boolean. An input whose declared type cannot yield one is rejected before rendering, and a value that is missing or null after the pointer is an error, never a silent default.
+In unit documents, a field that its owner declares *resolvable* accepts a
+literal or one clause:
 
 ```yaml
-spec:
-  includeCrds: {fromInput: {name: clusterWide}}
+target: {fromValues: {pointer: /target}}
+teardownWait: {fromValues: {pointer: /teardownWait, default: {strategy: manual}}}
+approval: {fromValues: {pointer: /approval, optional: true}}
 ```
 
-This deliberately has no general form. A chart value such as
-`metacontroller.install` belongs in a `valuesFrom` input, i.e. in the target's
-binding, not in a reference node inside `values`.
+- **Where the pointer reads.** `pointer` is rooted at the environment's effective `values`, from an Environment or a template instance. The value it reads is the already rendered value and is never templated again.
+- **When a value is missing.** If nothing is at the pointer, or the value is null:
+  - `default` applies if set, and it must be non-null;
+  - with `optional: true` the key is removed, so the rendered spec is identical to omitting the field;
+  - otherwise it is an error.
+- **Who declares which fields are resolvable.** Core declares resolvable common fields (`approval`, `timeout`); each driver declares its own (`KubernetesPublication.target`, `teardownWait`). Core does the substitution generically, and the declaring side validates the type exactly as it does for a literal. Errors are `NYL-UNIT-INVALID`. The list is closed and grows only by decision.
+- **Inside `fromUnit`.** `fromUnit.environment` is the one sanctioned nested case. Render-time sources resolve before execution-time ones.
+- **One place, fail-closed.** Resolution happens in one place, environment unit rendering, so direct and environment paths agree. No clause may survive rendering: a surviving one is an error, never data.
+- **Errors.** A missing pointer names the environment, the keys that exist, and the nearest match. `nyl validate` checks every pointer against every environment and every template sample instance that selects the unit.
 
-## 3. `target: {fromValues: …}` on publication units
+### 3. `fromInput` on two HelmChart fields
 
-`KubernetesPublication.spec.target` accepts `{fromValues: {pointer}}` as well
-as a name or `{inline: …}`.
+`includeCrds` and `lookup` accept `{fromInput: {name, pointer?}}`. There is no
+`default` on the clause: the Release input's declared default applies.
 
-- The pointer reads the environment's effective `values`, from either an Environment or a template instance.
-- The value there must be a string (a target name) or an object `{inline: …}`.
-- Inline targets keep their current rules: the name is `<environment>-<unit>`, templates inside the inline spec render with the instance, and `validate` checks every template through sample instances.
+## Case study
 
-```yaml
-kind: KubernetesPublication
-metadata:
-  name: rise
-  labels: {stage: develop, preview: 'true'}   # flow style is fine again
-spec:
-  target: {fromValues: {pointer: /target}}
-```
+**Subjects:**
+- the Rise draft (a Release plus a publication unit);
+- the reference scenarios `preview` and `promotion`;
+- independently, the end-to-end example and `hotfix`.
 
-The unit document becomes valid YAML before rendering. The block-style-labels
-workaround (`scan_unit_envelope`'s static scanner) then becomes unnecessary for
-such units, but it stays for templated ones.
+**Method:** three reviewers.
+- A spec-only author rewrote projects it had not seen rewritten.
+- A task-based user performed five change tasks against both versions.
+- An adversarial reviewer checked the spec against the code.
+
+| Measure | Before | After |
+|---|---|---|
+| Structural-templating sites, own rewrite (4 projects) | 10 | 0 |
+| Same, spec-only author (2 projects it had not seen rewritten) | 3 | 0, matching the own rewrite |
+| Unit documents that are valid YAML before rendering | 0 of 4 | 4 of 4 |
+| Edit size for the 5 change tasks | same | same |
+| Typo in a required pointer is caught | late or silent | at render, before any effect |
+
+**Findings that changed the proposal:**
+- **Any-depth resolution in HelmChart `values` dropped.** Data from `valuesFrom` would become code, and charts that embed Nyl resources would be resolved eagerly. The tier-3 rewrite showed it is unnecessary.
+- **`default: null` replaced by `optional: true`.** `null` satisfies no input type, serde cannot tell `default: null` apart from an absent `default`, and emitting `field: null` changes a unit's execution key.
+- **Resolvable fields declared by their owner.** `teardownWait` and `target` are driver-owned (`COMMON_UNIT_FIELDS` lists only common ones), so a shared list would break the driver boundary.
+- **Fail-closed invariant added.** Several readers parse references with `if let Ok` (`rules/multi_environment.rs:260`), so an unresolved clause inside `fromUnit` would silently drop a cross-environment edge.
+- **A defaulted pointer still fails silently on a typo.** `validate` therefore checks pointers against all selecting environments, and error messages suggest the nearest key.
+
+**Usefulness:**
+- The gains are documents that are valid YAML before rendering, lintable, and written with flow-style labels; type errors before execution; and a defined merge instead of a loop that could emit duplicate keys.
+- Editing is not cheaper. The benefit is correctness and readability.
+
+## Open decision
+
+Typed **template parameters** still need Jinja. A boolean parameter that
+reaches a binding (`clusterWide: {value: {{ params.crds | tojson }}}`) cannot
+be written with these clauses. There are two options:
+- add `{fromParameter: name}` inside `EnvironmentTemplate.spec.values`, resolved when an instance is created; parameters are declared and typed;
+- accept the remaining `| tojson` in templates.
 
 ## Not proposed
 
-- **Type-preserving interpolation** (a scalar that is exactly `'{{ inputs.x }}'` keeps the input's type). It works everywhere, but it is implicit, and it changes the output of existing documents that quote a numeric input and rely on getting a string.
-- **Reference nodes inside arbitrary resources** (`{$input: …}` in any manifest). That would be a second templating language with the potential to collide with real data.
+- **Resolving sources anywhere.** It collides with real data, lets chart output become input, has no type at the site, and leaves the scope rules implicit.
+- **Type-preserving `'{{ x }}'` interpolation.** It is implicit and changes the output of existing documents.
+- **A promise that every field becomes resolvable.** That would be a second templating language arriving one field at a time. `| tojson` stays acceptable for rare fields.
 
 ## Compatibility
 
-- All three forms are additive schema changes, and every existing document renders unchanged.
+- The changes are additive: existing documents render byte-identically.
 - There is no state or ownership-index change.
-- JSON schemas are regenerated.
-- Errors reuse the existing configuration codes. No unit-specific codes are added; `target` resolution failures stay `NYL-UNIT-INVALID`.
-
-## The Rise Release afterwards
-
-```yaml
-kind: HelmChart
-spec:
-  chart: {name: ../helm/rise}
-  includeCrds: {fromInput: {name: clusterWide}}
-  valuesFrom: [{input: chartValues}]          # per target, incl. metacontroller.install
-  values:
-    fullnameOverride: '{{ inputs.name }}'
-    image: {repository: ghcr.io/rise-deploy/rise, digest: '{{ inputs.imageDigest }}'}
-```
-
-The `digest` value assumes a small chart change in Rise. Today the chart only
-joins `repository:tag`.
-
-## Order
-
-1. `valuesFrom` (highest value)
-2. `target: {fromValues}`
-3. `fromInput` on `includeCrds` and `lookup`
-
-## Open questions
-
-- Should `valuesFrom.input` also accept `fromUnit`-style sources directly, bypassing Release inputs? The proposal is no: inputs stay the single typed boundary between a target and a Release.
+- The Jinja and declarative forms of each case-study project must render identical specs.
