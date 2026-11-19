@@ -142,9 +142,12 @@ impl Driver for FakePublication {
             "type": "object",
             "required": ["target"],
             "properties": {
-                "target": {"type": ["string", "object"]},
+                // Resolvable like the kind it stands in for; the marker is all
+                // rendering reads.
+                "target": {"type": ["string", "object"], "x-nyl-resolvable": "fromValues"},
                 "observe": {"type": "object", "additionalProperties": false},
                 "teardownWait": {
+                    "x-nyl-resolvable": "fromValues",
                     "type": "object",
                     "required": ["strategy"],
                     "properties": {

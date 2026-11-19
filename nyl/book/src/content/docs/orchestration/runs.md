@@ -64,6 +64,12 @@ Common fields every kind shares:
 | `timeout` | The deadline of one execution, at most `7d`. |
 | `env` | `passthrough`, the names of runner variables the unit may read, and `secrets`, mapping variable names to project secret keys. Missing credentials stop the unit before execution. |
 
+`approval` and `timeout` accept a
+[`fromValues`](/nyl/reference/value-sources/#unit-fields-fromvalues) clause, such
+as `approval: {fromValues: {pointer: /approval}}`, which reads the value from
+the environment's `values`, so environments that need different values share
+one unit document.
+
 ## References between units
 
 `{fromUnit: {unit: <name>, output: <output>}}` stands for an output of

@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 fn catalogue() -> nyl_render::config::ResourceCatalogue {
     let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
     descriptors.extend_from_slice(nyl_units::catalog::RESOURCES);
-    nyl_render::config::ResourceCatalogue(descriptors)
+    nyl_render::config::ResourceCatalogue::new(descriptors)
 }
 
 fn real() -> KubernetesPublicationDriver {
@@ -1296,13 +1296,23 @@ fn test_units_claim_their_target_as_an_ownership_scope() {
 #[test]
 fn test_the_unit_schema_types_an_inline_target_as_a_deployment_target_spec() {
     let schema = serde_json::to_value(KubernetesPublicationDriver::new(catalogue()).spec_schema()).unwrap();
-    let inline = &schema["properties"]["target"]["oneOf"][1]["properties"]["inline"];
+    let inline = &schema["properties"]["target"]["anyOf"][0]["oneOf"][1]["properties"]["inline"];
     assert!(inline["properties"]["reconciler"].is_object(), "{inline}");
     assert!(
         inline["required"].as_array().unwrap().contains(&json!("reconciler")),
         "{inline}"
     );
     assert!(schema["$defs"]["TargetReconciler"].is_object(), "{schema}");
+    // `target` and `teardownWait` accept `fromValues`, and nothing else does.
+    let resolvable =
+        nyl_core::bindings::resolvable_fields(&KubernetesPublicationDriver::new(catalogue()).spec_schema());
+    assert_eq!(
+        resolvable
+            .iter()
+            .map(|field| (field.pointer.as_str(), field.kind.as_str()))
+            .collect::<Vec<_>>(),
+        [("/target", "fromValues"), ("/teardownWait", "fromValues")]
+    );
 }
 
 /// The deployments a PromotionPath's `coverage` may name for the unit: each
