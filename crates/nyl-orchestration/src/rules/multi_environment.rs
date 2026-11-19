@@ -15,7 +15,7 @@ pub fn dependencies(spec: &Value) -> BTreeSet<EnvironmentName> {
         return BTreeSet::new();
     }
     let mut result = BTreeSet::new();
-    if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
+    if let Ok(references) = nyl_core::bindings::unit_references("", spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
         for reference in references {
             if let Some(environment) = reference.source.environment {
                 if let Ok(name) = EnvironmentName::new(environment) {
@@ -257,7 +257,7 @@ fn check_references(
             )
         })
     };
-    if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
+    if let Ok(references) = nyl_core::bindings::unit_references("", spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
         for reference in references {
             let Some(environment) = reference.source.environment.as_deref() else {
                 continue;
@@ -345,7 +345,7 @@ pub fn blocked_references(
         };
         reasons.push(BlockedReason::new(pointer, blocker));
     };
-    if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
+    if let Ok(references) = nyl_core::bindings::unit_references("", spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
         for binding in references {
             reference(
                 binding.source.environment.as_deref(),

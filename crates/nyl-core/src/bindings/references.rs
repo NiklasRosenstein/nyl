@@ -21,13 +21,15 @@ pub struct UnitReference {
 }
 
 /// Every `fromUnit` reference object in `document`, at any depth of its
-/// objects and arrays, with `pointer` locating `document` itself. A
+/// objects and arrays, with `pointer` locating `document` itself. `kinds`
+/// are the reference kinds the document accepts, as for
+/// [`super::resolve_document`], such as [`super::UNIT_REFERENCE_KINDS`]. A
 /// malformed reference object (unknown fields, both `output` and `artifact`)
-/// is an issue naming its pointer; `fromPromotion` references are skipped.
-pub fn unit_references(pointer: &str, document: &Value) -> Result<Vec<UnitReference>, Vec<String>> {
+/// is an issue naming its pointer; references of other kinds are skipped.
+pub fn unit_references(pointer: &str, document: &Value, kinds: &[&str]) -> Result<Vec<UnitReference>, Vec<String>> {
     let mut references = Vec::new();
     let mut issues = Vec::new();
-    walk(pointer, document, &mut references, &mut issues);
+    walk(pointer, document, kinds, &mut references, &mut issues);
     if issues.is_empty() {
         Ok(references)
     } else {
@@ -35,14 +37,14 @@ pub fn unit_references(pointer: &str, document: &Value) -> Result<Vec<UnitRefere
     }
 }
 
-fn walk(pointer: &str, value: &Value, references: &mut Vec<UnitReference>, issues: &mut Vec<String>) {
+fn walk(pointer: &str, value: &Value, kinds: &[&str], references: &mut Vec<UnitReference>, issues: &mut Vec<String>) {
     match value {
         Value::Object(fields) => {
-            let kinds = reference_kinds(fields);
-            match kinds.as_slice() {
+            let found = reference_kinds(fields, kinds);
+            match found.as_slice() {
                 [] => {
                     for (key, child) in fields {
-                        walk(&crate::json_pointer::child(pointer, key), child, references, issues);
+                        walk(&crate::json_pointer::child(pointer, key), child, kinds, references, issues);
                     }
                 }
                 [kind] if fields.len() == 1 => {
@@ -52,13 +54,13 @@ fn walk(pointer: &str, value: &Value, references: &mut Vec<UnitReference>, issue
                 }
                 _ => issues.push(format!(
                     "the reference at {pointer:?} mixes {} with other fields; a reference object holds only its reference",
-                    kinds.join(" and ")
+                    found.join(" and ")
                 )),
             }
         }
         Value::Array(items) => {
             for (index, child) in items.iter().enumerate() {
-                walk(&format!("{pointer}/{index}"), child, references, issues);
+                walk(&format!("{pointer}/{index}"), child, kinds, references, issues);
             }
         }
         _ => {}
@@ -90,6 +92,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::bindings::UNIT_REFERENCE_KINDS;
 
     fn source(unit: &str, output: Option<&str>, artifact: Option<&str>) -> UnitInputSource {
         UnitInputSource {
@@ -113,7 +116,7 @@ mod tests {
             "promoted": {"fromPromotion": {"value": "image"}},
             "literal": {"fromGit": "main"},
         });
-        let references = unit_references("", &document).unwrap();
+        let references = unit_references("", &document, UNIT_REFERENCE_KINDS).unwrap();
         assert_eq!(
             references,
             [
@@ -132,7 +135,7 @@ mod tests {
     #[test]
     fn test_unit_references_escapes_tokens_below_the_given_pointer() {
         let document = json!({"platform/web": {"image": {"fromUnit": {"unit": "web-image", "artifact": "image"}}}});
-        let references = unit_references("/releases", &document).unwrap();
+        let references = unit_references("/releases", &document, UNIT_REFERENCE_KINDS).unwrap();
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].pointer, "/releases/platform~1web/image");
     }
@@ -146,7 +149,7 @@ mod tests {
             "mixed": {"fromUnit": {"unit": "a", "output": "x"}, "other": 1},
             "scalar": {"fromUnit": "a"},
         });
-        let issues = unit_references("", &document).unwrap_err();
+        let issues = unit_references("", &document, UNIT_REFERENCE_KINDS).unwrap_err();
         assert_eq!(issues.len(), 5, "{issues:?}");
         for (issue, pointer) in issues
             .iter()

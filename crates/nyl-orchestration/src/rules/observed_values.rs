@@ -392,7 +392,7 @@ fn stale_foreign_references(
         let Some(resolved) = document.resolved_spec.as_ref() else {
             continue;
         };
-        let Ok(references) = unit_references("", &document.spec) else {
+        let Ok(references) = unit_references("", &document.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) else {
             continue;
         };
         for reference in references {
@@ -443,7 +443,7 @@ fn stale_local_references(
         let Some(resolved) = document.resolved_spec.as_ref() else {
             continue;
         };
-        let Ok(references) = unit_references("", &document.spec) else {
+        let Ok(references) = unit_references("", &document.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) else {
             continue;
         };
         for reference in references {
@@ -522,7 +522,7 @@ fn blocked_source(
     producer: &ProducerRef,
     observation: &str,
 ) -> Option<UnitInputSource> {
-    unit_references("", &document.spec)
+    unit_references("", &document.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS)
         .ok()?
         .into_iter()
         .find(|reference| {

@@ -149,7 +149,7 @@ pub fn prepare(
                 .map_err(config)?;
             environments.insert(name, state);
         }
-    } else if !nyl_core::bindings::unit_references("", &spec)
+    } else if !nyl_core::bindings::unit_references("", &spec, nyl_core::bindings::UNIT_REFERENCE_KINDS)
         .map_err(|errors| config(errors.join("; ")))?
         .is_empty()
         || spec

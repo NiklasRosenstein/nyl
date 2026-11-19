@@ -12,7 +12,12 @@
 //!   otherwise the binding, otherwise the declared default. A source that holds
 //!   no value yet leaves the slot unbound, so the default applies.
 //! - [`resolve_document`] replaces reference objects at any depth of a
-//!   free-form document and records provenance per JSON Pointer.
+//!   free-form document and records provenance per JSON Pointer. The caller
+//!   names the reference kinds the document accepts, such as
+//!   [`UNIT_REFERENCE_KINDS`].
+//! - [`resolve_declared`] substitutes typed source clauses ([`SourceKind`])
+//!   only at the fields a schema marks with [`Resolvable`], and
+//!   [`reject_surviving_clauses`] makes an unresolved clause an error.
 //! - A provider may report a reference as [`Provision::Blocked`], such as a
 //!   producer without a current receipt; blocked values are listed with their
 //!   location instead of failing resolution.
@@ -25,8 +30,10 @@
 
 mod binding;
 mod declaration;
+mod declared;
 mod issue;
 mod references;
+mod sources;
 
 use std::collections::BTreeMap;
 
@@ -40,8 +47,13 @@ pub use binding::{
     UnitInputSource,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
+pub use declared::{reject_surviving_clauses, resolve_declared, SourceProvider};
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
+pub use sources::{
+    resolvable_fields, FromInput, FromValues, InputSource, ParameterSource, Resolvable, ResolvableField, SourceClause,
+    SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
+};
 
 /// An effective value and where it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -277,15 +289,17 @@ pub struct ResolvedDocument<O> {
 /// and arrays, by the value it stands for.
 ///
 /// Contract: orchestration core, References. A reference object has exactly
-/// one field, `fromUnit` or `fromPromotion`, and replaces the whole value it
-/// stands for; every other object is data. `field` and `pointer` locate
-/// `document` itself, such as `spec.variables` and `/variables`. A reference
-/// that resolves to no value is an issue, because a document declares no
-/// defaults.
+/// one field, one of `kinds` (unit `values` and `variables` accept
+/// [`UNIT_REFERENCE_KINDS`]; each is a source field of [`InputBinding`]),
+/// and replaces the whole value it stands for; every other object is data.
+/// `field` and `pointer` locate `document` itself, such as `spec.variables`
+/// and `/variables`. A reference that resolves to no value is an issue,
+/// because a document declares no defaults.
 pub fn resolve_document<P: Providers>(
     field: &str,
     pointer: &str,
     document: &Value,
+    kinds: &[&str],
     providers: &P,
     issues: &mut Vec<BindingIssue>,
 ) -> ResolvedDocument<P::Origin> {
@@ -294,7 +308,7 @@ pub fn resolve_document<P: Providers>(
         provenance: BTreeMap::new(),
         blocked: Vec::new(),
     };
-    walk(field, pointer, &mut value, providers, &mut found, issues);
+    walk(field, pointer, &mut value, kinds, providers, &mut found, issues);
     ResolvedDocument {
         value,
         provenance: found.provenance,
@@ -307,16 +321,17 @@ struct Found<O> {
     blocked: Vec<Blocked>,
 }
 
-/// Fields that make an object a reference.
-const REFERENCE_KINDS: [&str; 2] = ["fromUnit", "fromPromotion"];
+/// The reference kinds of unit `values` and `variables`: a recorded unit
+/// value, and a value recorded through a PromotionPath.
+pub const UNIT_REFERENCE_KINDS: &[&str] = &["fromUnit", "fromPromotion"];
 
-/// The reference fields of an object, in key order: none for data, one
-/// without any other field for a reference object; anything else mixes a
-/// reference with other fields.
-fn reference_kinds(fields: &serde_json::Map<String, Value>) -> Vec<String> {
+/// The fields of an object that are one of `kinds`, in key order: none for
+/// data, one without any other field for a reference object; anything else
+/// mixes a reference with other fields.
+fn reference_kinds(fields: &serde_json::Map<String, Value>, kinds: &[&str]) -> Vec<String> {
     fields
         .keys()
-        .filter(|key| REFERENCE_KINDS.contains(&key.as_str()))
+        .filter(|key| kinds.contains(&key.as_str()))
         .cloned()
         .collect()
 }
@@ -337,13 +352,14 @@ fn walk<P: Providers>(
     field: &str,
     pointer: &str,
     value: &mut Value,
+    kinds: &[&str],
     providers: &P,
     found: &mut Found<P::Origin>,
     issues: &mut Vec<BindingIssue>,
 ) {
     match value {
         Value::Object(fields) => {
-            let references = reference_kinds(fields);
+            let references = reference_kinds(fields, kinds);
             match references.as_slice() {
                 [] => {
                     for (key, child) in fields.iter_mut() {
@@ -351,6 +367,7 @@ fn walk<P: Providers>(
                             &format!("{field}.{key}"),
                             &crate::json_pointer::child(pointer, key),
                             child,
+                            kinds,
                             providers,
                             found,
                             issues,
@@ -375,6 +392,7 @@ fn walk<P: Providers>(
                     &format!("{field}[{index}]"),
                     &format!("{pointer}/{index}"),
                     child,
+                    kinds,
                     providers,
                     found,
                     issues,
@@ -650,7 +668,14 @@ mod tests {
             "literal": {"fromGit": "main"},
         });
         let mut issues = Vec::new();
-        let resolved = resolve_document("spec.variables", "/variables", &document, &providers, &mut issues);
+        let resolved = resolve_document(
+            "spec.variables",
+            "/variables",
+            &document,
+            UNIT_REFERENCE_KINDS,
+            &providers,
+            &mut issues,
+        );
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(resolved.value["vpc_id"], json!("vpc-0abc123"));
         // Only fromUnit and fromPromotion are references in a document.
@@ -681,7 +706,14 @@ mod tests {
             "e": {"fromPromotion": {"value": "image"}},
         });
         let mut issues = Vec::new();
-        resolve_document("values", "", &document, &TestProviders::default(), &mut issues);
+        resolve_document(
+            "values",
+            "",
+            &document,
+            UNIT_REFERENCE_KINDS,
+            &TestProviders::default(),
+            &mut issues,
+        );
         let issues = messages(&issues);
         assert_eq!(issues.len(), 5, "{issues:?}");
         assert_eq!(
@@ -742,7 +774,7 @@ mod tests {
             "b": {"fromUnit": {"unit": "other", "output": "x"}, "pointer": "/id"},
         });
         let mut issues = Vec::new();
-        resolve_document("spec", "", &document, &providers, &mut issues);
+        resolve_document("spec", "", &document, UNIT_REFERENCE_KINDS, &providers, &mut issues);
         assert_eq!(
             issues,
             [
