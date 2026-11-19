@@ -11,9 +11,11 @@ for target bindings, and [References between units](/nyl/orchestration/runs/#ref
 for unit specs.
 
 Unit fields read the environment's values with [`fromValues`](#unit-fields-fromvalues).
-Typed source clauses for HelmChart fields and EnvironmentTemplate values are
-being added. This page documents each one as it ships; until then, those
-places take literal values and Jinja.
+A HelmChart reads its values from files and Release inputs with
+[`valuesFrom`](#helmchart-values-valuesfrom), and two of its fields from Release
+inputs with [`fromInput`](#helmchart-fields-frominput). A typed source clause for
+EnvironmentTemplate values is being added; until then, those values take
+literals and Jinja.
 
 ## How resolution works
 
@@ -152,7 +154,9 @@ spec:
 ```
 
 **Where it is valid.** Only the fields that declare it, and only in unit
-documents:
+documents, including the inline target of a KubernetesPublication. A declared
+DeploymentTarget is not a unit document: its `fromUnit` bindings take a literal
+`environment`, and a `fromValues` there fails with where it works.
 
 | Field | Units |
 | --- | --- |
@@ -210,3 +214,113 @@ Configuration error: Rendering the units of Environment dev at 00000000000000000
 Environment that selects it, and for sample instances of every
 EnvironmentTemplate, so a pointer that one environment lacks fails before any
 run or instance exists.
+
+## HelmChart values: `valuesFrom`
+
+A HelmChart can read its chart values from values files of this repository and
+from `object` Release inputs, merged in order, before its inline `values`:
+
+```yaml
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: web
+  namespace: web
+spec:
+  chart: {name: ./chart}
+  valuesFrom:
+    - file: values-base.yaml            # relative to this file's directory
+    - file: /shared/values-preview.yaml # from the Git worktree root
+      pointer: /web
+    - input: chartValues                # an object input of this Release
+    - input: chartValues
+      pointer: /monitoring
+      key: monitoring
+  values:
+    fullnameOverride: web
+```
+
+Each entry sets exactly one source, and optionally `pointer` and `key`:
+
+| Field | Meaning |
+| --- | --- |
+| `file` | A YAML file holding one mapping, read without templating. The path rules are those of [Cluster and DeploymentTarget `valuesFrom`](/nyl/kubernetes-gitops/targets-and-clusters/#file-backed-values): relative to the directory of the file that declares the HelmChart, `/` for the Git worktree root, never outside the worktree or through a symbolic link, and only a Git-visible file outside the project's `.nyl/cache`. In a remote ApplicationGroup source, `/` is the root of its checkout. |
+| `input` | A Release input of type `object` that the Release of this bundle declares. Its value is the target's binding, or the declared default. |
+| `pointer` | A JSON Pointer that selects a value inside the file or input; the whole value when omitted. |
+| `key` | Mount the selected value under this key. Without `key`, the selected value must be a mapping, merged at the values root. |
+
+**Where it is valid.** In a HelmChart in a file of a Release bundle: the
+Release entry file or a file its `spec.include` selects, also without a Release
+for `file` entries. An `input` entry needs a Release that declares the input. A
+HelmChart that rendering generates, such as one a chart outputs, cannot use
+`valuesFrom`.
+
+**When it resolves.** At render time, when Nyl loads the bundle's files and
+before it renders the chart. Entries merge in order and the inline `values`
+merge last: maps merge key by key, and every other value, lists included,
+replaces. That is Helm's own rule for several `-f` files.
+
+**The values are data.** The merged values go to Helm as they are. Nyl never
+reads source clauses in them, before or after the merge, so an object such as
+`{fromInput: …}` inside `values` or a values file reaches the chart unchanged.
+
+**Missing values.** There are no defaults: a missing file, a `pointer` that
+selects nothing, and an input the Release does not declare are errors. An
+optional input's declared default applies when the target binds none.
+
+**Types.** An `input` entry reads only an input of type `object`. Without
+`key`, the value it contributes must be a mapping.
+
+**Caching.** Each file is an input of the Release's render, and of its target's
+tree, like an included file, and the merged values are part of the Helm render
+cache key, so changing a file or an input renders the chart again.
+
+**Errors.** Each error names the HelmChart, its file, and the entry:
+
+```console
+$ nyl render apps/web/web.yaml
+2026-11-19T01:32:01.925507Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.valuesFrom[1]: Release input "chartValues" has type string; valuesFrom reads only inputs of type object
+Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
+```
+
+## HelmChart fields: `fromInput`
+
+`spec.includeCrds` and `spec.lookup` of a HelmChart read a boolean Release
+input with `{fromInput: {name, pointer?}}`, so one Release bundle serves
+targets that need different settings:
+
+```yaml
+spec:
+  inputs:
+    crds: {type: boolean, default: true}
+    features: {type: object, default: {lookup: false}}
+---
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: web
+spec:
+  chart: {name: ./chart}
+  includeCrds: {fromInput: {name: crds}}
+  lookup: {fromInput: {name: features, pointer: /lookup}}
+```
+
+**Where it is valid.** Only on these two fields, in a HelmChart in a file of a
+Release bundle whose Release declares the input. Every other place in a Nyl
+resource of the bundle treats an object whose only field is `fromInput` as an
+error; `values`, `valuesFrom` data, and a Component's `spec` are chart data and
+are never checked.
+
+**When it resolves.** At render time, when Nyl loads the bundle's files: before
+anything reads the HelmChart, so `lookup` read from an input decides the cache
+and the lookup scope exactly as a literal would.
+
+**Missing values.** The clause has no `default`: the input's declared default
+applies when the target binds none. A `pointer` that selects nothing, and a
+`null` value, are errors.
+
+**Types.** The value must be a boolean.
+
+**Errors.** An input the Release does not declare, an input read outside a
+Release that declares inputs, and a value that is not a boolean fail the render
+with a message that names the HelmChart, its file, and the field.

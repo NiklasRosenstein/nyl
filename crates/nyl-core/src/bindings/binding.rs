@@ -228,12 +228,38 @@ impl PublicationInputSource {
     }
 }
 
+/// `fromUnit.environment` once its document is resolved: a name. A
+/// `fromValues` clause reaches deserialization only where nothing resolves
+/// it, such as a declared DeploymentTarget, so it fails with where it works.
+fn environment_name<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::String(name) => Ok(Some(name)),
+        Value::Null => Ok(None),
+        Value::Object(object) if object.len() == 1 && object.contains_key(<super::FromValues as super::SourceKind>::FIELD) => {
+            Err(serde::de::Error::custom(
+                "fromUnit.environment holds a fromValues clause, which resolves only in unit documents (including an inline target of a KubernetesPublication); write the environment name here, see https://niklasrosenstein.github.io/nyl/reference/value-sources/#unit-fields-fromvalues",
+            ))
+        }
+        other => Err(serde::de::Error::custom(format!(
+            "fromUnit.environment must be an environment name, got {}",
+            super::json_type_name(&other)
+        ))),
+    }
+}
+
 /// Reserved orchestration reference to a unit output or artifact field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnitInputSource {
-    /// Environment of the unit, for cross-environment references. In a unit document, accepts `fromValues`, resolved when the unit renders.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `fromValues`, resolved when the unit renders.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "environment_name"
+    )]
     #[schemars(with = "super::Resolvable<Option<String>, super::FromValues>")]
     pub environment: Option<String>,
     /// Producing unit name.

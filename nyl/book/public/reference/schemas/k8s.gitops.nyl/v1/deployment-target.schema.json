@@ -1344,28 +1344,11 @@
           "type": "array"
         },
         "environment": {
-          "anyOf": [
-            {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "fromValues": {
-                  "$ref": "#/$defs/ValuesSource"
-                }
-              },
-              "required": [
-                "fromValues"
-              ],
-              "type": "object"
-            }
-          ],
-          "description": "Environment of the unit, for cross-environment references. In a unit document, accepts `fromValues`, resolved when the unit renders.",
-          "x-nyl-resolvable": "fromValues"
+          "description": "Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `fromValues`, resolved when the unit renders.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "evidence": {
           "anyOf": [

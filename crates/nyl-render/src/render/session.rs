@@ -68,6 +68,10 @@ pub struct RenderRequest<'a> {
     /// The namespace documents take when the file declares no Release, as
     /// `apply` and `diff` take it from `--namespace`.
     pub namespace_without_release: Option<&'a str>,
+    /// The root of the pinned checkout the file comes from, such as a remote
+    /// ApplicationGroup source: HelmChart `valuesFrom` files are read inside
+    /// it. Without it, they are read from the Git worktree holding the file.
+    pub source_checkout: Option<&'a Path>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -91,6 +95,7 @@ impl<'a> RenderRequest<'a> {
             lookup_scope: None,
             destination_namespace: None,
             namespace_without_release: None,
+            source_checkout: None,
         }
     }
 }
@@ -452,12 +457,16 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
     ) -> Result<RenderedBundle> {
-        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None, None, None)
+        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None, None, None, None)
             .await
     }
 
     /// Render one Release entry file of a target with its resolved inputs, and
     /// say where the Release is published, for the Helm `lookup` of its charts.
+    ///
+    /// `checkout` is the root of the pinned checkout a remote source comes
+    /// from, where HelmChart `valuesFrom` files are read.
+    #[allow(clippy::too_many_arguments)] // each is one independent fact of the Release's render
     pub async fn render_release_file_with_inputs(
         &self,
         path: &Path,
@@ -466,9 +475,11 @@ impl RenderSession {
         inputs: Option<&serde_json::Map<String, Value>>,
         lookup_scope: Option<ScopeSource>,
         destination_namespace: Option<&str>,
+        checkout: Option<&Path>,
     ) -> Result<RenderedBundle> {
         let mut request = RenderRequest::new(path, Some(provenance_root));
         request.provenance_worktree_root = worktree_root;
+        request.source_checkout = checkout;
         request.inputs = inputs;
         request.lookup_scope = lookup_scope;
         request.destination_namespace = destination_namespace;
@@ -508,6 +519,10 @@ impl RenderSession {
             ProvenanceRoots {
                 root: request.provenance_root,
                 worktree: request.provenance_worktree_root,
+            },
+            super::BundleFiles {
+                project_root: &self.project_root,
+                checkout: request.source_checkout,
             },
         )?;
         for resource in &bundle.resources {
@@ -1681,6 +1696,61 @@ spec:
             seen(&render_seen(&session).await),
             "two",
             "a changed lookup result invalidates the cached Release"
+        );
+    }
+
+    /// Catches a cached render reused after a `valuesFrom` file changed: the
+    /// file is an input of the Release cache, and the merged values a
+    /// parameter of the Helm cache, so the next render reads the new values.
+    #[tokio::test]
+    async fn changing_a_values_from_file_invalidates_the_cached_release() {
+        let temp = TempDir::new().unwrap();
+        git2::Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        let chart = temp.path().join("chart");
+        fs::create_dir_all(chart.join("templates")).unwrap();
+        fs::write(
+            chart.join("Chart.yaml"),
+            "apiVersion: v2\nname: greeting\nversion: 1.0.0\n",
+        )
+        .unwrap();
+        fs::write(
+            chart.join("templates/greeting.yaml"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: greeting\ndata:\n  greeting: {{ .Values.greeting | quote }}\n  name: {{ .Values.name | quote }}\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("values.yaml"), "greeting: hello\nname: file\n").unwrap();
+        fs::write(
+            temp.path().join("app.yaml"),
+            format!(
+                "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: greeting\n  namespace: apps\n---\napiVersion: {API_VERSION}\nkind: HelmChart\nmetadata:\n  name: greeting\n  namespace: apps\nspec:\n  chart:\n    name: chart\n  valuesFrom:\n    - file: values.yaml\n  values:\n    name: inline\n"
+            ),
+        )
+        .unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
+        let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        session.set_cache(Some(
+            RenderCache::with_root(temp.path().join(".nyl/cache"), CacheMode::Default).unwrap(),
+        ));
+        let greeting = |bundle: &RenderedBundle| bundle.manifests[0]["data"].clone();
+
+        let first = session.render_release_file(Path::new("app.yaml")).await.unwrap();
+        assert_eq!(
+            greeting(&first),
+            serde_json::json!({"greeting": "hello", "name": "inline"})
+        );
+        assert!(first.cacheable);
+        let values_file = temp.path().canonicalize().unwrap().join("values.yaml");
+        assert!(first.inputs.contains(&values_file), "{:?}", first.inputs);
+        let cached = session.render_release_file(Path::new("app.yaml")).await.unwrap();
+        assert_eq!(greeting(&cached), greeting(&first));
+
+        fs::write(temp.path().join("values.yaml"), "greeting: goodbye\nname: file\n").unwrap();
+        let changed = session.render_release_file(Path::new("app.yaml")).await.unwrap();
+        assert_eq!(
+            greeting(&changed),
+            serde_json::json!({"greeting": "goodbye", "name": "inline"}),
+            "a changed values file invalidates the cached Release and Helm output"
         );
     }
 

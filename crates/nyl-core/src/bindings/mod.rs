@@ -53,8 +53,8 @@ pub use declared::{reject_surviving_clauses, resolve_declared, resolve_in_refere
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
 pub use sources::{
-    resolvable_fields, resolvable_schema, FromInput, FromValues, InputSource, ParameterSource, Resolvable,
-    ResolvableField, SourceClause, SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
+    resolvable_fields, resolvable_schema, without_clauses, FromInput, FromValues, InputSource, ParameterSource,
+    Resolvable, ResolvableField, SourceClause, SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
 };
 
 /// An effective value and where it came from.

@@ -166,6 +166,32 @@ spec:
       type: LoadBalancer
 ```
 
+### Values files and Release inputs
+
+`spec.valuesFrom` reads chart values from YAML files of this repository and
+from `object` Release inputs. Entries merge in order, and inline `values` merge
+last; maps merge key by key and everything else replaces, as with Helm's `-f`:
+
+```yaml
+spec:
+  chart: {name: ./charts/web}
+  valuesFrom:
+    - file: values-base.yaml       # relative to this file's directory
+    - file: /shared/preview.yaml   # from the Git worktree root
+      pointer: /web
+    - input: chartValues           # an object input the Release declares
+  values:
+    fullnameOverride: web
+```
+
+`pointer` selects a value inside the file or input, and `key` mounts it under
+one values key. Files follow the path and Git-visibility rules of Cluster
+`valuesFrom`; an `input` entry is valid only in the bundle of a Release that
+declares the input. Nyl passes the merged values to Helm as data and never
+templates or resolves anything in them. See
+[Value sources](/nyl/reference/value-sources/#helmchart-values-valuesfrom) for
+every rule.
+
 ### Cluster and target values
 
 Cluster and DeploymentTarget values are Nyl template inputs. They are not passed to
@@ -180,8 +206,9 @@ spec:
     environment: "{{ values.environment }}"
 ```
 
-Helm receives only `HelmChart.spec.values`. Component resources follow the same
-rule and pass only their `spec` payload to Helm.
+Helm receives only `HelmChart.spec.values`, merged over `spec.valuesFrom`.
+Component resources follow the same rule and pass only their `spec` payload to
+Helm.
 
 ### Templating in Values
 
@@ -300,6 +327,11 @@ spec:
     version: 1.17.6
   lookup: true
 ```
+
+In a Release bundle, `lookup` and `includeCrds` can also read a boolean
+Release input, so targets decide them without templating:
+`lookup: {fromInput: {name: lookup}}`. See
+[HelmChart fields: `fromInput`](/nyl/reference/value-sources/#helmchart-fields-frominput).
 
 `lookup` is opt-in. A chart without it renders exactly as before. `spec.lookup: false` is the
 explicit opt-out: it renders the same way, and tells Nyl you know the chart calls `lookup`
