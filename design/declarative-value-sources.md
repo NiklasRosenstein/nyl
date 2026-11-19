@@ -83,6 +83,82 @@ spec:
 - **What is an error.** An unknown parameter name is an error, and so is a clause anywhere outside the template's `values`, for example in a declared Environment.
 - **What `validate` checks.** `nyl validate` resolves the clauses for every sample instance, so a template whose values reference a missing parameter fails before any instance exists.
 
+## Implementation shape
+
+### Resolve on `Value`, then deserialize
+
+Typed fields resolve on the `serde_json::Value` of a document before anything
+deserializes it into its typed struct:
+
+```text
+authored YAML → Jinja (strings only) → Value
+  → resolve the declared clauses (nyl-core, pure)
+  → reject any clause that survived
+  → validate and deserialize, exactly as today
+```
+
+- **Drivers never see a clause.** They already take the spec as `&Value` (`Driver::validate_spec`, `teardown_wait`, …), and their typed structs keep resolved types.
+- **Execution keys are unchanged.** They hash the resolved spec, so a field filled by a clause hashes exactly like the same literal. Moving a document from Jinja to clauses re-runs nothing.
+- **Rejected alternative: `Resolvable<T>` as a runtime type** (`pub target: Resolvable<TargetRef>`). Every reader would have to unwrap it, "already resolved" would be invisible in the type, and drivers would handle a concept that belongs to core.
+
+### The schema is the declaration
+
+`Resolvable<T, S>` is a schema-only type, applied with `#[schemars(with = …)]`:
+
+```rust
+/// nyl-core `bindings`: a clause kind and the clause object it takes.
+pub trait SourceKind { const FIELD: &'static str; type Clause: JsonSchema; }
+pub enum FromValues {}   // FIELD = "fromValues", Clause = ValuesSource
+pub enum FromInput {}    // FIELD = "fromInput",  Clause = InputSource
+
+/// `anyOf: [T, {<FIELD>: Clause}]` plus `"x-nyl-resolvable": <FIELD>`.
+pub struct Resolvable<T, S: SourceKind>(PhantomData<(T, S)>);
+
+// a driver's spec struct: runtime type unchanged
+#[schemars(with = "Resolvable<TargetRef, FromValues>")]
+pub target: TargetRef,
+
+// HelmChartSpec
+#[schemars(with = "Resolvable<Option<bool>, FromInput>")]
+pub include_crds: Option<bool>,
+```
+
+- **The source is a type parameter.** The clause a field accepts depends on the kind of document it sits in, not on the field: unit specs take `fromValues`, and Nyl resources in a Release bundle take `fromInput`. Each struct lives in one kind of document, so its fields name their source, and the editor schema only offers a clause that can resolve there.
+- **Core reads the marker.** For each unit kind, core walks `driver.spec_schema()` once and collects the JSON pointers marked `x-nyl-resolvable`. Core's own schema marks the common unit fields; HelmChart's schema marks its two fields. The resolver substitutes only at those pointers. That is how "each driver declares its own fields" keeps the driver boundary: the declaration is the driver's schema, and core never names a kind or a field.
+- **The caller supplies one kind of clause.** Unit rendering supplies `FromValues` and Release rendering supplies `FromInput`. A marker that names another kind is a configuration error, so a struct reused somewhere else fails loudly instead of resolving from the wrong place.
+- **Several sources on one field** (`Resolvable<T, (FromValues, FromInput)>`) is the natural extension. It is added only when a real case needs it.
+
+### Clause types
+
+These live in nyl-core `bindings`, next to `InputBinding`:
+
+```rust
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ValuesSource {
+    pub pointer: String,
+    #[serde(default, deserialize_with = "present_non_null")]
+    pub default: Option<Value>,   // rejects `default: null` instead of reading it as absent
+    #[serde(default)]
+    pub optional: bool,           // exclusive with `default`
+}
+pub struct InputSource     { pub name: String, pub pointer: Option<String> }
+pub struct ParameterSource { pub name: String, pub pointer: Option<String> }
+```
+
+### Per mechanism
+
+| Mechanism | Code change |
+|---|---|
+| `HelmChart.valuesFrom` | A runtime field, `values_from: Vec<HelmValuesSource>`. Each entry holds exactly one of `file` (`ValuesFromFile`'s path rules) or `input`, plus `pointer` and `key`. The renderer merges the entries before it calls Helm. |
+| `fromValues` on unit fields | Only the schema attributes. Resolution happens once, in environment unit rendering (`render_environment_units`), which also serves the direct path. |
+| `fromInput` on `includeCrds` and `lookup` | Only the schema attributes. Resolution runs against the Release's inputs before the HelmChart is deserialized in the render pipeline. |
+| `fromParameter` | No struct change, because `values` is already a free-form `Value`. The any-depth walker (`resolve_document`) takes the set of clause kinds it accepts as a parameter instead of the fixed `REFERENCE_KINDS`: template values accept `fromParameter`, and unit `values` and `variables` keep `fromUnit` and `fromPromotion`. |
+
+- **`fromUnit.environment` is the exception.** It sits inside a reference object within a free-form map, not at a fixed schema path. The any-depth walker resolves `fromValues` inside each `fromUnit` it finds. Its schema still says `Resolvable<Option<String>, FromValues>` for editors, but the marked pointers do not drive resolution there.
+- **The surviving-clause check is explicit.** After substitution, an object whose only key is a known clause name is an error. A typed field with `deny_unknown_fields` would catch most survivors anyway, but a field typed as free-form `Value` would not.
+- **Every value a clause reads enters the dependency recorder** at the layer that consumes it, as the cache invariants require. Environment values and Release inputs already do.
+- **One resolver, one shell call.** The resolver is pure (`resolve_declared(spec, pointers, provider)`), and each source kind is one provider method, as in `bindings::Providers`. Bindings, unit references and declared fields share one resolver, as the architecture rules require.
+
 ## Case study
 
 **Subjects:**
