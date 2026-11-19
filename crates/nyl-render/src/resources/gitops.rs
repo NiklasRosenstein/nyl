@@ -1454,6 +1454,31 @@ impl DeploymentTarget {
             .get_or_insert_with(|| self.metadata.name.clone());
     }
 
+    /// A `fromParameter` clause resolves only in an EnvironmentTemplate's
+    /// `values`, so an inline target written there holds none once its
+    /// instance is created; one anywhere in a target, such as in a binding's
+    /// `value`, is an error instead of reaching a Release as data.
+    fn reject_parameter_sources(&self) -> Result<()> {
+        let spec = serde_json::to_value(&self.spec).map_err(|error| CoreError::config(error.to_string()))?;
+        let mut issues = Vec::new();
+        nyl_core::bindings::reject_surviving_clauses(
+            "spec",
+            &spec,
+            nyl_core::bindings::TEMPLATE_VALUE_KINDS,
+            &mut issues,
+        );
+        if issues.is_empty() {
+            return Ok(());
+        }
+        Err(CoreError::config(
+            issues
+                .into_iter()
+                .map(|issue| issue.message)
+                .collect::<Vec<_>>()
+                .join("; "),
+        ))
+    }
+
     pub fn cluster_name(&self) -> &str {
         self.spec
             .cluster_ref
@@ -1501,6 +1526,7 @@ impl DeploymentTarget {
             KIND_DEPLOYMENT_TARGET,
             &self.metadata,
         )?;
+        self.reject_parameter_sources()?;
         validate_static_required("spec.clusterRef.name", self.cluster_name())?;
         if self.spec.legacy_argocd_ref.is_some() {
             return Err(CoreError::config(format!(
@@ -2696,6 +2722,25 @@ mod tests {
     /// `fromValues` in a `fromUnit` binding's `environment`: only unit
     /// documents resolve it, so the declared target fails with where it works,
     /// and only a literal name is offered to editors.
+    /// Catches a `fromParameter` clause in a declared DeploymentTarget, such
+    /// as in a binding's `value`, reaching a Release as data: only an
+    /// EnvironmentTemplate's values resolve one.
+    #[test]
+    fn declared_targets_reject_from_parameter() {
+        let error = parse_gitops_resource(&target_with(json!({
+            "reconciler": {"argocd": {}},
+            "releaseInputs": {"rise/rise": {"clusterWide": {"value": {"fromParameter": {"name": "crds"}}}}}
+        })))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(
+                "spec.releaseInputs.rise/rise.clusterWide.value holds a fromParameter clause where none resolves"
+            ),
+            "{error}"
+        );
+    }
+
     #[test]
     fn declared_targets_take_a_literal_from_unit_environment() {
         let binding = |environment: serde_json::Value| {

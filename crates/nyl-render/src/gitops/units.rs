@@ -45,9 +45,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nyl_core::bindings::{
-    reject_surviving_clauses, resolve_declared, resolve_in_references, BindingIssue, FromValues, InputBinding,
-    InputDeclaration, InputType, Origin, Provided, Provision, ResolvableField, Resolved, SourceKind, SourceProvider,
-    ValuesSource,
+    reject_surviving_clauses, resolve_declared, resolve_in_references, BindingIssue, FromParameter, FromValues,
+    InputBinding, InputDeclaration, InputType, Origin, Provided, Provision, ResolvableField, Resolved, SourceKind,
+    SourceProvider, ValuesSource,
 };
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
@@ -543,7 +543,7 @@ fn resolve_value_sources(
         &mut issues,
     );
     if issues.is_empty() {
-        reject_surviving_clauses("spec", &referenced.value, &[FromValues::FIELD], &mut issues);
+        reject_surviving_clauses("spec", &referenced.value, UNIT_CLAUSES, &mut issues);
     }
     if !issues.is_empty() {
         let messages = issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>();
@@ -552,6 +552,11 @@ fn resolve_value_sources(
     *spec = referenced.value;
     Ok(())
 }
+
+/// The clause kinds no unit spec may hold after its `fromValues` clauses
+/// resolve: an unresolved `fromValues`, and `fromParameter`, which only an
+/// EnvironmentTemplate's `values` resolve.
+const UNIT_CLAUSES: &[&str] = &[FromValues::FIELD, FromParameter::FIELD];
 
 /// Where a resolved `fromValues` clause read its value.
 #[derive(Debug, Clone, PartialEq)]
@@ -2103,6 +2108,101 @@ spec:
             "{error}"
         );
         assert!(error.contains("pass -e <environment>"), "{error}");
+    }
+
+    /// The preview template with a boolean parameter `crds` bound into its
+    /// inline target's Release input, the Rise case.
+    fn parameter_preview_project(binding: &str, unit: &str) -> TempDir {
+        let template = PREVIEW_TEMPLATE
+            .replace(
+                "    pr: {type: integer}\n",
+                "    pr: {type: integer}\n    crds: {type: boolean, default: false}\n",
+            )
+            .replace(
+                "    prefix: '{{ environment.name }}'\n",
+                &format!("    target:\n      inline:\n        reconciler: {{argocd: {{}}}}\n        clusterRef: {{name: dev}}\n        publication:\n          repository: {{repoURL: 'https://example.invalid/deploy.git'}}\n          revision: previews\n          pathPrefix: '{{{{ environment.name }}}}'\n        releaseInputs:\n          rise/rise:\n            clusterWide: {binding}\n"),
+            );
+        let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();
+        let platform = [platform[0].clone(), platform[2].clone()].join("---");
+        project(&[
+            ("platform.yaml", &platform),
+            ("preview.yaml", &template),
+            ("kubernetes.yaml", unit),
+        ])
+    }
+
+    const TARGET_FROM_VALUES: &str = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata: {name: kubernetes, labels: {preview: 'true'}}\nspec:\n  target: {fromValues: {pointer: /target}}\n";
+
+    fn render_parameter_instance(worktree: &TempDir, params: Value) -> Result<RenderedSource> {
+        let params = serde_json::from_value(params).unwrap();
+        UnitSourceRenderer::new("/nyl", crate::config::test_catalogue())
+            .with_instances(BTreeMap::from([(
+                EnvironmentName::new("pr-5").unwrap(),
+                InstanceDescriptor {
+                    template: "preview".to_owned(),
+                    params,
+                },
+            )]))
+            .render_source(
+                worktree.path(),
+                &EnvironmentName::new("pr-5").unwrap(),
+                &CommitId::new("a".repeat(40)).unwrap(),
+            )
+    }
+
+    /// Catches a template parameter reaching a Release input binding as
+    /// anything but its declared type, or a unit seeing the clause instead of
+    /// its value: `fromParameter` inside the inline target's binding `value`
+    /// resolves when the instance's values are computed, before the unit
+    /// renders, so `fromValues` reads a target whose binding holds the
+    /// literal boolean, given or defaulted.
+    #[test]
+    fn test_from_parameter_resolves_before_units_read_the_values() {
+        let worktree = parameter_preview_project("{value: {fromParameter: {name: crds}}}", TARGET_FROM_VALUES);
+        for (params, expected) in [
+            (json!({"pr": 5, "crds": true}), json!(true)),
+            (json!({"pr": 5}), json!(false)),
+        ] {
+            let source = render_parameter_instance(&worktree, params).unwrap();
+            let binding = json!({"value": expected});
+            assert_eq!(
+                source.environment.spec.values["target"]["inline"]["releaseInputs"]["rise/rise"]["clusterWide"],
+                binding
+            );
+            let spec = unit(&source, "kubernetes").spec.clone().expect("the unit renders");
+            assert_eq!(spec["target"]["name"], json!("pr-5-kubernetes"));
+            assert_eq!(
+                spec["target"]["inline"]["releaseInputs"]["rise/rise"]["clusterWide"],
+                binding
+            );
+        }
+
+        // An undeclared parameter names the template and what it declares.
+        let worktree = parameter_preview_project("{value: {fromParameter: {name: crd}}}", TARGET_FROM_VALUES);
+        let error = render_parameter_instance(&worktree, json!({"pr": 5}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-TEMPLATE-INVALID"), "{error}");
+        assert!(
+            error.contains("spec.values.target.inline.releaseInputs.rise/rise.clusterWide.value.fromParameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: crds, pr)"),
+            "{error}"
+        );
+    }
+
+    /// Catches a `fromParameter` clause in a unit document reaching a driver
+    /// as data: only an EnvironmentTemplate's values resolve one.
+    #[test]
+    fn test_from_parameter_in_a_unit_document_is_an_error() {
+        let unit = format!("{TARGET_FROM_VALUES}  timeout: {{fromParameter: {{name: pr}}}}\n");
+        let worktree = parameter_preview_project("{value: true}", &unit);
+        let error = render_parameter_instance(&worktree, json!({"pr": 5}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-UNIT-INVALID"), "{error}");
+        assert!(
+            error.contains("spec.timeout holds a fromParameter clause where none resolves; fromParameter resolves only in an EnvironmentTemplate's spec.values"),
+            "{error}"
+        );
     }
 
     /// Catches an inline target that is not a valid DeploymentTarget being

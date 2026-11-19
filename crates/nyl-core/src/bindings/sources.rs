@@ -66,6 +66,17 @@ impl SourceKind for FromInput {
     type Clause = InputSource;
 }
 
+/// `fromParameter`: a value of an EnvironmentTemplate's `spec.values` read
+/// from the instance's bound parameter. It resolves at any depth of those
+/// values ([`super::resolve_document`] with [`super::TEMPLATE_VALUE_KINDS`]),
+/// not at fields a schema marks, so no struct names it.
+pub enum FromParameter {}
+
+impl SourceKind for FromParameter {
+    const FIELD: &'static str = "fromParameter";
+    type Clause = ParameterSource;
+}
+
 /// Reads a value from the environment's effective `values`.
 ///
 /// When nothing is at `pointer`, or the value there is `null`, `default`

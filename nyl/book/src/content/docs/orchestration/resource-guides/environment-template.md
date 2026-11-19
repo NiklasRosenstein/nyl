@@ -96,9 +96,38 @@ variables:
   vpc_id: {fromUnit: {unit: network, output: vpcId, environment: {fromValues: {pointer: /networkFrom, optional: true}}}}
 ```
 
+A string renders to a string. Where a value needs a parameter's own type, such
+as a boolean or an integer, write
+[`{fromParameter: {name, pointer?}}`](/nyl/reference/value-sources/#template-parameters-fromparameter)
+in its place, at any depth of `values`, also inside an inline target's
+bindings:
+
+```yaml
+spec:
+  parameters:
+    pr: {type: integer}
+    crds: {type: boolean, default: false}
+  values:
+    target:
+      inline:
+        # …
+        releaseInputs:
+          rise/rise:
+            clusterWide: {value: {fromParameter: {name: crds}}}
+```
+
+The clause is replaced by the instance's bound parameter, checked against its
+declaration when `--param` is parsed and defaulted as declared, after the
+strings render and before any unit reads the values. `--param crds=true` gives
+the binding `{value: true}`, a boolean the Release's `boolean` input accepts.
+A clause that names a parameter the template does not declare fails with
+`NYL-TEMPLATE-INVALID`, naming the declared ones. Only a template's `values`
+take the clause.
+
 [`nyl validate`](/nyl/reference/cli/validate/) renders the units of sample
-instances of every template, so a pointer the template's values lack fails
-before any instance exists.
+instances of every template, so a pointer the template's values lack, or a
+`fromParameter` that names an undeclared parameter, fails before any instance
+exists.
 
 `state` is different: it locates the `state.yaml` that holds the parameters,
 so it renders with `environment.name` alone. With `path: '{{ environment.name }}'`

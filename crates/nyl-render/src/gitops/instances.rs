@@ -9,8 +9,13 @@
 //!
 //! - every string of the template's `values`, `state`, `source`, and
 //!   `protectedRefs` that has template syntax renders with `params` and
-//!   `environment.name`; the result is an ordinary [`Environment`], validated
-//!   like a declared one, whose labels are the template's, so groups apply;
+//!   `environment.name`, then every `fromParameter` clause of `values`
+//!   resolves to its bound parameter
+//!   ([`EnvironmentTemplate::resolve_parameter_sources`]); the result is an
+//!   ordinary [`Environment`], validated like a declared one, whose labels
+//!   are the template's, so groups apply. This is the one place an
+//!   instance's values are computed, for `state init`, `reconcile
+//!   --template`, every later command, and `nyl validate`'s sample instances;
 //! - `state` renders with `environment.name` alone, because it locates the
 //!   `state.yaml` that holds the parameters;
 //! - the template's lifecycle fields travel as [`InstanceTerms`];
@@ -165,6 +170,15 @@ pub fn instantiate(
                 render_strings(&engine, value, &context)
                     .map_err(|error| invalid(template, name.as_str(), format!("spec.{field}: {error}")))?;
             }
+        }
+        // Then the `fromParameter` clauses of `values`, with the bound
+        // parameters: the value a clause reads is typed and never templated.
+        if let Some(Value::Object(values)) = map.get_mut("values") {
+            let rendered = values.clone().into_iter().collect();
+            let resolved = template
+                .resolve_parameter_sources(&rendered, &bound)
+                .map_err(|message| invalid(template, name.as_str(), message))?;
+            *values = resolved.into_iter().collect();
         }
         // `state` reads only `environment.name`; its rendering is the one
         // that located the state.

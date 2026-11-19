@@ -138,6 +138,12 @@ Each binding sets exactly one source:
 [Value sources](/nyl/reference/value-sources/#release-input-bindings) lists
 each source with when it resolves and what it does when it finds no value.
 
+An inline target written in an EnvironmentTemplate's `values` can bind an input
+to a template parameter with `{value: {fromParameter: {name: crds}}}`: the
+instance's values resolve the clause first, so the binding holds the
+parameter's typed value, such as a boolean. See
+[`fromParameter`](/nyl/reference/value-sources/#template-parameters-fromparameter).
+
 The effective value is the target binding if there is one, otherwise the
 Release default. A binding replaces the value whole; unlike `values`, inputs
 are never deep-merged, so every value has exactly one source.

@@ -13,9 +13,24 @@ for unit specs.
 Unit fields read the environment's values with [`fromValues`](#unit-fields-fromvalues).
 A HelmChart reads its values from files and Release inputs with
 [`valuesFrom`](#helmchart-values-valuesfrom), and two of its fields from Release
-inputs with [`fromInput`](#helmchart-fields-frominput). A typed source clause for
-EnvironmentTemplate values is being added; until then, those values take
-literals and Jinja.
+inputs with [`fromInput`](#helmchart-fields-frominput). An EnvironmentTemplate's
+values read the instance's parameters with
+[`fromParameter`](#template-parameters-fromparameter).
+
+## Summary
+
+| Source | Where it is valid | Resolves | When it finds no value | Type check |
+| --- | --- | --- | --- | --- |
+| [`value`, `fromFile`, `fromGit`, `fromPublication`](#release-input-bindings) | A Release-input binding of a DeploymentTarget, declared or inline. | Render time. | The Release input's declared default applies; without one, an error. A `pointer` that selects nothing in a file that exists is an error. | The input's declared `type` and `enum`. |
+| [`fromUnit`, `fromPromotion`](#unit-references) | A Release-input binding of a target that a KubernetesPublication names, and any depth of a unit spec's free-form maps. | Execution time. | The consumer is blocked until the value exists; a reference that resolves to no value is an error. | The producer's declared output type, and the Release input's type where it is bound. |
+| [`fromValues`](#unit-fields-fromvalues) | The fields of a unit spec that declare it, and `environment` of each `fromUnit` in a unit spec. | Render time, when the environment's units render. | `default`, else `optional: true` removes the field, else an error. | By the unit's kind, as the literal. |
+| [`valuesFrom`](#helmchart-values-valuesfrom) | A HelmChart in a file of a Release bundle. | Render time, when the bundle's files load. | An error: a missing file, a `pointer` that selects nothing, or an undeclared input. | `input` reads only `object` inputs; without `key`, a mapping. |
+| [`fromInput`](#helmchart-fields-frominput) | `includeCrds` and `lookup` of a HelmChart in a Release bundle whose Release declares the input. | Render time, when the bundle's files load. | The input's declared default applies; a `pointer` that selects nothing is an error. | Boolean. |
+| [`fromParameter`](#template-parameters-fromparameter) | Any depth of an EnvironmentTemplate's `spec.values`. | When an instance's values are computed: `state init --template`, `reconcile --template`, every command that names the instance, and `nyl validate`'s sample instances. | The parameter's declared default applies; a required parameter must be passed. An undeclared parameter, or a `pointer` that selects nothing, is an error. | The parameter's declared `type` and `enum`, when `--param` is parsed. |
+
+Each section below says where its clause is an error instead of data, so a
+clause written in the wrong place fails with where it works instead of reaching
+a reader unresolved.
 
 ## How resolution works
 
@@ -324,3 +339,82 @@ applies when the target binds none. A `pointer` that selects nothing, and a
 **Errors.** An input the Release does not declare, an input read outside a
 Release that declares inputs, and a value that is not a boolean fail the render
 with a message that names the HelmChart, its file, and the field.
+
+## Template parameters: `fromParameter`
+
+An EnvironmentTemplate's `values` read the instance's parameters with
+`{fromParameter: {name, pointer?}}`, so a value keeps the parameter's type
+where a quoted Jinja string would make it a string:
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: EnvironmentTemplate
+metadata:
+  name: preview
+spec:
+  parameters:
+    pr: {type: integer}
+    crds: {type: boolean, default: false}
+    sizes: {type: object, default: {web: {replicas: 1}}}
+  values:
+    hostname: 'pr-{{ params.pr }}.preview.example.com'   # a string: Jinja is fine
+    replicas: {fromParameter: {name: sizes, pointer: /web/replicas}}
+    target:
+      inline:
+        # …
+        releaseInputs:
+          rise/rise:
+            clusterWide: {value: {fromParameter: {name: crds}}}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `name` | A parameter the template declares in `spec.parameters`. |
+| `pointer` | A JSON Pointer that selects a value inside the parameter; the whole value when omitted. |
+
+**Where it is valid.** At any depth of an EnvironmentTemplate's `spec.values`,
+as a [reference object](#reference-objects): exactly one field, and an object
+with other fields next to it is an error. That includes an inline target and
+the `value` of its bindings, as above. Everywhere else, a declared
+Environment's or EnvironmentGroup's `values`, a DeploymentTarget, a unit
+document, a Nyl resource of a Release bundle, and the template's other fields,
+the clause is an error.
+
+**When it resolves.** When an instance's values are computed, which is the one
+step that turns a template and its parameters into the instance's Environment:
+at `nyl state init --template`, at `nyl reconcile --template`, and at every
+later command that names the instance with `-e`, from the parameters its
+`state.yaml` records. Strings with template syntax render first; the clause
+then resolves, and its value is used as it is, never templated again. Units
+render after that, so a unit's [`fromValues`](#unit-fields-fromvalues) reads the
+resolved value, and a binding written `{value: {fromParameter: …}}` reaches the
+Release as the literal `{value: true}`.
+
+**Missing values.** The clause has no `default`: the parameter's declared
+default applies when the instance is created without it, and a parameter
+without a default must be passed with `--param`. A `pointer` that selects
+nothing, or `null`, is an error.
+
+**Types.** The value is the bound parameter, checked against its declared
+`type` and `enum` when `--param` is parsed, so `--param crds=true` is a boolean.
+A value bound to a Release input is checked against the input's type again when
+the target renders.
+
+**Errors.** A clause that does not resolve fails the instance with
+`NYL-TEMPLATE-INVALID`. A parameter the template does not declare names the
+declared ones. [`nyl validate`](/nyl/reference/cli/validate/) computes the
+values of sample instances of every template, so the error appears before any
+instance exists:
+
+```console
+$ nyl validate
+…
+Configuration error: Rendering the units of Environment preview-sample-1 at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.replicas.fromParameter names parameter "replica", which EnvironmentTemplate preview does not declare (declared: crds, pr); declare it in spec.parameters, or name a declared one (fix EnvironmentTemplate preview in source)
+```
+
+A clause outside a template's values fails where the resource is read:
+
+```console
+$ nyl validate
+2026-11-19T01:47:50.126319Z ERROR nyl: Configuration error: dev.yaml#document-1: spec.values.replicas holds a fromParameter clause where none resolves; fromParameter resolves only in an EnvironmentTemplate's spec.values, see https://niklasrosenstein.github.io/nyl/reference/value-sources/#template-parameters-fromparameter
+```

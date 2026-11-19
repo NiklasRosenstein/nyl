@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use nyl_core::bindings::{
-    reject_surviving_clauses, resolvable_fields, resolve_declared, BindingIssue, FromInput, FromValues, InputSource,
-    Origin, Provided, Provision, ResolvableField, Resolved, SourceKind, SourceProvider,
+    reject_surviving_clauses, resolvable_fields, resolve_declared, BindingIssue, FromInput, FromParameter, FromValues,
+    InputSource, Origin, Provided, Provision, ResolvableField, Resolved, SourceKind, SourceProvider,
 };
 use nyl_core::constants::API_VERSION;
 use serde_json::Value;
@@ -44,7 +44,7 @@ static CHART_INPUT_FIELDS: LazyLock<Vec<ResolvableField>> =
 
 /// The clause kinds no Nyl resource of a Release bundle may hold after
 /// resolution, outside its free-form values.
-const BUNDLE_CLAUSES: &[&str] = &[FromInput::FIELD, FromValues::FIELD];
+const BUNDLE_CLAUSES: &[&str] = &[FromInput::FIELD, FromValues::FIELD, FromParameter::FIELD];
 
 /// Where the files of a Release bundle come from, for `valuesFrom` files.
 #[derive(Debug, Clone, Copy)]
@@ -533,6 +533,14 @@ mod tests {
         assert!(
             surviving.contains("spec.version[0] holds a fromInput clause where none resolves"),
             "{surviving}"
+        );
+
+        // Only an EnvironmentTemplate's values resolve `fromParameter`.
+        let parameter = project("  values: {}\n  releaseName: {fromParameter: {name: pr}}\n", &[]);
+        let parameter = error(&parameter, None);
+        assert!(
+            parameter.contains("spec.releaseName holds a fromParameter clause where none resolves"),
+            "{parameter}"
         );
     }
 

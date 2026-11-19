@@ -379,6 +379,95 @@ fn test_validate_checks_the_names_every_instance_would_generate() {
         ),
         "{output}"
     );
+
+    // A template value that reads an undeclared parameter fails for the
+    // sample instances, before any instance exists.
+    let undeclared = validate(&|root| {
+        let file = root.join("nyl/preview.yaml");
+        let text = std::fs::read_to_string(&file).unwrap();
+        let from = "    backendDir: '/var/empty/tofu'\n";
+        assert!(text.contains(from), "the template holds {from:?}");
+        std::fs::write(
+            file,
+            text.replace(from, &format!("{from}    crds: {{fromParameter: {{name: crd}}}}\n")),
+        )
+        .unwrap();
+    });
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&undeclared.stdout),
+        String::from_utf8_lossy(&undeclared.stderr)
+    );
+    assert!(!undeclared.status.success(), "{output}");
+    assert!(
+        output.contains(
+            "NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.crds.fromParameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: pr)"
+        ),
+        "{output}"
+    );
+}
+
+/// A boolean template parameter bound into the inline target's Release
+/// input with `{value: {fromParameter: {name: crds}}}`, the case that needed
+/// `| tojson`: the instance's values resolve the clause first, so the binding
+/// holds a literal boolean that the Release's `boolean` input accepts, with
+/// `--param crds=true` and with the declared default. Catches the parameter
+/// reaching the binding as a string, or as the clause itself.
+#[test]
+fn test_a_template_parameter_reaches_a_release_input_with_its_type() {
+    let project = preview_project();
+    let edit = |path: &str, from: &str, to: &str| {
+        let file = project.path().join(path);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(from), "{path} holds {from:?}");
+        std::fs::write(file, text.replace(from, to)).unwrap();
+    };
+    edit(
+        "nyl/preview.yaml",
+        "parameters: {pr: {type: integer}}",
+        "parameters:\n    pr: {type: integer}\n    crds: {type: boolean, default: false}",
+    );
+    edit(
+        "nyl/preview.yaml",
+        "            databaseHost: {fromUnit: {unit: database, output: host}}\n",
+        "            databaseHost: {fromUnit: {unit: database, output: host}}\n            clusterWide: {value: {fromParameter: {name: crds}}}\n",
+    );
+    edit(
+        "applications/web/release.yaml",
+        "    databaseHost: {type: string}\n",
+        "    databaseHost: {type: string}\n    clusterWide: {type: boolean, default: false}\n",
+    );
+    edit(
+        "applications/web/release.yaml",
+        "  name: web\n  namespace: web\nspec:\n  replicas: 1",
+        "  name: web\n  namespace: web\n  annotations: {example.invalid/cluster-wide: '{{ inputs.clusterWide | tojson }}'}\nspec:\n  replicas: 1",
+    );
+    let harness = real_publication_harness(project.path());
+    for (pr, params) in [("1", vec!["--param", "crds=true"]), ("2", vec![])] {
+        let name = format!("pr-{pr}");
+        let pr_param = format!("pr={pr}");
+        let mut args = vec!["reconcile", "-e", &name, "--template", "preview", "--param", &pr_param];
+        args.extend(params);
+        args.extend(["-o", "json"]);
+        let reconcile = invoke(&harness, &args);
+        assert_eq!(reconcile.exit, 0, "{}\n{}", reconcile.stderr, reconcile.stdout);
+    }
+    let cluster_wide = |prefix: &str| {
+        let files = previews(&harness);
+        let path = files
+            .iter()
+            .find(|path| path.starts_with(&format!("{prefix}/web/")) && path.contains("/deployment.apps/"))
+            .unwrap_or_else(|| panic!("{prefix} publishes the Deployment: {files:?}"));
+        let document: Value = serde_saphyr::from_str(&harness.show("refs/heads/previews", path)).unwrap();
+        document["metadata"]["annotations"]["example.invalid/cluster-wide"].clone()
+    };
+    assert_eq!(cluster_wide("pr-1"), "true");
+    assert_eq!(cluster_wide("pr-2"), "false");
+
+    // A later command reads the recorded parameters and resolves the same values.
+    let again = invoke(&harness, &["reconcile", "-e", "pr-1", "-o", "json"]);
+    assert_eq!(again.exit, 0, "{}\n{}", again.stderr, again.stdout);
+    assert_eq!(cluster_wide("pr-1"), "true");
 }
 
 fn instance_uid(harness: &harness::Harness, instance: &str, unit: &str) -> String {
