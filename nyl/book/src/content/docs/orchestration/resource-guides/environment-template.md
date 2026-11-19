@@ -85,9 +85,20 @@ Every string of `values`, `source`, and `protectedRefs` that contains template
 syntax renders once, when an instance is created or loaded, with `params` and
 `environment.name`. A unit then sees the rendered values, so a `values.target`
 object that declares a publication's inline target can name its prefix after
-the instance, and a unit places it with `target: {{ values.target | tojson }}`.
-A document that is not YAML before rendering needs a block-style envelope; see
-[units](/nyl/orchestration/environments-and-state/).
+the instance, and a unit places it with
+[`target: {fromValues: {pointer: /target}}`](/nyl/reference/value-sources/#unit-fields-fromvalues),
+which takes the object as rendered and never templates it again. The same
+clause in a `fromUnit` reference's `environment` lets an instance read another
+environment's unit where a declared environment reads its own:
+
+```yaml
+variables:
+  vpc_id: {fromUnit: {unit: network, output: vpcId, environment: {fromValues: {pointer: /networkFrom, optional: true}}}}
+```
+
+[`nyl validate`](/nyl/reference/cli/validate/) renders the units of sample
+instances of every template, so a pointer the template's values lack fails
+before any instance exists.
 
 `state` is different: it locates the `state.yaml` that holds the parameters,
 so it renders with `environment.name` alone. With `path: '{{ environment.name }}'`

@@ -1279,6 +1279,16 @@ impl DriverSet {
             .get(&(api_version.to_owned(), kind.to_owned()))
             .map(std::convert::AsRef::as_ref)
     }
+
+    /// The fields each registered kind's spec schema marks resolvable, for
+    /// unit rendering, which substitutes source clauses only there.
+    pub fn resolvable_unit_fields(&self) -> crate::resources::units::ResolvableUnitFields {
+        let mut fields = crate::resources::units::ResolvableUnitFields::default();
+        for ((api_version, kind), driver) in &self.drivers {
+            fields.declare(api_version, kind, &driver.spec_schema());
+        }
+        fields
+    }
 }
 
 impl std::fmt::Debug for DriverSet {

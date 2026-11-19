@@ -185,20 +185,41 @@ impl<T: JsonSchema, S: SourceKind> JsonSchema for Resolvable<T, S> {
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let literal = generator.subschema_for::<T>();
-        let clause = generator.subschema_for::<S::Clause>();
-        json_schema!({
-            "anyOf": [
-                literal,
-                {
-                    "type": "object",
-                    "properties": {S::FIELD: clause},
-                    "required": [S::FIELD],
-                    "additionalProperties": false,
-                },
-            ],
-            RESOLVABLE_EXTENSION: S::FIELD,
-        })
+        resolvable_schema::<S>(generator, literal)
     }
+
+    // An `Option` field stays optional: the derive asks the `with` type, not
+    // the field's own type, whether a field without `#[serde(default)]` is
+    // required.
+    fn _schemars_private_is_option() -> bool {
+        T::_schemars_private_is_option()
+    }
+}
+
+/// The schema of a field that holds `literal` or one `S` clause, for a schema
+/// written by hand instead of derived: what [`Resolvable<T, S>`] generates
+/// for a `T` whose schema is `literal`. A `description` on `literal` moves to
+/// the field, where editors show it.
+pub fn resolvable_schema<S: SourceKind>(generator: &mut SchemaGenerator, literal: Schema) -> Schema {
+    let mut literal = literal;
+    let description = literal.as_object_mut().and_then(|object| object.remove("description"));
+    let clause = generator.subschema_for::<S::Clause>();
+    let mut schema = json_schema!({
+        "anyOf": [
+            literal,
+            {
+                "type": "object",
+                "properties": {S::FIELD: clause},
+                "required": [S::FIELD],
+                "additionalProperties": false,
+            },
+        ],
+        RESOLVABLE_EXTENSION: S::FIELD,
+    });
+    if let Some(description) = description {
+        schema.insert("description".to_owned(), description);
+    }
+    schema
 }
 
 /// A field a schema marks resolvable.
@@ -354,6 +375,21 @@ mod tests {
         assert_eq!(target["anyOf"][0], json!({"type": "string"}));
         assert_eq!(target["anyOf"][1]["required"], json!(["fromValues"]));
         assert_eq!(target["anyOf"][1]["additionalProperties"], json!(false));
+        // An `Option` field stays optional without `#[serde(default)]`.
+        assert_eq!(schema.as_value()["required"], json!(["target", "approval", "items"]));
+    }
+
+    #[test]
+    fn test_resolvable_schema_wraps_a_hand_written_literal() {
+        let mut generator = SchemaGenerator::default();
+        let schema = resolvable_schema::<FromValues>(
+            &mut generator,
+            json_schema!({"type": "object", "description": "When phase 1 ends."}),
+        );
+        let schema = schema.as_value();
+        assert_eq!(schema["description"], json!("When phase 1 ends."));
+        assert_eq!(schema["anyOf"][0], json!({"type": "object"}));
+        assert_eq!(schema[RESOLVABLE_EXTENSION], json!("fromValues"));
     }
 
     #[test]

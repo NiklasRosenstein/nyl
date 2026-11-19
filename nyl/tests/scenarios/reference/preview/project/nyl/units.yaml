@@ -10,19 +10,17 @@ spec:
     vpcId: {type: string}
   timeout: 60m
 ---
-# Block-style envelope, because the document is not valid YAML before rendering.
 apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
 metadata:
   name: database
-  labels:
-    dev: 'true'
-    preview: 'true'
+  labels: {dev: 'true', preview: 'true'}
 spec:
   source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
-    vpc_id: {fromUnit: {% if values.networkFrom %}{environment: '{{ values.networkFrom }}', unit: network, output: vpcId}{% else %}{unit: network, output: vpcId}{% endif %}}
+    # dev's own network, or the one networkFrom names (a preview reads dev's)
+    vpc_id: {fromUnit: {unit: network, output: vpcId, environment: {fromValues: {pointer: /networkFrom, optional: true}}}}
   outputs:
     connection: {type: object}
   timeout: 60m
@@ -44,12 +42,10 @@ apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
 metadata:
   name: kubernetes
-  labels:
-    dev: 'true'
-    preview: 'true'
+  labels: {dev: 'true', preview: 'true'}
 spec:
-  target: {{ values.target | tojson }}    # dev, or the preview template's inline target
-  {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% else %}teardownWait: {strategy: manual}{% endif %}
+  target: {fromValues: {pointer: /target}}   # dev, or the preview template's inline target
+  teardownWait: {fromValues: {pointer: /teardownWait, default: {strategy: manual}}}
   timeout: 10m
 ---
 apiVersion: units.gitops.nyl/v1

@@ -17,7 +17,7 @@ use serde::de::{Deserializer, Error as _};
 use serde::{Deserialize, Serialize};
 
 use super::gitops::validate_static_required;
-use crate::bindings::{validate_input_name, InputType};
+use crate::bindings::{resolvable_fields, validate_input_name, FromValues, InputType, Resolvable, ResolvableField};
 use crate::constants::API_VERSION_UNITS;
 use crate::orchestration::ids::{EnvironmentName, UnitName};
 use crate::orchestration::time::Duration;
@@ -86,14 +86,16 @@ pub struct CommonUnitFields {
     /// Units that must have a current receipt first, for ordering without a data reference.
     #[serde(rename = "dependsOn", default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<DependsOn>,
-    /// Whether executions need an invocation's approval.
+    /// Whether executions need an invocation's approval. Accepts `fromValues`.
     #[serde(default, skip_serializing_if = "ApprovalPolicy::is_auto")]
+    #[schemars(with = "Resolvable<ApprovalPolicy, FromValues>")]
     pub approval: ApprovalPolicy,
     /// What happens to the unit's resources when it leaves the ownership set. Default `Teardown` where the kind supports teardown, else `Retain`.
     #[serde(rename = "deletionPolicy", default, skip_serializing_if = "Option::is_none")]
     pub deletion_policy: Option<DeletionPolicy>,
-    /// Deadline for one execution, teardown, or verification, at most `7d`. Default per kind.
+    /// Deadline for one execution, teardown, or verification, at most `7d`. Default per kind. Accepts `fromValues`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Resolvable<Option<Duration>, FromValues>")]
     pub timeout: Option<Duration>,
     /// Variables and secrets admitted into the unit's otherwise empty tool environment.
     #[serde(default, skip_serializing_if = "EnvAdmission::is_empty")]
@@ -173,6 +175,54 @@ impl CommonUnitFields {
             DeletionPolicy::Retain
         })
     }
+}
+
+/// The `spec` fields of each unit kind that accept a source clause, as JSON
+/// Pointers into the spec.
+///
+/// Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
+/// "The schema is the declaration". The common fields' schema
+/// ([`CommonUnitFields`]) declares the resolvable common fields, and each
+/// kind's driver declares its own in its spec schema
+/// ([`Driver::spec_schema`](crate::orchestration::driver::Driver::spec_schema));
+/// [`DriverSet::resolvable_unit_fields`](crate::orchestration::driver::DriverSet::resolvable_unit_fields)
+/// reads them from the registered drivers. Rendering substitutes clauses
+/// only at these pointers, and never names a kind or a field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvableUnitFields {
+    kinds: BTreeMap<(String, String), Vec<ResolvableField>>,
+}
+
+impl ResolvableUnitFields {
+    /// Declare the fields `spec_schema`, the schema of the kind's own spec
+    /// fields, marks resolvable for `apiVersion` and `kind`.
+    pub fn declare(&mut self, api_version: &str, kind: &str, spec_schema: &schemars::Schema) {
+        self.kinds.insert(
+            (api_version.to_owned(), kind.to_owned()),
+            resolvable_fields(spec_schema),
+        );
+    }
+
+    /// The resolvable fields of a unit of `apiVersion` and `kind`: the common
+    /// ones, and those its kind declares. A kind nobody registered has the
+    /// common ones; rendering it fails later for the missing driver.
+    pub fn for_kind(&self, api_version: &str, kind: &str) -> Vec<ResolvableField> {
+        let mut fields = common_resolvable_fields();
+        if let Some(own) = self.kinds.get(&(api_version.to_owned(), kind.to_owned())) {
+            fields.extend(own.iter().cloned());
+        }
+        fields.sort();
+        fields.dedup();
+        fields
+    }
+}
+
+/// The fields of [`CommonUnitFields`] that accept a source clause.
+pub fn common_resolvable_fields() -> Vec<ResolvableField> {
+    static FIELDS: std::sync::OnceLock<Vec<ResolvableField>> = std::sync::OnceLock::new();
+    FIELDS
+        .get_or_init(|| resolvable_fields(&schemars::schema_for!(CommonUnitFields)))
+        .clone()
 }
 
 /// One declared output: a type from the Release input type set.
@@ -480,6 +530,30 @@ pub fn is_builtin_unit_api_version(api_version: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_common_resolvable_fields_join_each_kinds_own() {
+        let pointers = |fields: Vec<ResolvableField>| fields.into_iter().map(|field| field.pointer).collect::<Vec<_>>();
+        assert_eq!(pointers(common_resolvable_fields()), ["/approval", "/timeout"]);
+        let schema = schemars::schema_for!(CommonUnitFields);
+        // Both stay optional, as they were before they became resolvable.
+        assert!(schema.as_value().get("required").is_none(), "{schema:?}");
+
+        let mut fields = ResolvableUnitFields::default();
+        fields.declare(
+            "units.example/v1",
+            "Publication",
+            &schemars::json_schema!({"properties": {"target": {"x-nyl-resolvable": "fromValues"}}}),
+        );
+        assert_eq!(
+            pointers(fields.for_kind("units.example/v1", "Publication")),
+            ["/approval", "/target", "/timeout"]
+        );
+        assert_eq!(
+            pointers(fields.for_kind("units.example/v1", "Other")),
+            ["/approval", "/timeout"]
+        );
+    }
 
     #[test]
     fn test_approval_accepts_short_and_long_forms() {

@@ -232,8 +232,9 @@ impl PublicationInputSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnitInputSource {
-    /// Environment of the unit, for cross-environment references.
+    /// Environment of the unit, for cross-environment references. In a unit document, accepts `fromValues`, resolved when the unit renders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "super::Resolvable<Option<String>, super::FromValues>")]
     pub environment: Option<String>,
     /// Producing unit name.
     pub unit: String,

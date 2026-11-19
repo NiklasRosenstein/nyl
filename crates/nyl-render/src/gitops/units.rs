@@ -19,6 +19,10 @@
 //!   Environment winning), the sanitized `environment`, and later `params`:
 //!   never secrets or the process environment. A document that renders to
 //!   nothing has no spec.
+//! - Then its `fromValues` clauses resolve against the same effective
+//!   `values`: at the fields its kind declares resolvable, and at
+//!   `environment` inside each `fromUnit` reference. A clause left anywhere
+//!   else is an error ([`resolve_value_sources`]).
 //! - A `KubernetesPublication` unit's rendered spec gains `releases`: for
 //!   each `<group>/<release>` of its target's `releaseInputs`, the bindings
 //!   orchestration resolves, as reference objects, so references at
@@ -40,7 +44,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use nyl_core::bindings::{InputBinding, InputDeclaration, InputType};
+use nyl_core::bindings::{
+    reject_surviving_clauses, resolve_declared, resolve_in_references, BindingIssue, FromValues, InputBinding,
+    InputDeclaration, InputType, Origin, Provided, Provision, ResolvableField, Resolved, SourceKind, SourceProvider,
+    ValuesSource,
+};
 use nyl_core::orchestration::codes::Code;
 use nyl_core::orchestration::ids::{CommitId, EnvironmentName, UnitName};
 use nyl_core::orchestration::instance::InstanceDescriptor;
@@ -167,7 +175,7 @@ pub fn render_direct_unit(
         .get(name)
         .ok_or_else(|| NylError::config(format!("unit {name} is not declared")))?;
     let context = environment.map_or_else(|| serde_json::json!({}), unit_template_context);
-    let mut spec = render_unit(unit, &context)
+    let mut spec = render_unit(inventory, unit, &context, environment)
         .map_err(|error| {
             if environment.is_none() {
                 NylError::config(format!(
@@ -440,7 +448,7 @@ fn render_environment_units(
         if !selected {
             continue;
         }
-        let mut spec = render_unit(unit, &context)?;
+        let mut spec = render_unit(inventory, unit, &context, Some(effective))?;
         if let Some(spec) = &mut spec {
             apply_unit_defaults(inventory, &unit.envelope.kind, spec);
             if unit.is_publication() {
@@ -477,9 +485,216 @@ fn unit_template_context(effective: &EffectiveEnvironment) -> Value {
     context
 }
 
-/// Render one unit document. The rendered envelope must equal the literal
-/// one, and only `spec` may follow it.
-fn render_unit(unit: &DiscoveredUnit, context: &Value) -> Result<Option<Value>> {
+/// Render one unit document for `environment` (none for a direct build
+/// without `-e`): its template with `context`, then its `fromValues`
+/// clauses ([`resolve_value_sources`]). The rendered envelope must equal the
+/// literal one, and only `spec` may follow it.
+fn render_unit(
+    inventory: &GitOpsInventory,
+    unit: &DiscoveredUnit,
+    context: &Value,
+    environment: Option<&EffectiveEnvironment>,
+) -> Result<Option<Value>> {
+    let Some(mut spec) = render_unit_template(unit, context)? else {
+        return Ok(None);
+    };
+    resolve_value_sources(inventory, unit, environment, &mut spec)?;
+    Ok(Some(spec))
+}
+
+/// Resolve the `fromValues` clauses of a rendered unit spec against the
+/// environment's effective values: at the fields the unit's kind declares
+/// resolvable (the common ones and its driver's,
+/// [`ResourceCatalogue::unit_fields`](crate::config::ResourceCatalogue::unit_fields)),
+/// then at `environment` inside every `fromUnit` reference, at any depth.
+/// A clause left anywhere else is an error, never data.
+///
+/// Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
+/// "`fromValues` on declared unit fields". This is the only place unit
+/// clauses resolve, for every entry point. The values read are already
+/// rendered and are not templated again; the resolved value is part of the
+/// spec, so a field filled from values hashes exactly like the same literal.
+fn resolve_value_sources(
+    inventory: &GitOpsInventory,
+    unit: &DiscoveredUnit,
+    environment: Option<&EffectiveEnvironment>,
+    spec: &mut Value,
+) -> Result<()> {
+    let envelope = &unit.envelope;
+    let fields = inventory
+        .project_config
+        .resource_catalogue
+        .unit_fields
+        .for_kind(&envelope.api_version, &envelope.kind);
+    let provider = EnvironmentValues::new(environment);
+    let mut issues = Vec::new();
+    let declared = resolve_declared::<FromValues, _>("spec", spec, &fields, &provider, &mut issues);
+    let reference_fields = [ResolvableField {
+        pointer: "/environment".to_owned(),
+        kind: FromValues::FIELD.to_owned(),
+    }];
+    let referenced = resolve_in_references::<FromValues, _>(
+        "spec",
+        "",
+        &declared.value,
+        "fromUnit",
+        &reference_fields,
+        &provider,
+        &mut issues,
+    );
+    if issues.is_empty() {
+        reject_surviving_clauses("spec", &referenced.value, &[FromValues::FIELD], &mut issues);
+    }
+    if !issues.is_empty() {
+        let messages = issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>();
+        return Err(unit_invalid(&unit.location(), &messages.join("; ")));
+    }
+    *spec = referenced.value;
+    Ok(())
+}
+
+/// Where a resolved `fromValues` clause read its value.
+#[derive(Debug, Clone, PartialEq)]
+enum ValuesOrigin {
+    /// The environment's effective values, at the clause's pointer.
+    Values,
+    /// The clause's `default`.
+    Default,
+}
+
+impl Origin for ValuesOrigin {
+    fn from_default() -> Self {
+        Self::Default
+    }
+    fn from_override() -> Self {
+        Self::Values
+    }
+    fn from_value() -> Self {
+        Self::Values
+    }
+    fn describe(&self, field: &str) -> String {
+        match self {
+            Self::Values => format!("{field} (from the environment's values)"),
+            Self::Default => format!("{field} (its default)"),
+        }
+    }
+}
+
+/// The `fromValues` source of unit rendering: the effective `values` of
+/// one environment, a declared Environment with its groups' values or a
+/// template instance.
+struct EnvironmentValues<'a> {
+    environment: Option<&'a EffectiveEnvironment>,
+    values: Value,
+}
+
+impl<'a> EnvironmentValues<'a> {
+    fn new(environment: Option<&'a EffectiveEnvironment>) -> Self {
+        let values = environment.map_or(Value::Null, |effective| {
+            Value::Object(effective.environment.spec.values.clone().into_iter().collect())
+        });
+        Self { environment, values }
+    }
+
+    /// `Environment dev`, or `Environment pr-1 (an instance of EnvironmentTemplate preview)`.
+    fn describe(environment: &EffectiveEnvironment) -> String {
+        let name = &environment.environment.metadata.name;
+        match &environment.instance {
+            Some(terms) => format!(
+                "Environment {name} (an instance of EnvironmentTemplate {})",
+                terms.template
+            ),
+            None => format!("Environment {name}"),
+        }
+    }
+}
+
+impl SourceProvider<FromValues> for EnvironmentValues<'_> {
+    type Origin = ValuesOrigin;
+
+    fn provide(&self, field: &str, clause: &ValuesSource) -> Provided<ValuesOrigin> {
+        if self.environment.is_none() {
+            return Err(BindingIssue::new(format!(
+                "{field}.fromValues reads the environment's values at {}, and no environment is given",
+                clause.pointer
+            )));
+        }
+        Ok(match self.values.pointer(&clause.pointer) {
+            Some(value) => Provision::Value(Resolved {
+                value: value.clone(),
+                origin: ValuesOrigin::Values,
+            }),
+            None => Provision::Unbound,
+        })
+    }
+
+    fn missing(&self, field: &str, clause: &ValuesSource) -> Option<BindingIssue> {
+        let environment = Self::describe(self.environment?);
+        let pointer = &clause.pointer;
+        let fix = "set it in the values, or give the clause a default, or optional: true to omit the field";
+        if self.values.pointer(pointer).is_some() {
+            return Some(BindingIssue::new(format!(
+                "{field}.fromValues reads {pointer}, which is null in the values of {environment}; {fix}"
+            )));
+        }
+        Some(BindingIssue::new(format!(
+            "{field}.fromValues reads {pointer}, which is not in the values of {environment}: {}; {fix}",
+            missing_key(&self.values, pointer)
+        )))
+    }
+}
+
+/// What the deepest existing parent of `pointer` in `values` holds instead
+/// of the missing key: its keys and the nearest one, or its type.
+fn missing_key(values: &Value, pointer: &str) -> String {
+    let tokens = pointer
+        .split('/')
+        .skip(1)
+        .map(|token| token.replace("~1", "/").replace("~0", "~"))
+        .collect::<Vec<_>>();
+    let mut parent = values;
+    let mut parent_pointer = String::new();
+    for token in &tokens {
+        let child = match parent {
+            Value::Object(members) => members.get(token),
+            Value::Array(items) => token.parse::<usize>().ok().and_then(|index| items.get(index)),
+            _ => None,
+        };
+        let Some(child) = child else {
+            let (at, has) = if parent_pointer.is_empty() {
+                ("the values".to_owned(), "have")
+            } else {
+                (parent_pointer.clone(), "has")
+            };
+            return match parent {
+                Value::Object(members) if members.is_empty() => format!("{at} {has} no keys"),
+                Value::Object(members) => {
+                    let nearest = members
+                        .keys()
+                        .min_by_key(|key| crate::render::levenshtein_distance(key, token))
+                        .expect("a non-empty mapping has a key");
+                    format!(
+                        "{at} {has} keys {} (nearest to {token:?}: {nearest:?})",
+                        members
+                            .keys()
+                            .map(|key| format!("{key:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+                Value::Array(items) => format!("{at} is a list of {} items", items.len()),
+                other => format!("{at} is {}", nyl_core::bindings::json_type_name(other)),
+            };
+        };
+        parent_pointer = nyl_core::json_pointer::child(&parent_pointer, token);
+        parent = child;
+    }
+    "it is not there".to_owned()
+}
+
+/// Render one unit document's template. The rendered envelope must equal
+/// the literal one, and only `spec` may follow it.
+fn render_unit_template(unit: &DiscoveredUnit, context: &Value) -> Result<Option<Value>> {
     let location = unit.location();
     let rendered = TemplateEngine::new()
         .render_named(&slash_path(&unit.source_path), &unit.raw_document, context)
@@ -1773,6 +1988,121 @@ spec:
             spec["target"]["inline"]["values"]["hostname"],
             json!("pr-5.example.com")
         );
+    }
+
+    /// The preview template with a `target`, a `teardownWait` only some
+    /// instances set, and a `timeout` in its values.
+    fn sourced_preview_project(unit: &str) -> TempDir {
+        let template = PREVIEW_TEMPLATE.replace(
+            "    prefix: '{{ environment.name }}'\n",
+            "    target:\n      inline:\n        reconciler: {argocd: {}}\n        clusterRef: {name: dev}\n        publication:\n          repository: {repoURL: 'https://example.invalid/deploy.git'}\n          revision: previews\n          pathPrefix: '{{ environment.name }}'\n        values: {hostname: 'pr-{{ params.pr }}.example.com'}\n    timeout: 10m\n    networkFrom: dev\n",
+        );
+        let platform = PLATFORM.split("---").map(str::to_owned).collect::<Vec<_>>();
+        let platform = [platform[0].clone(), platform[2].clone()].join("---");
+        project(&[
+            ("platform.yaml", &platform),
+            ("preview.yaml", &template),
+            ("kubernetes.yaml", unit),
+        ])
+    }
+
+    fn render_instance(worktree: &TempDir) -> Result<Value> {
+        let renderer =
+            UnitSourceRenderer::new("/nyl", crate::config::test_catalogue()).with_instances(instances(&[("pr-5", 5)]));
+        let source = renderer.render_source(
+            worktree.path(),
+            &EnvironmentName::new("pr-5").unwrap(),
+            &CommitId::new("a".repeat(40)).unwrap(),
+        )?;
+        Ok(self::unit(&source, "kubernetes")
+            .spec
+            .clone()
+            .expect("the unit renders"))
+    }
+
+    const SOURCED_UNIT: &str = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata: {name: kubernetes, labels: {preview: 'true'}}\nspec:\n  target: {fromValues: {pointer: /target}}\n  teardownWait: {fromValues: {pointer: /teardownWait, default: {strategy: manual}}}\n  approval: {fromValues: {pointer: /approval, optional: true}}\n  timeout: {fromValues: {pointer: /timeout}}\n  observations:\n    network:\n      from: {fromUnit: {unit: network, output: id, environment: {fromValues: {pointer: /networkFrom, optional: true}}}}\n    local:\n      from: {fromUnit: {unit: network, output: id, environment: {fromValues: {pointer: /localFrom, optional: true}}}}\n";
+
+    /// Catches a field filled from values that renders anything but what the
+    /// structural Jinja it replaces renders, which would change the unit's
+    /// execution key and re-run it: both forms render byte-identical specs,
+    /// including a default, an omitted optional field, and `fromValues`
+    /// inside `fromUnit.environment`.
+    #[test]
+    fn test_from_values_renders_the_same_spec_as_structural_jinja() {
+        let jinja = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: kubernetes\n  labels:\n    preview: 'true'\nspec:\n  target: {{ values.target | tojson }}\n  {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% else %}teardownWait: {strategy: manual}{% endif %}\n  {% if values.approval %}approval: {{ values.approval | tojson }}{% endif %}\n  timeout: {{ values.timeout | tojson }}\n  observations:\n    network:\n      from: {fromUnit: {% if values.networkFrom %}{unit: network, output: id, environment: '{{ values.networkFrom }}'}{% else %}{unit: network, output: id}{% endif %}}\n    local:\n      from: {fromUnit: {% if values.localFrom %}{unit: network, output: id, environment: '{{ values.localFrom }}'}{% else %}{unit: network, output: id}{% endif %}}\n";
+        let from_jinja = render_instance(&sourced_preview_project(jinja)).unwrap();
+        let from_values = render_instance(&sourced_preview_project(SOURCED_UNIT)).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&from_values).unwrap(),
+            serde_json::to_vec(&from_jinja).unwrap()
+        );
+        assert_eq!(from_values["target"]["name"], json!("pr-5-kubernetes"));
+        assert_eq!(
+            from_values["target"]["inline"]["values"]["hostname"],
+            json!("pr-5.example.com")
+        );
+        assert_eq!(from_values["teardownWait"], json!({"strategy": "manual"}));
+        assert_eq!(from_values["timeout"], json!("10m"));
+        assert!(from_values.get("approval").is_none());
+        assert_eq!(
+            from_values["observations"]["network"]["from"]["fromUnit"]["environment"],
+            json!("dev")
+        );
+        assert_eq!(
+            from_values["observations"]["local"]["from"]["fromUnit"],
+            json!({"unit": "network", "output": "id"})
+        );
+    }
+
+    /// Catches a typo in a pointer passing silently, or a clause reaching a
+    /// reader as data: a missing required value names the environment, the
+    /// keys there are, and the nearest one; a clause on a field nobody
+    /// declares resolvable is an error.
+    #[test]
+    fn test_from_values_fails_closed() {
+        let typo = SOURCED_UNIT.replace("pointer: /timeout}", "pointer: /timout}");
+        let error = render_instance(&sourced_preview_project(&typo))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NYL-UNIT-INVALID"), "{error}");
+        assert!(
+            error.contains(
+                "spec.timeout.fromValues reads /timout, which is not in the values of Environment pr-5 (an instance of EnvironmentTemplate preview)"
+            ),
+            "{error}"
+        );
+        assert!(error.contains(r#"the values have keys "host", "networkFrom", "region", "target", "timeout" (nearest to "timout": "timeout")"#), "{error}");
+
+        let nested = SOURCED_UNIT.replace("pointer: /target}", "pointer: /target/inline/hostname}");
+        let error = render_instance(&sourced_preview_project(&nested))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/target/inline has keys \"clusterRef\""), "{error}");
+
+        let unmarked = SOURCED_UNIT.replace(
+            "  observations:",
+            "  observe: {fromValues: {pointer: /observe, optional: true}}\n  observations:",
+        );
+        let error = render_instance(&sourced_preview_project(&unmarked))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("spec.observe holds a fromValues clause where none resolves"),
+            "{error}"
+        );
+
+        // A direct build without an environment has no values to read.
+        let worktree = sourced_preview_project(SOURCED_UNIT);
+        let error = render_direct_unit(&inventory(&worktree), &UnitName::new("kubernetes").unwrap(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "spec.target.fromValues reads the environment's values at /target, and no environment is given"
+            ),
+            "{error}"
+        );
+        assert!(error.contains("pass -e <environment>"), "{error}");
     }
 
     /// Catches an inline target that is not a valid DeploymentTarget being

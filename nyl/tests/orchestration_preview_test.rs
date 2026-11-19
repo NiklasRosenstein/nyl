@@ -47,11 +47,11 @@ fn preview_project() -> tempfile::TempDir {
             &format!("name: {unit}\n  labels: {{dev: 'true', preview: 'true'}}"),
         );
     }
-    // Not YAML before rendering, so the envelope is block style.
+    // dev's target by name, or the template's inline target.
     edit(
         "nyl/units.yaml",
-        "name: kubernetes\n  labels: {dev: 'true', preview: 'true'}\nspec:\n  target: '{{ values.target }}'",
-        "name: kubernetes\n  labels:\n    dev: 'true'\n    preview: 'true'\nspec:\n  target: {{ values.target | tojson }}",
+        "spec:\n  target: '{{ values.target }}'",
+        "spec:\n  target: {fromValues: {pointer: /target}}",
     );
     edit(
         "nyl/platform.yaml",
@@ -347,6 +347,37 @@ fn test_validate_checks_the_names_every_instance_would_generate() {
     assert!(
         output.contains("sample"),
         "the message names the sample instances: {output}"
+    );
+
+    // A value only dev declares fails for the template's sample instances,
+    // before any instance exists.
+    let unsourced =
+        validate(&|root| {
+            for (path, from, to) in [
+            (
+                "nyl/units.yaml",
+                "  target: {fromValues: {pointer: /target}}\n  timeout: 10m",
+                "  target: {fromValues: {pointer: /target}}\n  timeout: {fromValues: {pointer: /publicationTimeout}}",
+            ),
+            ("nyl/platform.yaml", "    target: dev\n", "    target: dev\n    publicationTimeout: 10m\n"),
+        ] {
+            let file = root.join(path);
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.contains(from), "{path} holds {from:?}");
+            std::fs::write(file, text.replace(from, to)).unwrap();
+        }
+        });
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&unsourced.stdout),
+        String::from_utf8_lossy(&unsourced.stderr)
+    );
+    assert!(!unsourced.status.success(), "{output}");
+    assert!(
+        output.contains(
+            "spec.timeout.fromValues reads /publicationTimeout, which is not in the values of Environment preview-sample-1 (an instance of EnvironmentTemplate preview)"
+        ),
+        "{output}"
     );
 }
 

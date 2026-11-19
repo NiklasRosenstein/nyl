@@ -264,10 +264,11 @@ pub(crate) async fn generate_render_resource(
     generated
         .into_iter()
         .map(|value| {
-            nyl_core::resources::schema::validate_resource_api_with_catalog(&value, &config.resource_catalogue.0)
-                .map_err(|error| {
-                    NylError::from(error).with_render_provenance(provenance.resource(&value).to_string())
-                })?;
+            nyl_core::resources::schema::validate_resource_api_with_catalog(
+                &value,
+                &config.resource_catalogue.resources,
+            )
+            .map_err(|error| NylError::from(error).with_render_provenance(provenance.resource(&value).to_string()))?;
             Ok(RenderResource {
                 value,
                 provenance: provenance.clone(),
@@ -379,7 +380,7 @@ async fn expand_resource(
     {
         check_annotation_type(resource)?;
     }
-    nyl_core::resources::schema::validate_resource_api_with_catalog(resource, &config.resource_catalogue.0)?;
+    nyl_core::resources::schema::validate_resource_api_with_catalog(resource, &config.resource_catalogue.resources)?;
     // Check if it's a HelmChart resource
 
     if kind == Some("HelmChart") && api_version == Some(API_VERSION) {

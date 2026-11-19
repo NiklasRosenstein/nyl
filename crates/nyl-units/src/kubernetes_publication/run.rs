@@ -1358,7 +1358,7 @@ mod tests {
             let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
             descriptors.extend_from_slice(crate::catalog::RESOURCES);
             render(
-                &nyl_render::config::ResourceCatalogue(descriptors),
+                &nyl_render::config::ResourceCatalogue::new(descriptors),
                 &world.work(),
                 &world.work().join("nyl"),
                 &world.root.path().join("cache"),

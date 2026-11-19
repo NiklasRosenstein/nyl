@@ -17,9 +17,7 @@ apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
 metadata:
   name: database
-  labels:
-    dev: 'true'
-    prod: 'true'
+  labels: {dev: 'true', prod: 'true'}
 spec:
   source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
@@ -27,7 +25,7 @@ spec:
     vpc_id: {fromUnit: {unit: network, output: vpcId}}
   outputs:
     connection: {type: object}
-  approval: {{ values.approval | tojson }}
+  approval: {fromValues: {pointer: /approval}}
   timeout: 60m
 ---
 apiVersion: units.gitops.nyl/v1
@@ -47,6 +45,6 @@ metadata:
   name: kubernetes
   labels: {dev: 'true', prod: 'true', hotfix: 'true'}
 spec:
-  target: '{{ values.target }}'
+  target: {fromValues: {pointer: /target}}
   teardownWait: {strategy: manual}
   timeout: 10m

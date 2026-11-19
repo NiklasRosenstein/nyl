@@ -117,6 +117,104 @@ pub fn resolve_declared<S: SourceKind, P: SourceProvider<S>>(
     resolved
 }
 
+/// Substitute the `S` clauses at `fields` inside every `reference` object at
+/// any depth of `document`, such as `fromValues` at `/environment` of each
+/// `fromUnit`.
+///
+/// A reference object is an object whose only field is `reference`; its
+/// value is resolved like a document with [`resolve_declared`], and every
+/// other object is data that the walk descends into. `field` and `pointer`
+/// locate `document` itself, such as `spec` and `""`; provenance and blocked
+/// values are keyed by the clause's pointer in `document`.
+pub fn resolve_in_references<S: SourceKind, P: SourceProvider<S>>(
+    field: &str,
+    pointer: &str,
+    document: &Value,
+    reference: &str,
+    fields: &[ResolvableField],
+    provider: &P,
+    issues: &mut Vec<BindingIssue>,
+) -> ResolvedDocument<P::Origin> {
+    let mut resolved = ResolvedDocument {
+        value: document.clone(),
+        provenance: std::collections::BTreeMap::default(),
+        blocked: Vec::new(),
+    };
+    walk_references(field, pointer, &mut resolved, None, reference, fields, provider, issues);
+    resolved
+}
+
+/// Walk `resolved.value` at `at` (the whole value when `None`), which sits at
+/// `field` and `pointer` of the document.
+#[allow(clippy::too_many_arguments)] // The walk carries its location, inputs, and outputs.
+fn walk_references<S: SourceKind, P: SourceProvider<S>>(
+    field: &str,
+    pointer: &str,
+    resolved: &mut ResolvedDocument<P::Origin>,
+    at: Option<&str>,
+    reference: &str,
+    fields: &[ResolvableField],
+    provider: &P,
+    issues: &mut Vec<BindingIssue>,
+) {
+    let local = at.unwrap_or("");
+    let Some(value) = resolved.value.pointer(local) else {
+        return;
+    };
+    match value {
+        Value::Object(members) if members.len() == 1 && members.contains_key(reference) => {
+            let inner_local = crate::json_pointer::child(local, reference);
+            let inner_pointer = crate::json_pointer::child(pointer, reference);
+            let inner_field = format!("{field}.{reference}");
+            let inner = resolved.value.pointer(&inner_local).cloned().unwrap_or(Value::Null);
+            if !inner.is_object() {
+                return;
+            }
+            let found = resolve_declared::<S, P>(&inner_field, &inner, fields, provider, issues);
+            if let Some(slot) = resolved.value.pointer_mut(&inner_local) {
+                *slot = found.value;
+            }
+            for (clause, origin) in found.provenance {
+                resolved.provenance.insert(format!("{inner_pointer}{clause}"), origin);
+            }
+            resolved.blocked.extend(found.blocked.into_iter().map(|mut blocked| {
+                blocked.pointer = format!("{inner_pointer}{}", blocked.pointer);
+                blocked
+            }));
+        }
+        Value::Object(members) => {
+            let keys = members.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                walk_references(
+                    &format!("{field}.{key}"),
+                    &crate::json_pointer::child(pointer, &key),
+                    resolved,
+                    Some(&crate::json_pointer::child(local, &key)),
+                    reference,
+                    fields,
+                    provider,
+                    issues,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for index in 0..items.len() {
+                walk_references(
+                    &format!("{field}[{index}]"),
+                    &format!("{pointer}/{index}"),
+                    resolved,
+                    Some(&format!("{local}/{index}")),
+                    reference,
+                    fields,
+                    provider,
+                    issues,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn parse_clause<S: SourceKind>(field: &str, clause: &Value) -> Result<S::Clause, String> {
     if !clause.is_object() {
         return Err(format!("{field} must be an object"));
@@ -369,6 +467,38 @@ mod tests {
                 "spec.includeCrds is declared resolvable from fromInput, but this document resolves only fromValues"
             ),
             "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_in_references_resolves_inside_each_reference_at_any_depth() {
+        let document = json!({
+            "variables": {
+                "vpc": {"fromUnit": {"unit": "network", "output": "vpcId", "environment": {"fromValues": {"pointer": "/target"}}}},
+                "list": [{"fromUnit": {"unit": "db", "output": "url", "environment": {"fromValues": {"pointer": "/missing", "optional": true}}}}],
+                "local": {"fromUnit": {"unit": "db", "output": "url"}},
+            },
+            "data": {"fromUnit": {"unit": "db"}, "other": {"fromValues": {"pointer": "/target"}}},
+        });
+        let fields = marked(&["/environment"]);
+        let provider = Values(json!({"target": "prod"}));
+        let mut issues = Vec::new();
+        let resolved =
+            resolve_in_references::<FromValues, _>("spec", "", &document, "fromUnit", &fields, &provider, &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(
+            resolved.value["variables"]["vpc"]["fromUnit"]["environment"],
+            json!("prod")
+        );
+        assert_eq!(
+            resolved.value["variables"]["list"][0]["fromUnit"],
+            json!({"unit": "db", "output": "url"})
+        );
+        // An object with other fields is data, not a reference.
+        assert_eq!(resolved.value["data"], document["data"]);
+        assert_eq!(
+            resolved.provenance.keys().collect::<Vec<_>>(),
+            ["/variables/vpc/fromUnit/environment"]
         );
     }
 

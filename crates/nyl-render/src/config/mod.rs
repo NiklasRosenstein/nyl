@@ -231,13 +231,49 @@ pub struct ProjectConfig {
 /// passes it to each entry point; there is no default, so every invocation
 /// validates against the same resource APIs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResourceCatalogue(pub Vec<nyl_core::resources::schema::ResourceDescriptor>);
+pub struct ResourceCatalogue {
+    /// Every resource kind's API and schema.
+    pub resources: Vec<nyl_core::resources::schema::ResourceDescriptor>,
+    /// The `spec` fields of each registered unit kind that accept a source
+    /// clause, which unit rendering resolves; the common ones only until the
+    /// application declares its drivers' with [`Self::with_unit_fields`].
+    pub unit_fields: nyl_core::resources::units::ResolvableUnitFields,
+}
+
+impl ResourceCatalogue {
+    /// The catalogue of `resources`, whose unit kinds declare only the
+    /// common resolvable fields.
+    pub fn new(resources: Vec<nyl_core::resources::schema::ResourceDescriptor>) -> Self {
+        Self {
+            resources,
+            unit_fields: nyl_core::resources::units::ResolvableUnitFields::default(),
+        }
+    }
+
+    /// The catalogue with the resolvable fields of the registered unit kinds,
+    /// such as [`DriverSet::resolvable_unit_fields`](nyl_core::orchestration::driver::DriverSet::resolvable_unit_fields).
+    #[must_use]
+    pub fn with_unit_fields(mut self, unit_fields: nyl_core::resources::units::ResolvableUnitFields) -> Self {
+        self.unit_fields = unit_fields;
+        self
+    }
+}
 
 /// The catalogue of the resources nyl-core and nyl-render own, for tests in
-/// this crate.
+/// this crate, with the resolvable fields the publication unit's driver
+/// declares.
 #[cfg(test)]
 pub(crate) fn test_catalogue() -> ResourceCatalogue {
-    ResourceCatalogue(crate::resources::catalog::resource_catalogue())
+    let mut unit_fields = nyl_core::resources::units::ResolvableUnitFields::default();
+    unit_fields.declare(
+        nyl_core::constants::API_VERSION_UNITS,
+        crate::gitops::units::KIND_KUBERNETES_PUBLICATION,
+        &schemars::json_schema!({"properties": {
+            "target": {"x-nyl-resolvable": "fromValues"},
+            "teardownWait": {"x-nyl-resolvable": "fromValues"},
+        }}),
+    );
+    ResourceCatalogue::new(crate::resources::catalog::resource_catalogue()).with_unit_fields(unit_fields)
 }
 
 impl ProjectConfig {

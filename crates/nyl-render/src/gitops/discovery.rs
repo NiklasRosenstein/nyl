@@ -538,13 +538,15 @@ fn discover_document(
         let (api_version, kind, name) = scan_static_envelope_fields(document);
         serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}})
     });
-    nyl_core::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.0).map_err(|error| {
-        NylError::config(format!(
-            "{} document {}: {error}",
-            relative_path.display(),
-            document_index + 1
-        ))
-    })?;
+    nyl_core::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.resources).map_err(
+        |error| {
+            NylError::config(format!(
+                "{} document {}: {error}",
+                relative_path.display(),
+                document_index + 1
+            ))
+        },
+    )?;
     if !advertises_gitops_api(document) {
         return Ok(None);
     }
