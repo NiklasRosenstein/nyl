@@ -72,6 +72,30 @@ fn test_validate_accepts_a_pointer_into_an_input_a_unit_fills() {
         .stdout(predicate::str::contains("GitOps configuration is valid"));
 }
 
+/// Catches a pointer into a scalar input a unit fills passing validation: a
+/// string holds nothing a pointer selects, whatever orchestration delivers.
+#[test]
+fn test_validate_rejects_a_pointer_into_a_string_input_a_unit_fills() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    let release = checkout.join("applications/web/release.yaml");
+    let contents = std::fs::read_to_string(&release).unwrap().replace("\r\n", "\n");
+    let from = "value: {$fromInput: databaseHost}";
+    assert!(contents.contains(from));
+    std::fs::write(
+        &release,
+        contents.replace(from, "value: {$fromInput: {name: databaseHost, pointer: /x}}"),
+    )
+    .unwrap();
+
+    nyl_validate(&world, &checkout)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "$fromInput reads \"/x\" of Release input \"databaseHost\", which holds nothing there",
+        ));
+}
+
 #[test]
 fn test_validate_rejects_from_unit_on_a_target_without_a_publication_unit() {
     let world = World::new(&project());

@@ -369,9 +369,10 @@ value has the input's declared type: the target's binding, or the declared
 default when the target binds none. An input a target binds with `$fromUnit`
 or `$fromPromotion` has no value before a run, so
 [`nyl validate`](/nyl/reference/cli/validate/) gives it a placeholder of its
-declared type, and what a `pointer` selects in it is unknown and not checked:
-an `object` input that holds an image artifact can be read with
-`{$fromInput: {name: image, pointer: /digest}}`. A `pointer` that selects nothing, a
+declared type, and what a `pointer` selects in an `object` or `array` input
+is unknown and not checked: an `object` input that holds an image artifact
+can be read with `{$fromInput: {name: image, pointer: /digest}}`. A `pointer`
+into a `string`, `integer`, `number`, or `boolean` input, a `pointer` that selects nothing, a
 `null` value, an input the Release does not declare, and a resource outside a
 Release that declares inputs are errors. String interpolation such as
 `'web-{{ inputs.tier }}'` stays Jinja.

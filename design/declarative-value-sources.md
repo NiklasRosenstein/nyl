@@ -118,8 +118,9 @@ project, never a run's temporary checkout.
 
 `nyl validate` compiles a target an environment places with a placeholder of
 the declared type for each Release input bound with `$fromUnit` or
-`$fromPromotion`. What a `$fromInput` `pointer` selects in such an input is
-unknown, like a value a run is blocked on: validation does not check the
+`$fromPromotion`. What a `$fromInput` `pointer` selects in such an input of
+type `object` or `array` is unknown (a pointer into a scalar input selects
+nothing and stays an error), like a value a run is blocked on: validation does not check the
 pointer or the selected value's type (the value is a placeholder string), and
 a `valuesFrom` entry with a `pointer` into it contributes nothing; the input's
 declared type and every structural check still apply.

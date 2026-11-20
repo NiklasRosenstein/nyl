@@ -27,7 +27,7 @@
 //!   manifest) holds no source ([`reject_sources_in_output`]).
 //! - An input only orchestration fills (`$fromUnit`, `$fromPromotion`) holds a
 //!   placeholder of its declared type in `nyl validate`. What a `pointer`
-//!   selects in it is unknown, like a blocked value: the pointer and the
+//!   selects in it, when its type is `object` or `array`, is unknown, like a blocked value: the pointer and the
 //!   selected value's type are not checked, and the selected value is a
 //!   placeholder string; a `valuesFrom` entry with a `pointer` into it adds
 //!   nothing. The input's own type and every structural check still apply.
@@ -285,11 +285,17 @@ struct ReleaseInputs<'a> {
 
 impl ReleaseInputs<'_> {
     /// Whether reading `pointer` of input `name` selects a value only
-    /// orchestration knows: a non-empty pointer into an unknown input.
+    /// orchestration knows: a non-empty pointer into an unknown input whose
+    /// declared type is `object` or `array`, which its placeholder holds. A
+    /// pointer into a scalar input selects nothing whatever its value, so it
+    /// stays an error.
     fn selects_unknown(&self, name: &str, pointer: Option<&str>) -> bool {
         pointer.is_some_and(|pointer| !pointer.is_empty())
             && self.unknown.contains(name)
-            && self.inputs.and_then(|inputs| inputs.get(name)).is_some()
+            && self
+                .inputs
+                .and_then(|inputs| inputs.get(name))
+                .is_some_and(|value| value.is_object() || value.is_array())
     }
 
     /// The resolved value of input `name`, read at `field`.
@@ -735,6 +741,17 @@ mod tests {
         assert!(
             known.contains("reads \"/repository\" of Release input \"image\", which holds nothing there"),
             "{known}"
+        );
+
+        // A scalar input holds nothing a pointer selects, known or not.
+        let mut context = super::tests::context(Some(json!({"image": placeholder})));
+        context.unknown_inputs = BTreeSet::from(["image".to_owned()]);
+        let scalar = load_release_bundle(&temp.path().join("apps/app.yaml"), &context)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            scalar.contains("reads \"/repository\" of Release input \"image\", which holds nothing there"),
+            "{scalar}"
         );
     }
 
