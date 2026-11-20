@@ -28,7 +28,7 @@
 //!
 //! A publication that loses the race for the branch head, before or at its
 //! push, built on a head that moved, so nothing was published. A tree that
-//! read no state is built again as it is. A tree that read `$publication`
+//! read no state is built again as it is. A tree that read `$fromPublication`
 //! state is rendered again on the new head: when the state it read is
 //! unchanged, it publishes there; when the state changed, the call ends
 //! without publishing as a retryable failure (`NYL-UNIT-INPUTS-CHANGED`),
@@ -293,9 +293,9 @@ pub(crate) fn render_at(
 /// Render the target `spec` names or declares inline at `worktree` as
 /// `nyl validate` compiles a placed target: every Release input binding
 /// orchestration resolves takes a placeholder of its declared type, so the
-/// unit's spec need not be resolved, and `$publication` inputs fall back
+/// unit's spec need not be resolved, and `$fromPublication` inputs fall back
 /// to the cached branch, so it works without a network. With `ctx.offline`
-/// it never uses the network: Git sources and `$publication` state come
+/// it never uses the network: Git sources and `$fromPublication` state come
 /// from the caches only, Git sources from `ctx.source_cache_dir` when the
 /// caller has one. It shows what the target generates (its deployments) and
 /// is never published.
@@ -1586,8 +1586,8 @@ mod tests {
         let platform = world.work().join("nyl/platform.yaml");
         let text = std::fs::read_to_string(&platform).unwrap();
         let bound = text.replace(
-            "databaseHost: {$unit: {unit: database, output: host}}",
-            "databaseHost: {$publication: {path: state/db.json, pointer: /host}}",
+            "databaseHost: {$fromUnit: {unit: database, output: host}}",
+            "databaseHost: {$fromPublication: {path: state/db.json, pointer: /host}}",
         );
         assert_ne!(text, bound);
         std::fs::write(&platform, bound).unwrap();
@@ -1666,7 +1666,7 @@ mod tests {
         (outcome, renders.get())
     }
 
-    /// Catches a `$publication` target failing, as the contract forbids,
+    /// Catches a `$fromPublication` target failing, as the contract forbids,
     /// because an unrelated target published to the shared branch first: it
     /// renders again on the new head, reads the same state, and publishes.
     #[test]

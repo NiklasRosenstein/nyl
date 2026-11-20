@@ -532,12 +532,12 @@
           "additionalProperties": false,
           "description": "Reads the value from a YAML or JSON file of this repository.",
           "properties": {
-            "$file": {
+            "$fromFile": {
               "$ref": "#/$defs/FileInputSource"
             }
           },
           "required": [
-            "$file"
+            "$fromFile"
           ],
           "type": "object"
         },
@@ -545,12 +545,12 @@
           "additionalProperties": false,
           "description": "Reads the value from a file of a Git repository at a locked commit.",
           "properties": {
-            "$git": {
+            "$fromGit": {
               "$ref": "#/$defs/GitInputSource"
             }
           },
           "required": [
-            "$git"
+            "$fromGit"
           ],
           "type": "object"
         },
@@ -558,12 +558,12 @@
           "additionalProperties": false,
           "description": "Reads the value from a state file in this target's publication branch.",
           "properties": {
-            "$publication": {
+            "$fromPublication": {
               "$ref": "#/$defs/PublicationInputSource"
             }
           },
           "required": [
-            "$publication"
+            "$fromPublication"
           ],
           "type": "object"
         },
@@ -571,12 +571,12 @@
           "additionalProperties": false,
           "description": "Reads a unit's output, artifact, or observed value; resolved by orchestration.",
           "properties": {
-            "$unit": {
+            "$fromUnit": {
               "$ref": "#/$defs/UnitInputSource"
             }
           },
           "required": [
-            "$unit"
+            "$fromUnit"
           ],
           "type": "object"
         },
@@ -584,12 +584,12 @@
           "additionalProperties": false,
           "description": "Reads a value recorded through a PromotionPath; resolved by orchestration.",
           "properties": {
-            "$promotion": {
+            "$fromPromotion": {
               "$ref": "#/$defs/PromotionInputSource"
             }
           },
           "required": [
-            "$promotion"
+            "$fromPromotion"
           ],
           "type": "object"
         },
@@ -657,7 +657,7 @@
     },
     "PromotionInputSource": {
       "additionalProperties": false,
-      "description": "`$promotion`: a value recorded through a PromotionPath, which\norchestration resolves.",
+      "description": "`$fromPromotion`: a value recorded through a PromotionPath, which\norchestration resolves.",
       "properties": {
         "path": {
           "description": "PromotionPath the value must come from.",
@@ -876,7 +876,7 @@
     },
     "UnitInputSource": {
       "additionalProperties": false,
-      "description": "`$unit`: a unit's output, artifact, or observed value, which orchestration\nresolves from the producer's current receipt.",
+      "description": "`$fromUnit`: a unit's output, artifact, or observed value, which orchestration\nresolves from the producer's current receipt.",
       "properties": {
         "artifact": {
           "description": "Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.",
@@ -893,7 +893,7 @@
           "type": "array"
         },
         "environment": {
-          "description": "Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$environment`, resolved when the unit renders.",
+          "description": "Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$fromEnvironment`, resolved when the unit renders.",
           "type": [
             "string",
             "null"

@@ -16,17 +16,17 @@ metadata:
   name: kubernetes
   labels: {stage: dev}
 spec:
-  target: {$environment: /target}
+  target: {$fromEnvironment: /target}
   teardownWait: {strategy: manual}
 ```
 
 `target` names a static DeploymentTarget, or declares one inline (see
 [Inline targets](#inline-targets)). Like any field of a unit document, they accept an
-[`$environment`](/nyl/reference/value-sources/#environment) source,
+[`$fromEnvironment`](/nyl/reference/value-sources/#fromenvironment) source,
 which reads the value from the environment's `values`, here the `target` each
 environment sets, so one unit serves environments with different targets. The unit places that target into its
 environment: a target belongs to at most one environment, and a target no
-publication unit names rejects `$unit` bindings. A unit publishes only,
+publication unit names rejects `$fromUnit` bindings. A unit publishes only,
 unless it declares `observe: {}`: it then publishes the same way and also
 reads the reconciler that runs its target, Argo CD (see
 [Observing Argo CD](#observing-argo-cd)), and the live cluster (see
@@ -67,13 +67,13 @@ spec:
       values: {hostname: '{{ values.hostname }}'}
       releaseInputs:
         web/web:
-          image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+          image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
 ```
 
 The unit's templates see the environment's `values` and `environment`, as the
 other unit fields do. When the inline target differs between environments, such
 as a static target for `dev` and an inline one for each preview, keep it in the
-environments' values and write `target: {$environment: /target}`: the
+environments' values and write `target: {$fromEnvironment: /target}`: the
 source takes the whole object, already rendered, and no Jinja decides the
 field's shape. The inline target is named `<environment>-<unit>`, here
 `dev-kubernetes`, so adding or removing publication units never renames another
@@ -99,7 +99,7 @@ path, and checked with every other target by
 Application and AppProject names it generates differ from every other target's
 on the same cluster and Argo CD namespace. Use `applicationNameTemplate` and
 `projectTemplate` with `target.metadata.name` where several targets select one
-ApplicationGroup. Its `$unit` bindings work as in a declared target. The
+ApplicationGroup. Its `$fromUnit` bindings work as in a declared target. The
 renderer fills `target.name` and `target.sourceFile` (the file that declares the
 unit); writing `sourceFile` by hand is an error.
 
@@ -131,24 +131,24 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {$unit: {unit: database, output: host}}
+      image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$fromUnit: {unit: database, output: host}}
 ```
 
-Each `$unit` binding is a dependency, so the publication waits until
+Each `$fromUnit` binding is a dependency, so the publication waits until
 `web-image` and `database` have current receipts. Orchestration resolves the
 references with the resolver every other unit uses and records the values in
 the unit's resolved spec under `releases`, keyed by `<group>/<release>`. The
 publication renders the target with exactly those values, and a value the
 Release's declared input type does not accept fails the unit before anything is
-published. Other bindings (literals, `$file`, `$git`,
-`$publication`) resolve while rendering.
+published. Other bindings (literals, `$fromFile`, `$fromGit`,
+`$fromPublication`) resolve while rendering.
 
 The published ownership index records every resolved input as
 `@input/<group>/<release>/<input>` with the digest of its value, so the tree
 shows which values produced it. The same Releases render with literal or
-`$file` bindings in a target that no environment owns, for example in
-`render-tree` and `publish-tree`; only `$unit` bindings need orchestration.
+`$fromFile` bindings in a target that no environment owns, for example in
+`render-tree` and `publish-tree`; only `$fromUnit` bindings need orchestration.
 
 ## Execution key and result
 
@@ -163,7 +163,7 @@ The unit records a `PublishedTree` artifact named `tree` with `repository`,
 compare-and-swap on the branch head. When another publication moved the head
 first, nothing was published, and the unit builds its commit again on the new
 head, up to three times and within its `timeout`. A target with
-`$publication` bindings is rendered again on the new head: when the state
+`$fromPublication` bindings is rendered again on the new head: when the state
 files it read are unchanged, it publishes there. When one changed, the unit
 ends without publishing as a retryable failure, `NYL-UNIT-INPUTS-CHANGED` (`publication-state-changed`),
 and the next run resolves it again with the new state.
@@ -230,7 +230,7 @@ kind: KubernetesPublication
 metadata:
   name: kubernetes
 spec:
-  target: {$environment: /target}
+  target: {$fromEnvironment: /target}
   observe: {}
   env: {passthrough: [KUBECONFIG]}      # the credential for the access the ArgoCDInstance declares
 ```
@@ -364,7 +364,7 @@ shared evaluation over whatever reader the target's reconciler has:
 
 ```yaml
 spec:
-  target: {$environment: /target}
+  target: {$fromEnvironment: /target}
   observe: {waitHealthy: {timeout: 5m}}
   env: {passthrough: [KUBECONFIG]}
 ```
@@ -498,7 +498,7 @@ state write, and nothing recorded. It renders the target as a run does, with
 the same renderer and the unit's Release inputs, and with no process
 environment or project secrets. Files come from the worktree, uncommitted
 changes included, or from `--source <revision>`. With `-e`, the target's
-`$unit` bindings resolve against that environment's current receipts, as
+`$fromUnit` bindings resolve against that environment's current receipts, as
 `nyl get output` reads them; without it, they fail the build and name `-e`. The
 driver's own options follow `--`:
 
@@ -591,7 +591,7 @@ environment says otherwise, such as previews that expire unattended:
 
 ```yaml
 spec:
-  teardownWait: {$environment: {pointer: /teardownWait, default: {strategy: manual}}}
+  teardownWait: {$fromEnvironment: {pointer: /teardownWait, default: {strategy: manual}}}
 ```
 
 ### Teardown readiness

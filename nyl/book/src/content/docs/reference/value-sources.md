@@ -9,9 +9,9 @@ an object whose only key is the source's `$` name, and is replaced by the value
 it names:
 
 ```yaml
-target: {$environment: /target}
-includeCrds: {$input: crds}
-vpc_id: {$unit: {unit: network, output: vpcId}}
+target: {$fromEnvironment: /target}
+includeCrds: {$fromInput: crds}
+vpc_id: {$fromUnit: {unit: network, output: vpcId}}
 ```
 
 This page lists every source, where each is valid, when it resolves, and what
@@ -24,12 +24,12 @@ for unit specs.
 
 | Source | Shorthand | Object form | Where it is valid | Resolves | When it finds no value | Type check |
 | --- | --- | --- | --- | --- | --- | --- |
-| [`$environment`](#environment) | a JSON Pointer: `{$environment: /target}` | `{pointer, default?, optional?}` | Unit documents. | Render time, when the unit renders. | `default`, else `optional: true` removes the field, else an error. | The field's own, as a literal. |
-| [`$input`](#input) | a name: `{$input: image}` | `{name, pointer?}` | Every resource of a Release bundle: plain manifests, HelmChart fields and chart `values`, a Component's `spec`, a RemoteManifest, and `metadata.namespace`. | Render time, when the bundle's files load. | The input's declared default; a `pointer` that selects nothing is an error. | The input's declared `type`, then the field's own, as a literal. |
-| [`$parameter`](#parameter) | a name: `{$parameter: pr}` | `{name, pointer?}` | An EnvironmentTemplate's `spec.values`. | When an instance's values are computed. | The parameter's declared default; a required parameter must be passed. | The parameter's declared `type` and `enum`. |
-| [`$unit`](#unit) | none | `{unit, output \| artifact \| observation, …}` | Unit documents and Release-input bindings. | Execution time. | The consumer waits for the producer. | The producer's declared output type, and the input's where it is bound. |
-| [`$promotion`](#promotion) | none | `{value, path?}` | Unit documents and Release-input bindings. | Execution time. | The consumer waits for a record. | The input's where it is bound. |
-| [`$file`, `$git`, `$publication`](#file-git-and-publication) | none | see below | Release-input bindings. | Render time. | The input's declared default; a `pointer` that selects nothing in a file that exists is an error. | The input's declared `type` and `enum`. |
+| [`$fromEnvironment`](#fromenvironment) | a JSON Pointer: `{$fromEnvironment: /target}` | `{pointer, default?, optional?}` | Unit documents. | Render time, when the unit renders. | `default`, else `optional: true` removes the field, else an error. | The field's own, as a literal. |
+| [`$fromInput`](#frominput) | a name: `{$fromInput: image}` | `{name, pointer?}` | Every resource of a Release bundle: plain manifests, HelmChart fields and chart `values`, a Component's `spec`, a RemoteManifest, and `metadata.namespace`. | Render time, when the bundle's files load. | The input's declared default; a `pointer` that selects nothing is an error. | The input's declared `type`, then the field's own, as a literal. |
+| [`$fromParameter`](#fromparameter) | a name: `{$fromParameter: pr}` | `{name, pointer?}` | An EnvironmentTemplate's `spec.values`. | When an instance's values are computed. | The parameter's declared default; a required parameter must be passed. | The parameter's declared `type` and `enum`. |
+| [`$fromUnit`](#fromunit) | none | `{unit, output \| artifact \| observation, …}` | Unit documents and Release-input bindings. | Execution time. | The consumer waits for the producer. | The producer's declared output type, and the input's where it is bound. |
+| [`$fromPromotion`](#frompromotion) | none | `{value, path?}` | Unit documents and Release-input bindings. | Execution time. | The consumer waits for a record. | The input's where it is bound. |
+| [`$fromFile`, `$fromGit`, `$fromPublication`](#fromfile-fromgit-and-frompublication) | none | see below | Release-input bindings. | Render time. | The input's declared default; a `pointer` that selects nothing in a file that exists is an error. | The input's declared `type` and `enum`. |
 | [`$literal`](#literal) | — | any value | Wherever sources are. | With the document. | — | As the literal. |
 
 ## How sources work
@@ -41,17 +41,17 @@ whole value it stands for, at any depth of a document's objects and lists:
 
 - A source next to other keys is an error, because it would replace them.
 - A source with a shorthand takes its main field as a string:
-  `{$environment: /target}` is `{$environment: {pointer: /target}}`, and
-  `{$input: image}` is `{$input: {name: image}}`. A shorthand that looks like
-  the other one is an error that suggests the fix: `{$input: /image}` "takes a
-  name; did you mean image?", and `{$environment: target}` "takes a JSON
+  `{$fromEnvironment: /target}` is `{$fromEnvironment: {pointer: /target}}`, and
+  `{$fromInput: image}` is `{$fromInput: {name: image}}`. A shorthand that looks like
+  the other one is an error that suggests the fix: `{$fromInput: /image}` "takes a
+  name; did you mean image?", and `{$fromEnvironment: target}` "takes a JSON
   Pointer; did you mean /target?".
 - `pointer` is a JSON Pointer, such as `/web/tier`; empty or omitted selects
   the whole value.
 
 ### Missing values
 
-When a source finds nothing, or `$environment` finds `null`:
+When a source finds nothing, or `$fromEnvironment` finds `null`:
 
 - `default` applies. It must not be `null`.
 - With `optional: true` the key is removed, so the document is the same as one
@@ -60,9 +60,9 @@ When a source finds nothing, or `$environment` finds `null`:
   looked for: the environment, the instance, or the Release, with the keys
   that exist there and the nearest one.
 
-`default` and `optional` are exclusive, and only `$environment` takes them:
-`$input` and `$parameter` use the default their declaration gives, and
-`$unit` and `$promotion` wait for their producer.
+`default` and `optional` are exclusive, and only `$fromEnvironment` takes them:
+`$fromInput` and `$fromParameter` use the default their declaration gives, and
+`$fromUnit` and `$fromPromotion` wait for their producer.
 
 ### Types
 
@@ -80,7 +80,7 @@ read as a source. Use it for data that looks like one:
 
 ```yaml
 values:
-  schema: {$literal: {$unit: not-a-reference}}
+  schema: {$literal: {$fromUnit: not-a-reference}}
 ```
 
 In a unit document, `$literal` unwraps when the unit renders, unless its
@@ -94,19 +94,31 @@ one, such as `$ref` in a HelmChart's `chart`, is an error. In free-form data
 (chart values, a Component's `spec`, plain Kubernetes manifests, a unit's
 `variables` and `values`, environment values, a binding's literal) other `$`
 keys such as `$ref` and `$schema` are data, except these likely slips, which
-are errors that name the source you probably meant: `$value`, `$values`,
-`$env`, `$inputs`, `$param`, `$params`, `$parameters`, `$units`, `$output`,
-and `$artifact`. Wrap the object in `$literal` to keep one of them as data.
+are errors that name the source you probably meant:
+
+| Slip | Meant |
+| --- | --- |
+| `$environment`, `$input`, `$parameter`, `$unit`, `$promotion`, `$file`, `$git`, `$publication` | the same source with `$from`, such as `$fromInput` |
+| `$value`, `$values`, `$env`, `$fromEnv`, `$fromValue`, `$fromValues`, `$valueFrom`, `$valuesFrom` | `$fromEnvironment` |
+| `$inputs`, `$fromInputs`, `$inputFrom` | `$fromInput` |
+| `$param`, `$params`, `$parameters`, `$fromParam`, `$fromParams`, `$fromParameters` | `$fromParameter` |
+| `$units`, `$output`, `$artifact`, `$fromUnits`, `$fromOutput`, `$fromArtifact` | `$fromUnit` |
+| `$from` | lists every source |
+
+Slips match ignoring case, `_`, and `-`, so `$frominput`, `$from_input`, and
+`$FromInput` are slips for `$fromInput`. Wrap the object in `$literal` to keep
+one of them as data.
 
 In a unit document, the kind's schema says which fields are typed: where it
 has no place for a `$` key that is no source, the key is an unknown source,
-reported with the source it is closest to; where it leaves an object open,
+reported with the slip's suggestion or else the source it is closest to,
+compared the same way; where it leaves an object open,
 such as a Terraform unit's `variables`, the key is data:
 
 ```console
 $ nyl validate
 2026-11-20T02:41:15.605358Z ERROR nyl: Configuration error: units are invalid:
-  - dev: NYL-UNIT-INVALID: unit web-image (/nyl/units.yaml): spec.context.path.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $environment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/) (correct the unit's spec so that it matches its kind's schema)
+  - dev: NYL-UNIT-INVALID: unit web-image (/nyl/units.yaml): spec.context.path.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/) (correct the unit's spec so that it matches its kind's schema)
 …
 ```
 
@@ -119,14 +131,14 @@ document it lands in, which resolves it.
 
 | Context | Resolves | Carries |
 | --- | --- | --- |
-| The typed fields of a Release bundle's Nyl resources: a HelmChart's, a RemoteManifest's, a Release's, and a Component's envelope (`$` keys reserved) | `$input`, `$literal` | — |
-| The free-form data of a Release bundle: a HelmChart's `values`, a Component's `spec`, and plain Kubernetes manifests (foreign `$` keys are data) | `$input`, `$literal` | — |
+| The typed fields of a Release bundle's Nyl resources: a HelmChart's, a RemoteManifest's, a Release's, and a Component's envelope (`$` keys reserved) | `$fromInput`, `$literal` | — |
+| The free-form data of a Release bundle: a HelmChart's `values`, a Component's `spec`, and plain Kubernetes manifests (foreign `$` keys are data) | `$fromInput`, `$literal` | — |
 | A Release's `spec.inputs` declarations | — | — |
-| A unit document, when the unit renders | `$environment` | `$unit` and `$promotion` to the run; in an inline target's `releaseInputs`, also `$file`, `$git`, and `$publication` to the target's rendering |
-| A unit's rendered spec, when a run resolves it | `$unit`, `$promotion`, `$literal` | — |
-| An EnvironmentTemplate's `spec.values` | `$parameter` | `$unit`, `$promotion`, `$file`, `$git`, `$publication`, `$literal` |
+| A unit document, when the unit renders | `$fromEnvironment` | `$fromUnit` and `$fromPromotion` to the run; in an inline target's `releaseInputs`, also `$fromFile`, `$fromGit`, and `$fromPublication` to the target's rendering |
+| A unit's rendered spec, when a run resolves it | `$fromUnit`, `$fromPromotion`, `$literal` | — |
+| An EnvironmentTemplate's `spec.values` | `$fromParameter` | `$fromUnit`, `$fromPromotion`, `$fromFile`, `$fromGit`, `$fromPublication`, `$literal` |
 | A declared Environment's or EnvironmentGroup's `values` | — | as template values |
-| A DeploymentTarget's `releaseInputs`, declared or inline | `$file`, `$git`, `$publication`, `$literal`; `$unit` and `$promotion` through orchestration | — |
+| A DeploymentTarget's `releaseInputs`, declared or inline | `$fromFile`, `$fromGit`, `$fromPublication`, `$literal`; `$fromUnit` and `$fromPromotion` through orchestration | — |
 | What recursive expansion generates: a chart's output, a Component's, a remote manifest | — (any source is an error) | — |
 | Any other field, such as a target's `values` or a template's `parameters` | — | — |
 
@@ -134,11 +146,11 @@ document it lands in, which resolves it.
 
 A value read from outside your configuration is data and is never read for
 sources: a unit's output, artifact, or observed value, a file read with
-`$file`, `$git`, `$publication`, or HelmChart `valuesFrom`, a promotion record,
+`$fromFile`, `$fromGit`, `$fromPublication`, or HelmChart `valuesFrom`, a promotion record,
 a template parameter, and whatever rendering generates. A value copied from
 your configuration carries its sources to where it lands:
-`{$environment: /target}` can read an inline target whose bindings hold
-`$unit`, and the run resolves that `$unit` like one written in the unit. The
+`{$fromEnvironment: /target}` can read an inline target whose bindings hold
+`$fromUnit`, and the run resolves that `$fromUnit` like one written in the unit. The
 environment's values cannot read the environment's values.
 
 Two kinds of data are checked for sources anyway, because one there is always
@@ -150,7 +162,7 @@ a mistake:
 
   ```console
   $ nyl render apps/web/web.yaml
-  2026-11-20T02:37:25.732037Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.valuesFrom[0]: values file apps/web/values-base.yaml holds a $input source at image.tag; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
+  2026-11-20T02:37:25.732037Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.valuesFrom[0]: values file apps/web/values-base.yaml holds a $fromInput source at image.tag; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
   ```
 
 - A value source in the output of recursive expansion (what a HelmChart's or
@@ -162,20 +174,20 @@ a mistake:
 ### Carried sources and `nyl validate`
 
 A source that an environment's or a template's values carry is checked where
-the values land: the unit document that reads them with `$environment`, in
-the context at that place. A `$file` that lands in an inline target's
+the values land: the unit document that reads them with `$fromEnvironment`, in
+the context at that place. A `$fromFile` that lands in an inline target's
 `values` instead of its `releaseInputs`, for example, fails the unit's render:
 
 ```console
 $ nyl validate
 …
-Configuration error: Rendering the units of Environment preview-sample-1 at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 4: spec.target.inline.values.config holds a $file source, which fills a Release input and is valid only in a DeploymentTarget's releaseInputs; bind it to a Release input in the DeploymentTarget's releaseInputs (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); it came with the environment's values that $environment read here
+Configuration error: Rendering the units of Environment preview-sample-1 at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 4: spec.target.inline.values.config holds a $fromFile source, which fills a Release input and is valid only in a DeploymentTarget's releaseInputs; bind it to a Release input in the DeploymentTarget's releaseInputs (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); it came with the environment's values that $fromEnvironment read here
 ```
 
 [`nyl validate`](/nyl/reference/cli/validate/) renders every unit for every
 Environment and for sample instances of every EnvironmentTemplate, so these
 checks run before any instance exists. A source the values may not hold at
-all, such as `$input` in a template's values, fails there too. A carried
+all, such as `$fromInput` in a template's values, fails there too. A carried
 source that no unit of an environment reads never resolves; `nyl validate`
 warns about it with `NYL-VALUES-SOURCE-UNREAD`, per environment and per sample
 instance:
@@ -183,7 +195,7 @@ instance:
 ```console
 $ nyl validate
 …
-⚠ NYL-VALUES-SOURCE-UNREAD: spec.values.unused of instance preview-sample-1 holds a $file source that no unit of the environment reads: a source in values resolves only where a unit reads it with $environment (read the value in a unit with $environment, or remove it from the values)
+⚠ NYL-VALUES-SOURCE-UNREAD: spec.values.unused of instance preview-sample-1 holds a $fromFile source that no unit of the environment reads: a source in values resolves only where a unit reads it with $fromEnvironment (read the value in a unit with $fromEnvironment, or remove it from the values)
 ```
 
 The check follows each source into the units' rendered specs, so a value a
@@ -195,7 +207,7 @@ unit reads with structural Jinja counts as read as well.
 discovery and selection before anything resolves, so a source in them is an
 error, in a unit document and in every resource of a Release bundle.
 `metadata.namespace` is not one of them: a Release, its Nyl resources, and its
-manifests may read it with `{$input: namespace}`.
+manifests may read it with `{$fromInput: namespace}`.
 
 ### Render time and execution time
 
@@ -213,8 +225,8 @@ manifests may read it with `{$input: namespace}`.
 
 The published JSON Schemas offer the sources a context accepts next to the
 top-level `spec` fields of the resources that take them, generated from the
-context table: `$environment`, `$unit`, `$promotion`, and `$literal` for the
-unit kinds, `$input` and `$literal` for HelmChart and RemoteManifest, and the
+context table: `$fromEnvironment`, `$fromUnit`, `$fromPromotion`, and `$literal` for the
+unit kinds, `$fromInput` and `$literal` for HelmChart and RemoteManifest, and the
 binding sources for a DeploymentTarget's `releaseInputs`. Sources are valid
 at any depth of those fields, in a plain manifest, in a Component's `spec`,
 and in `metadata.namespace` too, but editors are not offered them there, and
@@ -231,9 +243,9 @@ only where no source fits.
 
 ## Sources
 
-### `$environment`
+### `$fromEnvironment`
 
-Reads the environment's effective values: an Environment's values over its
+`$fromEnvironment` reads a value from the environment's effective values: an Environment's values over its
 groups' values, or an EnvironmentTemplate instance's values.
 
 ```yaml
@@ -243,9 +255,9 @@ metadata:
   name: kubernetes
   labels: {dev: 'true', preview: 'true'}
 spec:
-  target: {$environment: /target}
-  teardownWait: {$environment: {pointer: /teardownWait, default: {strategy: manual}}}
-  approval: {$environment: {pointer: /approval, optional: true}}
+  target: {$fromEnvironment: /target}
+  teardownWait: {$fromEnvironment: {pointer: /teardownWait, default: {strategy: manual}}}
+  approval: {$fromEnvironment: {pointer: /approval, optional: true}}
   timeout: 10m
 ---
 apiVersion: units.gitops.nyl/v1
@@ -256,7 +268,7 @@ metadata:
 spec:
   variables:
     # dev's own network, or the environment that networkFrom names
-    vpc_id: {$unit: {unit: network, output: vpcId, environment: {$environment: {pointer: /networkFrom, optional: true}}}}
+    vpc_id: {$fromUnit: {unit: network, output: vpcId, environment: {$fromEnvironment: {pointer: /networkFrom, optional: true}}}}
 ```
 
 | Field | Meaning |
@@ -269,7 +281,7 @@ It resolves when an environment's units render: in `nyl plan`,
 `nyl reconcile`, `nyl validate`, `nyl build -e`, and every other command that
 renders units. The values are already rendered, so the value is used as it is
 and never templated again. A direct `nyl build` without `-e` has no
-environment, so a unit with `$environment` needs `-e`.
+environment, so a unit with `$fromEnvironment` needs `-e`.
 [`nyl validate`](/nyl/reference/cli/validate/) renders every unit for every
 Environment that selects it and for sample instances of every
 EnvironmentTemplate, so a pointer one environment lacks fails before any run.
@@ -279,12 +291,12 @@ A missing required value fails the unit's render with `NYL-UNIT-INVALID`:
 ```console
 $ nyl validate
 …
-Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.timeout.$environment reads /timout, which is not in the values of Environment dev: the values have keys "target", "timeout" (nearest to "timout": "timeout"); set it in the values, or give the source a default, or optional: true to omit the field
+Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.timeout.$fromEnvironment reads /timout, which is not in the values of Environment dev: the values have keys "target", "timeout" (nearest to "timout": "timeout"); set it in the values, or give the source a default, or optional: true to omit the field
 ```
 
-### `$input`
+### `$fromInput`
 
-Reads a Release input in any resource of the Release's bundle: the Release
+`$fromInput` reads a value from a Release input, in any resource of the Release's bundle: the Release
 entry file and every file its `spec.include` selects. One bundle then serves
 targets that bind different values, without templating its structure:
 
@@ -293,7 +305,7 @@ apiVersion: k8s.nyl/v1
 kind: Release
 metadata:
   name: web
-  namespace: {$input: namespace}
+  namespace: {$fromInput: namespace}
 spec:
   inputs:
     namespace: {type: string, default: web}
@@ -306,26 +318,26 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web
-  namespace: {$input: namespace}
+  namespace: {$fromInput: namespace}
 spec:
-  replicas: {$input: replicas}
+  replicas: {$fromInput: replicas}
   template:
     spec:
       containers:
         - name: web
-          image: {$input: image}
+          image: {$fromInput: image}
 ---
 apiVersion: k8s.nyl/v1
 kind: HelmChart
 metadata:
   name: worker
-  namespace: {$input: namespace}
+  namespace: {$fromInput: namespace}
 spec:
   chart: {name: ./chart}
-  includeCrds: {$input: crds}
-  lookup: {$input: {name: features, pointer: /lookup}}
+  includeCrds: {$fromInput: crds}
+  lookup: {$fromInput: {name: features, pointer: /lookup}}
   values:
-    image: {$input: image}
+    image: {$fromInput: image}
     schema: {$ref: '#/definitions/x'}   # foreign `$` keys in chart values are data
 ```
 
@@ -350,17 +362,18 @@ Release that declares inputs are errors. String interpolation such as
 The Release's inputs are part of the Release's and the target's render cache
 keys, and the resolved chart values are part of the Helm cache key, so a
 changed binding renders again. What a chart or a remote manifest generates
-takes no `$input`: see [Data and configuration](#data-and-configuration).
+takes no `$fromInput`: see [Data and configuration](#data-and-configuration).
 
 ```console
 $ nyl render apps/web/web.yaml
-2026-11-20T02:37:25.751364Z ERROR nyl: Configuration error: Deployment "web" in apps/web/web.yaml: spec.template.spec.containers[0].env[0].value holds a $unit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $unit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); spec.template.spec.containers[0].image.$inputs is not a value source; did you mean $input? (write {$literal: …} to keep the key as data)
+2026-11-20T02:37:25.751364Z ERROR nyl: Configuration error: Deployment "web" in apps/web/web.yaml: spec.template.spec.containers[0].env[0].value holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); spec.template.spec.containers[0].image.$inputs is not a value source; did you mean $fromInput? (write {$literal: …} to keep the key as data)
 Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
 ```
 
-### `$parameter`
+### `$fromParameter`
 
-Reads a parameter an EnvironmentTemplate instance binds, at any depth of the
+`$fromParameter` reads a value from a parameter an EnvironmentTemplate
+instance binds, at any depth of the
 template's `spec.values`, so a value keeps the parameter's type where a quoted
 Jinja string would make it a string:
 
@@ -376,21 +389,21 @@ spec:
     sizes: {type: object, default: {web: {replicas: 1}}}
   values:
     hostname: 'pr-{{ params.pr }}.preview.example.com'   # a string: Jinja is fine
-    replicas: {$parameter: {name: sizes, pointer: /web/replicas}}
+    replicas: {$fromParameter: {name: sizes, pointer: /web/replicas}}
     target:
       inline:
         # …
         releaseInputs:
           rise/rise:
-            clusterWide: {$parameter: crds}
-            image: {$unit: {unit: web-image, artifact: image}}   # carried to the unit
+            clusterWide: {$fromParameter: crds}
+            image: {$fromUnit: {unit: web-image, artifact: image}}   # carried to the unit
 ```
 
 It resolves when an instance's values are computed: at
 `nyl state init --template`, at `nyl reconcile --template`, and at every later
 command that names the instance, from the parameters its `state.yaml`
 records. Strings with template syntax render first; units render after, so a
-unit's `$environment` reads the resolved value. The parameter's declared
+unit's `$fromEnvironment` reads the resolved value. The parameter's declared
 default applies when the instance is created without it. An undeclared
 parameter fails the instance with `NYL-TEMPLATE-INVALID`, and
 [`nyl validate`](/nyl/reference/cli/validate/) computes the values of sample
@@ -399,22 +412,22 @@ instances of every template, so it fails before any instance exists:
 ```console
 $ nyl validate
 …
-2026-11-20T02:01:10.922110Z ERROR nyl: Configuration error: Configuration error: NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.replicas.$parameter names parameter "size", which EnvironmentTemplate preview does not declare (declared: pr, sizes); declare it in spec.parameters, or name a declared one (fix EnvironmentTemplate preview in source)
+2026-11-20T02:01:10.922110Z ERROR nyl: Configuration error: Configuration error: NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.replicas.$fromParameter names parameter "size", which EnvironmentTemplate preview does not declare (declared: pr, sizes); declare it in spec.parameters, or name a declared one (fix EnvironmentTemplate preview in source)
 ```
 
-### `$unit`
+### `$fromUnit`
 
-Reads a unit's output, published artifact, or observed value from its current
-receipt. Only a run resolves it: in a unit's spec at any depth, and in a
+`$fromUnit` reads a value from another unit's receipt: its output, published
+artifact, or observed value. Only a run resolves it: in a unit's spec at any depth, and in a
 Release-input binding of a target that a
 [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/#release-inputs-from-other-units)
 names.
 
 ```yaml
 values:
-  host: {$unit: {unit: database, output: host}}
-  image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-  networkId: {$unit: {environment: infra, unit: network, output: id}}
+  host: {$fromUnit: {unit: database, output: host}}
+  image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+  networkId: {$fromUnit: {environment: infra, unit: network, output: id}}
 ```
 
 | Field | Meaning |
@@ -422,7 +435,7 @@ values:
 | `unit` | The producing unit. |
 | `output`, `artifact`, `observation` | Exactly one: a declared output, a published artifact, or a declared [observed value](/nyl/orchestration/runs/#observed-values). |
 | `pointer` | A JSON Pointer inside the value. |
-| `environment` | The producer's environment, for a [cross-environment reference](/nyl/orchestration/runs/#multi-environment-runs). In a unit document it may be an `$environment` source. |
+| `environment` | The producer's environment, for a [cross-environment reference](/nyl/orchestration/runs/#multi-environment-runs). In a unit document it may be an `$fromEnvironment` source. |
 | `kind` | The expected artifact kind. |
 | `evidence`, `attestations` | What the producer must prove beyond a current receipt; see [Requiring attestations](/nyl/orchestration/runs/#requiring-attestations). |
 
@@ -436,33 +449,35 @@ does not select with `NYL-DEPENDENCY-UNKNOWN`, an undeclared attestation with
 `NYL-REFERENCE-INVALID`. A unit's stored spec keeps its references, and a
 stored reference that does not parse is an error, never a dropped dependency.
 
-### `$promotion`
+### `$fromPromotion`
 
-Reads a value recorded through a [PromotionPath](/nyl/orchestration/promotion/):
+`$fromPromotion` reads a value from a promotion record, written through a [PromotionPath](/nyl/orchestration/promotion/):
 `value`, the promoted value's name, and optionally `path`, the PromotionPath
-it must come from. Like `$unit`, only a run resolves it, in a unit's spec or a
+it must come from. Like `$fromUnit`, only a run resolves it, in a unit's spec or a
 Release-input binding. A promotion without a record blocks the consumer
 (`NYL-PROMOTION-MISSING`).
 
 ```yaml
 releaseInputs:
   web/web:
-    image: {$promotion: {value: webImage}}
+    image: {$fromPromotion: {value: webImage}}
 ```
 
-### `$file`, `$git`, and `$publication`
+### `$fromFile`, `$fromGit`, and `$fromPublication`
 
-Read a Release input's value from a file, in a DeploymentTarget's
-`releaseInputs`. See [Release inputs](/nyl/kubernetes-gitops/release-inputs/)
+These read a Release input's value from a file: `$fromFile` from a file of
+this repository, `$fromGit` from a file at a locked commit, and
+`$fromPublication` from a state file in the target's publication branch. They
+are valid in a DeploymentTarget's `releaseInputs`. See [Release inputs](/nyl/kubernetes-gitops/release-inputs/)
 for the workflow.
 
 | Source | Reads |
 | --- | --- |
-| `$file` | `path`, a YAML or JSON file of this repository under the [local path rule](/nyl/reference/configuration/#local-paths), and `pointer` inside it. |
-| `$git` | A file of a Git repository at a locked `commit`, with `repositoryRef` or `repository`, `revision`, `path`, and `pointer`. |
-| `$publication` | A state file in the target's own publication branch: `path` relative to its path prefix, `pointer`, and optionally `carryFileFromWorktree`. |
+| `$fromFile` | `path`, a YAML or JSON file of this repository under the [local path rule](/nyl/reference/configuration/#local-paths), and `pointer` inside it. |
+| `$fromGit` | A file of a Git repository at a locked `commit`, with `repositoryRef` or `repository`, `revision`, `path`, and `pointer`. |
+| `$fromPublication` | A state file in the target's own publication branch: `path` relative to its path prefix, `pointer`, and optionally `carryFileFromWorktree`. |
 
-A `$file` file that does not exist, or a `$publication` branch or file that
+A `$fromFile` file that does not exist, or a `$fromPublication` branch or file that
 does not exist yet, leaves the input unbound, so its declared default applies.
 A `pointer` that selects nothing in a file that exists is an error.
 
@@ -477,11 +492,11 @@ releaseInputs:
   platform/web:
     replicas: 3
     image: registry.example.com/web@sha256:4f0c…
-    database: {$file: {path: environments/staging/database.yaml, pointer: /database}}
-    sizing: {$git: {repositoryRef: {name: sizing}, revision: main, commit: 3f1c…, path: web.json}}
-    tag: {$publication: {path: state/tag.json, pointer: /tag}}
-    host: {$unit: {unit: database, output: host}}
-    raw: {$literal: {$file: not-a-source}}
+    database: {$fromFile: {path: environments/staging/database.yaml, pointer: /database}}
+    sizing: {$fromGit: {repositoryRef: {name: sizing}, revision: main, commit: 3f1c…, path: web.json}}
+    tag: {$fromPublication: {path: state/tag.json, pointer: /tag}}
+    host: {$fromUnit: {unit: database, output: host}}
+    raw: {$literal: {$fromFile: not-a-source}}
 ```
 
 The effective value is the binding's, otherwise the Release's declared
@@ -489,13 +504,13 @@ The effective value is the binding's, otherwise the Release's declared
 `enum`; `null` satisfies no type. Nyl checks every binding of a target before
 rendering any Release and reports all problems together: unknown Releases or
 inputs, missing required values, and type mismatches. A binding reads either
-`$unit` and `$promotion` or the sources rendering reads, not both.
+`$fromUnit` and `$fromPromotion` or the sources rendering reads, not both.
 
 ## HelmChart `valuesFrom`
 
 A HelmChart can read its chart values from values files of this repository and
 from `object` Release inputs, merged in order, before its inline `values`. Use
-it for whole objects and for files; use [`$input`](#input) in the inline
+it for whole objects and for files; use [`$fromInput`](#frominput) in the inline
 `values` for one field, at any depth.
 
 ```yaml
@@ -534,7 +549,7 @@ cannot use `valuesFrom`. Entries merge in order and the inline `values` merge
 last: maps merge key by key, and every other value, lists included, replaces.
 That is Helm's own rule for several `-f` files.
 
-The inline `values` have their `$input` sources resolved before the merge.
+The inline `values` have their `$fromInput` sources resolved before the merge.
 The merged values are data: Nyl passes them to Helm as they are, and a values
 file that holds a value source is an error that says to move it to the inline
 `values` (see [Data and configuration](#data-and-configuration)). There are no
@@ -551,7 +566,7 @@ not accept it says where it works:
 
 ```console
 $ nyl render apps/web/web.yaml
-2026-11-20T02:01:10.850437Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.includeCrds holds a $unit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $unit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
+2026-11-20T02:01:10.850437Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.includeCrds holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
 Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
 ```
 
@@ -560,5 +575,5 @@ A likely slip, and a source with other keys next to it:
 ```console
 $ nyl validate
 …
-Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $unit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$values is not a value source; did you mean $environment? (write {$literal: …} to keep the key as data)
+Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$values is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)
 ```

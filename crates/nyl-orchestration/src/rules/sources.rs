@@ -194,7 +194,7 @@ pub fn promoted_record<'a>(
     })
 }
 
-/// The record a `$promotion` binding reads among an environment's
+/// The record a `$fromPromotion` binding reads among an environment's
 /// `records`, or `None` when none supplies it yet. Every reader of a
 /// binding takes it here: the binding provider of the shared resolver and
 /// `nyl get promotions`.
@@ -228,7 +228,7 @@ pub fn binding_supplier<'a>(
 
 /// The promotion paths that supply an environment's source, from its
 /// Environment spec (the declared one or the one an environment record
-/// keeps): `None` unless `source.promotion` is set. A `$promotion`
+/// keeps): `None` unless `source.promotion` is set. A `$fromPromotion`
 /// binding without `path` reads only records on these paths, so every
 /// resolution of references, run, `get`, or direct command, derives them
 /// here.
@@ -316,7 +316,7 @@ pub fn invalid_block(environment: &str, problem: impl std::fmt::Display) -> Find
     )
 }
 
-/// The PromotionRecords an environment's source and its `$promotion`
+/// The PromotionRecords an environment's source and its `$fromPromotion`
 /// bindings read: the records in its state, and with `record: source` the
 /// `promoted` block of `promoted` (the Environment's `source.promotion`)
 /// in place of any record in state on the paths it names, which never

@@ -24,7 +24,7 @@ metadata:
 spec:
   files: ['../scripts/worker.sh']
   values:
-    cache: {$unit: {unit: cache, output: endpoint}}
+    cache: {$fromUnit: {unit: cache, output: endpoint}}
   workingDir: ../scripts
   command: [sh, './worker.sh']
   idempotent: true

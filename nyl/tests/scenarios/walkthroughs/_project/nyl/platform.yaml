@@ -35,8 +35,8 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {$unit: {unit: database, output: host}}
+      image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$fromUnit: {unit: database, output: host}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment

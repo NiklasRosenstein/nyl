@@ -110,11 +110,11 @@ pub enum ImageContext {
     Image(ImageReference),
     Directory(GitSource),
 }
-/// An image context. Its reference can be supplied by a `$unit` artifact binding.
+/// An image context. Its reference can be supplied by a `$fromUnit` artifact binding.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageReference {
-    /// A digest-pinned image reference or a `$unit` artifact binding.
+    /// A digest-pinned image reference or a `$fromUnit` artifact binding.
     pub image: Value,
 }
 /// Buildx cache specifications.
@@ -269,7 +269,7 @@ impl OciImageSpec {
     }
 }
 
-/// Whether `object` is a `$unit` or `$promotion` source, which the run
+/// Whether `object` is a `$fromUnit` or `$fromPromotion` source, which the run
 /// resolves before the driver executes.
 fn is_run_reference(object: &serde_json::Map<String, serde_json::Value>) -> bool {
     matches!(

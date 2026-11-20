@@ -421,7 +421,7 @@ pub fn citing_tombstones(desired: &BTreeMap<UnitName, DesiredUnit>, unit: &Desir
         .collect()
 }
 
-/// The dependencies among `units` from their stored specs (`$unit`
+/// The dependencies among `units` from their stored specs (`$fromUnit`
 /// references and `dependsOn`), ignoring producers outside `units`: for
 /// each unit, the units it depends on. A stored reference that does not parse
 /// is an error naming its unit, never a dropped edge, because a dropped edge
@@ -606,7 +606,7 @@ mod tests {
     }
 
     fn reads(producer: &str) -> Value {
-        json!({"values": {"input": {"$unit": {"unit": producer, "output": "value"}}}})
+        json!({"values": {"input": {"$fromUnit": {"unit": producer, "output": "value"}}}})
     }
 
     fn deleting(unit: &str, spec: Value, reason: DeletionReason, intent: DeletionIntent) -> DesiredUnit {
@@ -712,7 +712,7 @@ mod tests {
     fn test_a_stored_reference_that_does_not_parse_stops_every_teardown() {
         let case = Case::new(vec![
             teardown("network", json!({})),
-            teardown("api", json!({"values": {"vpc": {"$unit": {"unit": "network"}}}})),
+            teardown("api", json!({"values": {"vpc": {"$fromUnit": {"unit": "network"}}}})),
         ]);
         let plan = case.plan();
         assert!(plan.ready.is_empty(), "{plan:?}");
@@ -724,7 +724,7 @@ mod tests {
             assert_eq!(findings[0].code, Code::ReferenceInvalid);
             assert!(
                 findings[0].message.contains(
-                    "unit api: spec.values.vpc.$unit must set exactly one of output, artifact, and observation"
+                    "unit api: spec.values.vpc.$fromUnit must set exactly one of output, artifact, and observation"
                 ),
                 "{}",
                 findings[0].message

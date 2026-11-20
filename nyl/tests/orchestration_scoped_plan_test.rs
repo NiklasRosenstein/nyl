@@ -29,7 +29,7 @@ fn test_scoped_plan_blocks_on_changed_producer_omitted_from_report() {
         ("nyl/app.yaml", &environment("app")),
         ("nyl/network.yaml", NETWORK),
         ("nyl/noop.yaml", "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata: {name: noop, labels: {scope: infra}}\nspec:\n  command: [sh, -c, 'true']\n  idempotent: true\n"),
-        ("nyl/consumer.yaml", "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata: {name: app, labels: {scope: app}}\nspec:\n  command: [sh, -c, 'true']\n  idempotent: true\n  values:\n    network: {$unit: {environment: infra, unit: network, output: id}}\n"),
+        ("nyl/consumer.yaml", "apiVersion: units.gitops.nyl/v1\nkind: Command\nmetadata: {name: app, labels: {scope: app}}\nspec:\n  command: [sh, -c, 'true']\n  idempotent: true\n  values:\n    network: {$fromUnit: {environment: infra, unit: network, output: id}}\n"),
     ]);
     let harness = shell::Harness::new(project.path(), true);
     for name in ["infra", "app"] {

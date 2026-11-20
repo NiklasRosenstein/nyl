@@ -15,7 +15,7 @@ use crate::resources::{DenyUnknownFields, GitSource};
 use crate::{CoreError, Result};
 
 /// Where one Release input's value comes from: a literal, or a value source
-/// (`$file`, `$git`, `$publication`, `$unit`, `$promotion`, `$literal`).
+/// (`$fromFile`, `$fromGit`, `$fromPublication`, `$fromUnit`, `$fromPromotion`, `$literal`).
 ///
 /// A bare value is the input's value. An object whose only key is a source
 /// reads the value from it, and sources inside a literal are resolved too,
@@ -66,14 +66,14 @@ impl InputBinding {
     }
 
     /// Whether only orchestrated execution resolves this binding: it holds a
-    /// `$unit` or `$promotion` source.
+    /// `$fromUnit` or `$fromPromotion` source.
     pub fn requires_orchestration(&self) -> bool {
         self.clauses()
             .iter()
             .any(|found| found.clause.source().requires_orchestration())
     }
 
-    /// The `$file` sources of the binding.
+    /// The `$fromFile` sources of the binding.
     pub fn files(&self) -> Vec<FileInputSource> {
         self.clauses()
             .into_iter()
@@ -84,7 +84,7 @@ impl InputBinding {
             .collect()
     }
 
-    /// The `$git` sources of the binding, with their pointers inside it.
+    /// The `$fromGit` sources of the binding, with their pointers inside it.
     pub fn git_sources(&self) -> Vec<(String, GitInputSource)> {
         self.clauses()
             .into_iter()
@@ -95,7 +95,7 @@ impl InputBinding {
             .collect()
     }
 
-    /// The `$publication` sources of the binding.
+    /// The `$fromPublication` sources of the binding.
     pub fn publications(&self) -> Vec<PublicationInputSource> {
         self.clauses()
             .into_iter()
@@ -106,7 +106,7 @@ impl InputBinding {
             .collect()
     }
 
-    /// The `$unit` sources of the binding.
+    /// The `$fromUnit` sources of the binding.
     pub fn units(&self) -> Vec<UnitInputSource> {
         self.clauses()
             .into_iter()
@@ -129,7 +129,7 @@ impl InputBinding {
             .find(|found| orchestrated && !found.clause.source().requires_orchestration())
         {
             return Err(CoreError::config(format!(
-                "{} holds a {} source in a binding that orchestration resolves; a binding reads either $unit and $promotion, or sources rendering reads, so split the value into two inputs",
+                "{} holds a {} source in a binding that orchestration resolves; a binding reads either $fromUnit and $fromPromotion, or sources rendering reads, so split the value into two inputs",
                 rendered.field,
                 rendered.clause.source().key()
             )));
@@ -236,8 +236,8 @@ impl PublicationInputSource {
     }
 }
 
-/// `$unit.environment` once its document is resolved: a name. An
-/// `$environment` source reaches deserialization only where nothing resolves
+/// `$fromUnit.environment` once its document is resolved: a name. An
+/// `$fromEnvironment` source reaches deserialization only where nothing resolves
 /// it, such as a declared DeploymentTarget, so it fails with where it works.
 fn environment_name<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
 where
@@ -248,7 +248,7 @@ where
         Value::Null => Ok(None),
         Value::Object(object) if object.len() == 1 && object.contains_key(super::Source::Environment.key()) => {
             Err(serde::de::Error::custom(format!(
-                "environment holds an $environment source, which resolves only in unit documents (including an inline target of a KubernetesPublication unit); write the environment name here (see {})",
+                "environment holds an $fromEnvironment source, which resolves only in unit documents (including an inline target of a KubernetesPublication unit); write the environment name here (see {})",
                 super::VALUE_SOURCES_DOCS
             )))
         }
@@ -259,12 +259,12 @@ where
     }
 }
 
-/// `$unit`: a unit's output, artifact, or observed value, which orchestration
+/// `$fromUnit`: a unit's output, artifact, or observed value, which orchestration
 /// resolves from the producer's current receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnitInputSource {
-    /// Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$environment`, resolved when the unit renders.
+    /// Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$fromEnvironment`, resolved when the unit renders.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -313,7 +313,7 @@ impl UnitInputSource {
     }
 }
 
-/// `$promotion`: a value recorded through a PromotionPath, which
+/// `$fromPromotion`: a value recorded through a PromotionPath, which
 /// orchestration resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -342,13 +342,13 @@ mod tests {
 
     #[test]
     fn test_binding_is_a_literal_or_a_source() {
-        let binding = InputBinding(json!({"$promotion": {"value": "image"}}));
+        let binding = InputBinding(json!({"$fromPromotion": {"value": "image"}}));
         assert!(binding.requires_orchestration());
         assert_eq!(binding.clause().unwrap().source(), crate::bindings::Source::Promotion);
         let literal = InputBinding(json!({"tag": "v1"}));
         assert!(literal.clause().is_none());
         literal.validate("b").unwrap();
-        let nested = InputBinding(json!({"tag": {"$unit": {"unit": "build", "output": "tag"}}}));
+        let nested = InputBinding(json!({"tag": {"$fromUnit": {"unit": "build", "output": "tag"}}}));
         assert!(nested.requires_orchestration());
         assert!(nested.clause().is_none());
     }
@@ -358,18 +358,18 @@ mod tests {
     #[test]
     fn test_binding_mixing_render_and_run_sources_is_rejected() {
         let binding = InputBinding(json!({
-            "a": {"$unit": {"unit": "build", "output": "tag"}},
-            "b": {"$file": {"path": "x.yaml"}},
+            "a": {"$fromUnit": {"unit": "build", "output": "tag"}},
+            "b": {"$fromFile": {"path": "x.yaml"}},
         }));
         let error = binding.validate("b").unwrap_err().to_string();
         assert!(
-            error.contains("b.b holds a $file source in a binding that orchestration resolves"),
+            error.contains("b.b holds a $fromFile source in a binding that orchestration resolves"),
             "{error}"
         );
-        let error = InputBinding(json!({"$environment": "/x"}))
+        let error = InputBinding(json!({"$fromEnvironment": "/x"}))
             .validate("b")
             .unwrap_err()
             .to_string();
-        assert!(error.starts_with("b holds a $environment source"), "{error}");
+        assert!(error.starts_with("b holds a $fromEnvironment source"), "{error}");
     }
 }

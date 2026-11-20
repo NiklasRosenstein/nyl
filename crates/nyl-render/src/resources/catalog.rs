@@ -118,7 +118,7 @@ impl ResourceKind {
         if schema.get("examples").is_none() {
             schema["examples"] = json!([resource_example(self)]);
         }
-        // Editors offer `$input` next to the top-level fields of the Nyl
+        // Editors offer `$fromInput` next to the top-level fields of the Nyl
         // resources of a Release bundle whose spec is typed.
         if matches!(self, Self::HelmChart | Self::RemoteManifest) {
             nyl_core::bindings::offer_sources(&mut schema, nyl_core::bindings::Context::ReleaseBundle);

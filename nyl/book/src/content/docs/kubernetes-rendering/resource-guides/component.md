@@ -9,19 +9,19 @@ Generated resources inherit a Component's Argo CD sync wave and phase; see [Argo
 ## Release inputs
 
 In the bundle of a Release that declares inputs, a Component's `spec` reads
-one with `{$input: name}` at any depth, with the input's type, before value
+one with `{$fromInput: name}` at any depth, with the input's type, before value
 imports apply; other `$` keys, such as `$ref`, are chart data. What the
 Component's chart generates takes no value sources. See
-[`$input`](/nyl/reference/value-sources/#input).
+[`$fromInput`](/nyl/reference/value-sources/#frominput).
 
 ```yaml
 apiVersion: components.k8s.nyl/v1
 kind: example/v1/Nginx
 metadata:
   name: web
-  namespace: {$input: namespace}
+  namespace: {$fromInput: namespace}
 spec:
-  image: {tag: {$input: tag}}
+  image: {tag: {$fromInput: tag}}
 ```
 
 ## Local Resolution

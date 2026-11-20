@@ -12,7 +12,7 @@
 //! source directory as their relative base, with the same worktree boundary.
 //!
 //! Paths inside another repository's checkout, such as a remote
-//! ApplicationGroup source or a `$git` binding, are relative to that
+//! ApplicationGroup source or a `$fromGit` binding, are relative to that
 //! checkout and do not use this module.
 //!
 //! Recorded paths, such as ownership-index inputs and rendered provenance, use

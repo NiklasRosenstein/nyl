@@ -23,7 +23,7 @@ metadata:
 spec:
   files: ['../scripts/consumer.sh']
   values:
-    release: {$unit: {unit: producer, output: release}}
+    release: {$fromUnit: {unit: producer, output: release}}
     replicas: '1'
   workingDir: ../scripts
   command: [sh, './consumer.sh']

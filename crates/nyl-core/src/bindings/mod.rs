@@ -48,8 +48,8 @@ pub use binding::{
     FileInputSource, GitInputSource, InputBinding, PromotionInputSource, PublicationInputSource, UnitInputSource,
 };
 pub use clauses::{
-    clause_key, holds_dollar_key, literal_field_issues, sources_in, Clause, Context, InputSource, Namespace,
-    ParameterSource, Source, Treatment, ValuesSource, LITERAL_ONLY_FIELDS, SLIPS, VALUE_SOURCES_DOCS,
+    clause_key, holds_dollar_key, literal_field_issues, slip, sources_in, suggest, Clause, Context, InputSource,
+    Namespace, ParameterSource, Source, Treatment, ValuesSource, LITERAL_ONLY_FIELDS, VALUE_SOURCES_DOCS,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
 pub use issue::{BindingIssue, Coded};
@@ -493,8 +493,8 @@ mod tests {
             "shaped": {"type": "object"},
         }));
         let bound = bindings(json!({
-            "settings": {"port": {"$file": {"path": "ports.json", "pointer": "/web"}}, "tls": true},
-            "shaped": {"$literal": {"$file": "not a source"}},
+            "settings": {"port": {"$fromFile": {"path": "ports.json", "pointer": "/web"}}, "tls": true},
+            "shaped": {"$literal": {"$fromFile": "not a source"}},
         }));
         let providers = TestProviders {
             files: BTreeMap::from([("ports.json", json!({"web": 8080}))]),
@@ -503,7 +503,7 @@ mod tests {
         let (slots, issues) = resolve_all(&declared, Some(&bound), &BTreeMap::new(), &providers);
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(slots.values["settings"].value, json!({"port": 8080, "tls": true}));
-        assert_eq!(slots.values["shaped"].value, json!({"$file": "not a source"}));
+        assert_eq!(slots.values["shaped"].value, json!({"$fromFile": "not a source"}));
     }
 
     #[test]
@@ -513,8 +513,8 @@ mod tests {
             "image": {"type": "string"},
         }));
         let bound = bindings(json!({
-            "tag": {"$file": {"path": "missing.json"}},
-            "image": {"$file": {"path": "missing.json"}},
+            "tag": {"$fromFile": {"path": "missing.json"}},
+            "image": {"$fromFile": {"path": "missing.json"}},
         }));
         let (slots, issues) = resolve_all(&declared, Some(&bound), &BTreeMap::new(), &TestProviders::default());
         assert_eq!(slots.values["tag"].origin, TestOrigin::Default);
@@ -534,10 +534,10 @@ mod tests {
             "vpc": {"type": "string"},
         }));
         let bound = bindings(json!({
-            "port": {"$file": {"path": "ports.json", "pointer": "/web"}},
-            "sha": {"$git": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
+            "port": {"$fromFile": {"path": "ports.json", "pointer": "/web"}},
+            "sha": {"$fromGit": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
             "tier": "large",
-            "vpc": {"$unit": {"unit": "network", "output": "vpcId"}},
+            "vpc": {"$fromUnit": {"unit": "network", "output": "vpcId"}},
         }));
         let providers = TestProviders {
             files: BTreeMap::from([("ports.json", json!({"web": "8080"}))]),
@@ -550,7 +550,7 @@ mod tests {
             [
                 r#"Subject s requires input "name" (Service name), but it has no binding and no default; bind it in bindings"#,
                 r#"bindings.port (File("ports.json")) for input "port" of Subject s is invalid: expected integer, got string"#,
-                "bindings.sha.$git is not supported here",
+                "bindings.sha.$fromGit is not supported here",
                 r#"bindings.tier (Value) for input "tier" of Subject s is invalid: "large" is not one of the allowed values ["small"]"#,
             ]
         );
@@ -593,8 +593,8 @@ mod tests {
 
         let declared = declarations(json!({"vpc": {"type": "string"}, "port": {"type": "integer"}}));
         let bound = bindings(json!({
-            "vpc": {"$unit": {"unit": "network", "output": "vpcId"}},
-            "port": {"$git": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
+            "vpc": {"$fromUnit": {"unit": "network", "output": "vpcId"}},
+            "port": {"$fromGit": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
         }));
         let mut issues = Vec::new();
         resolve(
@@ -609,14 +609,14 @@ mod tests {
         assert_eq!(
             issues,
             [
-                BindingIssue::new("bindings.port.$git is not supported here"),
+                BindingIssue::new("bindings.port.$fromGit is not supported here"),
                 rejected.clone()
             ]
         );
 
         let document = json!({
-            "a": {"$unit": {"unit": "network", "output": "vpcId"}},
-            "b": {"$unit": {"unit": "other", "output": "x"}, "pointer": "/id"},
+            "a": {"$fromUnit": {"unit": "network", "output": "vpcId"}},
+            "b": {"$fromUnit": {"unit": "other", "output": "x"}, "pointer": "/id"},
         });
         let mut issues = Vec::new();
         resolve_document(
@@ -632,7 +632,7 @@ mod tests {
             [
                 rejected,
                 BindingIssue::new(
-                    "spec.b holds $unit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data)"
+                    "spec.b holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data)"
                 )
             ]
         );

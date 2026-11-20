@@ -41,7 +41,7 @@ spec:
   idempotent: true
   detectDrift: [sh, -c, 'true']
   values:
-    network: {$unit: {environment: infra, unit: network, output: id}}
+    network: {$fromUnit: {environment: infra, unit: network, output: id}}
 "#;
 
 struct Harness {
@@ -188,7 +188,7 @@ fn test_an_unavailable_selected_source_reports_its_error_and_independent_environ
         .replace("name: app", "name: solo")
         .replace("scope: app", "scope: solo")
         .replace(
-            "  values:\n    network: {$unit: {environment: infra, unit: network, output: id}}\n",
+            "  values:\n    network: {$fromUnit: {environment: infra, unit: network, output: id}}\n",
             "",
         );
     harness.shell.world.commit_files(
@@ -219,7 +219,7 @@ fn test_busy_producer_blocks_old_receipts_but_independent_consumer_units_execute
     let harness = Harness::new();
     assert_eq!(harness.invoke(&["reconcile", "-g", "testing"]).exit, 0);
     let independent = CONSUMER.replace("name: app", "name: independent").replace(
-        "  values:\n    network: {$unit: {environment: infra, unit: network, output: id}}\n",
+        "  values:\n    network: {$fromUnit: {environment: infra, unit: network, output: id}}\n",
         "",
     );
     harness.shell.world.commit_files(
@@ -333,8 +333,8 @@ fn test_a_consumer_waits_for_an_observed_value_of_another_environments_unit_then
     );
     assert!(producer.contains("observations:"), "{producer}");
     let consumer = CONSUMER.replace(
-        "    network: {$unit: {environment: infra, unit: network, output: id}}\n",
-        "    address: {$unit: {environment: infra, unit: network, observation: ip}}\n",
+        "    network: {$fromUnit: {environment: infra, unit: network, output: id}}\n",
+        "    address: {$fromUnit: {environment: infra, unit: network, observation: ip}}\n",
     );
     assert!(consumer.contains("observation: ip"), "{consumer}");
     let probe = Arc::new(Probe::default());

@@ -14,8 +14,8 @@ See the [RemoteManifest resource reference](/nyl/reference/resources/k8s.nyl/v1/
 - When `spec.urls` is used, documents from all URLs are concatenated in order.
 - Parsed resources are processed recursively like local resources.
 - Fetched resources inherit the RemoteManifest's Argo CD sync wave and phase; see [Argo CD sync waves and phases](/nyl/kubernetes-rendering/pipeline/#argo-cd-sync-waves-and-phases).
-- Remote content is not rendered as a Jinja template, and it is data: a value source such as `{$input: x}` in a fetched document is an error that names the RemoteManifest.
-- In the bundle of a Release that declares inputs, the RemoteManifest's own fields, including `metadata.namespace`, may read one with `{$input: name}`, such as `url: {$input: crdsUrl}`; see [`$input`](/nyl/reference/value-sources/#input).
+- Remote content is not rendered as a Jinja template, and it is data: a value source such as `{$fromInput: x}` in a fetched document is an error that names the RemoteManifest.
+- In the bundle of a Release that declares inputs, the RemoteManifest's own fields, including `metadata.namespace`, may read one with `{$fromInput: name}`, such as `url: {$fromInput: crdsUrl}`; see [`$fromInput`](/nyl/reference/value-sources/#frominput).
 - When `spec.overrideNamespace: true`, remote manifests with `metadata.namespace` are rewritten to `RemoteManifest.metadata.namespace` (applied after all URLs are fetched).
 - Special case: for `RoleBinding` and `ClusterRoleBinding` (`rbac.authorization.k8s.io/*`), `subjects[*].namespace` is also rewritten (ServiceAccount subjects are forced to the override namespace).
 - Potential future rewrite targets (currently not handled): webhook service namespaces (`MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, CRD conversion webhook), and `APIService.spec.service.namespace`.

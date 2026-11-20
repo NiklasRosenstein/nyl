@@ -100,7 +100,7 @@ metadata:
 spec:
   command: [sh, -c, 'true']
   values:
-    image: {$promotion: {value: webImage}}
+    image: {$fromPromotion: {value: webImage}}
 ";
 
 struct Promote {

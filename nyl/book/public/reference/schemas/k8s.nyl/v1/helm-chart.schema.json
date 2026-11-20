@@ -55,7 +55,7 @@
               "$ref": "#/$defs/ReleaseBundleValueSource"
             }
           ],
-          "description": "Whether to include CRDs from the chart's crds/ directory in the rendered output.\nDefaults to true when unset. In a Release bundle, `{$input: name}` reads it from a\nRelease input."
+          "description": "Whether to include CRDs from the chart's crds/ directory in the rendered output.\nDefaults to true when unset. In a Release bundle, `{$fromInput: name}` reads it from a\nRelease input."
         },
         "lookup": {
           "anyOf": [
@@ -69,7 +69,7 @@
               "$ref": "#/$defs/ReleaseBundleValueSource"
             }
           ],
-          "description": "Lets the chart's Helm `lookup` read the objects of the Release it belongs\nto, so a chart that reuses what it generated earlier, such as a Secret\nholding a CA, finds it when it renders again.\n\nDeclare it as `lookup: true`, or `lookup: false` to state that the chart must not use it\n(which silences `NYL-HELM-LOOKUP-UNDECLARED`).\n`lookup` then reads the Release's objects from the\ntarget's last publication (or, with `--lookup=live`, from the cluster) and sees\nnothing else: any other object is absent. Without a target, or before the\nRelease is published, nothing is found and the chart generates.\n\nCharts that declare it render through Helm's server-side dry run against a\nread-only API that Nyl serves on 127.0.0.1 for the duration of the render;\nHelm never gets a cluster or credentials. The Cluster's declared Kubernetes\nversion and API versions describe that API, plus the API versions of\nCustomResourceDefinitions the chart ships in `crds/`.\n\nIn a Release bundle, `{$input: name}` reads it from a Release input."
+          "description": "Lets the chart's Helm `lookup` read the objects of the Release it belongs\nto, so a chart that reuses what it generated earlier, such as a Secret\nholding a CA, finds it when it renders again.\n\nDeclare it as `lookup: true`, or `lookup: false` to state that the chart must not use it\n(which silences `NYL-HELM-LOOKUP-UNDECLARED`).\n`lookup` then reads the Release's objects from the\ntarget's last publication (or, with `--lookup=live`, from the cluster) and sees\nnothing else: any other object is absent. Without a target, or before the\nRelease is published, nothing is found and the chart generates.\n\nCharts that declare it render through Helm's server-side dry run against a\nread-only API that Nyl serves on 127.0.0.1 for the duration of the render;\nHelm never gets a cluster or credentials. The Cluster's declared Kubernetes\nversion and API versions describe that API, plus the API versions of\nCustomResourceDefinitions the chart ships in `crds/`.\n\nIn a Release bundle, `{$fromInput: name}` reads it from a Release input."
         },
         "values": {
           "anyOf": [
@@ -79,7 +79,7 @@
             }
           ],
           "default": null,
-          "description": "Values to pass to the chart, merged over `valuesFrom`. In a Release bundle,\n`{$input: name}` reads a Release input at any depth, before `valuesFrom` merges;\nother `$` keys, such as `$ref`, are chart data."
+          "description": "Values to pass to the chart, merged over `valuesFrom`. In a Release bundle,\n`{$fromInput: name}` reads a Release input at any depth, before `valuesFrom` merges;\nother `$` keys, such as `$ref`, are chart data."
         },
         "valuesFrom": {
           "anyOf": [
@@ -138,7 +138,7 @@
     },
     "InputSource": {
       "additionalProperties": false,
-      "description": "`$input`: a Release input. Its declared default applies when the target\nbinds none. Shorthand: `{$input: name}`.",
+      "description": "`$fromInput`: a Release input. Its declared default applies when the target\nbinds none. Shorthand: `{$fromInput: name}`.",
       "properties": {
         "name": {
           "description": "Name of an input the Release declares.",
@@ -198,7 +198,7 @@
           "additionalProperties": false,
           "description": "Reads an input the Release declares.",
           "properties": {
-            "$input": {
+            "$fromInput": {
               "anyOf": [
                 {
                   "description": "Shorthand: the input's name.",
@@ -211,7 +211,7 @@
             }
           },
           "required": [
-            "$input"
+            "$fromInput"
           ],
           "type": "object"
         },

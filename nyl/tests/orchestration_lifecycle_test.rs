@@ -55,7 +55,7 @@ fn cache_and_worker() -> String {
             "worker",
             "test -d %SCENARIO_TMP%/cache",
             None,
-            "  values:\n    cache: {$unit: {unit: cache, output: endpoint}}\n  idempotent: true\n  deletionPolicy: Retain\n",
+            "  values:\n    cache: {$fromUnit: {unit: cache, output: endpoint}}\n  idempotent: true\n  deletionPolicy: Retain\n",
         )
     )
 }
@@ -368,13 +368,13 @@ fn test_replace_keeps_dependents_with_an_unchanged_key_current() {
             "fixed",
             "true",
             None,
-            "  values:\n    value: {$unit: {unit: base, output: value}}\n",
+            "  values:\n    value: {$fromUnit: {unit: base, output: value}}\n",
         ),
         command_unit(
             "stamped",
             "true",
             None,
-            "  values:\n    stamp: {$unit: {unit: base, output: stamp}}\n",
+            "  values:\n    stamp: {$fromUnit: {unit: base, output: stamp}}\n",
         ),
     );
     let (_project, harness) = harness_with(&units);
@@ -521,7 +521,7 @@ fn test_a_held_units_consumers_resolve_its_receipt() {
             "consumer",
             "true",
             None,
-            &format!("  values:\n    value: {{$unit: {{unit: producer, output: value}}}}\n{extra}"),
+            &format!("  values:\n    value: {{$fromUnit: {{unit: producer, output: value}}}}\n{extra}"),
         )
     };
     let (_project, harness) = harness_with(&format!("{producer}---\n{}", consumer("")));

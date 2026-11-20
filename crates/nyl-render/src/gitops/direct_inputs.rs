@@ -47,9 +47,9 @@ pub struct DirectInputContext<'a> {
     /// The project inventory and the DeploymentTarget whose bindings apply;
     /// `None` renders defaults and overrides only.
     pub target: Option<(&'a GitOpsInventory, &'a crate::resources::DeploymentTarget)>,
-    /// The command's render cache, for `$git` reads and cache modes.
+    /// The command's render cache, for `$fromGit` reads and cache modes.
     pub cache: Option<&'a crate::render::cache::RenderCache>,
-    /// How `$publication` reads the publication branch, as for
+    /// How `$fromPublication` reads the publication branch, as for
     /// `render-tree`: refreshed, or the cached head with `--offline`.
     pub publication_read: PublicationRead,
 }
@@ -59,7 +59,7 @@ pub struct DirectInputContext<'a> {
 pub struct DirectInputs {
     pub declarations: BTreeMap<String, InputDeclaration>,
     pub resolved: ResolvedReleaseInputs,
-    /// The publication base `$publication` bindings read, if any.
+    /// The publication base `$fromPublication` bindings read, if any.
     pub publication_base: Option<PublicationBase>,
 }
 
@@ -69,7 +69,7 @@ impl DirectInputs {
         self.resolved.values()
     }
 
-    /// Project files the inputs were read from: `$file` files, carry files,
+    /// Project files the inputs were read from: `$fromFile` files, carry files,
     /// and referenced GitRepository resources.
     pub fn files(&self) -> Vec<PathBuf> {
         self.resolved
@@ -330,7 +330,7 @@ impl<'a> Sources<'a> {
             &inventory.project_config,
             context.cache.cloned(),
         ));
-        // The branch is read only when a $publication binding decides an
+        // The branch is read only when a $fromPublication binding decides an
         // input, not when an override replaces every such input.
         let reads_publication = bindings.is_some_and(|bindings| {
             bindings

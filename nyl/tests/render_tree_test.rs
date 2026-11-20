@@ -4675,7 +4675,7 @@ fn with_production_api_bindings(fixture: &TempDir) {
     .unwrap();
     with_api_inputs(
         fixture,
-        "    workloads/api:\n      image: registry.example.com/api@sha256:4f0c\n      database:\n        $file:\n          path: environments/database.yaml\n          pointer: /database\n",
+        "    workloads/api:\n      image: registry.example.com/api@sha256:4f0c\n      database:\n        $fromFile:\n          path: environments/database.yaml\n          pointer: /database\n",
     );
 }
 
@@ -4845,7 +4845,7 @@ fn test_render_does_not_read_the_publication_branch_for_overridden_inputs() {
     // The fixture's publication repository is unreachable.
     with_api_inputs(
         &fixture,
-        "    workloads/api:\n      image: {$publication: {path: state.json}}\n      database: {host: h}\n",
+        "    workloads/api:\n      image: {$fromPublication: {path: state.json}}\n      database: {host: h}\n",
     );
     let output = nyl_render(
         &fixture,
@@ -4918,7 +4918,7 @@ fn release_inputs_render_from_values_files_and_defaults() {
         r#"    workloads/api:
       image: registry.example.com/api@sha256:4f0c
       database:
-        $file:
+        $fromFile:
           path: environments/database.yaml
           pointer: /database
 "#,
@@ -4957,7 +4957,7 @@ fn release_input_changes_reach_rendered_output_through_the_cache() {
     fs::write(fixture.path().join("database.json"), r#"{"host": "one"}"#).unwrap();
     with_api_inputs(
         &fixture,
-        "    workloads/api:\n      image: a\n      database: {$file: {path: database.json}}\n",
+        "    workloads/api:\n      image: a\n      database: {$fromFile: {path: database.json}}\n",
     );
     render_production(&fixture).success();
     fs::write(fixture.path().join("database.json"), r#"{"host": "two"}"#).unwrap();
@@ -4979,7 +4979,7 @@ fn release_input_problems_are_reported_together_before_rendering() {
         r#"    workloads/api:
       replicas: "3"
       unknown: 1
-      database: {$unit: {unit: database, output: facts}}
+      database: {$fromUnit: {unit: database, output: facts}}
     workloads/missing:
       image: x
 "#,
@@ -4994,7 +4994,7 @@ fn release_input_problems_are_reported_together_before_rendering() {
         ))
         .stderr(predicate::str::contains("expected integer, got string"))
         .stderr(predicate::str::contains("does not declare"))
-        .stderr(predicate::str::contains("$unit needs orchestrated execution"))
+        .stderr(predicate::str::contains("$fromUnit needs orchestrated execution"))
         .stderr(predicate::str::contains("\"workloads/missing\" names no Release"));
     assert!(!fixture.path().join("deploy").exists());
 }
@@ -5018,7 +5018,7 @@ fn publication_bindings_of_disabled_groups_never_read_the_branch() {
     // The fixture's publication repository is unreachable.
     with_api_inputs(
         &fixture,
-        "    workloads/api:\n      image: {$publication: {path: state.json}}\n",
+        "    workloads/api:\n      image: {$fromPublication: {path: state.json}}\n",
     );
     render_production(&fixture).success();
 }
@@ -5030,7 +5030,7 @@ fn release_input_files_under_at_prefixed_directories_enter_the_index() {
     fs::write(fixture.path().join("@shared/database.json"), r#"{"host": "db"}"#).unwrap();
     with_api_inputs(
         &fixture,
-        "    workloads/api:\n      image: a\n      database: {$file: {path: '@shared/database.json'}}\n",
+        "    workloads/api:\n      image: a\n      database: {$fromFile: {path: '@shared/database.json'}}\n",
     );
     render_production(&fixture).success();
     let tree = read_tree(&fixture.path().join("deploy/production"));
@@ -5049,7 +5049,7 @@ fn release_input_files_must_be_visible_to_git() {
     fs::write(fixture.path().join("local.json"), r#"{"host": "db"}"#).unwrap();
     with_api_inputs(
         &fixture,
-        "    workloads/api:\n      image: a\n      database: {$file: {path: local.json}}\n",
+        "    workloads/api:\n      image: a\n      database: {$fromFile: {path: local.json}}\n",
     );
     render_production(&fixture)
         .failure()
@@ -5118,7 +5118,7 @@ data:
     let target = fs::read_to_string(&target_path).unwrap();
     fs::write(
         target_path,
-        format!("{target}  releaseInputs:\n    workloads/api:\n      image: {{$file: {{path: image.json, pointer: /image}}}}\n"),
+        format!("{target}  releaseInputs:\n    workloads/api:\n      image: {{$fromFile: {{path: image.json, pointer: /image}}}}\n"),
     )
     .unwrap();
     let cache = TempDir::new().unwrap();
@@ -5238,7 +5238,7 @@ fn test_render_tree_from_git_reads_the_locked_commit() {
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: {first}\n          path: dev/images.json\n          pointer: /api\n"
+            "      image:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: {first}\n          path: dev/images.json\n          pointer: /api\n"
         ),
     );
     let cache = TempDir::new().unwrap();
@@ -5286,7 +5286,7 @@ fn test_vendor_captures_from_git_locks_for_required_offline_renders() {
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: {commit}\n          path: dev/images.json\n          pointer: /api\n"
+            "      image:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: {commit}\n          path: dev/images.json\n          pointer: /api\n"
         ),
     );
     let nyl = |cache: &TempDir, args: &[&str]| {
@@ -5311,7 +5311,7 @@ fn test_vendor_captures_from_git_locks_for_required_offline_renders() {
     nyl(&TempDir::new().unwrap(), &render)
         .failure()
         .stderr(predicate::str::contains(format!(
-            ".$git: Remote artifact {url}@{commit}#dev/images.json is not present in the required vendor lock; run 'nyl vendor'"
+            ".$fromGit: Remote artifact {url}@{commit}#dev/images.json is not present in the required vendor lock; run 'nyl vendor'"
         )));
     nyl(&TempDir::new().unwrap(), &["vendor"]).success();
     let lock = fs::read_to_string(fixture.path().join("vendor/lock.yaml")).unwrap();
@@ -5363,7 +5363,7 @@ fn test_update_source_locks_moves_from_git_groups_and_keeps_other_revisions() {
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: {first}\n          path: dev/images.json\n          pointer: /api\n      tag:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: pinned\n          commit: {first}\n          path: dev/images.json\n          pointer: /tag\n"
+            "      image:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: {first}\n          path: dev/images.json\n          pointer: /api\n      tag:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: pinned\n          commit: {first}\n          path: dev/images.json\n          pointer: /tag\n"
         ),
     );
     let cache = TempDir::new().unwrap();
@@ -5413,7 +5413,7 @@ fn test_update_source_locks_moves_publication_prefix_locks_to_the_branch_head() 
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: '{zero}'\n          path: dev/state/images.json\n          pointer: /api\n      tag:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: \"{zero}\"\n          path: shared/tag.json\n"
+            "      image:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: '{zero}'\n          path: dev/state/images.json\n          pointer: /api\n      tag:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: \"{zero}\"\n          path: shared/tag.json\n"
         ),
     );
     let cache = TempDir::new().unwrap();
@@ -5440,7 +5440,7 @@ fn test_render_tree_from_git_repository_ref_records_the_repository_from_a_subdir
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        $git:\n          repositoryRef: {{name: state}}\n          revision: main\n          commit: {commit}\n          path: images.json\n          pointer: /api\n"
+            "      image:\n        $fromGit:\n          repositoryRef: {{name: state}}\n          revision: main\n          commit: {commit}\n          path: images.json\n          pointer: /api\n"
         ),
     );
     let cache = TempDir::new().unwrap();
@@ -5474,7 +5474,7 @@ fn test_render_tree_from_git_reports_an_unavailable_locked_commit() {
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: main\n          commit: {missing}\n          path: images.json\n          pointer: /api\n"
+            "      image:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: main\n          commit: {missing}\n          path: images.json\n          pointer: /api\n"
         ),
     );
     let cache = TempDir::new().unwrap();
@@ -5540,7 +5540,7 @@ fn test_update_source_locks_filtered_updates_agree_with_unfiltered_checks() {
     with_image_binding(
         &fixture,
         &format!(
-            "      image:\n        $git:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: '{zero}'\n          path: dev/state/images.json\n          pointer: /api\n"
+            "      image:\n        $fromGit:\n          repository: {{repoURL: '{url}'}}\n          revision: deploy/dev\n          commit: '{zero}'\n          path: dev/state/images.json\n          pointer: /api\n"
         ),
     );
     let cache = TempDir::new().unwrap();
@@ -5613,7 +5613,7 @@ fn push_publication_change(seed: &TempDir, path: &str, contents: Option<&str>) -
 /// Bind the `api` Release's `image` input from publication state and commit
 /// the source change.
 fn with_publication_binding(fixture: &TempDir, binding: &str) {
-    with_image_binding(fixture, &format!("      image:\n        $publication:\n{binding}"));
+    with_image_binding(fixture, &format!("      image:\n        $fromPublication:\n{binding}"));
     commit_all(&Repository::open(fixture.path()).unwrap(), "Bind publication state");
 }
 
@@ -5690,7 +5690,7 @@ data:
     fs::write(
         &target_path,
         format!(
-            "{target}  releaseInputs:\n    workloads/api:\n      static: static-value\n      file:\n        $file:\n          path: config/values/file.json\n          pointer: /api\n      locked:\n        $git:\n          repository: {{repoURL: '{}'}}\n          revision: main\n          commit: '{commit}'\n          path: sizing.json\n          pointer: /web/tier\n      committed:\n        $publication:\n          path: state/committed.json\n          pointer: /api\n      carried:\n        $publication:\n          path: state/carried.json\n          pointer: /api\n          carryFileFromWorktree: build/carried.json\n",
+            "{target}  releaseInputs:\n    workloads/api:\n      static: static-value\n      file:\n        $fromFile:\n          path: config/values/file.json\n          pointer: /api\n      locked:\n        $fromGit:\n          repository: {{repoURL: '{}'}}\n          revision: main\n          commit: '{commit}'\n          path: sizing.json\n          pointer: /web/tier\n      committed:\n        $fromPublication:\n          path: state/committed.json\n          pointer: /api\n      carried:\n        $fromPublication:\n          path: state/carried.json\n          pointer: /api\n          carryFileFromWorktree: build/carried.json\n",
             locked.url()
         ),
     )
@@ -6325,7 +6325,7 @@ fn test_render_tree_leaves_publication_inputs_unbound_before_the_branch_exists()
     .unwrap();
     with_image_binding(
         &fixture,
-        "      image: registry.example.com/api@sha256:fixed\n      tag:\n        $publication:\n          path: state/tag.json\n",
+        "      image: registry.example.com/api@sha256:fixed\n      tag:\n        $fromPublication:\n          path: state/tag.json\n",
     );
     render_production(&fixture)
         .success()
@@ -7179,7 +7179,7 @@ fn partial_publication_rejects_shared_carried_state_updates_until_consumers_are_
     fs::write(
         &target,
         format!(
-            "{}    workloads/worker:\n      image:\n        $publication:\n{source}",
+            "{}    workloads/worker:\n      image:\n        $fromPublication:\n{source}",
             fs::read_to_string(&target).unwrap()
         ),
     )

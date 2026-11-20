@@ -136,7 +136,7 @@ pub struct EnvironmentTemplateSpec {
     /// Matches literal unit `metadata.labels` across all unit kinds. An empty selector selects every unit.
     #[serde(rename = "unitSelector", default)]
     pub unit_selector: LabelSelector,
-    /// Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created. At any depth, a `$parameter` source (`{$parameter: name}` or `{$parameter: {name, pointer?}}`) is replaced by the instance's bound parameter `name`, typed as declared, or the value `pointer` selects in it; other value sources are carried to the documents the values land in.
+    /// Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created. At any depth, a `$fromParameter` source (`{$fromParameter: name}` or `{$fromParameter: {name, pointer?}}`) is replaced by the instance's bound parameter `name`, typed as declared, or the value `pointer` selects in it; other value sources are carried to the documents the values land in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, serde_json::Value>,
     /// Where an instance's state lives. Strings may read `environment.name` only. With `path` such as `{{ environment.name }}`, every instance shares the refs, one directory each.
@@ -401,7 +401,7 @@ impl Environment {
 /// Check the value sources of a declared Environment's or EnvironmentGroup's
 /// `values` at `field`: none resolves there; the ones the documents the values
 /// land in resolve are carried and checked where they land, and the others,
-/// such as `$parameter`, are errors.
+/// such as `$fromParameter`, are errors.
 fn check_value_sources(field: &str, values: &BTreeMap<String, serde_json::Value>) -> Result<()> {
     let document = serde_json::Value::Object(values.clone().into_iter().collect());
     find_clauses(field, "", &document, Context::EnvironmentValues.into())
@@ -483,7 +483,7 @@ impl EnvironmentTemplate {
         issues_to_result(issues)
     }
 
-    /// `values` with every `$parameter` source replaced by the instance's
+    /// `values` with every `$fromParameter` source replaced by the instance's
     /// `bound` parameters ([`Self::bind_parameters`]), at any depth.
     ///
     /// Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
@@ -493,7 +493,7 @@ impl EnvironmentTemplate {
     /// A parameter the template does not declare, a pointer that selects
     /// nothing, and a malformed source are errors, all reported together.
     /// The resolved value is data: it is never templated or resolved again.
-    /// The sources of the documents the values land in, such as `$unit` in
+    /// The sources of the documents the values land in, such as `$fromUnit` in
     /// an inline target's bindings, are carried and checked there.
     pub fn resolve_parameter_sources(
         &self,
@@ -779,13 +779,13 @@ fn merge_values(base: &mut serde_json::Value, overlay: serde_json::Value) {
     }
 }
 
-/// The `$parameter` source of a template instance: its bound parameters.
+/// The `$fromParameter` source of a template instance: its bound parameters.
 struct BoundParameters<'a> {
     template: &'a EnvironmentTemplate,
     bound: &'a BTreeMap<String, serde_json::Value>,
 }
 
-/// Where a resolved `$parameter` source read its value: always the
+/// Where a resolved `$fromParameter` source read its value: always the
 /// instance's bound parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParameterOrigin;
@@ -809,7 +809,7 @@ impl Providers for BoundParameters<'_> {
     type Origin = ParameterOrigin;
 
     fn parameter(&self, field: &str, source: &ParameterSource) -> Provided<ParameterOrigin> {
-        let clause = format!("{field}.$parameter");
+        let clause = format!("{field}.$fromParameter");
         let template = &self.template.metadata.name;
         let Some(value) = self.bound.get(&source.name) else {
             let declared = self.template.spec.parameters.keys().cloned().collect::<Vec<_>>();
@@ -890,10 +890,10 @@ mod tests {
     }
 
     /// Catches a template parameter that reaches a binding as anything but
-    /// its declared type, or a source read as data: `$parameter` resolves at
+    /// its declared type, or a source read as data: `$fromParameter` resolves at
     /// any depth of `values` (inside a binding too) to the bound parameter
     /// with its declared default and type, `pointer` selects inside it, a
-    /// `$unit` is carried, and a source with siblings is refused.
+    /// `$fromUnit` is carried, and a source with siblings is refused.
     #[test]
     fn test_parameter_resolves_at_any_depth_of_template_values() {
         let template = template(json!({
@@ -906,12 +906,12 @@ mod tests {
         }));
         let bound = template.bind_parameters(&map(json!({"pr": 7}))).unwrap();
         let values = map(json!({
-            "pr": {"$parameter": "pr"},
+            "pr": {"$fromParameter": "pr"},
             "target": {"inline": {"releaseInputs": {"rise/rise": {
-                "clusterWide": {"$parameter": "crds"},
-                "image": {"$unit": {"unit": "image", "artifact": "image"}},
+                "clusterWide": {"$fromParameter": "crds"},
+                "image": {"$fromUnit": {"unit": "image", "artifact": "image"}},
             }}}},
-            "replicas": [{"$parameter": {"name": "sizes", "pointer": "/web/replicas"}}],
+            "replicas": [{"$fromParameter": {"name": "sizes", "pointer": "/web/replicas"}}],
             "data": {"name": "pr"},
         }));
         let resolved = template.resolve_parameter_sources(&values, &bound).unwrap();
@@ -921,7 +921,7 @@ mod tests {
                 "pr": 7,
                 "target": {"inline": {"releaseInputs": {"rise/rise": {
                     "clusterWide": false,
-                    "image": {"$unit": {"unit": "image", "artifact": "image"}},
+                    "image": {"$fromUnit": {"unit": "image", "artifact": "image"}},
                 }}}},
                 "replicas": [2],
                 "data": {"name": "pr"},
@@ -931,37 +931,37 @@ mod tests {
         let error = template
             .resolve_parameter_sources(
                 &map(json!({
-                    "a": {"$parameter": "crd"},
-                    "b": {"$parameter": {"name": "sizes", "pointer": "/db"}},
-                    "c": {"$parameter": "pr", "other": 1},
-                    "d": {"$parameter": {"name": "pr", "default": 1}},
-                    "e": {"$environment": "/target"},
+                    "a": {"$fromParameter": "crd"},
+                    "b": {"$fromParameter": {"name": "sizes", "pointer": "/db"}},
+                    "c": {"$fromParameter": "pr", "other": 1},
+                    "d": {"$fromParameter": {"name": "pr", "default": 1}},
+                    "e": {"$fromEnvironment": "/target"},
                 })),
                 &bound,
             )
             .unwrap_err();
         for expected in [
-            "spec.values.a.$parameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: crds, pr, sizes)",
-            "spec.values.b.$parameter selects /db in parameter \"sizes\" of EnvironmentTemplate preview, which holds no value there",
-            "spec.values.c holds $parameter next to other keys (other)",
-            "spec.values.d.$parameter is not valid: unknown field `default`",
-            "spec.values.e holds a $environment source, which reads the environment's values and resolves only in unit documents; the environment's values cannot read its values",
+            "spec.values.a.$fromParameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: crds, pr, sizes)",
+            "spec.values.b.$fromParameter selects /db in parameter \"sizes\" of EnvironmentTemplate preview, which holds no value there",
+            "spec.values.c holds $fromParameter next to other keys (other)",
+            "spec.values.d.$fromParameter is not valid: unknown field `default`",
+            "spec.values.e holds a $fromEnvironment source, which reads the environment's values and resolves only in unit documents; the environment's values cannot read its values",
         ] {
             assert!(error.contains(expected), "{expected}\n{error}");
         }
     }
 
-    /// Catches a `$parameter` source outside a template's `values` being
+    /// Catches a `$fromParameter` source outside a template's `values` being
     /// read as data: a declared Environment, a group, and a template's
     /// parameter defaults refuse one with where it works.
     #[test]
     fn test_parameter_is_an_error_outside_template_values() {
-        let clause = json!({"$parameter": "pr"});
+        let clause = json!({"$fromParameter": "pr"});
         let error = environment(json!({"values": {"target": {"nested": [clause]}}}))
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("spec.values.target.nested[0] holds a $parameter source, which reads a template parameter and resolves only in an EnvironmentTemplate's spec.values; only an EnvironmentTemplate's values read parameters"),
+            error.contains("spec.values.target.nested[0] holds a $fromParameter source, which reads a template parameter and resolves only in an EnvironmentTemplate's spec.values; only an EnvironmentTemplate's values read parameters"),
             "{error}"
         );
         let shared = group(
@@ -969,7 +969,10 @@ mod tests {
             &json!({"environmentSelector": {"matchLabels": {"stage": "preview"}}, "values": {"pr": clause}}),
         );
         let error = shared.validate().unwrap_err().to_string();
-        assert!(error.contains("spec.values.pr holds a $parameter source"), "{error}");
+        assert!(
+            error.contains("spec.values.pr holds a $fromParameter source"),
+            "{error}"
+        );
         let declared: EnvironmentTemplate = serde_json::from_value(json!({
             "apiVersion": "gitops.nyl/v1",
             "kind": "EnvironmentTemplate",
@@ -979,7 +982,7 @@ mod tests {
         .unwrap();
         let error = declared.validate().unwrap_err().to_string();
         assert!(
-            error.contains("spec.parameters.size.default.x holds a $parameter source"),
+            error.contains("spec.parameters.size.default.x holds a $fromParameter source"),
             "{error}"
         );
     }

@@ -30,7 +30,7 @@ pub const KIND_PROMOTION_PATH: &str = "PromotionPath";
 ///
 /// A path says which environment is the source and which the target, how
 /// strong the evidence must be, and which source fields become named values
-/// that `$promotion` bindings read. Source and target may differ in unit
+/// that `$fromPromotion` bindings read. Source and target may differ in unit
 /// names, input names, and document shape; the path states the mapping.
 ///
 /// ## When needed
@@ -42,7 +42,7 @@ pub const KIND_PROMOTION_PATH: &str = "PromotionPath";
 /// ## If omitted
 ///
 /// Nothing is promoted between environments, and no environment may use a
-/// `promotion` source or `$promotion` binding.
+/// `promotion` source or `$fromPromotion` binding.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[schemars(example = super::schema::promotion_path_example())]
@@ -84,7 +84,7 @@ pub struct PromotionPathSpec {
     /// Per unit that runs as several deployments, such as a KubernetesPublication, which of them count toward its running-scoped attestations for this path: keyed by the unit's name in the source environment. `nyl validate` and `nyl plan` check every unit, group, and deployment named here against what the unit's kind lists for it. Omitted, every deployment of every unit counts.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub coverage: BTreeMap<String, UnitCoverage>,
-    /// The promoted values by name; the names are what `$promotion` bindings read.
+    /// The promoted values by name; the names are what `$fromPromotion` bindings read.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, PromotionValue>,
 }

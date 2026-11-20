@@ -51,8 +51,8 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+      image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$fromUnit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
@@ -72,8 +72,8 @@ spec:
   releaseInputs:
     web/web:
       # Path-less: from the record that supplied prod's source.
-      image: {$promotion: {value: webImage}}
-      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+      image: {$fromPromotion: {value: webImage}}
+      databaseHost: {$fromUnit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -151,7 +151,7 @@ spec:
     pathPrefix: hotfix
   releaseInputs:
     web/web:
-      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
       databaseHost: db.hotfix.example.invalid
 ---
 # Follows release/prod, which is cut from what prod runs; nothing points from

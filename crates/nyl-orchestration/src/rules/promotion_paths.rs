@@ -20,7 +20,7 @@
 //!   output the unit does not declare or marks `sensitive`.
 //! - [`Code::PromoteValueType`]: the type a selector reads does not fit a
 //!   binding that reads the value.
-//! - [`Code::PromoteBindingUnknown`]: a `$promotion` binding names a path or
+//! - [`Code::PromoteBindingUnknown`]: a `$fromPromotion` binding names a path or
 //!   a value no PromotionPath declares.
 //! - [`Code::AttestationUndeclared`]: the path requires an attestation its scope
 //!   does not declare.
@@ -51,7 +51,7 @@
 //! rendered literal, a declared output's type, the kind's schema at the
 //! pointer, or the schema the producing kind declares for an artifact,
 //! [`Driver::artifact_schema`]) against what the reading place accepts (the
-//! kind's schema at the field a unit's `$promotion` binding replaces, or,
+//! kind's schema at the field a unit's `$fromPromotion` binding replaces, or,
 //! where the schema cannot type it, the type the unit's driver reads from
 //! what declares the field, [`Driver::bound_field_types`], such as a Release
 //! input's declaration). An unknown side fits anything.
@@ -135,7 +135,7 @@ fn is_reference(fields: &serde_json::Map<String, Value>) -> bool {
     )
 }
 
-/// A place that reads a promoted value with `$promotion`.
+/// A place that reads a promoted value with `$fromPromotion`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueReader {
     /// Where the binding is, for messages.
@@ -874,7 +874,7 @@ fn source_paths(source: &RenderedSource) -> Option<Vec<String>> {
     Some(promoted.path.iter().chain(&promoted.paths).cloned().collect())
 }
 
-/// Whether every `$promotion` binding can be supplied: Contract:
+/// Whether every `$fromPromotion` binding can be supplied: Contract:
 /// [Several paths into one environment](../../../../design/promotion.md#several-paths-into-one-environment).
 ///
 /// - A binding that names a `path` reads only that path, which must exist,
@@ -1005,7 +1005,7 @@ pub fn check_sources(
 /// recorded state ([`super::promotion::supersede::value_commits`]), over the
 /// source environment's rendered units: an artifact or output has the
 /// producing unit's Git source fields, an input the field that holds it or
-/// the producer a `$unit` reference at or above it names. A value only one
+/// the producer a `$fromUnit` reference at or above it names. A value only one
 /// path carries is never compared, so it is not listed.
 pub fn unchecked(
     paths: &[PromotionPath],
@@ -1123,7 +1123,7 @@ fn cited_producer(spec: Option<&Value>, pointer: &str) -> Option<Cited> {
     cited
 }
 
-/// The `$promotion` bindings in the specs of each environment's selected
+/// The `$fromPromotion` bindings in the specs of each environment's selected
 /// units, with the type each place accepts where the unit's kind schema says.
 pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers: &DriverSet) -> Vec<ValueReader> {
     let mut readers = Vec::new();
@@ -1149,7 +1149,7 @@ pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers
     readers
 }
 
-/// The `$promotion` bindings of a unit's spec, by JSON Pointer, as
+/// The `$fromPromotion` bindings of a unit's spec, by JSON Pointer, as
 /// readers find them: `nyl get promotions` lists the record each reads.
 pub fn bindings_in(spec: &Value) -> Vec<(String, PromotionInputSource)> {
     let mut found = Vec::new();
@@ -1159,7 +1159,7 @@ pub fn bindings_in(spec: &Value) -> Vec<(String, PromotionInputSource)> {
     found
 }
 
-/// Every `$promotion` source of a rendered unit spec, through the one walker.
+/// Every `$fromPromotion` source of a rendered unit spec, through the one walker.
 /// A spec whose sources do not parse yields none here: the dependency graph
 /// reports it ([`super::graph`]), and the unit does not run.
 fn walk(value: &Value, pointer: &str, found: &mut dyn FnMut(&str, PromotionInputSource)) {
@@ -1243,7 +1243,9 @@ fn types_of(root: &Value, node: &Value) -> Vec<ValueType> {
         let is_reference_object = branch
             .get("properties")
             .and_then(Value::as_object)
-            .is_some_and(|properties| properties.contains_key("$unit") || properties.contains_key("$promotion"));
+            .is_some_and(|properties| {
+                properties.contains_key("$fromUnit") || properties.contains_key("$fromPromotion")
+            });
         if is_reference_object {
             continue;
         }

@@ -278,7 +278,7 @@ impl Driver for TestDriver {
                 "properties": {
                     "source": {"type": "object", "properties": {"path": {"type": "string"}}},
                     "replicas": {"type": "integer"},
-                    "image": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"$unit": {}}}]}
+                    "image": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"$fromUnit": {}}}]}
                 }
             });
         }

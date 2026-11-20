@@ -71,14 +71,14 @@ pub struct TargetRender<'a> {
     pub selection: super::tree::partial::PublicationSelection,
     /// Optional pinned destination base, shared with the caller's input snapshot.
     pub publication_base: Option<PublicationBase>,
-    /// Resolved values of the target's `$unit` (and later `$promotion`) bindings.
+    /// Resolved values of the target's `$fromUnit` (and later `$fromPromotion`) bindings.
     pub inputs: &'a InputSnapshot,
     /// Render for validation instead: every binding orchestration resolves
     /// takes a placeholder of its declared type, as `nyl validate` compiles a
     /// target an environment places, and `inputs` must be empty. Such a
     /// render shows what the target generates, never what it publishes.
     pub placeholders: bool,
-    /// How `$publication` inputs read the publication branch: `Fresh` for
+    /// How `$fromPublication` inputs read the publication branch: `Fresh` for
     /// a run, `FreshOrCached` for a validation render, which then works
     /// offline as `nyl validate` does.
     pub publication_read: super::inputs::PublicationRead,
@@ -160,10 +160,10 @@ pub struct RenderedTarget {
     /// The record then does not cover the render, and a caller keying work
     /// on it must treat the render as changed every time.
     pub cacheable: bool,
-    /// How publication reconciles the tree: carried `$publication` state
+    /// How publication reconciles the tree: carried `$fromPublication` state
     /// files are adopted and committed ones released, as `publish-tree` does.
     pub reconcile: ReconcileOptions,
-    /// The publication branch head the render's `$publication` bindings
+    /// The publication branch head the render's `$fromPublication` bindings
     /// read; publishing verifies the branch is still there.
     pub publication_base: Option<PublicationBase>,
     /// The target Cluster's recorded Kubernetes capabilities, which the
@@ -190,7 +190,7 @@ pub struct RenderedTarget {
 impl RenderedTarget {
     /// The values this render read from state, as its ownership index
     /// records them: the digests of every resolved Release input
-    /// (`@input/…`), of `$publication` state files read from the base
+    /// (`@input/…`), of `$fromPublication` state files read from the base
     /// commit (`@publication/…`), and of carried ones (`@carried/…`). Two
     /// renders with equal state inputs read the same state.
     pub fn state_inputs(&self) -> Result<BTreeMap<String, String>> {
@@ -432,7 +432,7 @@ async fn render_target_on_runtime(request: &TargetRender<'_>) -> Result<Rendered
 }
 
 /// An inline target's spec without the Release input bindings the pinned
-/// `inputs` supply. A unit's reference resolution replaces each `$unit`
+/// `inputs` supply. A unit's reference resolution replaces each `$fromUnit`
 /// binding in the stored spec with the value it resolved, which is no
 /// binding any more; the render takes that value from the snapshot instead,
 /// where an input's value takes an override's precedence over its binding.
@@ -1022,7 +1022,7 @@ pub struct TreePublication<'a> {
     /// The target Cluster's recorded Kubernetes capabilities, which resolve
     /// the scope of resources published without a namespace.
     pub cluster_kubernetes: Option<&'a crate::resources::ClusterKubernetesCapabilities>,
-    /// The branch head `$publication` bindings read, if any.
+    /// The branch head `$fromPublication` bindings read, if any.
     pub publication_base: Option<&'a PublicationBase>,
     /// Decides whether this publication's owner (`index.owner`) may take
     /// over a prefix whose index names another owner: `Ok` when that
@@ -2236,7 +2236,7 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {{$unit: {{unit: web-image, artifact: image, pointer: /reference}}}}
+      image: {{$fromUnit: {{unit: web-image, artifact: image, pointer: /reference}}}}
 "
         )
     }
@@ -2435,7 +2435,7 @@ spec:
                 "clusterRef": {"name": "dev"},
                 "applicationGroupSelector": {"matchLabels": {"app": "web"}},
                 "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "dev"},
-                // What resolving the unit leaves of a `$unit` binding: its value.
+                // What resolving the unit leaves of a `$fromUnit` binding: its value.
                 "releaseInputs": {"web/web": {"image": "registry.invalid/web@sha256:feed"}},
             }),
         }
@@ -2524,7 +2524,7 @@ spec:
       clusterRef: {name: dev}
       applicationGroupSelector: {matchLabels: {app: web}}
       publication: {repositoryRef: {name: platform}, revision: deploy, pathPrefix: '{{ values.prefix }}'}
-      releaseInputs: {web/web: {image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}}}
+      releaseInputs: {web/web: {image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}}}
 ";
 
     /// A project whose one publication unit, selected by `dev` and `staging`,
@@ -2628,7 +2628,7 @@ spec:
         let error = render(worktree.path(), &InputSnapshot::new(), None)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("$unit needs orchestrated execution"), "{error}");
+        assert!(error.contains("$fromUnit needs orchestrated execution"), "{error}");
 
         // Tree commands pass no snapshot at all and keep rejecting the binding.
         let inventory = super::super::discover_gitops_inventory(
@@ -2649,7 +2649,7 @@ spec:
             ))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("$unit needs orchestrated execution"), "{error}");
+        assert!(error.contains("$fromUnit needs orchestrated execution"), "{error}");
     }
 
     #[test]

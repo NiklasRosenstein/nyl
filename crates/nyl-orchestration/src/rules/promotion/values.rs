@@ -2,7 +2,7 @@
 //!
 //! Contract: [PromotionPath](../../../../../design/promotion.md#promotionpath)
 //! ("A `select` names exactly one source field, with the same JSON Pointer
-//! semantics and resolver as `$unit` references and `nyl get`") and
+//! semantics and resolver as `$fromUnit` references and `nyl get`") and
 //! [Promotion paths](../../../../../design/promotion.md#promotion-paths).
 //!
 //! A value is read through [`resolve_reference`] (output and artifact

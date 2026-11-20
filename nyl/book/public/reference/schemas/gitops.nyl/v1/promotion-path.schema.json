@@ -217,7 +217,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/PromotionValue"
           },
-          "description": "The promoted values by name; the names are what `$promotion` bindings read.",
+          "description": "The promoted values by name; the names are what `$fromPromotion` bindings read.",
           "type": "object"
         },
         "verifyArtifacts": {
@@ -234,7 +234,7 @@
     },
     "PromotionSelect": {
       "additionalProperties": false,
-      "description": "Which field of the source a promoted value reads: the same selectors, with\nthe same JSON Pointer semantics and resolver, as `$unit` references and\n`nyl get`.\n\nSet exactly one of the four forms:\n`{unit, input}` reads the source unit's resolved spec;\n`{unit, output, pointer?}` a declared, non-sensitive output of its receipt;\n`{unit, artifact, kind?, pointer}` a field of an artifact its receipt lists,\nrelative to the artifact's `spec`; and `{input}` (a target source, M11)\na Release input of the target.",
+      "description": "Which field of the source a promoted value reads: the same selectors, with\nthe same JSON Pointer semantics and resolver, as `$fromUnit` references and\n`nyl get`.\n\nSet exactly one of the four forms:\n`{unit, input}` reads the source unit's resolved spec;\n`{unit, output, pointer?}` a declared, non-sensitive output of its receipt;\n`{unit, artifact, kind?, pointer}` a field of an artifact its receipt lists,\nrelative to the artifact's `spec`; and `{input}` (a target source, M11)\na Release input of the target.",
       "properties": {
         "artifact": {
           "description": "An artifact the unit's receipt lists.",
@@ -334,7 +334,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "The explicit link between source selectors and target bindings, along\nwhich `nyl promote` moves a proven source commit and selected values from\none environment's recorded state into another environment's desired state.\n\nA path says which environment is the source and which the target, how\nstrong the evidence must be, and which source fields become named values\nthat `$promotion` bindings read. Source and target may differ in unit\nnames, input names, and document shape; the path states the mapping.\n\n## When needed\n\nTo promote what one environment proved into another: a source commit, an\nimage digest, or any value a unit's input or a Release input should take\nfrom another environment instead of rebuilding or retyping it.\n\n## If omitted\n\nNothing is promoted between environments, and no environment may use a\n`promotion` source or `$promotion` binding.",
+  "description": "The explicit link between source selectors and target bindings, along\nwhich `nyl promote` moves a proven source commit and selected values from\none environment's recorded state into another environment's desired state.\n\nA path says which environment is the source and which the target, how\nstrong the evidence must be, and which source fields become named values\nthat `$fromPromotion` bindings read. Source and target may differ in unit\nnames, input names, and document shape; the path states the mapping.\n\n## When needed\n\nTo promote what one environment proved into another: a source commit, an\nimage digest, or any value a unit's input or a Release input should take\nfrom another environment instead of rebuilding or retyping it.\n\n## If omitted\n\nNothing is promoted between environments, and no environment may use a\n`promotion` source or `$fromPromotion` binding.",
   "examples": [
     {
       "apiVersion": "gitops.nyl/v1",

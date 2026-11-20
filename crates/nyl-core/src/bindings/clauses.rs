@@ -21,21 +21,21 @@ pub const VALUE_SOURCES_DOCS: &str = "https://niklasrosenstein.github.io/nyl/ref
 /// A `$` value source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Source {
-    /// `$environment`: the environment's effective values.
+    /// `$fromEnvironment`: the environment's effective values.
     Environment,
-    /// `$input`: a Release input.
+    /// `$fromInput`: a Release input.
     Input,
-    /// `$parameter`: an EnvironmentTemplate instance's parameter.
+    /// `$fromParameter`: an EnvironmentTemplate instance's parameter.
     Parameter,
-    /// `$unit`: a unit's output, artifact, or observed value.
+    /// `$fromUnit`: a unit's output, artifact, or observed value.
     Unit,
-    /// `$promotion`: a value recorded through a PromotionPath.
+    /// `$fromPromotion`: a value recorded through a PromotionPath.
     Promotion,
-    /// `$file`: a YAML or JSON file of this repository.
+    /// `$fromFile`: a YAML or JSON file of this repository.
     File,
-    /// `$git`: a file of a Git repository at a locked commit.
+    /// `$fromGit`: a file of a Git repository at a locked commit.
     Git,
-    /// `$publication`: a state file in the target's publication branch.
+    /// `$fromPublication`: a state file in the target's publication branch.
     Publication,
     /// `$literal`: its content, verbatim and never walked.
     Literal,
@@ -55,17 +55,17 @@ impl Source {
         Self::Literal,
     ];
 
-    /// The key as authored, such as `$environment`.
+    /// The key as authored, such as `$fromEnvironment`.
     pub fn key(self) -> &'static str {
         match self {
-            Self::Environment => "$environment",
-            Self::Input => "$input",
-            Self::Parameter => "$parameter",
-            Self::Unit => "$unit",
-            Self::Promotion => "$promotion",
-            Self::File => "$file",
-            Self::Git => "$git",
-            Self::Publication => "$publication",
+            Self::Environment => "$fromEnvironment",
+            Self::Input => "$fromInput",
+            Self::Parameter => "$fromParameter",
+            Self::Unit => "$fromUnit",
+            Self::Promotion => "$fromPromotion",
+            Self::File => "$fromFile",
+            Self::Git => "$fromGit",
+            Self::Publication => "$fromPublication",
             Self::Literal => "$literal",
         }
     }
@@ -97,30 +97,125 @@ impl Source {
     }
 }
 
-/// `$` keys that look like a source but are none: a likely slip, with what
-/// was probably meant. In free-form data any other `$` key, such as `$ref`
-/// or `$schema`, is data.
-pub const SLIPS: &[(&str, &str)] = &[
-    (
-        "$value",
-        "$literal for a literal value, or $environment for the environment's values",
-    ),
-    ("$values", "$environment"),
-    ("$env", "$environment"),
-    ("$inputs", "$input"),
-    ("$param", "$parameter"),
-    ("$params", "$parameter"),
-    ("$parameters", "$parameter"),
-    ("$units", "$unit"),
-    ("$output", "$unit"),
-    ("$artifact", "$unit"),
+/// Spellings that look like a source but are none, normalised as
+/// [`normalise_key`] does, with the source probably meant: the bare nouns of
+/// the sources, plurals, abbreviations, and `…From` suffixes.
+const SLIPS: &[(&str, Source)] = &[
+    ("environment", Source::Environment),
+    ("env", Source::Environment),
+    ("value", Source::Environment),
+    ("values", Source::Environment),
+    ("fromenv", Source::Environment),
+    ("fromvalue", Source::Environment),
+    ("fromvalues", Source::Environment),
+    ("valuefrom", Source::Environment),
+    ("valuesfrom", Source::Environment),
+    ("input", Source::Input),
+    ("inputs", Source::Input),
+    ("frominputs", Source::Input),
+    ("inputfrom", Source::Input),
+    ("parameter", Source::Parameter),
+    ("param", Source::Parameter),
+    ("params", Source::Parameter),
+    ("parameters", Source::Parameter),
+    ("fromparam", Source::Parameter),
+    ("fromparams", Source::Parameter),
+    ("fromparameters", Source::Parameter),
+    ("unit", Source::Unit),
+    ("units", Source::Unit),
+    ("output", Source::Unit),
+    ("artifact", Source::Unit),
+    ("fromunits", Source::Unit),
+    ("fromoutput", Source::Unit),
+    ("fromartifact", Source::Unit),
+    ("promotion", Source::Promotion),
+    ("file", Source::File),
+    ("git", Source::Git),
+    ("publication", Source::Publication),
 ];
 
-/// `$environment`: a value of the environment's effective `values`.
+/// `key` without its `$`, lowercased and without `_` and `-`, so that
+/// `$from_input`, `$FromInput`, and `$frominput` compare equal.
+fn normalise_key(key: &str) -> String {
+    key.trim_start_matches('$')
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// What a `$` key that is no source probably meant, if it is a likely slip:
+/// another spelling of a source, a bare noun such as `$input`, a plural, an
+/// abbreviation, a `…From` suffix, or `$from` alone. In free-form data any
+/// other `$` key, such as `$ref` or `$schema`, is data.
+pub fn slip(key: &str) -> Option<String> {
+    if !key.starts_with('$') || Source::from_key(key).is_some() {
+        return None;
+    }
+    let normalised = normalise_key(key);
+    if normalised == "from" {
+        let sources = Source::ALL
+            .into_iter()
+            .filter(|source| *source != Source::Literal)
+            .map(Source::key)
+            .collect::<Vec<_>>();
+        return Some(format!("one of {}", sources.join(", ")));
+    }
+    Source::ALL
+        .into_iter()
+        .find(|source| normalise_key(source.key()) == normalised)
+        .or_else(|| {
+            SLIPS
+                .iter()
+                .find(|(slip, _)| *slip == normalised)
+                .map(|(_, source)| *source)
+        })
+        .map(|source| source.key().to_owned())
+}
+
+/// What an unknown `$` key in a typed field probably meant: a [`slip`], or
+/// else the source whose key, or whose noun after `$from`, is nearest to it
+/// once both are normalised.
+pub fn suggest(key: &str) -> Option<String> {
+    slip(key).or_else(|| {
+        let normalised = normalise_key(key);
+        Source::ALL
+            .into_iter()
+            .filter_map(|source| {
+                let full = normalise_key(source.key());
+                let noun = full.strip_prefix("from").unwrap_or(&full);
+                let distance = distance(&normalised, &full).min(distance(&normalised, noun));
+                (distance <= (noun.len() / 3).max(1)).then_some((distance, source))
+            })
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, source)| source.key().to_owned())
+    })
+}
+
+/// The edit distance between `left` and `right`.
+fn distance(left: &str, right: &str) -> usize {
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (row, left) in left.chars().enumerate() {
+        let mut current = vec![row + 1];
+        for (column, right) in right.iter().enumerate() {
+            let cost = usize::from(left != *right);
+            current.push(
+                (previous[column + 1] + 1)
+                    .min(current[column] + 1)
+                    .min(previous[column] + cost),
+            );
+        }
+        previous = current;
+    }
+    previous[right.len()]
+}
+
+/// `$fromEnvironment`: a value of the environment's effective `values`.
 ///
 /// When nothing is at `pointer`, or the value there is `null`, `default`
 /// applies; with `optional: true` the field is removed instead, as if it were
-/// omitted; otherwise it is an error. Shorthand: `{$environment: /pointer}`.
+/// omitted; otherwise it is an error. Shorthand: `{$fromEnvironment: /pointer}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ValuesSource {
@@ -150,8 +245,8 @@ impl ValuesSource {
     }
 }
 
-/// `$input`: a Release input. Its declared default applies when the target
-/// binds none. Shorthand: `{$input: name}`.
+/// `$fromInput`: a Release input. Its declared default applies when the target
+/// binds none. Shorthand: `{$fromInput: name}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct InputSource {
@@ -162,9 +257,9 @@ pub struct InputSource {
     pub pointer: Option<String>,
 }
 
-/// `$parameter`: a parameter an EnvironmentTemplate instance binds. The
+/// `$fromParameter`: a parameter an EnvironmentTemplate instance binds. The
 /// declared default applies when the instance binds none. Shorthand:
-/// `{$parameter: name}`.
+/// `{$fromParameter: name}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ParameterSource {
@@ -320,7 +415,7 @@ impl Clause {
         }
     }
 
-    /// The object form of a `source` clause at `at`, such as `spec.target.$unit`.
+    /// The object form of a `source` clause at `at`, such as `spec.target.$fromUnit`.
     fn parse_object(at: &str, source: Source, body: &Value) -> std::result::Result<Self, String> {
         let invalid = |error: serde_json::Error| format!("{at} is not valid: {error}");
         let checked = |result: Result<()>| result.map_err(|error| error.to_string());
@@ -403,26 +498,26 @@ pub fn holds_dollar_key(value: &Value) -> bool {
 /// [Declarative value sources](../../../../design/declarative-value-sources.md#contexts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
-    /// A unit document as its unit renders: `$environment` resolves; `$unit`
-    /// and `$promotion` are carried to the run, which resolves them.
+    /// A unit document as its unit renders: `$fromEnvironment` resolves; `$fromUnit`
+    /// and `$fromPromotion` are carried to the run, which resolves them.
     UnitRender,
     /// The part of a unit document that is a DeploymentTarget's
-    /// `releaseInputs`, such as an inline target's: also carries `$file`,
-    /// `$git`, and `$publication` to the target's rendering.
+    /// `releaseInputs`, such as an inline target's: also carries `$fromFile`,
+    /// `$fromGit`, and `$fromPublication` to the target's rendering.
     UnitTargetInputs,
-    /// A rendered unit spec as a run resolves it: `$unit`, `$promotion`, and
-    /// `$literal` resolve; `$file`, `$git`, and `$publication` were placed in
+    /// A rendered unit spec as a run resolves it: `$fromUnit`, `$fromPromotion`, and
+    /// `$literal` resolve; `$fromFile`, `$fromGit`, and `$fromPublication` were placed in
     /// a target's bindings when the unit rendered, and are carried.
     UnitExecution,
     /// The typed fields of the Nyl resources of a Release bundle (a
     /// HelmChart's, a RemoteManifest's, a Release's, and a Component's
-    /// envelope): `$input` resolves; every `$` key is reserved.
+    /// envelope): `$fromInput` resolves; every `$` key is reserved.
     ReleaseBundle,
     /// The free-form data of a Release bundle: a HelmChart's `spec.values`, a
-    /// Component's `spec`, and plain Kubernetes manifests. `$input` resolves;
+    /// Component's `spec`, and plain Kubernetes manifests. `$fromInput` resolves;
     /// foreign `$` keys are data.
     ReleaseData,
-    /// An EnvironmentTemplate's `spec.values`: `$parameter` resolves; the
+    /// An EnvironmentTemplate's `spec.values`: `$fromParameter` resolves; the
     /// sources of the documents the values land in are carried.
     TemplateValues,
     /// A declared Environment's or EnvironmentGroup's `values`: nothing
@@ -447,7 +542,7 @@ pub enum Treatment {
     Reject,
 }
 
-/// Whether unknown `$` keys are reserved, or data apart from [`SLIPS`].
+/// Whether unknown `$` keys are reserved, or data apart from each [`slip`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Namespace {
     /// Nyl's typed resource fields: every `$` key is a source or an error.
@@ -508,10 +603,10 @@ impl Context {
                 })
             }
             (Self::UnitRender | Self::UnitTargetInputs | Self::UnitExecution, Source::Input) => {
-                "a unit has no Release inputs; read the environment's values with $environment".to_owned()
+                "a unit has no Release inputs; read the environment's values with $fromEnvironment".to_owned()
             }
             (Self::UnitRender | Self::UnitTargetInputs | Self::UnitExecution, Source::Parameter) => {
-                "set the value in the EnvironmentTemplate's spec.values with $parameter, and read it here with $environment"
+                "set the value in the EnvironmentTemplate's spec.values with $fromParameter, and read it here with $fromEnvironment"
                     .to_owned()
             }
             (Self::UnitRender | Self::UnitExecution, Source::File | Source::Git | Source::Publication) => {
@@ -534,7 +629,7 @@ impl Context {
                     .to_owned()
             }
             (Self::ReleaseInputs, Source::Parameter) => {
-                "declare the target inline in the EnvironmentTemplate's values, where $parameter resolves".to_owned()
+                "declare the target inline in the EnvironmentTemplate's values, where $fromParameter resolves".to_owned()
             }
             (Self::ReleaseInputs, Source::Input) => "a binding fills a Release input; it cannot read one".to_owned(),
             (Self::Literal, _) => "write a literal value".to_owned(),
@@ -648,20 +743,64 @@ mod tests {
     fn test_shorthand_misuse_suggests_the_fix() {
         assert_eq!(
             parse(Source::Input, json!("/image")).unwrap_err(),
-            "spec.x.$input takes a name; did you mean image?"
+            "spec.x.$fromInput takes a name; did you mean image?"
         );
         assert_eq!(
             parse(Source::Parameter, json!("/sizes/web")).unwrap_err(),
-            "spec.x.$parameter takes a name; did you mean {name: sizes, pointer: /web}?"
+            "spec.x.$fromParameter takes a name; did you mean {name: sizes, pointer: /web}?"
         );
         assert_eq!(
             parse(Source::Environment, json!("target")).unwrap_err(),
-            "spec.x.$environment takes a JSON Pointer; did you mean /target?"
+            "spec.x.$fromEnvironment takes a JSON Pointer; did you mean /target?"
         );
         assert_eq!(
             parse(Source::Unit, json!("network")).unwrap_err(),
-            "spec.x.$unit must be an object, not string; $unit has no shorthand"
+            "spec.x.$fromUnit must be an object, not string; $fromUnit has no shorthand"
         );
+    }
+
+    /// Catches a likely slip read as data: the bare nouns, plurals,
+    /// abbreviations, `…From` suffixes, and other spellings of a source.
+    #[test]
+    fn test_slips_point_at_the_exact_spelling() {
+        for (key, meant) in [
+            ("$input", "$fromInput"),
+            ("$environment", "$fromEnvironment"),
+            ("$publication", "$fromPublication"),
+            ("$value", "$fromEnvironment"),
+            ("$fromEnv", "$fromEnvironment"),
+            ("$valuesFrom", "$fromEnvironment"),
+            ("$inputFrom", "$fromInput"),
+            ("$fromInputs", "$fromInput"),
+            ("$frominput", "$fromInput"),
+            ("$from_input", "$fromInput"),
+            ("$FromInput", "$fromInput"),
+            ("$from-parameter", "$fromParameter"),
+            ("$params", "$fromParameter"),
+            ("$fromArtifact", "$fromUnit"),
+            ("$output", "$fromUnit"),
+            ("$Literal", "$literal"),
+        ] {
+            assert_eq!(slip(key).as_deref(), Some(meant), "{key}");
+        }
+        assert_eq!(
+            slip("$from").as_deref(),
+            Some("one of $fromEnvironment, $fromInput, $fromParameter, $fromUnit, $fromPromotion, $fromFile, $fromGit, $fromPublication")
+        );
+        for key in ["$fromInput", "$literal", "$ref", "$schema", "$id", "$enviroment"] {
+            assert_eq!(slip(key), None, "{key}");
+        }
+    }
+
+    /// Catches a suggestion for an unknown key that ignores the normalisation
+    /// slips use, or that misses a source whose noun is near.
+    #[test]
+    fn test_suggestions_use_the_slip_normalisation() {
+        assert_eq!(suggest("$enviroment").as_deref(), Some("$fromEnvironment"));
+        assert_eq!(suggest("$from_enviroment").as_deref(), Some("$fromEnvironment"));
+        assert_eq!(suggest("$FROM_PUBLICATON").as_deref(), Some("$fromPublication"));
+        assert_eq!(suggest("$from_input").as_deref(), Some("$fromInput"));
+        assert_eq!(suggest("$ref"), None);
     }
 
     #[test]
@@ -682,11 +821,11 @@ mod tests {
     #[test]
     fn test_clause_key_finds_a_lone_source_and_reports_siblings() {
         let object = |value: Value| value.as_object().unwrap().clone();
-        assert_eq!(clause_key(&object(json!({"$unit": {}}))), Ok(Some(Source::Unit)));
+        assert_eq!(clause_key(&object(json!({"$fromUnit": {}}))), Ok(Some(Source::Unit)));
         assert_eq!(clause_key(&object(json!({"$ref": "x", "a": 1}))), Ok(None));
         assert_eq!(
-            clause_key(&object(json!({"$unit": {}, "pointer": "/x"}))),
-            Err(vec!["$unit"])
+            clause_key(&object(json!({"$fromUnit": {}, "pointer": "/x"}))),
+            Err(vec!["$fromUnit"])
         );
     }
 
@@ -695,11 +834,11 @@ mod tests {
         let document = json!({
             "apiVersion": "v1",
             "kind": "X",
-            "metadata": {"name": {"$environment": "/name"}, "namespace": {"$input": "ns"}, "labels": {"a": {"$literal": "b"}}},
+            "metadata": {"name": {"$fromEnvironment": "/name"}, "namespace": {"$fromInput": "ns"}, "labels": {"a": {"$literal": "b"}}},
         });
         let issues = literal_field_issues(&document);
         assert_eq!(issues.len(), 2, "{issues:?}");
-        assert!(issues[0].starts_with("metadata.name holds a $environment source"));
+        assert!(issues[0].starts_with("metadata.name holds a $fromEnvironment source"));
         assert!(issues[1].starts_with("metadata.labels.a holds a $literal source"));
     }
 
@@ -707,11 +846,11 @@ mod tests {
     fn test_misplaced_teaches_the_fix() {
         let message = Context::ReleaseBundle.misplaced("spec.image", Source::Unit);
         assert!(
-            message.starts_with("spec.image holds a $unit source, which is resolved by orchestration"),
+            message.starts_with("spec.image holds a $fromUnit source, which is resolved by orchestration"),
             "{message}"
         );
         assert!(
-            message.contains("declare a Release input and bind it on the target with $unit"),
+            message.contains("declare a Release input and bind it on the target with $fromUnit"),
             "{message}"
         );
     }

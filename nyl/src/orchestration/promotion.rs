@@ -45,7 +45,7 @@ pub fn declared_paths(inventory: &GitOpsInventory) -> Vec<PromotionPath> {
 }
 
 /// Every finding of the project's PromotionPaths, given each environment's
-/// rendered units. A project without paths and without `$promotion`
+/// rendered units. A project without paths and without `$fromPromotion`
 /// bindings has none.
 pub fn findings(
     inventory: &GitOpsInventory,

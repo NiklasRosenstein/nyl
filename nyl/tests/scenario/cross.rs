@@ -1,5 +1,5 @@
 //! The two-environment project of the cross-environment tests: `dev` observes
-//! a value and `prod` reads it through a `$unit` reference.
+//! a value and `prod` reads it through a `$fromUnit` reference.
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ fn unit<'a>(report: &'a Value, name: &str) -> &'a Value {
 }
 
 /// `dev` observes the `ip` of `lb`; `dns` of `prod` reads it through
-/// `$unit: {environment: dev, …}`.
+/// `$fromUnit: {environment: dev, …}`.
 pub const CROSS_UNITS: &str = "apiVersion: units.gitops.nyl/v1
 kind: Command
 metadata:
@@ -34,7 +34,7 @@ metadata:
 spec:
   command: [sh, -c, 'true']
   values:
-    address: {$unit: {environment: dev, unit: lb, observation: ip}}
+    address: {$fromUnit: {environment: dev, unit: lb, observation: ip}}
 ";
 
 pub fn environment(name: &str, state: &str) -> String {

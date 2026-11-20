@@ -1755,7 +1755,7 @@ spec:
     }
 
     /// Catches a cached Release reused after a Release input changed that a
-    /// manifest reads with `$input`: the inputs are part of the Release's
+    /// manifest reads with `$fromInput`: the inputs are part of the Release's
     /// cache key, so the next render reads the new value.
     #[tokio::test]
     async fn changing_an_input_a_manifest_reads_invalidates_the_cached_release() {
@@ -1764,7 +1764,7 @@ spec:
         fs::write(temp.path().join("nyl.toml"), "").unwrap();
         fs::write(
             temp.path().join("app.yaml"),
-            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: web\n  namespace: apps\nspec:\n  inputs:\n    image: {type: string}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\ndata:\n  image: {$input: image}\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: web\n  namespace: apps\nspec:\n  inputs:\n    image: {type: string}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\ndata:\n  image: {$fromInput: image}\n",
         )
         .unwrap();
         let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();

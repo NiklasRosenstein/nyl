@@ -73,7 +73,7 @@ pub struct GitOpsInventory {
     /// `project_root` (see [`crate::util::project_path`]).
     pub worktree_yaml_files: Vec<PathBuf>,
     /// Every eligible YAML and JSON file in the worktree, relative to
-    /// `worktree_root`: the files a `$file` Release input binding may read,
+    /// `worktree_root`: the files a `$fromFile` Release input binding may read,
     /// under the same Git visibility rule as discovery.
     pub worktree_data_files: BTreeSet<PathBuf>,
     /// Compiler resources keyed by their static kind and local name.

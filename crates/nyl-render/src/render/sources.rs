@@ -1,4 +1,4 @@
-//! Value sources of a Release bundle: `$input` in every resource of the
+//! Value sources of a Release bundle: `$fromInput` in every resource of the
 //! bundle, and HelmChart `valuesFrom`.
 //!
 //! Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
@@ -10,7 +10,7 @@
 //! - The literal-only fields (`apiVersion`, `kind`, `metadata.name`,
 //!   `metadata.labels`) hold no source ([`literal_field_issues`]);
 //!   `metadata.namespace` may.
-//! - `$input` and `$literal` resolve at any depth ([`resolve_document`]):
+//! - `$fromInput` and `$literal` resolve at any depth ([`resolve_document`]):
 //!   in the typed fields of a HelmChart, a RemoteManifest, a Release, and a
 //!   Component's envelope ([`Context::ReleaseBundle`], every `$` key
 //!   reserved), and in free-form data: a HelmChart's `spec.values`, a
@@ -251,7 +251,7 @@ fn merge_values_from(
     }
 }
 
-/// The `$input` source of a Release bundle: the Release's resolved inputs,
+/// The `$fromInput` source of a Release bundle: the Release's resolved inputs,
 /// when its Release declares any.
 struct ReleaseInputs<'a> {
     inputs: Option<&'a Value>,
@@ -279,7 +279,7 @@ impl ReleaseInputs<'_> {
     }
 }
 
-/// Where a resolved `$input` source read its value: always the Release
+/// Where a resolved `$fromInput` source read its value: always the Release
 /// input, because the source has no default of its own.
 #[derive(Debug, Clone, PartialEq)]
 struct ReleaseInputOrigin;
@@ -305,7 +305,7 @@ impl Providers for ReleaseInputs<'_> {
     /// The input's value, or the value `pointer` selects in it. Its type is
     /// checked where the resolved resource is deserialized, as a literal's.
     fn input(&self, field: &str, source: &InputSource) -> Provided<ReleaseInputOrigin> {
-        let field = format!("{field}.$input");
+        let field = format!("{field}.$fromInput");
         let input = self.input_value(&field, &source.name)?;
         let pointer = source.pointer.as_deref().unwrap_or_default();
         let Some(value) = input.pointer(pointer) else {
@@ -325,7 +325,7 @@ impl Providers for ReleaseInputs<'_> {
             return None;
         };
         Some(BindingIssue::new(format!(
-            "{field}.$input reads Release input {:?}, which is null; bind a value or give the input a default",
+            "{field}.$fromInput reads Release input {:?}, which is null; bind a value or give the input a default",
             source.name
         )))
     }
@@ -527,13 +527,13 @@ mod tests {
         assert!(error(&escaped, None).contains("outside the Git worktree"));
     }
 
-    /// Catches `$input` in a HelmChart's fields not resolving, a value of
+    /// Catches `$fromInput` in a HelmChart's fields not resolving, a value of
     /// the wrong type passing, or a source the bundle cannot resolve, or one
     /// in a literal-only field, surviving as data.
     #[test]
     fn test_input_resolves_chart_fields() {
         let temp = project(
-            "  includeCrds: {$input: crds}\n  lookup: {$input: {name: features, pointer: /lookup}}\n",
+            "  includeCrds: {$fromInput: crds}\n  lookup: {$fromInput: {name: features, pointer: /lookup}}\n",
             &[],
         );
         let (chart, _) = load(&temp, Some(json!({"crds": false, "features": {"lookup": true}}))).unwrap();
@@ -546,32 +546,32 @@ mod tests {
         assert!(serde_json::from_value::<crate::resources::HelmChart>(wrong).is_err());
         let outside = error(&temp, None);
         assert!(
-            outside.contains("spec.includeCrds.$input reads Release input \"crds\", but this resource is not rendered as part of a Release that declares inputs"),
+            outside.contains("spec.includeCrds.$fromInput reads Release input \"crds\", but this resource is not rendered as part of a Release that declares inputs"),
             "{outside}"
         );
 
-        let shorthand = project("  includeCrds: {$input: /crds}\n", &[]);
+        let shorthand = project("  includeCrds: {$fromInput: /crds}\n", &[]);
         let shorthand = error(&shorthand, Some(json!({"crds": true})));
         assert!(
-            shorthand.contains("spec.includeCrds.$input takes a name; did you mean crds?"),
+            shorthand.contains("spec.includeCrds.$fromInput takes a name; did you mean crds?"),
             "{shorthand}"
         );
 
         let unit = project(
-            "  values: {}\n  version: {$unit: {unit: chart, output: version}}\n",
+            "  values: {}\n  version: {$fromUnit: {unit: chart, output: version}}\n",
             &[],
         );
         let unit = error(&unit, Some(json!({"chart": "x"})));
         assert!(
-            unit.contains("spec.version holds a $unit source")
-                && unit.contains("declare a Release input and bind it on the target with $unit"),
+            unit.contains("spec.version holds a $fromUnit source")
+                && unit.contains("declare a Release input and bind it on the target with $fromUnit"),
             "{unit}"
         );
 
         let named = project("  values: {}\n", &[]);
         fs::write(
             named.path().join("apps/app.yaml"),
-            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\n---\napiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata: {name: {$input: name}}\nspec: {chart: {name: ./chart}}\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\n---\napiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata: {name: {$fromInput: name}}\nspec: {chart: {name: ./chart}}\n",
         )
         .unwrap();
         let named = load_release_bundle(
@@ -581,7 +581,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            named.contains("metadata.name holds a $input source, but metadata.name must be literal"),
+            named.contains("metadata.name holds a $fromInput source, but metadata.name must be literal"),
             "{named}"
         );
     }
@@ -601,7 +601,7 @@ mod tests {
         let output = [
             json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}, "data": {"schema": {"$ref": "#/x"}}}),
             json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"},
-                "spec": {"template": {"spec": {"containers": [{"image": {"$input": "image"}}]}}}}),
+                "spec": {"template": {"spec": {"containers": [{"image": {"$fromInput": "image"}}]}}}}),
         ];
         let error = reject_sources_in_output("k8s.nyl/v1 HelmChart web (chart: ./chart)", &output)
             .unwrap_err()
@@ -611,20 +611,20 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.contains("Deployment \"web\" holds a $input source at spec.template.spec.containers[0].image"),
+            error.contains("Deployment \"web\" holds a $fromInput source at spec.template.spec.containers[0].image"),
             "{error}"
         );
         assert!(!error.contains("ConfigMap"), "{error}");
         assert!(reject_sources_in_output("x", &output[..1]).is_ok());
     }
 
-    /// Catches `$input` in chart values resolved after `valuesFrom` merged
+    /// Catches `$fromInput` in chart values resolved after `valuesFrom` merged
     /// (a file would then override the input), a foreign `$` key in chart
     /// values refused, or a likely slip there passing as data.
     #[test]
     fn test_input_resolves_in_chart_values_before_values_from_merges() {
         let temp = project(
-            "  valuesFrom: [{file: base.yaml}]\n  values:\n    image: {$input: image}\n    nested: {replicas: {$input: {name: sizes, pointer: /web}}}\n    schema: {$ref: '#/x'}\n    escaped: {$literal: {$input: kept}}\n",
+            "  valuesFrom: [{file: base.yaml}]\n  values:\n    image: {$fromInput: image}\n    nested: {replicas: {$fromInput: {name: sizes, pointer: /web}}}\n    schema: {$ref: '#/x'}\n    escaped: {$literal: {$fromInput: kept}}\n",
             &[("apps/base.yaml", "image: from-file\nnested: {replicas: 1, other: true}\n")],
         );
         let (chart, _) = load(&temp, Some(json!({"image": "web:1", "sizes": {"web": 3}}))).unwrap();
@@ -634,14 +634,14 @@ mod tests {
                 "image": "web:1",
                 "nested": {"replicas": 3, "other": true},
                 "schema": {"$ref": "#/x"},
-                "escaped": {"$input": "kept"},
+                "escaped": {"$fromInput": "kept"},
             })
         );
 
         let slip = project("  values: {image: {$inputs: image}}\n", &[]);
         let slip = error(&slip, Some(json!({"image": "web:1"})));
         assert!(
-            slip.contains("spec.values.image.$inputs is not a value source; did you mean $input?"),
+            slip.contains("spec.values.image.$inputs is not a value source; did you mean $fromInput?"),
             "{slip}"
         );
     }
@@ -652,11 +652,11 @@ mod tests {
     fn test_a_source_in_a_values_from_file_is_an_error_with_the_fix() {
         let temp = project(
             "  valuesFrom: [{file: base.yaml}]\n",
-            &[("apps/base.yaml", "web: {image: {$input: image}}\n")],
+            &[("apps/base.yaml", "web: {image: {$fromInput: image}}\n")],
         );
         let message = error(&temp, Some(json!({"image": "web:1"})));
         assert!(
-            message.contains("spec.valuesFrom[0]: values file") && message.contains("holds a $input source at web.image; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values"),
+            message.contains("spec.valuesFrom[0]: values file") && message.contains("holds a $fromInput source at web.image; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values"),
             "{message}"
         );
     }
@@ -669,13 +669,13 @@ mod tests {
         Ok(bundle.resources.into_iter().map(|resource| resource.value).collect())
     }
 
-    /// Catches `$input` left unresolved in a Component's spec, a
+    /// Catches `$fromInput` left unresolved in a Component's spec, a
     /// RemoteManifest, a plain manifest, or a `metadata.namespace`, and a
     /// source in a Release's input declarations read as a default.
     #[test]
     fn test_input_resolves_in_every_resource_of_a_bundle() {
         let resources = bundle(
-            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: {$input: namespace}}\n---\napiVersion: components.k8s.nyl/v1\nkind: web\nmetadata: {name: web}\nspec: {image: {$input: image}, schema: {$ref: '#/x'}}\n---\napiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {name: crds}\nspec: {url: {$input: crds}}\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web, namespace: {$input: namespace}}\nspec:\n  replicas: {$input: {name: sizes, pointer: /web}}\n  template: {spec: {containers: [{name: web, image: {$input: image}}]}}\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: {$fromInput: namespace}}\n---\napiVersion: components.k8s.nyl/v1\nkind: web\nmetadata: {name: web}\nspec: {image: {$fromInput: image}, schema: {$ref: '#/x'}}\n---\napiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {name: crds}\nspec: {url: {$fromInput: crds}}\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web, namespace: {$fromInput: namespace}}\nspec:\n  replicas: {$fromInput: {name: sizes, pointer: /web}}\n  template: {spec: {containers: [{name: web, image: {$fromInput: image}}]}}\n",
             Some(json!({"namespace": "apps", "image": "web:1", "crds": "https://example.com/crds.yaml", "sizes": {"web": 2}})),
         )
         .unwrap();
@@ -693,13 +693,13 @@ mod tests {
         );
 
         let labels = bundle(
-            "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a, labels: {tier: {$input: tier}}}\n",
+            "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a, labels: {tier: {$fromInput: tier}}}\n",
             Some(json!({"tier": "web"})),
         )
         .unwrap_err()
         .to_string();
         assert!(
-            labels.contains("metadata.labels.tier holds a $input source, but metadata.labels.tier must be literal"),
+            labels.contains("metadata.labels.tier holds a $fromInput source, but metadata.labels.tier must be literal"),
             "{labels}"
         );
         let reserved = bundle(
@@ -710,23 +710,23 @@ mod tests {
         .to_string();
         assert!(reserved.contains("spec.url.$ref is not a value source"), "{reserved}");
         let declaration = bundle(
-            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\nspec:\n  inputs:\n    image: {type: string, default: {$input: other}}\n",
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\nspec:\n  inputs:\n    image: {type: string, default: {$fromInput: other}}\n",
             Some(json!({"image": "x", "other": "y"})),
         )
         .unwrap_err()
         .to_string();
         assert!(
-            declaration.contains("spec.inputs.image.default holds a $input source"),
+            declaration.contains("spec.inputs.image.default holds a $fromInput source"),
             "{declaration}"
         );
         let outside = bundle(
-            "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a}\ndata: {image: {$input: image}}\n",
+            "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a}\ndata: {image: {$fromInput: image}}\n",
             None,
         )
         .unwrap_err()
         .to_string();
         assert!(
-            outside.contains("ConfigMap \"a\" in ") && outside.contains("data.image.$input reads Release input \"image\", but this resource is not rendered as part of a Release that declares inputs"),
+            outside.contains("ConfigMap \"a\" in ") && outside.contains("data.image.$fromInput reads Release input \"image\", but this resource is not rendered as part of a Release that declares inputs"),
             "{outside}"
         );
     }

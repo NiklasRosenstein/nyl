@@ -506,7 +506,7 @@ struct Prepared {
     rendered: RenderedSource,
     desired: Desired,
     order: Vec<UnitName>,
-    /// The PromotionRecords the environment's source and `$promotion`
+    /// The PromotionRecords the environment's source and `$fromPromotion`
     /// bindings read: its state's, or with `record: source` the block in
     /// its source ([`crate::rules::sources::promotion_records`]).
     promotions: BTreeMap<PromotionPathName, PromotionRecord>,
@@ -535,7 +535,7 @@ struct Evidence<'e> {
     run: Option<&'e RunId>,
     produced_in_run: &'e BTreeSet<UnitName>,
     previous: &'e BTreeMap<UnitName, DesiredUnit>,
-    /// The PromotionRecords `$promotion` bindings read.
+    /// The PromotionRecords `$fromPromotion` bindings read.
     promotions: &'e BTreeMap<
         nyl_core::orchestration::ids::PromotionPathName,
         nyl_core::orchestration::promotion::PromotionRecord,

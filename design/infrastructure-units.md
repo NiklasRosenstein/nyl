@@ -21,7 +21,7 @@ spec:
   context: {path: services/web}      # Git source shape; may name a revision or repository
   contexts:                          # additional named build contexts (--build-context)
     shared: {path: libs/shared}      # a directory: Git source shape
-    base: {image: {$unit: {unit: base-image, artifact: image, pointer: /reference}}}
+    base: {image: {$fromUnit: {unit: base-image, artifact: image, pointer: /reference}}}
     node: {image: 'node@sha256:…'}   # an image, pinned by digest
   dockerfile: Dockerfile             # relative to context.path
   target: runtime                    # optional build stage
@@ -29,7 +29,7 @@ spec:
   platforms: [linux/amd64, linux/arm64]
   buildArgs:
     VERSION: '{{ values.version }}'
-    API_URL: {$unit: {unit: api, output: url}}
+    API_URL: {$fromUnit: {unit: api, output: url}}
   tags: ['{{ environment.name }}']   # extra tags; see Tags
   builder: ci-buildkit               # optional buildx builder
   cache:
@@ -65,7 +65,7 @@ to consumers when the registry holds it.
   the metadata file; tags record the exact build arguments, and platforms come
   from the requested platforms or image inspection, never build output. The kind declares no
   outputs; consumers reference the artifact, for example
-  `{$unit: {unit: web-image, artifact: image, pointer: /reference}}`.
+  `{$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}`.
 - **Tags:** every push carries the tag `nyl-<environment>-<first 16 hex digits
   of the execution key>`, so a pushed image can be found from its desired
   document, and two environments building the same key never move each
@@ -124,7 +124,7 @@ spec:
     bucket: acme-tofu-state
     key: '{{ values.stateKey }}'
   variables:
-    vpc_id: {$unit: {unit: network, output: vpcId}}
+    vpc_id: {$fromUnit: {unit: network, output: vpcId}}
     instance_class: '{{ values.dbClass }}'
   varFiles: ['environments/{{ environment.name }}.tfvars']
   outputs:
@@ -327,7 +327,7 @@ resume, and the approved next execution.
 
 ## Terraform to Terraform outputs
 
-A unit consumes another unit's outputs with `$unit`, for example a network
+A unit consumes another unit's outputs with `$fromUnit`, for example a network
 configuration's `vpc_id` in a database configuration:
 
 ```yaml
@@ -347,7 +347,7 @@ spec:
   source: {path: infra/database}
   backend: {bucket: acme-tofu-state, key: '{{ environment.name }}/database'}
   variables:
-    vpc_id: {$unit: {unit: network, output: vpcId}}
+    vpc_id: {$fromUnit: {unit: network, output: vpcId}}
   outputs:
     host: {type: string}
 ```

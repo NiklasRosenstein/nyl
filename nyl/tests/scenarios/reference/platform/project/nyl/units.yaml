@@ -19,7 +19,7 @@ spec:
   source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
-    vpc_id: {$unit: {unit: network, output: vpcId}}
+    vpc_id: {$fromUnit: {unit: network, output: vpcId}}
   outputs:
     connection: {type: object}
   timeout: 60m

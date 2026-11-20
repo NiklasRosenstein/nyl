@@ -1591,7 +1591,7 @@ mod tests {
         assert!(
             findings[0]
                 .message
-                .contains("spec.replicas.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $environment?"),
+                .contains("spec.replicas.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
             "{}",
             findings[0].message
         );

@@ -89,7 +89,7 @@ migrates it.
 
 - A Nyl older than this release keeps the file through its transitions, `hold`,
   `resume`, and `state forget`, but cannot act on it: it refuses an environment
-  whose `source` is `$promotion`, and it must not run `reconcile` in an
+  whose `source` is `$fromPromotion`, and it must not run `reconcile` in an
   environment whose bindings read promotions, because it cannot resolve them.
   Upgrade every Nyl that shares the state before an environment uses promotion.
 - This release's snapshots, `state move`, and `state restore` include the

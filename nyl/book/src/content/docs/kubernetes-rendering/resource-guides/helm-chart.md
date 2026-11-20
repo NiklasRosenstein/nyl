@@ -168,7 +168,7 @@ spec:
 
 ### Release inputs in values
 
-In the bundle of a Release that declares inputs, `{$input: name}` reads one at
+In the bundle of a Release that declares inputs, `{$fromInput: name}` reads one at
 any depth of `values`, with the input's type. It resolves before `valuesFrom`
 merges, so the inline value still merges last. Other `$` keys, such as `$ref`,
 are chart data:
@@ -179,11 +179,11 @@ spec:
   values:
     image:
       repository: registry.example.com/web
-      tag: {$input: tag}
-    replicas: {$input: {name: sizes, pointer: /web/replicas}}
+      tag: {$fromInput: tag}
+    replicas: {$fromInput: {name: sizes, pointer: /web/replicas}}
 ```
 
-See [`$input`](/nyl/reference/value-sources/#input).
+See [`$fromInput`](/nyl/reference/value-sources/#frominput).
 
 ### Values files and Release inputs
 
@@ -208,7 +208,7 @@ one values key. Files follow the path and Git-visibility rules of Cluster
 `valuesFrom`; an `input` entry is valid only in the bundle of a Release that
 declares the input. Nyl passes the merged values to Helm as data and never
 templates or resolves anything in them; a values file that holds a value
-source, such as `{$input: tag}`, is an error that says to move it to the
+source, such as `{$fromInput: tag}`, is an error that says to move it to the
 inline `values`. Anything a chart outputs is data as well: a value source in
 the rendered output is an error that names the HelmChart. See
 [Value sources](/nyl/reference/value-sources/#helmchart-valuesfrom) for
@@ -352,8 +352,8 @@ spec:
 
 In a Release bundle, `lookup`, `includeCrds`, and the HelmChart's other fields
 can also read a Release input, so targets decide them without templating:
-`lookup: {$input: lookup}`. See
-[`$input`](/nyl/reference/value-sources/#input).
+`lookup: {$fromInput: lookup}`. See
+[`$fromInput`](/nyl/reference/value-sources/#frominput).
 
 `lookup` is opt-in. A chart without it renders exactly as before. `spec.lookup: false` is the
 explicit opt-out: it renders the same way, and tells Nyl you know the chart calls `lookup`
@@ -389,7 +389,7 @@ chart and resource per run.
 ### What `lookup` sees
 
 - Only the objects of the Release being rendered, as the target's last publication
-  holds them. That is the commit `$publication` inputs read. Other Releases and
+  holds them. That is the commit `$fromPublication` inputs read. Other Releases and
   the cluster are invisible.
 - Before the Release is first published, or without a target, nothing is found and the
   chart generates. After `publish-tree`, later renders read back what was published.

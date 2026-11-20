@@ -77,7 +77,7 @@ pub struct CommonUnitFields {
     /// Declared outputs, for kinds that let units declare them. Only declared outputs are recorded.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub outputs: BTreeMap<String, OutputDeclaration>,
-    /// Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `$unit: {unit, observation}`.
+    /// Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `$fromUnit: {unit, observation}`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub observations: BTreeMap<String, ObservationDeclaration>,
     /// How long a run that executed the unit waits for its `pending` observations, within `timeout`. Default `0s`: one attempt, then later runs.

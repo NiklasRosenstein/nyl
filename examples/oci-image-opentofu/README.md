@@ -1,7 +1,7 @@
 # OciImage → OpenTofu on local Docker
 
 Nyl builds an nginx image, pushes it to a local registry, and deploys it with
-OpenTofu's Docker provider at <http://127.0.0.1:8080>. The `$unit` reference
+OpenTofu's Docker provider at <http://127.0.0.1:8080>. The `$fromUnit` reference
 in `units.yaml` passes the image digest and orders the two units.
 
 ## Prerequisites

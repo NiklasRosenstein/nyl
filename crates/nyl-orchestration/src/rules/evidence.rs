@@ -1,12 +1,12 @@
 //! What a consumer requires of its producer beyond a current receipt.
 //!
 //! Contract: [Units](../../../../design/orchestration-core.md#units)
-//! (`dependsOn` entries and `$unit` references with `evidence` and
+//! (`dependsOn` entries and `$fromUnit` references with `evidence` and
 //! `attestations`), [References](../../../../design/orchestration-core.md#references),
 //! and [Attestations](../../../../design/orchestration-core.md#attestations).
 //!
 //! One module owns the rule for every consumer, whichever field states it:
-//! a `dependsOn` entry, an output, artifact, or observation `$unit`, in
+//! a `dependsOn` entry, an output, artifact, or observation `$fromUnit`, in
 //! this environment or another declared one. Nothing here knows a unit kind
 //! or an attestation by name; the names come from what the producer
 //! declares.

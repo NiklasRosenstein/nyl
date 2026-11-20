@@ -19,8 +19,8 @@ use schemars::{Schema, SchemaGenerator};
 use serde_json::{json, Value};
 
 use super::{
-    clause_key, Context, FileInputSource, GitInputSource, InputSource, ParameterSource, PromotionInputSource,
-    PublicationInputSource, Source, Treatment, UnitInputSource, ValuesSource, SLIPS, VALUE_SOURCES_DOCS,
+    clause_key, suggest, Context, FileInputSource, GitInputSource, InputSource, ParameterSource, PromotionInputSource,
+    PublicationInputSource, Source, Treatment, UnitInputSource, ValuesSource, VALUE_SOURCES_DOCS,
 };
 
 /// What one step of a schema walk found for a member or an item.
@@ -152,43 +152,10 @@ fn reserved(field: &str, value: &Value, nodes: &[Value], root: &Value, issues: &
 
 /// The error for `key`, an unknown `$` key at `field` of a typed field.
 fn unknown_source(field: &str, key: &str) -> String {
-    let meant = SLIPS
-        .iter()
-        .find(|(slip, _)| *slip == key)
-        .map(|(_, meant)| (*meant).to_owned())
-        .or_else(|| nearest_source(key).map(|source| source.key().to_owned()));
     format!(
         "{field} is not a value source; `$` keys are reserved for value sources in the typed fields of a resource{} (see {VALUE_SOURCES_DOCS})",
-        meant.map(|meant| format!("; did you mean {meant}?")).unwrap_or_default()
+        suggest(key).map(|meant| format!("; did you mean {meant}?")).unwrap_or_default()
     )
-}
-
-/// The known source whose key is closest to `key`, if one is close.
-fn nearest_source(key: &str) -> Option<Source> {
-    Source::ALL
-        .into_iter()
-        .map(|source| (distance(key, source.key()), source))
-        .filter(|(distance, _)| *distance <= 3)
-        .min_by_key(|(distance, _)| *distance)
-        .map(|(_, source)| source)
-}
-
-fn distance(left: &str, right: &str) -> usize {
-    let right = right.chars().collect::<Vec<_>>();
-    let mut previous = (0..=right.len()).collect::<Vec<_>>();
-    for (row, left) in left.chars().enumerate() {
-        let mut current = vec![row + 1];
-        for (column, right) in right.iter().enumerate() {
-            let cost = usize::from(left != *right);
-            current.push(
-                (previous[column + 1] + 1)
-                    .min(current[column] + 1)
-                    .min(previous[column] + cost),
-            );
-        }
-        previous = current;
-    }
-    previous[right.len()]
 }
 
 impl Source {
@@ -369,23 +336,23 @@ mod tests {
             "name": {"$env": "/name"},
             "variables": {"schema": {"$ref": "#/x"}},
             "tags": [{"path": "a", "$values": "/x"}],
-            "carried": {"$unit": {"unit": "a", "output": "b"}},
+            "carried": {"$fromUnit": {"unit": "a", "output": "b"}},
         });
         let issues = reserved_key_issues("spec", &document, &schema());
         assert_eq!(issues.len(), 3, "{issues:?}");
         assert!(
-            issues[0].starts_with("spec.name.$env is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $environment?"),
+            issues[0].starts_with("spec.name.$env is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
             "{issues:?}"
         );
         let issues = &issues[1..];
         assert!(
-            issues[0].contains("spec.source.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $environment?"),
+            issues[0].contains("spec.source.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
             "{issues:?}"
         );
         assert!(
             issues[1].starts_with("spec.tags[0].$values is not a value source;")
                 && issues[1].ends_with(
-                    "did you mean $environment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)"
+                    "did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)"
                 ),
             "{issues:?}"
         );
@@ -408,7 +375,7 @@ mod tests {
             .iter()
             .map(|variant| variant["required"][0].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(keys, ["$input", "$literal"]);
+        assert_eq!(keys, ["$fromInput", "$literal"]);
         assert!(resource["$defs"].get("InputSource").is_some());
     }
 
@@ -419,6 +386,6 @@ mod tests {
             .into_iter()
             .map(|variant| variant.as_value()["required"][0].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(keys, ["$environment", "$unit", "$promotion", "$literal"]);
+        assert_eq!(keys, ["$fromEnvironment", "$fromUnit", "$fromPromotion", "$literal"]);
     }
 }
