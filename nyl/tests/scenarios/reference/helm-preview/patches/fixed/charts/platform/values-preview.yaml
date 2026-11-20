@@ -1,0 +1,5 @@
+# What every non-production deployment of the chart shares: develop and the
+# pull request previews. Plain data: Nyl reads it without resolving anything.
+logLevel: debug
+ingress:
+  className: nginx-internal

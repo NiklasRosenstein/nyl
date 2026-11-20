@@ -8,6 +8,8 @@ spec:
     image: {type: string}
     databaseHost: {type: string}
     namespace: {type: string}
+    imageRepository: {type: string}
+    imageDigest: {type: string}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -65,3 +67,21 @@ spec:
         - name: smoke
           image: {$fromInput: image}
           command: ["true"]
+---
+# The platform chart (charts/platform), as the helm-preview reference scenario
+# deploys it: its CRD and the operator are applied, and the chart joins the
+# image's repository and digest, so the cluster runs the image by digest.
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: platform
+  namespace: {$fromInput: namespace}
+spec:
+  chart: {name: ../charts/platform}       # relative to nyl.toml's directory
+  includeCrds: true
+  values:
+    fullnameOverride: platform
+    image:
+      repository: {$fromInput: imageRepository}
+      digest: {$fromInput: imageDigest}
+    operator: {install: true}

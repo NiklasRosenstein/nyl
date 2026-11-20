@@ -198,6 +198,12 @@ jobs:
           tofu_version: 1.13.2
           tofu_wrapper: false
 
+      # The reference scenarios render Helm charts in tier 2 as well.
+      - name: Install pinned Helm
+        uses: jdx/mise-action@v3
+        with:
+          install_args: helm
+
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -468,6 +474,12 @@ jobs:
         with:
           tofu_version: 1.13.2
           tofu_wrapper: false
+
+      # Nyl renders the fixture's Helm chart.
+      - name: Install pinned Helm
+        uses: jdx/mise-action@v3
+        with:
+          install_args: helm
 
       - name: Check Docker Buildx
         run: |

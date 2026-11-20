@@ -1,0 +1,11 @@
+# Named by the fullname, so every instance in the cluster has its own.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "platform.fullname" . }}
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [platform.example.com]
+    resources: [platforms]
+    verbs: [get, list, watch]

@@ -42,6 +42,28 @@ pub fn deployment_ready(deployment: &Value, image: &str, database_host: &str) ->
             host.unwrap_or("(unset)")
         ));
     }
+    rollout_ready(deployment)
+}
+
+/// Whether the platform chart's Deployment runs `image`, the reference the
+/// image unit pushed, which the chart joins from its repository and digest,
+/// and its rollout is over.
+pub fn chart_deployment_ready(deployment: &Value, image: &str) -> Poll<()> {
+    let template_image = deployment
+        .pointer("/spec/template/spec/containers/0/image")
+        .and_then(Value::as_str);
+    if template_image != Some(image) {
+        return Poll::pending(format!(
+            "the pod template runs image {} instead of {image}",
+            template_image.unwrap_or("(none)")
+        ));
+    }
+    rollout_ready(deployment)
+}
+
+/// Whether every replica of the Deployment's current generation is updated,
+/// ready, and available.
+fn rollout_ready(deployment: &Value) -> Poll<()> {
     let generation = deployment
         .pointer("/metadata/generation")
         .and_then(Value::as_i64)
@@ -429,6 +451,18 @@ mod tests {
         let host = deployment("r/web@sha256:b", "dev.r1.db.internal", 1, 1, 1);
         assert!(reason(deployment_ready(&host, "r/web@sha256:b", "dev.r2.db.internal"))
             .contains("DATABASE_HOST is dev.r1.db.internal"));
+    }
+
+    #[test]
+    fn test_the_chart_deployment_is_ready_when_it_runs_the_image_by_digest() {
+        let ready = deployment("r/web@sha256:b", "unused", 1, 1, 1);
+        assert_eq!(chart_deployment_ready(&ready, "r/web@sha256:b"), Poll::Ready(()));
+        assert!(reason(chart_deployment_ready(&ready, "r/web@sha256:c")).contains("instead of r/web@sha256:c"));
+        let starting = deployment("r/web@sha256:b", "unused", 0, 1, 1);
+        assert_eq!(
+            reason(chart_deployment_ready(&starting, "r/web@sha256:b")),
+            "readyReplicas is 0 of 1"
+        );
     }
 
     #[test]

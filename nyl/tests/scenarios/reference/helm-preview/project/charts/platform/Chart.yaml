@@ -1,0 +1,10 @@
+apiVersion: v2
+name: platform
+description: The platform's own chart, which the platform deploys for develop and every pull request.
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  # Vendored: charts/common-0.1.0.tgz is committed, so rendering fetches nothing.
+  - name: common
+    version: 0.1.0
+    repository: https://charts.example.invalid

@@ -171,6 +171,9 @@ fn test_scenario_git_steps_apply_in_the_test_world() {
         let world = World::new(&loaded.directory.join(&loaded.scenario.project));
         for step in &loaded.scenario.steps {
             match step.kind().unwrap() {
+                // A commit to a branch a `nyl` step creates, such as state a
+                // tool writes back to a publication branch, has no branch here.
+                StepKind::Commit if world.try_rev_parse(&step.commit.as_ref().unwrap().branch).is_err() => {}
                 StepKind::Commit => world.commit(step.commit.as_ref().unwrap(), &loaded.directory),
                 StepKind::Branch => world.branch(step.branch.as_ref().unwrap()),
                 StepKind::SquashMerge => world.squash_merge(step.squash_merge.as_ref().unwrap()),
@@ -193,6 +196,55 @@ fn test_scenario_git_steps_apply_in_the_test_world() {
             loaded.name
         );
     }
+}
+
+/// A file a `commit` step applies can lock a revision, as a `$fromGit`
+/// binding does: `%COMMIT(<revision>)%` is that revision's commit before the
+/// step. The placeholders that name `nyl` steps are refused there.
+#[test]
+fn test_commit_steps_replace_commit_placeholders_in_applied_files() {
+    let directory = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(directory.path().join("patches/lock")).unwrap();
+    std::fs::write(
+        directory.path().join("patches/lock/lock.yaml"),
+        "commit: '%COMMIT(main)%'\n",
+    )
+    .unwrap();
+    let project = scenario::scenarios_root().join("walkthroughs/_project");
+    let scenario_at = |milestone: &str| {
+        let text = format!(
+            "contract: design/reference-scenarios.md#scenario-files\nmilestone: {milestone}\ntiers: [1]\nproject: {}\nsteps:\n  - commit: {{branch: main, message: Lock, apply: patches/lock}}\n",
+            project.display()
+        );
+        scenario::Loaded {
+            name: "inline/commit-placeholders".to_owned(),
+            directory: directory.path().to_path_buf(),
+            scenario: serde_saphyr::from_str(&text).unwrap(),
+        }
+    };
+    let validate = |loaded: &scenario::Loaded| {
+        scenario::format::validate(&loaded.scenario, &loaded.directory, &scenario::repository_root())
+    };
+    let loaded = scenario_at("M6");
+    assert_eq!(validate(&loaded), Ok(()));
+    let early = validate(&scenario_at("M5")).unwrap_err();
+    assert!(early.contains("placeholders run from M6"), "{early}");
+
+    let world = World::new(&project);
+    let before = world.try_rev_parse("main").unwrap();
+    world.commit(loaded.scenario.steps[0].commit.as_ref().unwrap(), &loaded.directory);
+    assert_eq!(
+        world.show("main:lock.yaml").unwrap().trim(),
+        format!("commit: '{before}'")
+    );
+
+    std::fs::write(
+        directory.path().join("patches/lock/lock.yaml"),
+        "state: '%STATE(r1)%'\n",
+    )
+    .unwrap();
+    let state = validate(&scenario_at("M6")).unwrap_err();
+    assert!(state.contains("only %COMMIT(<revision>)% is"), "{state}");
 }
 
 fn nyl_toml_or_resources(files: &[String]) -> String {

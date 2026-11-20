@@ -130,7 +130,7 @@ mod tests {
         );
         // The documents stay separate: the Cluster ends before the target starts.
         assert!(platform.contains(
-            "  clusterScopedKinds: [core/Namespace]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget"
+            "  clusterScopedKinds: [core/Namespace, rbac.authorization.k8s.io/ClusterRole, apiextensions.k8s.io/CustomResourceDefinition]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget"
         ));
     }
 

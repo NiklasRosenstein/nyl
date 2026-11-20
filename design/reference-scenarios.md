@@ -55,7 +55,9 @@ infrastructure units with the real tools in tier 2. M5 adds the preview
 scenarios (`reference/preview-closed` and `reference/preview`) and runs them,
 with the platform scenario, in both tiers with the real
 `KubernetesPublication`. M6 adds scenario 4 (`reference/promotion`) and
-scenario 5 (`reference/hotfix`), which promote between environments.
+scenario 5 (`reference/hotfix`), which promote between environments, and
+scenario 6 (`reference/helm-preview`), which deploys a Helm chart through
+value sources.
 
 Run the harness from the repository root:
 
@@ -88,7 +90,7 @@ The tiers are:
   scenario's Git repository. Tier 2 scenarios compile only with
   the `tier2` Cargo feature; a missing `tofu`, `docker buildx`, or registry
   fails the test instead of skipping it, so a passing tier 2 always ran. A dedicated CI job with the
-  tools installed (OpenTofu 1.13.2, Terraform 1.9.8, Docker with Buildx, and
+  tools installed (OpenTofu 1.13.2, Terraform 1.9.8, Helm, Docker with Buildx, and
   `registry:2` pulled before the tests) runs the native driver tests and
   `cargo test -p nyl --features tier2 --test native_tools_test --test scenario_harness_test`, and is required
   for merging from M4 on. The two-tier scenarios need nothing else: Argo CD is
@@ -215,7 +217,7 @@ and to the harness's validation, together with the first scenario using them.
 
 | Step | Effect |
 | --- | --- |
-| `commit: {branch, message, apply, delete}` | Copies the files under `apply` over the working clone, removes the paths in `delete`, commits, and pushes |
+| `commit: {branch, message, apply, delete}` | Copies the files under `apply` over the working clone, removes the paths in `delete`, commits, and pushes. From M6, `%COMMIT(<revision>)%` in an applied file is that revision's commit in `project.git` before the step, such as the lock of a `$fromGit` binding; the branch may be one a `nyl` step created, such as a publication branch a tool writes state back to |
 | `branch: {name, from}` | Creates and pushes a branch |
 | `squash-merge: {branch, into}` | Squash-merges and pushes, keeping the branch |
 | `merge: {branch, into}` | From M6: merges with a merge commit (`--no-ff`) and pushes, keeping the branch, so every commit of `branch` becomes an ancestor of `into` |
@@ -271,6 +273,9 @@ in advance:
 | `%OBSERVED(<id>)%` | The observed-state commit the `nyl` step with that `id` wrote |
 | `%COMMIT(<revision>)%` | The full commit ID of a revision of `project.git`, such as `main~1` or `release/prod`, resolved when the step runs |
 | `%PLAN-DIGEST(<environment>/<unit>)%` | The `changeDigest` that `nyl plan -e <environment> --unit <unit> -o json` reports for the unit at the step's checkout, for `--approve <unit>=<digest>` under `requireDigest`; in tier 2 that `plan` runs through the binary, like every step there |
+
+A `commit` step replaces `%COMMIT(<revision>)%` in the files it applies, and
+no other placeholder, because the rest name `nyl` steps.
 
 The runner expands them as the step starts, so a `%PLAN-DIGEST%` or `%STATE%`
 in an `expect` names the state before the step, not after it. The revisions a
@@ -845,6 +850,47 @@ marks the commit prod first runs.
 | 12 | Delete and cut `release/prod` again; fix "Lower log level"; promote it; merge `release/prod` into `main` with a merge commit; dev runs it; `promote dev-to-prod` → 0 | An ancestor fix passes without `--supersede` |
 | 13 | Delete `release/prod`; `reconcile -e prod` → 0, nothing runs | The merge keeps prod's source fetchable |
 
+## Scenario 6: Helm chart previews
+
+The case the [value sources](declarative-value-sources.md) exist for: a
+self-hosted platform deploys its own Helm chart for a `develop` environment and
+a preview per pull request, in one cluster. `reference/helm-preview` runs it in
+both tiers; rendering the chart runs `helm` in both.
+
+The project: a local chart `charts/platform` with a CRD in `crds/`, a
+ClusterRole and a Deployment named by the fullname, an operator Deployment
+behind `operator.install`, a ConfigMap that shows what reached the chart (among
+it `kindOf` the operator flag), and a library chart vendored as
+`charts/common-0.1.0.tgz`, a gzip tar with zeroed times and owners, so its bytes
+are reproducible. One Release bundle serves every target: a HelmChart with
+`includeCrds: {$fromInput: clusterWide}`, `valuesFrom` a values file and the
+`chartValues` input, `$fromInput` in its inline `values` (the image's
+repository and digest, `fullnameOverride`, `operator.install`, the sizing),
+`metadata.namespace: {$fromInput: namespace}`, and a `$literal` holding the
+platform's own settings, which use the `$fromEnvironment` syntax. An `OciImage`
+unit feeds the image inputs through `$fromUnit`. develop's target binds
+`clusterWide: true` and reads `channel` with `$fromPublication`; the
+`preview` template declares `parameters: {pr: integer, crds: {type: boolean,
+default: false}}`, binds `clusterWide: {$fromParameter: crds}`, per-instance
+names and hosts, and reads the previews' sizing with `$fromGit` from
+`config/capacity.yaml` at a locked commit of the project repository.
+
+| Step | Action | Proves |
+| --- | --- | --- |
+| 1 | Commit the `$fromGit` lock on `main` (`%COMMIT(main)%`); `nyl validate` → 0 | The project validates, the chart rendered for develop and a sample preview |
+| 2 | `reconcile -e develop` → 0 | develop's tree has the CRD, the operator, and the ClusterRole; the Deployment runs the image by the digest the unit built; Helm received `operator.install` as a boolean; the input overrides the values file, which overrides the chart's defaults; without publication state the `channel` default applies; the `$literal` content reaches the chart as data |
+| 3 | Commit `develop/state/release.json` to the `deploy` branch | A tool writes state back beside the tree |
+| 4 | Branch `pr-1`; `reconcile -e pr-1 --template preview --param pr=1` → 0 | `crds` defaults to `false`, so the preview's tree has neither the CRD nor the operator; its own image by digest; the locked sizing (one replica); its host and ingress class |
+| 5 | Raise the capacity on `main`; branch `pr-2`; `--param crds=true` → 0 | The preview asked for them, so its tree has the CRD and the operator; the lock still names the reviewed commit, so it keeps one replica; `pr-1` is untouched |
+| 6 | Change the values file on `pr-1`; reconcile it → 0 | The change flows through `valuesFrom`: only the publication runs, the image is current |
+| 7 | Build on `main`; `reconcile -e develop` → 0 | The new digest reaches develop with the channel read from the publication branch |
+| 8 | `state delete -e pr-2 --teardown` → 0 | The closed pull request's tree is removed and `pr-1`'s kept |
+| 9 | On `pr-3`: `$fromUnit` in the chart values, then `$fromInputs`, then a source in the values file → each 1; then fixed → 0 | Each mistake blocks the publication (`NYL-DRIVER-ERROR`) with an error that names the fix: declare a Release input and bind it with `$fromUnit`; did you mean `$fromInput`; move it to the inline values. The image unit runs regardless |
+| 10 | A template binding `clusterWide: {$fromInput: crds}`: `nyl validate` → 1 | `NYL-TEMPLATE-INVALID` for a sample instance, before any instance exists |
+
+The cluster E2E suite deploys the same chart to a kind cluster with each
+reconciler: see [`crates/nyl-e2e/README.md`](../crates/nyl-e2e/README.md).
+
 ## Coverage by milestone
 
 | Milestone | Runs |
@@ -852,7 +898,7 @@ marks the commit prod first runs.
 | M3 | Scenario 1 in tier 1 with fake kinds for images, OpenTofu, and the publication: waves, `bind: plan` approvals and destroy digests, repeat no-op, selector typo, decommissioning with teardown order and `--confirm-removed`, a multi-environment run of dev and prod with repeated `-e`, crash, cancellation, and lease variants; the [crash-injection scenarios](#crash-injection) at every killable fault point |
 | M4 | Scenario 1 in tier 2 with the real `OciImage` and `OpenTofu` drivers and `FakePublication`, plus `nyl build` for an image |
 | M5 | All three scenarios in both tiers, with the real `KubernetesPublication`: `reference/platform` (scenario 1, with the exit criterion's published values and static render), `reference/preview-closed` (scenario 2), and `reference/preview` (scenario 3), plus the tier-1 variants `preview-manual-wait`, `preview-not-ready`, `preview-no-keep-ref`, and `preview-name-collision`; the `attested-evidence` and `observed-value` walkthroughs also run with the real driver |
-| M6 | Scenario 4, `reference/promotion`, in both tiers: dev's source commit and image digest promoted to prod, prod's reviewed-plan approvals with `requireDigest`, missing and aged evidence, a rollback, and artifact verification; scenario 5, `reference/hotfix`, in both tiers: `prod-hotfix` and `hotfix-to-prod`, a fix promoted from `release/prod`, the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, patch-equivalent cherry-picks passing, `--supersede` with a range, a merge commit, and the symmetric refusal; the `stale-promotion-evidence`, `value-only-promotion` (each value from what its consuming Application runs, and mixed revisions blocking a source path), and `promotion-record-source` walkthroughs |
+| M6 | Scenario 6, `reference/helm-preview`, in both tiers: a HelmChart rendered from Release inputs for develop and pull request previews, with every value source a target or template binds, and the errors of misplaced sources; scenario 4, `reference/promotion`, in both tiers: dev's source commit and image digest promoted to prod, prod's reviewed-plan approvals with `requireDigest`, missing and aged evidence, a rollback, and artifact verification; scenario 5, `reference/hotfix`, in both tiers: `prod-hotfix` and `hotfix-to-prod`, a fix promoted from `release/prod`, the next dev promotion refused with `NYL-PROMOTE-SUPERSEDES` until the fix is merged into `main`, patch-equivalent cherry-picks passing, `--supersede` with a range, a merge commit, and the symmetric refusal; the `stale-promotion-evidence`, `value-only-promotion` (each value from what its consuming Application runs, and mixed revisions blocking a source path), and `promotion-record-source` walkthroughs |
 | M10 | The `nyl-e2e` crate runs the platform scenario's Kubernetes publication three ways against Kind with a local registry, changing only the target's reconciler: direct apply, Argo CD read through the Kubernetes API, and Argo CD read through its API server ([direct reconciler](orchestration-core.md#end-to-end-harness)); tier 1 gains a `FakePublication` mode that mimics a direct target's attestation and teardown wait |
 
 The reference project grows with the milestones. A milestone's fixture omits

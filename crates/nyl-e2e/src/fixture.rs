@@ -23,6 +23,10 @@ pub const DEPLOYMENT: &str = "web";
 /// The `PostSync` hook Job of the Release.
 pub const HOOK_JOB: &str = "web-smoke";
 pub const SERVICE: &str = "web";
+/// The Deployment the platform chart renders in the same namespace, and the
+/// CustomResourceDefinition in its `crds/` directory.
+pub const CHART_DEPLOYMENT: &str = "platform";
+pub const CHART_CRD: &str = "platforms.platform.example.com";
 /// The branch the publication unit pushes the rendered tree to, and the prefix
 /// of the target on it.
 pub const PUBLICATION_BRANCH: &str = "deploy";
@@ -63,6 +67,50 @@ const FILES: &[(&str, &str)] = &[
     (
         "infra/database/.terraform.lock.hcl",
         include_str!("../fixture/project/infra/database/.terraform.lock.hcl"),
+    ),
+    (
+        "charts/platform/Chart.yaml",
+        include_str!("../fixture/project/charts/platform/Chart.yaml"),
+    ),
+    (
+        "charts/platform/values.yaml",
+        include_str!("../fixture/project/charts/platform/values.yaml"),
+    ),
+    (
+        "charts/platform/crds/platforms.yaml",
+        include_str!("../fixture/project/charts/platform/crds/platforms.yaml"),
+    ),
+    (
+        "charts/platform/templates/_helpers.tpl",
+        include_str!("../fixture/project/charts/platform/templates/_helpers.tpl"),
+    ),
+    (
+        "charts/platform/templates/configmap.yaml",
+        include_str!("../fixture/project/charts/platform/templates/configmap.yaml"),
+    ),
+    (
+        "charts/platform/templates/deployment.yaml",
+        include_str!("../fixture/project/charts/platform/templates/deployment.yaml"),
+    ),
+    (
+        "charts/platform/templates/service.yaml",
+        include_str!("../fixture/project/charts/platform/templates/service.yaml"),
+    ),
+    (
+        "charts/platform/templates/clusterrole.yaml",
+        include_str!("../fixture/project/charts/platform/templates/clusterrole.yaml"),
+    ),
+    (
+        "charts/platform/templates/operator.yaml",
+        include_str!("../fixture/project/charts/platform/templates/operator.yaml"),
+    ),
+    (
+        "charts/platform/charts/common/Chart.yaml",
+        include_str!("../fixture/project/charts/platform/charts/common/Chart.yaml"),
+    ),
+    (
+        "charts/platform/charts/common/templates/_labels.tpl",
+        include_str!("../fixture/project/charts/platform/charts/common/templates/_labels.tpl"),
     ),
 ];
 
@@ -149,7 +197,7 @@ pub fn render(params: &Params, declarations: &Declarations) -> Result<Vec<Render
 /// the Release renders against, since rendering never asks the cluster.
 pub fn cluster_capabilities(kube_version: &str) -> String {
     format!(
-        "kubernetes:\n  kubeVersion: {kube_version}\n  apiVersions: [v1, apps/v1, v1/Namespace, v1/Service, apps/v1/Deployment]\n  clusterScopedKinds: [core/Namespace]\n"
+        "kubernetes:\n  kubeVersion: {kube_version}\n  apiVersions: [v1, apps/v1, rbac.authorization.k8s.io/v1, apiextensions.k8s.io/v1, v1/Namespace, v1/Service, v1/ConfigMap, apps/v1/Deployment, rbac.authorization.k8s.io/v1/ClusterRole, apiextensions.k8s.io/v1/CustomResourceDefinition]\n  clusterScopedKinds: [core/Namespace, rbac.authorization.k8s.io/ClusterRole, apiextensions.k8s.io/CustomResourceDefinition]\n"
     )
 }
 

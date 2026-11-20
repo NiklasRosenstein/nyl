@@ -1,0 +1,39 @@
+# Every pull request is an instance: its own state under its name in one
+# shared ref, its own image and tree, behind one shared catalog. A preview
+# leaves the cluster-wide pieces to develop unless its job passes
+# `--param crds=true`.
+apiVersion: gitops.nyl/v1
+kind: EnvironmentTemplate
+metadata: {name: preview}
+spec:
+  parameters:
+    pr: {type: integer}
+    crds: {type: boolean, default: false}
+  unitSelector: {matchLabels: {preview: 'true'}}
+  values:
+    teardownWait: {strategy: delay, duration: 2m}   # unattended removal
+    target:
+      inline:
+        clusterRef: {name: shared}
+        reconciler: {argocd: {instanceRef: {name: shared}}}
+        catalogApplication:
+          shared: {name: previews}   # one self-managing catalog for every instance
+        applicationGroupSelector: {matchLabels: {app: platform}}
+        publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
+        values: {namespace: '{{ environment.name }}'}
+        releaseInputs:
+          platform/platform:
+            namespace: '{{ environment.name }}'
+            fullname: 'platform-{{ environment.name }}'
+            host: 'pr-{{ params.pr }}.preview.example.invalid'
+            # The image the instance's own unit built, by digest; carried to the run.
+            imageRepository: {$fromUnit: {unit: platform-image, artifact: image, pointer: /repository}}
+            imageDigest: {$fromUnit: {unit: platform-image, artifact: image, pointer: /digest}}
+            clusterWide: {$fromParameter: crds}   # a boolean, as the parameter declares
+            chartValues: {ingress: {className: preview}}
+  state: {repositoryRef: {name: platform}, path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
+  allowUnprotectedSource: true
+  deletionPolicy: Teardown
+  allowTeardown: true
+  ttl: 7d
+  maxInstances: 5

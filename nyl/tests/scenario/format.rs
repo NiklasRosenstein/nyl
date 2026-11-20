@@ -784,6 +784,10 @@ pub fn validate(scenario: &Scenario, directory: &Path, repository_root: &Path) -
         validate_placeholders(step, scenario.milestone, &ids)
             .map_err(|error| format!("step {}: {error}", index + 1))?;
         validate_step(step, directory, &mut ids).map_err(|error| format!("step {}: {error}", index + 1))?;
+        if let Some(apply) = step.commit.as_ref().and_then(|commit| commit.apply.as_ref()) {
+            validate_applied_placeholders(&directory.join(apply), scenario.milestone)
+                .map_err(|error| format!("step {}: {error}", index + 1))?;
+        }
         let kind = step.kind()?;
         if kind.executes_from() > scenario.milestone {
             return Err(format!(
@@ -917,6 +921,35 @@ pub fn placeholders(text: &str) -> Result<Vec<Placeholder>, String> {
         rest = &after[name_len + close + 2..];
     }
     Ok(found)
+}
+
+/// The files a `commit` step applies may hold `%COMMIT(<revision>)%`, which
+/// the runner replaces with the revision's commit before the step, from M6
+/// like every placeholder; the other placeholders name `nyl` steps and are
+/// not replaced there.
+fn validate_applied_placeholders(apply: &Path, milestone: Milestone) -> Result<(), String> {
+    for entry in walkdir::WalkDir::new(apply) {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for placeholder in placeholders(&text).map_err(|error| format!("{}: {error}", entry.path().display()))? {
+            if !matches!(placeholder, Placeholder::Commit(_)) {
+                return Err(format!(
+                    "{}: {} is not replaced in applied files; only %COMMIT(<revision>)% is",
+                    entry.path().display(),
+                    placeholder.token()
+                ));
+            }
+            if milestone < PLACEHOLDERS_FROM {
+                return Err(format!(
+                    "{}: placeholders run from {PLACEHOLDERS_FROM}, after the scenario's milestone",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The arguments of a step and its expectations that the runner substitutes

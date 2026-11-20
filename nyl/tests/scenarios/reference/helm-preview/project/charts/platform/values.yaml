@@ -1,0 +1,13 @@
+fullnameOverride: ""
+image:
+  repository: registry.example.invalid/platform
+  digest: ""
+replicas: 1
+host: platform.example.invalid
+channel: stable
+logLevel: info
+ingress:
+  className: nginx
+operator:
+  install: false
+settings: {}
