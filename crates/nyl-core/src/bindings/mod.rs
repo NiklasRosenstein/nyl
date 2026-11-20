@@ -14,7 +14,8 @@
 //! - [`resolve_document`] replaces reference objects at any depth of a
 //!   free-form document and records provenance per JSON Pointer. The caller
 //!   names the reference kinds the document accepts, such as
-//!   [`UNIT_REFERENCE_KINDS`].
+//!   [`UNIT_REFERENCE_KINDS`], or [`TEMPLATE_VALUE_KINDS`] for an
+//!   EnvironmentTemplate's `values`.
 //! - [`resolve_declared`] substitutes typed source clauses ([`SourceKind`])
 //!   only at the fields a schema marks with [`Resolvable`], and
 //!   [`resolve_in_references`] does so inside each reference object of a
@@ -53,8 +54,8 @@ pub use declared::{reject_surviving_clauses, resolve_declared, resolve_in_refere
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
 pub use sources::{
-    resolvable_fields, resolvable_schema, without_clauses, FromInput, FromValues, InputSource, ParameterSource,
-    Resolvable, ResolvableField, SourceClause, SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
+    resolvable_fields, resolvable_schema, without_clauses, FromInput, FromParameter, FromValues, InputSource,
+    ParameterSource, Resolvable, ResolvableField, SourceClause, SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
 };
 
 /// An effective value and where it came from.
@@ -128,6 +129,15 @@ pub trait Providers {
 
     fn promotion(&self, field: &str, _source: &PromotionInputSource) -> Provided<Self::Origin> {
         Err(unsupported(field, BindingKind::FromPromotion))
+    }
+
+    /// A `fromParameter` reference, which only an EnvironmentTemplate's
+    /// `values` accept ([`TEMPLATE_VALUE_KINDS`]).
+    fn parameter(&self, field: &str, _source: &ParameterSource) -> Provided<Self::Origin> {
+        Err(BindingIssue::new(format!(
+            "{field}.{} is not supported here",
+            <FromParameter as SourceKind>::FIELD
+        )))
     }
 
     /// Why a required slot whose binding left it unbound is missing, when the
@@ -327,6 +337,10 @@ struct Found<O> {
 /// value, and a value recorded through a PromotionPath.
 pub const UNIT_REFERENCE_KINDS: &[&str] = &["fromUnit", "fromPromotion"];
 
+/// The reference kinds of an EnvironmentTemplate's `values`: a parameter
+/// bound for the instance ([`Providers::parameter`]).
+pub const TEMPLATE_VALUE_KINDS: &[&str] = &[<FromParameter as SourceKind>::FIELD];
+
 /// The fields of an object that are one of `kinds`, in key order: none for
 /// data, one without any other field for a reference object; anything else
 /// mixes a reference with other fields.
@@ -348,6 +362,19 @@ fn parse_reference(field: &str, kind_label: &str, kind: &str, reference: &Value)
         InputBinding::deserialize(reference).map_err(|error| format!("{field} is not a valid reference: {error}"))?;
     binding.validate(field).map_err(|error| error.to_string())?;
     Ok(binding)
+}
+
+/// Parse and validate the `S` clause of the reference object at `field`.
+fn parse_clause_reference<S: SourceKind>(field: &str, reference: &Value) -> Result<S::Clause, String> {
+    let kind_field = format!("{field}.{}", S::FIELD);
+    let clause = &reference[S::FIELD];
+    if !clause.is_object() {
+        return Err(format!("{kind_field} must be an object"));
+    }
+    let clause =
+        S::Clause::deserialize(clause).map_err(|error| format!("{kind_field} is not a valid reference: {error}"))?;
+    clause.validate(&kind_field).map_err(|error| error.to_string())?;
+    Ok(clause)
 }
 
 fn walk<P: Providers>(
@@ -415,14 +442,25 @@ fn resolve_reference<P: Providers>(
     found: &mut Found<P::Origin>,
     issues: &mut Vec<BindingIssue>,
 ) -> Option<Value> {
-    let binding = match parse_reference(field, &format!("{field}.{kind}"), kind, reference) {
-        Ok(binding) => binding,
-        Err(issue) => {
-            issues.push(BindingIssue::new(issue));
-            return None;
+    // A source clause is no binding: it parses as its own clause type.
+    let (provision, binding) = if kind == <FromParameter as SourceKind>::FIELD {
+        match parse_clause_reference::<FromParameter>(field, reference) {
+            Ok(clause) => (providers.parameter(field, &clause), None),
+            Err(issue) => {
+                issues.push(BindingIssue::new(issue));
+                return None;
+            }
+        }
+    } else {
+        match parse_reference(field, &format!("{field}.{kind}"), kind, reference) {
+            Ok(binding) => (resolve_binding(field, &binding, providers), Some(binding)),
+            Err(issue) => {
+                issues.push(BindingIssue::new(issue));
+                return None;
+            }
         }
     };
-    match resolve_binding(field, &binding, providers) {
+    match provision {
         Ok(Provision::Value(input)) => {
             found.provenance.insert(pointer.to_owned(), input.origin);
             Some(input.value)
@@ -430,8 +468,8 @@ fn resolve_reference<P: Providers>(
         Ok(Provision::Unbound) => {
             let requirement = format!("{field} needs a value");
             issues.push(BindingIssue::new(
-                providers
-                    .unbound(field, &binding, &requirement)
+                binding
+                    .and_then(|binding| providers.unbound(field, &binding, &requirement))
                     .unwrap_or_else(|| format!("{requirement}, but its {kind} reference has none yet")),
             ));
             None
@@ -695,6 +733,38 @@ mod tests {
                 pointer: "/variables/db/hosts/0".to_owned(),
                 reason: Blocker::no_current_receipt(ProducerRef::local(UnitName::new("database").unwrap())),
             }]
+        );
+    }
+
+    /// Catches a document resolving a clause kind its caller did not name:
+    /// `fromParameter` is data where only unit references resolve, and a
+    /// provider that reads no parameters refuses it.
+    #[test]
+    fn test_resolve_document_resolves_only_the_kinds_it_is_given() {
+        let document = json!({"crds": {"fromParameter": {"name": "crds"}}});
+        let mut issues = Vec::new();
+        let resolved = resolve_document(
+            "spec.values",
+            "",
+            &document,
+            UNIT_REFERENCE_KINDS,
+            &TestProviders::default(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(resolved.value, document);
+
+        resolve_document(
+            "spec.values",
+            "",
+            &document,
+            TEMPLATE_VALUE_KINDS,
+            &TestProviders::default(),
+            &mut issues,
+        );
+        assert_eq!(
+            messages(&issues),
+            ["spec.values.crds.fromParameter is not supported here"]
         );
     }
 

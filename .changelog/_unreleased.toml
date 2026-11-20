@@ -237,3 +237,9 @@ id = "4ca5b8f5-c680-44c3-9c10-78f1d1ecb48e"
 type = "feature"
 description = "HelmChart `spec.valuesFrom` reads chart values from YAML files of the repository (`file`, under the path and Git-visibility rules of Cluster `valuesFrom`) and from `object` Release inputs (`input`, only in the bundle of a Release that declares it), each optionally narrowed by `pointer` and mounted under `key`. Entries merge in order and inline `values` merge last. The merged values are passed to Helm as data, never templated or resolved. A values file is an input of the Release and target render caches, and the merged values are part of the Helm cache key. `spec.includeCrds` and `spec.lookup` accept `{fromInput: {name, pointer?}}` to read a boolean Release input"
 author = "@NiklasRosenstein"
+
+[[entries]]
+id = "5a11e01f-0470-4367-bb3e-28f0f8c98871"
+type = "feature"
+description = "An EnvironmentTemplate's `spec.values` read the instance's parameters with `{fromParameter: {name, pointer?}}` at any depth, including the `value` of an inline target's Release-input bindings, so a boolean or integer parameter keeps its type without `| tojson`. The clause resolves when the instance's values are computed (`state init --template`, `reconcile --template`, and every later command), after strings render and before units render, to the bound parameter with its declared default and type. An undeclared parameter fails with `NYL-TEMPLATE-INVALID` naming the declared ones, and `nyl validate` checks every template through its sample instances. A `fromParameter` clause in a declared Environment, EnvironmentGroup, DeploymentTarget, unit document, or Release bundle is an error"
+author = "@NiklasRosenstein"

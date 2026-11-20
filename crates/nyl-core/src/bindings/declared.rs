@@ -263,7 +263,8 @@ pub fn reject_surviving_clauses(field: &str, document: &Value, kinds: &[&str], i
         Value::Object(fields) => {
             if let (1, Some(kind)) = (fields.len(), fields.keys().find(|key| kinds.contains(&key.as_str()))) {
                 issues.push(BindingIssue::new(format!(
-                    "{field} holds a {kind} clause where none resolves; {kind} is accepted only by the fields that declare it"
+                    "{field} holds a {kind} clause where none resolves; {}",
+                    clause_scope(kind)
                 )));
                 return;
             }
@@ -277,6 +278,17 @@ pub fn reject_surviving_clauses(field: &str, document: &Value, kinds: &[&str], i
             }
         }
         _ => {}
+    }
+}
+
+/// Where a clause of `kind` resolves, for the error about one that did not.
+fn clause_scope(kind: &str) -> String {
+    if kind == <super::FromParameter as SourceKind>::FIELD {
+        format!(
+            "{kind} resolves only in an EnvironmentTemplate's spec.values, see https://niklasrosenstein.github.io/nyl/reference/value-sources/#template-parameters-fromparameter"
+        )
+    } else {
+        format!("{kind} is accepted only by the fields that declare it")
     }
 }
 

@@ -350,7 +350,7 @@
         },
         "values": {
           "additionalProperties": true,
-          "description": "Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created.",
+          "description": "Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created. At any depth, an object whose only field is `fromParameter` (`{fromParameter: {name, pointer?}}`) is replaced by the instance's bound parameter `name`, typed as declared, or the value `pointer` selects in it.",
           "type": "object"
         }
       },
