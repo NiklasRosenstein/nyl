@@ -137,6 +137,10 @@ spec:
   definitions across repositories through a locked `GitSource` is an
   [open decision](#open-decisions).
 
+The [running example](#running-example-teams-and-services)'s `Team` and `Service` definitions use
+`x-nyl-reference`, nested schema defaults, and `x-nyl-validations` rules with
+and without `oldSelf`.
+
 ## Stage 1: Discovery
 
 ```yaml
@@ -239,6 +243,10 @@ spec:
 - **Stored with the declaration.** The catalog keeps each source as written.
   `nyl get resources` shows it that way, and only stage 4 replaces it.
 
+In the [running example](#running-example-teams-and-services), `checkout`'s `database.host` is a
+`$fromUnit` that every consumer of `checkout` resolves, or lists, in its own
+way.
+
 ## Stage 2: Admission
 
 Every catalog resource goes through three checks. Each check reads only S,
@@ -253,7 +261,8 @@ so its result applies to every environment and can be cached under the
    holds a source runs in stage 4 instead. Stage 4 validates each resolved
    value against its field's subschema.
 2. **Referential integrity.** Every `x-nyl-reference` field must name a
-   resource in the catalog.
+   resource in the catalog (`NYL-RESOURCE-REFERENCE-MISSING`), as a
+   misspelled owner in the [running example](#running-example-teams-and-services) shows.
 3. **Policy.** Kyverno validating policies run against the resource. They are
    loaded only from `[resources] policies`.
    - Nyl evaluates a copy of the resource with trusted context added as
@@ -349,6 +358,8 @@ schema:
   the platform, for example only `platform/` may change an `ou`.
 - Rules and their effects are part of the definition, so editing them is a
   reviewed change to a trusted path.
+- The [running example](#running-example-teams-and-services) guards a downgrade of a critical
+  service with `effect: approve` ([R5](#r5-transition-rules)).
 
 ### Choosing a base
 
@@ -534,6 +545,10 @@ describe:
   Preventing two configurations from fighting over one account is the point
   of making it explicit.
 
+In the [running example](#running-example-teams-and-services), `oncall-roster` owns the Services
+and reads the Teams, and `service-directory` reads both
+([R2](#r2-collections-in-units)).
+
 ## Stage 4: Resolution
 
 Stage 4 resolves the sources that the members and
@@ -685,7 +700,9 @@ feeds units, so an export and a unit's bundle cannot disagree:
 Neither writes state, takes a lease, loads a unit driver, renders a Release,
 or contacts a cluster. Without `-e` they read nothing but the source, so
 their output depends only on S and the arguments, and every machine and CI
-job produces the same bytes.
+job produces the same bytes. The [running example](#running-example-teams-and-services) feeds an
+on-call export and a static service directory page from them
+([R12](#r12-the-standalone-export)).
 
 ### `nyl get resources`
 
@@ -904,7 +921,9 @@ variables file as they already do. Nyl's generic preparation writes no
 
 **Through the whole bundle.** The `Command` kind adds `collections` to the
 `NYL_INPUTS` file, next to `values`. A plugin driver would receive the bundle
-in its serialized `DesiredUnit`.
+in its serialized `DesiredUnit`. The [running example](#running-example-teams-and-services)'s
+`service-directory` unit renders its page from that file with the generator
+that also reads the standalone export.
 
 ### Driver contract changes
 
@@ -1103,6 +1122,8 @@ and examples must say this plainly.
   breakglass: hold, `nyl exec … -- state rm`, remove the declaration, resume.
 - Revoking a grant is the normal case: delete the declaration, review the
   plan's destroy of that grant, and approve.
+- The [running example](#running-example-teams-and-services) deletes a critical service and shows
+  its owner waiting while a reading unit does not ([R4](#r4-removal-under-approval)).
 
 ### Guarded changes
 
@@ -1292,6 +1313,469 @@ bundles, so every later consumer (units in R2, Releases in R10) reuses its
 code rather than building its own. Slice identifiers are stable; R12 is
 numbered after the existing slices and ordered by what it needs.
 
+The [running example](#running-example-teams-and-services) shows what each slice makes work on one
+small catalog, from R1 to R10, and becomes `examples/service-catalog/` with a
+reference scenario that each slice extends.
+
+## Running example: teams and services
+
+One small catalog grows with the slices of the [rollout](#rollout) and shows
+what each slice makes work. Teams declare who they are, and services declare
+who owns them. Several consumers read the same declarations: a static page, an
+on-call export, an OpenTofu unit, and a Kubernetes Release. Nothing in it needs
+cloud credentials. Once implemented, it becomes `examples/service-catalog/`
+and a reference scenario runs it in CI. The larger
+[guide sketch](#guide-sketch-implementing-a-domain-resource) for AWS
+accounts stays the guide of R7.
+
+All YAML, scripts, and console output in this section are illustrative
+sketches of planned behaviour; field names, codes, and messages may change
+as the slices ship.
+
+```text
+examples/service-catalog/
+  nyl.toml                                  # [resources] definitions and policies
+  platform/
+    definitions/catalog.yaml                # Team and Service                      R1
+    policies/services.yaml                  # Kyverno ValidatingPolicy              R3
+    units/database.yaml                     # Command unit producing `connection`   R12
+    units/service-directory.yaml            # Command unit publishing the page      R2
+    units/oncall-roster.yaml, oncall-roster/main.tf   # OpenTofu, `local` provider  R2
+    releases/service-namespaces.yaml, templates/service-namespace.yaml             R10
+  environments/dev.yaml                     # the `dev` Environment                 R12
+  teams/
+    payments/team.yaml services.yaml        # Team payments; Services checkout, invoices
+    search/catalog.yaml                     # Team search and Service search-api in one file
+  tools/service-directory.py                # the static-page generator              R12
+```
+
+### The definitions
+
+```yaml
+# platform/definitions/catalog.yaml
+apiVersion: gitops.nyl/v1
+kind: ResourceDefinition
+metadata: {name: teams.domain.acme.example}
+spec:
+  group: domain.acme.example
+  kind: Team
+  version: v1
+  description: A team that owns services.
+  schema:
+    type: object
+    required: [displayName, members]
+    additionalProperties: false
+    properties:
+      displayName: {type: string}
+      members: {type: array, minItems: 1, items: {type: string, pattern: '^[a-z][a-z0-9-]*$'}}
+      onCall: {type: string}
+    x-nyl-validations:                                  # active from R5
+      - rule: "!has(self.onCall) || self.onCall in self.members"
+        message: onCall must be one of the team's members.
+---
+apiVersion: gitops.nyl/v1
+kind: ResourceDefinition
+metadata: {name: services.domain.acme.example}
+spec:
+  group: domain.acme.example
+  kind: Service
+  version: v1
+  description: A service, owned by one team.
+  schema:
+    type: object
+    required: [owner, tier, namespace]
+    additionalProperties: false
+    properties:
+      owner: {type: string, x-nyl-reference: {kind: Team}}
+      tier:
+        type: string
+        enum: [critical, standard]
+        x-nyl-validations:                              # active from R5
+          - rule: "!(oldSelf == 'critical' && self == 'standard')"
+            message: Downgrading a critical service drops it from the on-call roster.
+            effect: approve
+            reason: tier-downgrade
+      namespace: {type: string, pattern: '^[a-z][a-z0-9-]*$'}
+      quota:
+        type: object
+        default: {}
+        additionalProperties: false
+        properties:
+          cpu: {type: string, default: '2'}
+          memory: {type: string, default: 4Gi}
+      database:
+        type: object
+        required: [host]
+        additionalProperties: false
+        properties:
+          host: {type: string}
+```
+
+`quota` defaults to `{}`, and its properties' defaults then apply inside it,
+so a service that declares no quota gets `{cpu: '2', memory: 4Gi}` and one
+that declares only `cpu` keeps its own `cpu` and gets the default `memory`.
+
+### The declarations
+
+```yaml
+# teams/payments/team.yaml
+apiVersion: domain.acme.example/v1
+kind: Team
+metadata: {name: payments, labels: {team: payments}}
+spec: {displayName: Payments, members: [alice, bob], onCall: alice}
+```
+
+```yaml
+# teams/payments/services.yaml
+apiVersion: domain.acme.example/v1
+kind: Service
+metadata: {name: checkout, labels: {team: payments, tier: critical}}
+spec:
+  owner: payments
+  tier: critical
+  namespace: checkout
+  quota: {cpu: '4'}
+  database:
+    host: {$fromUnit: {unit: database, output: connection, pointer: /host}}
+---
+apiVersion: domain.acme.example/v1
+kind: Service
+metadata: {name: invoices, labels: {team: payments, tier: standard}}
+spec: {owner: payments, tier: standard, namespace: invoices}
+```
+
+```yaml
+# teams/search/catalog.yaml
+apiVersion: domain.acme.example/v1
+kind: Team
+metadata: {name: search, labels: {team: search}}
+spec: {displayName: Search, members: [carol, dan], onCall: carol}
+---
+apiVersion: domain.acme.example/v1
+kind: Service
+metadata: {name: search-api, labels: {team: search, tier: critical}}
+spec: {owner: search, tier: critical, namespace: search-api}
+```
+
+The tier appears twice on purpose. Membership and `-l` read only the literal
+envelope ([stage 3](#stage-3-collection)), so selection uses the `tier`
+label; transition rules guard `spec`, so the rule uses `spec.tier`. The
+policy of R3 keeps the two equal.
+
+`database` is the one unit the catalog depends on, a Command unit that writes
+`{"connection": {"host": "checkout-db.dev.internal", "port": 5432}}` to
+`NYL_OUTPUTS`, selected by the `dev` Environment.
+
+### Consumers
+
+| Consumer | Reads | Path | Slice |
+| --- | --- | --- | --- |
+| On-call export | `nyl bundle --kind Service -l tier=critical -o json` piped to `jq` | Standalone | R12 |
+| Service directory page | `nyl get resources -o json` piped to `tools/service-directory.py` | Standalone | R12 |
+| Service directory page | The `service-directory` Command unit's `collections` input, same generator | Orchestrated | R2 |
+| On-call roster | The `oncall-roster` OpenTofu unit, `access: own` | Orchestrated | R2, R4 |
+| Service namespaces | The `service-namespaces` Release's `spec.collections` | Rendering | R10 |
+
+The service directory is the same consumer on both paths: one generator,
+first run on an export by any CI job, later run by a unit that publishes the
+page. Nothing about the declarations changes between the two.
+
+### R1: definitions and the catalog
+
+R1 makes the definitions, the declarations, and their checks work, with no
+Environment and no unit in the project:
+
+```console
+$ nyl validate
+ok: 2 definitions, 5 domain resources admitted
+
+$ nyl get resources --kind Service
+NAME        KIND     LABELS                         SOURCE                         ADMITTED
+checkout    Service  team=payments,tier=critical    /teams/payments/services.yaml#0  yes
+invoices    Service  team=payments,tier=standard    /teams/payments/services.yaml#1  yes
+search-api  Service  team=search,tier=critical      /teams/search/catalog.yaml#1     yes
+```
+
+- **Referential integrity.** A misspelled owner fails at the declaration,
+  with a pointer to the field:
+
+  ```console
+  $ nyl validate
+  error[NYL-RESOURCE-REFERENCE-MISSING]: Service/invoices: /spec/owner names Team "paymnets", which is not declared
+    --> /teams/payments/services.yaml#1 /spec/owner
+    = help: declared Teams: payments, search
+  ```
+
+- **Schema defaults.** `nyl get resource Service/invoices` shows
+  `quota: {cpu: '2', memory: 4Gi}`, and `checkout` shows
+  `quota: {cpu: '4', memory: 4Gi}`.
+- **A value source in a declaration.** `checkout`'s `database.host` is
+  carried as written: its subschema is skipped at admission, and `nyl get
+  resources` shows the `$fromUnit` as declared. A `$fromEnvironment` in its
+  place fails with the fix to read the value in the consuming unit instead.
+
+### R12: the standalone export
+
+R12 makes the two standalone consumers work. The project gains the `dev`
+Environment and the `database` unit, which only `nyl bundle -e` reads.
+
+**The on-call export.** An on-call or status tool reads the critical services
+and their teams' on-call handles from one bundle, which carries the owning
+Teams through the [reference closure](#referenced-resources):
+
+```console
+$ nyl bundle --kind Service -l tier=critical -o json | jq '
+    .referenced["domain.acme.example/v1/Team"] as $teams
+    | .collections.services.items | to_entries
+    | map({service: .key, team: .value.spec.owner, onCall: $teams[.value.spec.owner].spec.onCall})'
+warning[NYL-RESOURCE-SOURCES-UNRESOLVED]: 1 value source left in place; pass -e to resolve it
+  /collections/services/items/checkout/spec/database/host ($fromUnit)  /teams/payments/services.yaml#0
+[
+  {"service": "checkout", "team": "payments", "onCall": "alice"},
+  {"service": "search-api", "team": "search", "onCall": "carol"}
+]
+```
+
+Without `-e`, the bundle lists `checkout`'s host under
+`unresolved: [{pointer: /collections/services/items/checkout/spec/database/host, source: $fromUnit}]`
+and exits 0. With `-e dev`, the host resolves read-only from `database`'s
+current receipt, `unresolved` disappears, and a tool can read
+`.spec.database.host` as `checkout-db.dev.internal`. Before `database` has a
+receipt in `dev`, `nyl bundle -e dev` exits 2 and names the blocked pointer.
+
+**The service directory page.** A static HTML page lists each team with its
+members, its on-call handle, and its services with their tiers. It is built
+from the catalog alone, with no other Nyl feature, and could be published by
+any static-site job:
+
+```sh
+set -o pipefail
+nyl get resources -o json | python3 tools/service-directory.py > public/index.html
+```
+
+```python
+# tools/service-directory.py: a ResourceCatalog, a bundle, or NYL_INPUTS on stdin; HTML on stdout
+import html, json, sys
+
+def load(doc):
+    if doc.get("kind") == "ResourceCatalog":            # nyl get resources -o json
+        of = lambda kind: {r["metadata"]["name"]: r["spec"] for r in doc["items"]
+                           if r["kind"] == kind and r["admission"]["admitted"]}
+        return of("Team"), of("Service")
+    c = doc["collections"]                              # a bundle, or a Command unit's NYL_INPUTS
+    return ({n: i["spec"] for n, i in c["teams"]["items"].items()},
+            {n: i["spec"] for n, i in c["services"]["items"].items()})
+
+teams, services = load(json.load(sys.stdin))
+e = lambda s: html.escape(str(s))
+out = ["<!doctype html><meta charset=utf-8><title>Service directory</title><h1>Service directory</h1>"]
+for name, team in sorted(teams.items()):
+    out.append(f"<h2>{e(team['displayName'])}</h2><p>On call: {e(team.get('onCall', 'nobody'))}"
+               f" · Members: {e(', '.join(team['members']))}</p><ul>")
+    out += [f"<li>{e(s)}: {e(svc['tier'])}, namespace {e(svc['namespace'])}</li>"
+            for s, svc in sorted(services.items()) if svc["owner"] == name]
+    out.append("</ul>")
+print("\n".join(out))
+```
+
+The page reads only names, `members`, `onCall`, `tier`, and `namespace`, so
+the carried `$fromUnit` in `checkout` does not matter to it, and the catalog
+is the same bytes on every machine.
+
+### R2: collections in units
+
+R2 makes units consume the catalog. Both units are selected by `dev`.
+
+**The service directory, orchestrated.** The same generator runs inside a
+Command unit, which reads its collections from `NYL_INPUTS` and publishes the
+page. Its collections are `access: read`, so it claims nothing and never
+waits for an owner's approval:
+
+```yaml
+# platform/units/service-directory.yaml
+apiVersion: units.gitops.nyl/v1
+kind: Command
+metadata: {name: service-directory, labels: {example: service-catalog}}
+spec:
+  collections:
+    teams: {type: {apiVersion: domain.acme.example/v1, kind: Team}, access: read}
+    services: {type: {apiVersion: domain.acme.example/v1, kind: Service}, access: read}
+  files: ['/tools/**']
+  command: ['./tools/publish-directory.sh']    # service-directory.py < "$NYL_INPUTS", then upload
+  outputs:
+    url: {type: string}
+```
+
+Because `checkout` carries a `$fromUnit`, every unit whose collections
+include it, `service-directory` and `oncall-roster` below, depends on
+`database` from S on, before any value exists: `nyl plan -e dev` lists the
+edge with the member's source path, and a run waits for `database`'s receipt.
+`nyl bundle --collection service-directory/teams --collection
+service-directory/services` prints the bytes the unit receives.
+
+**The on-call roster.** An OpenTofu unit owns every Service and writes a
+roster file per critical service with the `local` provider:
+
+```yaml
+# platform/units/oncall-roster.yaml
+apiVersion: units.gitops.nyl/v1
+kind: OpenTofu
+metadata: {name: oncall-roster, labels: {example: service-catalog}}
+spec:
+  source: {path: /platform/oncall-roster}
+  backend: {path: '{{ values.statePath }}/oncall-roster.tfstate'}
+  collections:
+    services:
+      type: {apiVersion: domain.acme.example/v1, kind: Service}
+      access: own
+    teams:
+      type: {apiVersion: domain.acme.example/v1, kind: Team}
+      access: read
+  variables:
+    services: {$fromCollection: {collection: services, each: /spec}}
+    teams: {$fromCollection: {collection: teams, each: /spec}}
+```
+
+```hcl
+# platform/oncall-roster/main.tf
+variable "services" { type = map(object({ owner = string, tier = string })) }
+variable "teams"    { type = map(object({ members = list(string), onCall = optional(string) })) }
+
+resource "local_file" "roster" {
+  for_each = { for name, s in var.services : name => s if s.tier == "critical" }
+  filename = "${path.root}/rosters/${each.key}.txt"
+  content  = "on call: ${var.teams[each.value.owner].onCall}\nteam: ${join(", ", var.teams[each.value.owner].members)}\n"
+}
+```
+
+- The unit owns all Services and filters critical ones itself, so a tier
+  change stays a change of one member, which the transition rule of R5 can
+  guard, instead of the member leaving the collection.
+- A second unit with `access: own` on Services fails resolution with
+  `NYL-RESOURCE-OWNER-OVERLAP`, naming both units.
+- `nyl prepare -e dev --unit oncall-roster` writes the same `bundle.yaml` as
+  `nyl bundle --collection oncall-roster/services --collection
+  oncall-roster/teams -e dev`.
+
+### R3: policy admission
+
+A policy keeps the tier label equal to `spec.tier`, and requires a critical
+service's team to have an on-call handle:
+
+```yaml
+# platform/policies/services.yaml
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata: {name: critical-services-have-on-call}
+spec:
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [domain.acme.example], apiVersions: [v1], resources: [services], operations: [CREATE, UPDATE]}
+  validations:
+    - expression: object.metadata.labels['tier'] == object.spec.tier
+      message: The tier label must equal spec.tier.
+    - expression: >-
+        object.spec.tier != 'critical'
+        || has(resource.Get('domain.acme.example/v1', 'teams', '', object.spec.owner).spec.onCall)
+      message: A critical service's team must name an onCall member.
+```
+
+Removing `onCall` from `search` rejects `search-api`, which blocks
+`oncall-roster` and `service-directory` in `dev` and fails the R12 exports
+that select it, while `invoices` and its consumers are unaffected. The second
+rule reads the owning Team, which admission must serve offline from the
+admitted catalog; see [Open decisions](#open-decisions).
+
+### R4: removal under approval
+
+Deleting `search-api`'s declaration drops a member of `oncall-roster`'s
+owned collection. `nyl plan -e dev` shows `-1 search-api` with
+`NYL-RESOURCE-MEMBERS-REMOVED` and the destroy of its roster file, and the
+unit waits for `--approve oncall-roster`. `service-directory` re-runs with
+the smaller page and waits for nothing. `nyl prepare -e dev --unit
+oncall-roster --native` writes the variables file that the run passes to
+`tofu`, so the roster can be planned by hand against a scratch backend.
+
+### R5: transition rules
+
+The two `x-nyl-validations` rules of the definitions take effect:
+
+- `onCall: erin` in a team without `erin` in `members` fails admission at
+  `/spec/onCall` with the rule's message.
+- Downgrading `checkout` from `critical` to `standard`, label and spec
+  together, is a guarded change:
+
+  ```console
+  $ nyl validate --base origin/main
+  guarded: Service/checkout tier-downgrade: Downgrading a critical service drops it from the on-call roster.
+    --> /teams/payments/services.yaml#0 /spec/tier
+  exit 2
+  ```
+
+  Under orchestration `oncall-roster`, the owner, waits for
+  `--approve oncall-roster` with the reason `tier-downgrade`;
+  `service-directory`, which only reads, re-runs without waiting.
+- The Service definition now declares a rule with `oldSelf`, so the R12
+  export commands take `--no-base` or `--base <rev>`; `nyl bundle --kind
+  Service -l tier=critical` without either fails with
+  `NYL-RESOURCE-BASE-REQUIRED`.
+
+### R8–R10: a Release per catalog
+
+A Release renders, per Service, a Namespace, a ResourceQuota from the
+defaulted `quota`, and a RoleBinding for the owning team's members:
+
+```yaml
+# platform/releases/service-namespaces.yaml
+apiVersion: k8s.nyl/v1
+kind: Release
+metadata: {name: service-namespaces, namespace: platform-services, labels: {example: service-catalog}}
+spec:
+  manifests: [/platform/templates/service-namespace.yaml]
+  collections:
+    services: {type: {apiVersion: domain.acme.example/v1, kind: Service}, paths: ['/teams/**']}
+```
+
+```yaml
+# platform/templates/service-namespace.yaml
+{% for name, svc in collections.services.items | items %}
+{% set team = referenced['domain.acme.example/v1/Team'][svc.spec.owner] %}
+apiVersion: v1
+kind: Namespace
+metadata: {name: {{ svc.spec.namespace }}, labels: {team: {{ svc.spec.owner }}, tier: {{ svc.spec.tier }}}}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: default, namespace: {{ svc.spec.namespace }}}
+spec:
+  hard: {requests.cpu: {{ svc.spec.quota.cpu | tojson }}, requests.memory: {{ svc.spec.quota.memory | tojson }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: {{ svc.spec.owner }}-edit, namespace: {{ svc.spec.namespace }}}
+subjects:
+{% for member in team.spec.members %}
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: {{ member }}}
+{% endfor %}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
+---
+{% endfor %}
+```
+
+- R8 gives the Release its literal labels and `spec.manifests`, so an
+  ApplicationGroup selects it with `example: service-catalog`; R9 admits it
+  by policy; R10 gives it `spec.collections` and the `collections` and
+  `referenced` variables.
+- `invoices` renders `requests.cpu: "2"` and `requests.memory: 4Gi` from the
+  schema defaults, `checkout` `requests.cpu: "4"`.
+- Every interpolated string is a name, handle, or namespace that the schemas
+  restrict to YAML-safe characters, or goes through `tojson`.
+- `checkout` carries a `$fromUnit` that `render-tree` cannot resolve, so
+  `render-tree` rejects the Release with the binding rule's message naming
+  `checkout` and `/spec/database/host`, although the template never reads
+  the host. Only orchestrated execution, which passes the resolved bundle,
+  renders it; see [Open decisions](#open-decisions).
+
 ## Guide sketch: implementing a domain resource
 
 This is the outline of the docs guide the issue asks for. It would go under
@@ -1361,10 +1845,12 @@ teams/
 | Whether `nyl get resources` needs a more specific name, because `nyl get` also reports Nyl's own project resources | R12 |
 | Whether one `nyl bundle` invocation takes several ad-hoc selections, each with its own `--as` | After R12 |
 | Whether `--collection` also names a Release's collection, as `<group>/<release>/<collection>` | R10 |
+| Whether a Release may render members whose carried sources its templates never read, as `checkout`'s `database.host` in the [running example](#r8r10-a-release-per-catalog), instead of rejecting them in `render-tree` | R10 |
 | Definition sharing across repositories through a locked `GitSource`, refreshed by `nyl update source-locks` | After R1 |
 | Version conversion between definition versions, or coordinated bumps only | After R2 |
 | Bundle size limits for desired state, and whether large bundles stay in state or are referenced by digest | R2 |
 | Offline Kyverno coverage of `ValidatingPolicy` for derived CRDs, and whether CODEOWNERS owners are offered as trusted policy context | R3 |
+| Whether and how a policy reads other catalog resources, such as the owning Team of a Service in the [running example](#r3-policy-admission), served offline from the admitted catalog, and how that enters the admission cache key | R3 |
 | Generating HCL variable types from definitions (`nyl schema hcl`) | After R4 |
 | Whether per-member removal approval should be per member (`--approve aws-accounts:legacy-sandbox`) | R4 |
 | Whether the character set for `resource` strings printed into templates should be wider, for example to allow `:` inside quoted scalars | R6 |

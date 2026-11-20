@@ -34,6 +34,7 @@ export const domainModelingRoadmap = {
         },
         { text: '`nyl validate` covering definitions and declarations', done: false },
         { text: '`nyl get resources` and `nyl schema resources`', done: false },
+        { text: 'The running example’s `Team` and `Service` definitions and declarations in `examples/service-catalog/`, with its reference scenario covering `nyl validate`, a misspelled owner, and schema defaults', done: false },
       ],
     },
     {
@@ -48,6 +49,7 @@ export const domainModelingRoadmap = {
         { text: '`nyl get resources -o yaml|json` printing the admitted catalog with defaults applied', done: false },
         { text: '`nyl bundle` selecting members by kind, labels, paths, or a unit’s named collection, with referenced resources and provenance', done: false },
         { text: 'Sources left in place and listed under `unresolved` without `-e`, and resolved read-only against current receipts with `-e`', done: false },
+        { text: 'The example’s standalone consumers: the on-call export from `nyl bundle`, and the static service directory page generated from `nyl get resources -o json`, checked in its reference scenario', done: false },
       ],
       exitCriterion:
         'A project with only `[resources]`, definitions, and declarations, and no Environment, unit, or Release, exports its catalog and a bundle for any selection, byte-identical across machines and worktree layouts; without `-e` the bundle lists its sources and exits 0, and with `-e` they resolve against current receipts, a missing receipt exiting 2; no state is written and no driver is loaded; the published schemas and golden files pin each format.',
@@ -65,6 +67,7 @@ export const domainModelingRoadmap = {
         { text: 'The bundle digest in the execution key', done: false },
         { text: '`$fromCollection` references and the Command unit’s `collections` input', done: false },
         { text: '`nyl prepare` with fixture outputs, writing the same `bundle.yaml` as `nyl bundle`', done: false },
+        { text: 'The example’s `oncall-roster` OpenTofu unit owning the Services, and the `service-directory` Command unit publishing the same page from its `collections` input, both depending on `database` through `checkout`’s `$fromUnit`', done: false },
       ],
     },
     {
@@ -76,6 +79,7 @@ export const domainModelingRoadmap = {
         { text: 'Kyverno validating policies loaded from `[resources] policies`', done: false },
         { text: 'Trusted source-path annotations and a CRD derived from each definition', done: false },
         { text: 'Rejection of mutating policies', done: false },
+        { text: 'The example’s policy requiring a critical service’s team to name an on-call member', done: false },
       ],
     },
     {
@@ -90,6 +94,7 @@ export const domainModelingRoadmap = {
         { text: '`nyl exec` with deployed and worktree bundles', done: false },
         { text: '`nyl prepare --native` and `nyl exec` for a unit outside any Environment, and `prepare --check`', done: false },
         { text: '`--worktree`, `--source`, and `--deployed` with warnings and refusals for relevant uncommitted changes', done: false },
+        { text: 'The example’s removal of a critical service waiting for approval in `oncall-roster` only', done: false },
       ],
     },
     {
@@ -104,6 +109,7 @@ export const domainModelingRoadmap = {
         { text: '`oldObject` and the operation for Kyverno policies', done: false },
         { text: 'Tracked last-applied refs with `exec --advance`: permission preflight, compare-and-swap, recovery steps, and `--bootstrap`', done: false },
         { text: 'The `approve` effect for guarded changes, with removed members as one of them, and `--allow-change` outside orchestration', done: false },
+        { text: 'The example’s `onCall` membership rule and the approval of a `tier` downgrade', done: false },
       ],
     },
     {
@@ -162,6 +168,7 @@ export const domainModelingRoadmap = {
         { text: '`collections` and `referenced` template variables with YAML-safe output', done: false },
         { text: 'Bundle digests in the dependency recorder and the ownership index', done: false },
         { text: 'Rejection in remote sources and of unresolvable references', done: false },
+        { text: 'The example’s `service-namespaces` Release rendering a Namespace, a ResourceQuota, and a RoleBinding per Service, and `render-tree` rejecting `checkout`’s carried `$fromUnit` with the binding rule’s message', done: false },
       ],
     },
     {
