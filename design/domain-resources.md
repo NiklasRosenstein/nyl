@@ -1260,6 +1260,14 @@ nyl resources status unset -e <env> <kind>/<name> <field>... [<options>]
         reason: null
   ```
 
+  `ResourceStatusRecord` is a member of state format `v1`, added in place:
+  no version bump and no migration. Every Nyl that shares an environment's
+  state must support it before any status is written there.
+- **Many resources in one commit.** `--from` with `--map` writes the status of
+  any number of resources in one transition commit, so a pipeline that gathers
+  values from several jobs merges them and calls `nyl resources status set`
+  once. There is no staged-change file; see the open decision on staging.
+
   `by` and `identity` come from the lookup that `nyl attest` uses for
   external attestations; `run` is `--url`, or the CI provider's run URL.
 - **Refreshing.** A write that changes no value writes nothing, unless the
@@ -2575,7 +2583,7 @@ teams/
 | Whether a Release's collections narrow to the active set of the environment whose `KubernetesPublication` publishes it, given that a Release renders the same outside orchestration | R13 |
 | Whether `resourceSelector` takes several terms, such as one per kind, any of which makes a resource active | After R13 |
 | `$fromEnvironment` in declarations, so one declaration can vary per environment | After R13 |
-| Whether `ResourceStatusRecord` joins state format `v1` as a new optional member or comes with a version bump, decided with the user | R14 |
+| A staged-change file for externally asserted facts, starting with resource status and extended to external attestations: a versioned `StagedChanges` document for one environment with typed entries, each with its own precondition, its original time (never younger than the recorded value, refused past `x-nyl-max-age`), and the stager's claimed provenance, the applier's identity being authoritative; written with `--stage <file>` on the writing command through the same validation, and applied with kind-neutral `nyl staged diff\|apply <files…>` in one observed commit under the lease. Never desired state, never committed to source, no server-side pending state. Not for driver-read facts, runs, promotion, or coordination commands | When external attestations are designed |
 | Whether `$fromResource` takes `evidence`, `attestations`, and `environment` as `$fromUnit` does | R14 |
 | Whether a read collection's bundle may carry its members' status, with the dependency edges of `$fromResource` | After R14 |
 | Status observed by a driver through `nyl observe`, and Kubernetes-style `conditions` | After R14 |
