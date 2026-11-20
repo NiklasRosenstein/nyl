@@ -93,6 +93,9 @@ Each binding sets exactly one source:
 | `fromPublication` | A state file in this target's own publication branch, relative to its path prefix, read at the commit publication builds on. With `carryFileFromWorktree`, a working-tree file of this run is rendered from and written into the publication. |
 | `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. An environment's [`KubernetesPublication`](/nyl/orchestration/resource-guides/kubernetes-publication/) resolves `fromUnit` and renders the target with the values pinned. |
 
+[Value sources](/nyl/reference/value-sources/#release-input-bindings) lists
+each source with when it resolves and what it does when it finds no value.
+
 The effective value is the target binding if there is one, otherwise the
 Release default. A binding replaces the value whole; unlike `values`, inputs
 are never deep-merged, so every value has exactly one source.

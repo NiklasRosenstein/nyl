@@ -75,7 +75,9 @@ the whole value it stands for, at any depth of the fields a kind accepts
 references in, such as a Command's `values`. References add a dependency on
 their producer, as `dependsOn` does. A cycle is rejected with
 `NYL-DEPENDENCY-CYCLE`, and a reference to a unit the environment does not
-select with `NYL-DEPENDENCY-UNKNOWN`.
+select with `NYL-DEPENDENCY-UNKNOWN`. [Value sources](/nyl/reference/value-sources/#unit-references)
+lists every field of `fromUnit` and `fromPromotion` and the reference-object
+rule.
 
 A consumer whose producer has no current receipt is **blocked**: it keeps its
 previous resolution and does not execute in this run. When the producer

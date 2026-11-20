@@ -157,7 +157,7 @@ pub struct ParameterSource { pub name: String, pub pointer: Option<String> }
 - **`fromUnit.environment` is the exception.** It sits inside a reference object within a free-form map, not at a fixed schema path. The any-depth walker resolves `fromValues` inside each `fromUnit` it finds. Its schema still says `Resolvable<Option<String>, FromValues>` for editors, but the marked pointers do not drive resolution there.
 - **The surviving-clause check is explicit.** After substitution, an object whose only key is a known clause name is an error. A typed field with `deny_unknown_fields` would catch most survivors anyway, but a field typed as free-form `Value` would not.
 - **Every value a clause reads enters the dependency recorder** at the layer that consumes it, as the cache invariants require. Environment values and Release inputs already do.
-- **One resolver, one shell call.** The resolver is pure (`resolve_declared(spec, pointers, provider)`), and each source kind is one provider method, as in `bindings::Providers`. Bindings, unit references and declared fields share one resolver, as the architecture rules require.
+- **One resolver, one shell call.** The resolver is pure (`resolve_declared::<S>(field, spec, pointers, provider, issues)`), and each source kind is one provider method, `SourceProvider<S>::provide`, as in `bindings::Providers`. The clause type carries its own validation and missing-value rule (`SourceClause`: `default`, `optional`), so the resolver applies them without naming a kind; a provider answer of `null` counts as missing for every kind. Bindings, unit references and declared fields share one resolver, as the architecture rules require.
 
 ## Case study
 

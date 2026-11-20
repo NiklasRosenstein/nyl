@@ -149,7 +149,7 @@ fn reference_edges(
     edges: &mut Vec<GraphEdge>,
     findings: &mut Vec<Finding>,
 ) {
-    let references = match unit_references("", &unit.spec) {
+    let references = match unit_references("", &unit.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
         Ok(references) => references,
         Err(issues) => {
             for issue in issues {

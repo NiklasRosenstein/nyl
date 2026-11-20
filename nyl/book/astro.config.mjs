@@ -239,6 +239,7 @@ export default defineConfig({
                 items: [{ label: "All resources", link: "/reference/resources/" }, ...resourceSidebar()],
               },
               { label: "Configuration", items: ["reference/configuration"] },
+              "reference/value-sources",
               "reference/git-storage",
               "reference/editor-schemas",
               "reference/deprecations",

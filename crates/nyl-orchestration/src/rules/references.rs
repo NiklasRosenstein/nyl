@@ -682,7 +682,14 @@ fn same_receipt(stored: &ReceiptProvenance, new: &ReceiptProvenance) -> bool {
 pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution {
     let providers = ViewProviders { view };
     let mut issues = Vec::new();
-    let resolved = resolve_document("spec", "", &unit.spec, &providers, &mut issues);
+    let resolved = resolve_document(
+        "spec",
+        "",
+        &unit.spec,
+        nyl_core::bindings::UNIT_REFERENCE_KINDS,
+        &providers,
+        &mut issues,
+    );
     let mut errors: Vec<ResolutionError> = issues.into_iter().map(ResolutionError::from).collect();
     let previous = view.previous.get(&unit.unit.name);
     let stored = previous.map(|previous| &previous.provenance);

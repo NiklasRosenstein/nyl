@@ -620,7 +620,9 @@ impl<'r, 'a> Session<'r, 'a> {
             let environments = self.environments.borrow();
             for (consumer, unit) in &environments[environment].desired {
                 let mut referenced = BTreeSet::new();
-                if let Ok(references) = nyl_core::bindings::unit_references("", &unit.spec) {
+                if let Ok(references) =
+                    nyl_core::bindings::unit_references("", &unit.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS)
+                {
                     for reference in references {
                         if reference.source.environment.as_deref() == Some(self.environment().as_str()) {
                             if let Ok(name) = UnitName::new(reference.source.unit) {

@@ -401,7 +401,9 @@ pub fn dependencies(units: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitNam
         .iter()
         .map(|(name, unit)| {
             let mut producers = BTreeSet::new();
-            for reference in unit_references("", &unit.spec).unwrap_or_default() {
+            for reference in
+                unit_references("", &unit.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS).unwrap_or_default()
+            {
                 if reference.source.environment.is_none() {
                     producers.extend(UnitName::new(reference.source.unit.as_str()).ok());
                 }
