@@ -13,7 +13,7 @@ pub struct Tool {
 }
 
 /// Everything the cluster scenarios need besides the `nyl` binary.
-pub const TOOLS: [Tool; 7] = [
+pub const TOOLS: [Tool; 8] = [
     Tool {
         name: "docker (daemon)",
         program: "docker",
@@ -43,6 +43,12 @@ pub const TOOLS: [Tool; 7] = [
         program: "tofu",
         args: &["version"],
         hint: "https://opentofu.org/docs/intro/install/; the OpenTofu unit runs it",
+    },
+    Tool {
+        name: "Helm",
+        program: "helm",
+        args: &["version", "--short"],
+        hint: "https://helm.sh/docs/intro/install/; Nyl renders the fixture's Helm chart with it",
     },
     Tool {
         name: "git",

@@ -46,7 +46,7 @@ impl World {
             world.root.path(),
             &["clone", "--quiet", world.project_url().as_str(), "work"],
         );
-        world.copy_into_work(project);
+        world.copy_into_work(project, &|text| text.to_owned());
         world.commit_and_push("main", "Initial project");
         world
     }
@@ -79,8 +79,8 @@ impl World {
     }
 
     /// Copy `source` over the working clone, substituting the placeholders in
-    /// text files.
-    fn copy_into_work(&self, source: &Path) {
+    /// text files after `resolve` has replaced the step's own.
+    fn copy_into_work(&self, source: &Path, resolve: &dyn Fn(&str) -> String) {
         for entry in walkdir::WalkDir::new(source).sort_by_file_name() {
             let entry = entry.unwrap();
             let relative = entry.path().strip_prefix(source).unwrap();
@@ -91,7 +91,7 @@ impl World {
             }
             let bytes = std::fs::read(entry.path()).unwrap();
             let bytes = match String::from_utf8(bytes) {
-                Ok(text) => self.substitute(&text).into_bytes(),
+                Ok(text) => self.substitute(&resolve(&text)).into_bytes(),
                 Err(error) => error.into_bytes(),
             };
             std::fs::write(&target, bytes).unwrap();
@@ -135,10 +135,25 @@ impl World {
     }
 
     /// A `commit` step: copy files over the clone, remove paths, commit, push.
+    /// `%COMMIT(<revision>)%` in an applied file is the revision's commit in
+    /// `project.git` before the step, such as the lock of a `$fromGit` binding.
     pub fn commit(&self, step: &CommitStep, scenario_dir: &Path) {
+        let resolve = |text: &str| {
+            let mut text = text.to_owned();
+            for placeholder in super::format::placeholders(&text.clone()).expect("validated placeholders") {
+                let super::format::Placeholder::Commit(revision) = &placeholder else {
+                    panic!("validated: only %COMMIT(…)% in applied files");
+                };
+                let commit = self
+                    .try_rev_parse(revision)
+                    .unwrap_or_else(|error| panic!("commit apply {}: {error}", placeholder.token()));
+                text = text.replace(&placeholder.token(), &commit);
+            }
+            text
+        };
         self.checkout(&step.branch);
         if let Some(apply) = &step.apply {
-            self.copy_into_work(&scenario_dir.join(apply));
+            self.copy_into_work(&scenario_dir.join(apply), &resolve);
         }
         for path in &step.delete {
             let target = self.work().join(path);

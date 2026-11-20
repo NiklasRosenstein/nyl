@@ -1,0 +1,45 @@
+# The platform's own chart, deployed by the platform: one bundle for develop
+# and every preview. Every value a target decides is a typed Release input, read
+# with $fromInput where it lands, so booleans stay booleans and the image stays
+# pinned by digest all the way into the chart.
+apiVersion: k8s.nyl/v1
+kind: Release
+metadata:
+  name: platform
+  namespace: {$fromInput: namespace}
+spec:
+  inputs:
+    namespace: {type: string}
+    fullname: {type: string}
+    host: {type: string}
+    imageRepository: {type: string}
+    imageDigest: {type: string}
+    clusterWide: {type: boolean, default: false}
+    chartValues: {type: object, default: {}}
+    sizing: {type: object, default: {replicas: 2}}
+    channel: {type: string, default: stable}
+---
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: platform
+  namespace: {$fromInput: namespace}
+spec:
+  chart: {name: ../charts/platform}         # relative to nyl.toml's directory
+  includeCrds: {$fromInput: clusterWide}
+  valuesFrom:
+    - file: /charts/platform/values-preview.yaml   # from the Git worktree root
+    - input: chartValues
+  values:
+    fullnameOverride: {$fromInput: fullname}
+    image:
+      repository: {$fromInput: imageRepository}
+      digest: {$fromInput: imageDigest}
+    replicas: {$fromInput: {name: sizing, pointer: /replicas}}
+    host: {$fromInputs: host}
+    channel: {$fromInput: channel}
+    operator:
+      install: {$fromInput: clusterWide}
+    # The platform's own settings file reads its secrets with the same syntax
+    # at startup; $literal keeps it as data for the chart.
+    settings: {$literal: {signingKey: {$fromEnvironment: SIGNING_KEY}}}

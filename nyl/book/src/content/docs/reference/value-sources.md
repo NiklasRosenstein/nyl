@@ -20,6 +20,16 @@ happens when it finds no value. The guides explain the workflows:
 and [References between units](/nyl/orchestration/runs/#references-between-units)
 for unit specs.
 
+For a worked example with every source together, see the
+[Helm chart previews scenario](https://github.com/NiklasRosenstein/nyl/blob/develop/design/reference-scenarios.md#scenario-6-helm-chart-previews):
+a platform deploys its own Helm chart for a `develop` environment and a preview
+per pull request, with the image pinned by digest through `$fromUnit` and
+`$fromInput`, the chart's CRD and operator switched by a boolean template
+parameter, sizing from a `$fromGit` lock, and state read with
+`$fromPublication`. Its project is
+`nyl/tests/scenarios/reference/helm-preview/project` in the Nyl repository,
+and CI runs it with Helm on every change.
+
 ## Summary
 
 | Source | Shorthand | Object form | Where it is valid | Resolves | When it finds no value | Type check |
@@ -116,9 +126,10 @@ such as a Terraform unit's `variables`, the key is data:
 
 ```console
 $ nyl validate
-2026-11-20T02:41:15.605358Z ERROR nyl: Configuration error: units are invalid:
-  - dev: NYL-UNIT-INVALID: unit web-image (/nyl/units.yaml): spec.context.path.$fromEnviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/) (correct the unit's spec so that it matches its kind's schema)
 …
+2026-11-20T05:26:47.605293Z ERROR nyl: Configuration error: units are invalid:
+  - dev: NYL-UNIT-INVALID: unit web-image (/nyl/units.yaml): spec.repository.$fromEnviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/) (correct the unit's spec so that it matches its kind's schema)
+Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
 ```
 
 ## Contexts
@@ -574,5 +585,6 @@ A common typo, and a source with other keys next to it:
 ```console
 $ nyl validate
 …
-Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$fromEnv is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)
+2026-11-20T05:26:54.878781Z ERROR nyl: Configuration error: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$fromEnv is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)
+…
 ```

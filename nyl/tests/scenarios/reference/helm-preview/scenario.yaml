@@ -1,0 +1,213 @@
+# A self-hosted platform deploys its own Helm chart: a `develop` environment
+# and a preview per pull request, in one cluster. develop owns the chart's
+# cluster-wide pieces (its CRD and operator); a preview gets them only when its
+# job passes `--param crds=true`. Every value a target decides reaches the
+# chart through a value source, so the published trees show what each source
+# delivered and with which type: the image pinned by digest, booleans as
+# booleans, a locked file, a publication's state, and a `$literal`. The last
+# steps are the mistakes a chart author makes, with the error each one gets.
+#
+# Runs in tier 1, with the fake kinds and with the real KubernetesPublication
+# driver, and in tier 2 with every real tool. Rendering the chart runs `helm`
+# in both tiers.
+contract: design/reference-scenarios.md#scenario-6-helm-chart-previews
+milestone: M6
+steps:
+  # 1. The previews' sizing reads config/capacity.yaml at a locked commit:
+  #    the one this change starts from, as `nyl update source-locks` writes it.
+  - commit: {branch: main, message: "Lock the capacity file for previews", apply: patches/lock}
+  - nyl: [validate]
+    exit: 0
+
+  # 2. develop renders the chart with every cluster-wide piece: the CRD (its
+  #    `includeCrds` reads the clusterWide input), the operator, the image
+  #    joined from the unit's repository and digest, `true` arriving in the
+  #    chart as a boolean, the input over the valuesFrom file, and the
+  #    $literal settings as data.
+  - nyl: [state, init, -e, develop]
+    exit: 0
+  - nyl: [reconcile, -e, develop]
+    exit: 0
+    expect:
+      executed: [platform-image, kubernetes]
+      deploy:
+        branch: deploy
+        contains:
+          - 'develop/platform/platform/crd/platforms.platform.example.com.yaml'
+          - 'develop/platform/platform/deployment.apps/platform/platform.yaml'
+          - 'develop/platform/platform/deployment.apps/platform/platform-operator.yaml'
+          - 'develop/platform/platform/clusterrole.rbac.authorization.k8s.io/platform.yaml'
+          - 'develop/_nyl/index.json'
+        mentions:
+          'develop/platform/platform/deployment.apps/platform/platform.yaml':
+            - [get, artifact, platform-image/image, -e, develop, --pointer, /reference]
+            - 'replicas: 2'                   # the sizing input's default: develop binds none
+          'develop/platform/platform/configmap/platform/platform.yaml':
+            - 'OPERATOR_INSTALL_KIND: bool'
+            - 'INGRESS_CLASS: internal'       # the chartValues input over the valuesFrom file
+            - 'LOG_LEVEL: debug'              # the valuesFrom file over the chart's default
+            - 'CHANNEL: stable'               # no publication state yet: the input's default
+            - '$fromEnvironment: SIGNING_KEY' # $literal content, passed to the chart as data
+
+  # 3. The release tooling writes the channel develop follows back to the
+  #    deploy branch, beside the tree.
+  - commit: {branch: deploy, message: "Follow the beta channel", apply: patches/channel}
+
+  # 4. Pull request 1 opens: its preview builds its own image and publishes a
+  #    tree without the CRD and without the operator. `crds` defaults to
+  #    false, and the boolean reaches both includeCrds and the chart's `if`.
+  - branch: {name: pr-1, from: main}
+  - commit: {branch: pr-1, message: "Show the pull request on the page", apply: patches/pr-1}
+  - nyl: [reconcile, -e, pr-1, --template, preview, --param, pr=1]
+    at: pr-1
+    exit: 0
+    expect:
+      executed: [platform-image, kubernetes]
+      deploy:
+        branch: previews
+        contains:
+          - 'pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1.yaml'
+          - 'pr-1/platform/platform/clusterrole.rbac.authorization.k8s.io/platform-pr-1.yaml'
+          - '_nyl/shared/previews/catalog.yaml'
+        absent:
+          - 'pr-1/platform/platform/crd/**'
+          - 'pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1-operator.yaml'
+        mentions:
+          'pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1.yaml':
+            - [get, artifact, platform-image/image, -e, pr-1, --pointer, /reference]
+            - 'replicas: 1'                   # $fromGit: the locked capacity file
+          'pr-1/platform/platform/configmap/pr-1/platform-pr-1.yaml':
+            - 'OPERATOR_INSTALL_KIND: bool'
+            - 'PUBLIC_HOST: pr-1.preview.example.invalid'
+            - 'INGRESS_CLASS: preview'
+
+  # 5. main raises the previews' capacity, but the lock still names the
+  #    reviewed commit. Pull request 2 asks for the cluster-wide pieces: its
+  #    tree has the CRD and the operator, and still one replica.
+  - commit: {branch: main, message: "Raise the previews' capacity", apply: patches/capacity}
+  - branch: {name: pr-2, from: main}
+  - commit: {branch: pr-2, message: "Work on the operator", apply: patches/pr-2}
+  - nyl: [reconcile, -e, pr-2, --template, preview, --param, pr=2, --param, crds=true]
+    at: pr-2
+    exit: 0
+    expect:
+      executed: [platform-image, kubernetes]
+      deploy:
+        branch: previews
+        contains:
+          - 'pr-2/platform/platform/crd/platforms.platform.example.com.yaml'
+          - 'pr-2/platform/platform/deployment.apps/pr-2/platform-pr-2-operator.yaml'
+        unchanged: ['pr-1/**']
+        mentions:
+          'pr-2/platform/platform/deployment.apps/pr-2/platform-pr-2.yaml':
+            - [get, artifact, platform-image/image, -e, pr-2, --pointer, /reference]
+            - 'replicas: 1'
+          'pr-2/platform/platform/configmap/pr-2/platform-pr-2.yaml':
+            - 'OPERATOR_INSTALL_KIND: bool'
+
+  # 6. Pull request 1 is updated: the valuesFrom file changes, and only the
+  #    publication runs again; the image is current.
+  - commit: {branch: pr-1, message: "Trace the preview's requests", apply: patches/trace}
+  - nyl: [reconcile, -e, pr-1, --template, preview, --param, pr=1]
+    at: pr-1
+    exit: 0
+    expect:
+      executed: [kubernetes]
+      current: [platform-image]
+      deploy:
+        branch: previews
+        unchanged: ['pr-2/**']
+        mentions:
+          'pr-1/platform/platform/configmap/pr-1/platform-pr-1.yaml': ['LOG_LEVEL: trace']
+
+  # 7. A new build reaches develop with the channel the tooling wrote back
+  #    ($fromPublication), and develop keeps its cluster-wide pieces.
+  - commit: {branch: main, message: "Build the platform again", apply: patches/build}
+  - nyl: [reconcile, -e, develop]
+    exit: 0
+    expect:
+      executed: [platform-image, kubernetes]
+      deploy:
+        branch: deploy
+        contains:
+          - 'develop/platform/platform/crd/platforms.platform.example.com.yaml'
+          - 'develop/state/release.json'
+        mentions:
+          'develop/platform/platform/deployment.apps/platform/platform.yaml':
+            - [get, artifact, platform-image/image, -e, develop, --pointer, /reference]
+          'develop/platform/platform/configmap/platform/platform.yaml': ['CHANNEL: beta']
+
+  # 8. Pull request 2 closes: its preview is torn down and its tree removed;
+  #    pull request 1's stays.
+  - nyl: [state, delete, -e, pr-2, --teardown]
+    exit: 0
+    expect:
+      outcome: done
+      removed: [kubernetes]
+      released: [platform-image]
+      deploy:
+        branch: previews
+        absent: ['pr-2/**']
+        contains: ['pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1.yaml']
+        unchanged: ['pr-1/**']
+  - {nyl: [get, environments, pr-2], exit: 1}
+
+  # 9. Mistakes in pull request 3, each failing its preview's job with an
+  #    error that names the fix. The image unit is not held up by them.
+  #    a) The chart values read the image unit directly: a Release bundle
+  #       takes Release inputs only.
+  - branch: {name: pr-3, from: main}
+  - commit: {branch: pr-3, message: "Read the digest from the image unit", apply: patches/unit-in-release}
+  - nyl: [reconcile, -e, pr-3, --template, preview, --param, pr=3]
+    at: pr-3
+    exit: 1
+    expect:
+      executed: [platform-image]
+      blocked: [kubernetes]
+      codes: [NYL-DRIVER-ERROR]
+      messages:
+        - 'spec.values.image.digest holds a $fromUnit source'
+        - 'declare a Release input and bind it on the target with $fromUnit'
+  #    b) A typo of a source's name in chart values, where other `$` keys
+  #       are data, is still an error.
+  - commit: {branch: pr-3, message: "Read the host from its input", apply: patches/typo}
+  - nyl: [reconcile, -e, pr-3, --template, preview, --param, pr=3]
+    at: pr-3
+    exit: 1
+    expect:
+      codes: [NYL-DRIVER-ERROR]
+      messages: ['spec.values.host.$fromInputs is not a value source; did you mean $fromInput?']
+  #    c) A source in the valuesFrom file, which is data.
+  - commit: {branch: pr-3, message: "Move the host to the values file", apply: patches/values-file}
+  - nyl: [reconcile, -e, pr-3, --template, preview, --param, pr=3]
+    at: pr-3
+    exit: 1
+    expect:
+      codes: [NYL-DRIVER-ERROR]
+      messages:
+        - 'values-preview.yaml holds a $fromInput source at host'
+        - 'move it to the inline values'
+  #    d) Fixed, the preview publishes.
+  - commit: {branch: pr-3, message: "Keep the host in the inline values", apply: patches/fixed}
+  - nyl: [reconcile, -e, pr-3, --template, preview, --param, pr=3]
+    at: pr-3
+    exit: 0
+    expect:
+      executed: [kubernetes]
+      current: [platform-image]
+      deploy:
+        branch: previews
+        contains: ['pr-3/platform/platform/deployment.apps/pr-3/platform-pr-3.yaml']
+        unchanged: ['pr-1/**']
+
+  # 10. A template that reads its parameter with $fromInput fails `nyl
+  #     validate`, before any instance exists.
+  - branch: {name: crds-input, from: main}
+  - commit: {branch: crds-input, message: "Read crds as an input", apply: patches/crds-input}
+  - nyl: [validate]
+    at: crds-input
+    exit: 1
+    expect:
+      messages:
+        - 'NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1'
+        - 'spec.values.target.inline.releaseInputs.platform/platform.clusterWide holds a $fromInput source'

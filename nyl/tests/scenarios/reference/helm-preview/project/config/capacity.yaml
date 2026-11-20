@@ -1,0 +1,4 @@
+# Capacity the platform team reviews. Previews read their sizing from here at a
+# locked commit, so a change on main reaches them only when the lock moves.
+preview:
+  replicas: 1

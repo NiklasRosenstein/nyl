@@ -45,6 +45,8 @@ spec:
       image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
       databaseHost: {$fromUnit: {unit: database, output: connection, pointer: /host}}
       namespace: web
+      imageRepository: {$fromUnit: {unit: web-image, artifact: image, pointer: /repository}}
+      imageDigest: {$fromUnit: {unit: web-image, artifact: image, pointer: /digest}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment

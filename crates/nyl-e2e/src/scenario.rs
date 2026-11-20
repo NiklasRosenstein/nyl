@@ -8,14 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::checks::{
-    attestation_ready, deployment_ready, hook_ran_after_workload, observations_ready, parse_attestation_record,
-    rollout_started, Observed,
+    attestation_ready, chart_deployment_ready, deployment_ready, hook_ran_after_workload, observations_ready,
+    parse_attestation_record, rollout_started, Observed,
 };
 use crate::env::Env;
 use crate::error::{Context, Error, Result};
 use crate::fixture::{
-    self, expected_database_host, Declarations, Params, ENVIRONMENT, NAMESPACE, PUBLICATION_BRANCH, PUBLICATION_PREFIX,
-    UNIT_DATABASE, UNIT_IMAGE, UNIT_PUBLICATION,
+    self, expected_database_host, Declarations, Params, CHART_CRD, CHART_DEPLOYMENT, ENVIRONMENT, NAMESPACE,
+    PUBLICATION_BRANCH, PUBLICATION_PREFIX, UNIT_DATABASE, UNIT_IMAGE, UNIT_PUBLICATION,
 };
 use crate::infra::kind::KUBE_VERSION;
 use crate::infra::{registry, KUBE_CONTEXT};
@@ -82,6 +82,10 @@ impl Scenario<'_> {
             self.check_published(&first)
         })?;
         step("the workload runs revision 1", || self.await_workload(&first))?;
+        step(
+            "the Helm chart's CRD exists and its Deployment runs revision 1 by digest",
+            || self.await_chart(&first),
+        )?;
         let first_hook = step("the PostSync hook ran after the workload was created", || {
             self.await_hook(None)
         })?;
@@ -112,6 +116,9 @@ impl Scenario<'_> {
             self.check_published(&second)
         })?;
         step("the workload runs revision 2", || self.await_workload(&second))?;
+        step("the Helm chart's Deployment runs revision 2 by digest", || {
+            self.await_chart(&second)
+        })?;
         step("the PostSync hook ran again, as a new Job", || {
             self.await_hook(Some(&first_hook)).map(|_| ())
         })?;
@@ -331,6 +338,34 @@ impl Scenario<'_> {
                 return Ok(Poll::pending("the Deployment does not exist yet"));
             };
             Ok(deployment_ready(&deployment, &revision.image, &revision.database_host))
+        })
+    }
+
+    /// Wait until the platform chart's CRD (from its `crds/` directory, which
+    /// `includeCrds` renders) exists and its Deployment runs the revision's
+    /// image by digest, every replica ready.
+    fn await_chart(&self, revision: &Revision) -> Result<()> {
+        let kubectl = &self.env.kubectl;
+        Waiter::new(
+            format!(
+                "the chart's CRD {CHART_CRD} and its Deployment to run revision {} ({})",
+                revision.number, revision.image
+            ),
+            Duration::from_secs(10 * 60),
+        )
+        .backoff(Duration::from_secs(2), Duration::from_secs(10))
+        .until(|| {
+            if kubectl
+                .get_optional(&["customresourcedefinition", CHART_CRD])?
+                .is_none()
+            {
+                return Ok(Poll::pending("the CRD does not exist yet"));
+            }
+            let Some(deployment) = kubectl.get_optional(&["deployment", CHART_DEPLOYMENT, "--namespace", NAMESPACE])?
+            else {
+                return Ok(Poll::pending("the chart's Deployment does not exist yet"));
+            };
+            Ok(chart_deployment_ready(&deployment, &revision.image))
         })
     }
 

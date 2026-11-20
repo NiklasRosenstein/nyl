@@ -1,0 +1,20 @@
+apiVersion: units.gitops.nyl/v1
+kind: OciImage
+metadata:
+  name: platform-image
+  labels: {develop: 'true', preview: 'true'}
+spec:
+  env: {passthrough: ['%DOCKER_PASSTHROUGH%']}
+  context: {path: ../services/platform}
+  repository: '%REGISTRY%/platform'
+  timeout: 60m
+---
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {develop: 'true', preview: 'true'}
+spec:
+  target: {$fromEnvironment: /target}   # develop, or the preview template's inline target
+  teardownWait: {$fromEnvironment: {pointer: /teardownWait, default: {strategy: manual}}}
+  timeout: 10m
