@@ -49,7 +49,7 @@ pub(super) fn resolve_resource_values(
             &|relative| visible_files.contains(relative),
             source,
         )
-        .map_err(|error| NylError::config(format!("{context}: {error}")))?;
+        .map_err(|error| NylError::config(format!("{context}: {}", NylError::from(error))))?;
         discovered
             .values_inputs
             .insert(paths.key(&path).expect("import is inside the worktree"));
@@ -73,6 +73,39 @@ pub(crate) enum ValuesFileRoot<'a> {
     Checkout(&'a Path),
 }
 
+/// Why a values file was not read.
+#[derive(Debug)]
+pub(crate) enum ValuesFileError {
+    /// The configuration names a file it may not read as values: one that
+    /// is missing, outside the Git worktree, not Git-visible, or not a YAML
+    /// mapping. Its author fixes it.
+    Invalid(NylError),
+    /// Reading failed for a reason outside the configuration, such as an I/O
+    /// error or a directory in no Git worktree.
+    Failed(NylError),
+}
+
+impl From<ValuesFileError> for NylError {
+    fn from(error: ValuesFileError) -> Self {
+        match error {
+            ValuesFileError::Invalid(error) | ValuesFileError::Failed(error) => error,
+        }
+    }
+}
+
+impl From<NylError> for ValuesFileError {
+    /// A failure of the environment, the default for anything `?` passes on.
+    fn from(error: NylError) -> Self {
+        ValuesFileError::Failed(error)
+    }
+}
+
+impl From<std::io::Error> for ValuesFileError {
+    fn from(error: std::io::Error) -> Self {
+        ValuesFileError::Failed(error.into())
+    }
+}
+
 /// Read one HelmChart `valuesFrom` file under the rules of Cluster and
 /// DeploymentTarget `valuesFrom`: `file` is relative to `directory`, the
 /// directory of the file declaring the HelmChart, or starts at the root with
@@ -82,7 +115,7 @@ pub(crate) fn load_chart_values_file(
     root: ValuesFileRoot<'_>,
     directory: &Path,
     file: &str,
-) -> Result<(PathBuf, serde_json::Value)> {
+) -> std::result::Result<(PathBuf, serde_json::Value), ValuesFileError> {
     let directory = directory
         .canonicalize()
         .map_err(|error| NylError::config(format!("Cannot resolve directory {}: {error}", directory.display())))?;
@@ -126,16 +159,23 @@ fn load(
     source_paths: &ProjectPaths,
     visible: &dyn Fn(&Path) -> bool,
     source: &ValuesFromFile,
-) -> Result<(PathBuf, serde_json::Value)> {
-    let path = source_paths.resolve("spec.valuesFrom[].file", &source.file)?;
+) -> std::result::Result<(PathBuf, serde_json::Value), ValuesFileError> {
+    // A path that is malformed, leaves the worktree, or traverses a symbolic
+    // link is the configuration's; only reading the file system fails otherwise.
+    let path = source_paths
+        .resolve("spec.valuesFrom[].file", &source.file)
+        .map_err(|error| match error {
+            NylError::Io(_) => ValuesFileError::Failed(error),
+            error => ValuesFileError::Invalid(error),
+        })?;
     let relative = path
         .strip_prefix(&paths.worktree_root)
         .expect("import is inside the worktree");
     if !visible(relative) || !path.is_file() || path.starts_with(paths.project_root.join(".nyl/cache")) {
-        return Err(NylError::config(format!(
+        return Err(ValuesFileError::Invalid(NylError::config(format!(
             "Values file {} is missing or is not an eligible Git-visible regular file; add the file to Git or remove its ignore rule, and keep it outside submodules and the project's .nyl/cache directory",
             path.display()
-        )));
+        ))));
     }
     let content = std::fs::read_to_string(&path).map_err(|error| {
         NylError::config(format!(
@@ -144,9 +184,10 @@ fn load(
         ))
     })?;
     // Parse exactly one document, without resource API canonicalization or templating.
-    let mapping: BTreeMap<String, serde_json::Value> =
-        crate::util::SourceContext::new(path.clone()).parse_yaml(&content)?;
-    let value = serde_json::to_value(mapping)?;
+    let mapping: BTreeMap<String, serde_json::Value> = crate::util::SourceContext::new(path.clone())
+        .parse_yaml(&content)
+        .map_err(ValuesFileError::Invalid)?;
+    let value = serde_json::to_value(mapping).map_err(NylError::from)?;
     let imported = match &source.key {
         Some(key) => serde_json::Value::Object(serde_json::Map::from_iter([(key.clone(), value)])),
         None => value,

@@ -50,7 +50,7 @@ use nyl_core::constants::API_VERSION;
 use serde_json::Value;
 
 use super::bundle::{provenance_path, ProvenanceRoots};
-use crate::gitops::values::{load_chart_values_file, ValuesFileRoot};
+use crate::gitops::values::{load_chart_values_file, ValuesFileError, ValuesFileRoot};
 use crate::resources::{merge_chart_values, HelmValuesOrigin, HelmValuesSource, Release, RemoteManifest};
 use crate::{NylError, Result};
 
@@ -112,7 +112,7 @@ pub(crate) fn resolve_bundle_resource(
         if issues.is_empty() {
             *resource = resolved.value;
             if subject == BundleResource::HelmChart {
-                merge_values_from(resource, file, files, roots, &provider, read, &mut issues);
+                merge_values_from(resource, file, files, roots, &provider, read, &mut issues)?;
             }
         }
     }
@@ -188,7 +188,9 @@ fn describe(resource: &Value) -> String {
 /// Merge a resolved HelmChart's `valuesFrom` entries in order, then its
 /// inline `values`; the result replaces `spec.values` and the entries are
 /// removed. The merged values are data and are never walked, and a values
-/// file that holds a source is an error: it would read as data.
+/// file that holds a source is an error: it would read as data. A values file
+/// the configuration may not read is an issue; one that cannot be read for a
+/// reason outside the configuration, such as an I/O error, is returned as it is.
 fn merge_values_from(
     resource: &mut Value,
     file: &Path,
@@ -197,18 +199,18 @@ fn merge_values_from(
     provider: &ReleaseInputs<'_>,
     read: &mut Vec<PathBuf>,
     issues: &mut Vec<BindingIssue>,
-) {
+) -> Result<()> {
     let Some(spec) = resource.get_mut("spec").and_then(Value::as_object_mut) else {
-        return;
+        return Ok(());
     };
     let Some(entries) = spec.remove("valuesFrom") else {
-        return;
+        return Ok(());
     };
     let entries: Vec<HelmValuesSource> = match serde_json::from_value(entries) {
         Ok(entries) => entries,
         Err(error) => {
             issues.push(BindingIssue::new(format!("spec.valuesFrom: {error}")));
-            return;
+            return Ok(());
         }
     };
     let mut sources = Vec::new();
@@ -237,8 +239,9 @@ fn merge_values_from(
                             None => entry.select(&document, &what),
                         }
                     }
-                    Err(NylError::Config(message)) => Err(message),
-                    Err(error) => Err(error.to_string()),
+                    Err(ValuesFileError::Invalid(NylError::Config(message))) => Err(message),
+                    Err(ValuesFileError::Invalid(error)) => Err(error.to_string()),
+                    Err(ValuesFileError::Failed(error)) => return Err(error),
                 }
             }
             HelmValuesOrigin::Input(name) => match provider.input_value(&format!("{field}.input"), name) {
@@ -262,7 +265,7 @@ fn merge_values_from(
         }
     }
     if !issues.is_empty() {
-        return;
+        return Ok(());
     }
     let inline = spec.get("values").cloned().unwrap_or(Value::Null);
     match merge_chart_values(sources, inline) {
@@ -271,6 +274,7 @@ fn merge_values_from(
         }
         Err(message) => issues.push(BindingIssue::new(message)),
     }
+    Ok(())
 }
 
 /// The `$fromInput` source of a Release bundle: the Release's resolved inputs,
@@ -574,6 +578,34 @@ mod tests {
         assert!(error(&list, None).contains("spec.valuesFrom[0]"));
         let escaped = project("  valuesFrom: [{file: ../../outside.yaml}]\n", &[]);
         assert!(error(&escaped, None).contains("outside the Git worktree"));
+        let missing = project("  valuesFrom: [{file: missing.yaml}]\n", &[]);
+        for temp in [&ignored, &list, &escaped, &missing] {
+            assert!(load(temp, None).unwrap_err().is_value_source_config());
+        }
+    }
+
+    /// Catches a values file that cannot be read for a reason outside the
+    /// configuration, such as a Release outside any Git repository, reported
+    /// as the configuration's mistake (`NYL-UNIT-INVALID` in a run) instead
+    /// of the failure it is.
+    #[test]
+    fn test_values_from_environment_failures_keep_their_error() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("values.yaml"), "a: 1\n").unwrap();
+        fs::write(
+            temp.path().join("app.yaml"),
+            "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata: {name: web}\nspec:\n  chart: {name: ./chart}\n  valuesFrom: [{file: values.yaml}]\n",
+        )
+        .unwrap();
+        if git2::Repository::discover(temp.path()).is_ok() {
+            return; // The temporary directory lies in a Git worktree here.
+        }
+        let error = load_release_bundle(&temp.path().join("app.yaml"), &context(None)).unwrap_err();
+        assert!(!error.is_value_source_config(), "{error}");
+        assert!(
+            error.to_string().contains("reads a file of the Git worktree, but"),
+            "{error}"
+        );
     }
 
     /// Catches `$fromInput` in a HelmChart's fields not resolving, a value of
