@@ -97,11 +97,26 @@ only the context decides which sources are allowed. The rules:
 | Declared Environment and EnvironmentGroup `values` | — | as template values |
 | DeploymentTarget `releaseInputs`, declared or inline | `$fromFile`, `$fromGit`, `$fromPublication`, `$fromUnit`, `$fromPromotion` (the last two only through orchestration), `$literal` | — |
 | Output of recursive expansion: a chart's or a Component's output, a remote manifest, a HelmChart either generates | — (any source is an error naming the expanding resource) | — |
+| *Planned (M9):* a domain resource's `spec`, at discovery and admission | `$literal` | `$fromUnit`, `$fromPromotion` at any depth, to the consumer's resolution |
+| *Planned (M9):* a domain resource's `spec`, when a consumer resolves its bundle | `$fromUnit`, `$fromPromotion`, `$literal`, in the consumer's environment | — |
 | Anything else, such as a target's other fields or a template's parameter declarations | — | — |
 
 A source a context rejects is an error that teaches the fix, such as `$fromUnit`
 in a Release: "declare a Release input and bind it on the target with
 `$fromUnit`". A bare literal binding is the input's value.
+
+The two domain-resource rows are planned with
+[domain modeling](domain-resources.md#value-sources-in-declarations) and not
+implemented. They follow the unit rows: a declaration carries the
+execution-time sources, and its consumer (a unit's run, or `nyl bundle -e`)
+resolves them in its environment; every other source is rejected with a fix,
+such as reading a per-environment value in the consuming unit with
+`$fromEnvironment`. The envelope and `x-nyl-reference` fields are
+literal-only. The definition's schema validates the resolved values: admission
+treats a position that holds a source as not yet known, and resolution
+validates the value against the field's subschema. The same design plans
+`$fromCollection`, which a unit's spec carries and its run resolves from the
+unit's bundle.
 
 - **Data vs. configuration.** A value read from outside the user's
   configuration (a unit's output, artifact, or observed value; a file read with
@@ -114,6 +129,8 @@ in a Release: "declare a Release input and bind it on the target with
 - **Literal-only fields.** `apiVersion`, `kind`, `metadata.name`, and
   `metadata.labels` are read by discovery and selection before anything
   resolves, so a source there is an error. `metadata.namespace` may hold one.
+  A domain resource (planned) adds `metadata.annotations` and its
+  `x-nyl-reference` fields.
 - **`$literal` in unit documents.** A unit renders before a run resolves it,
   and the rendered spec is stored. `$literal` unwraps when the unit renders,
   unless its content holds `$` keys; then it unwraps when the run resolves the

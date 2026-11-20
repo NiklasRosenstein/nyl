@@ -2,7 +2,9 @@
 // Domain modeling roadmap page and summarized as M9 on the Orchestration
 // roadmap. Tick a deliverable in the change that ships it, and set `done` on a
 // slice only when all of it has shipped. The orchestration milestones it
-// builds on are the M-numbered needs of its slices.
+// builds on are the M-numbered needs of its slices. Slice IDs stay stable for
+// issues and pull requests: a new slice takes the next free number and is
+// placed in rollout order, after the slices it needs, as R12 is after R1.
 
 export const domainModelingRoadmap = {
   id: 'domain-modeling',
@@ -11,7 +13,7 @@ export const domainModelingRoadmap = {
   page: 'domain-modeling/roadmap/',
   itemNoun: 'deliverables',
   exitCriterion:
-    'Colocated team declarations feed independently registered units. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. Releases select their manifests and are selected by label or path, read the same bundles in every render, and render identically with and without the cache. The guide runs end to end.',
+    'Colocated team declarations feed independently registered units and export, without any unit, as versioned bundles for other tools. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. Releases select their manifests and are selected by label or path, read the same bundles in every render, and render identically with and without the cache. The guide runs end to end.',
   // Set when the exit criterion is met, which completes M9.
   done: false,
   // GitHub issues this roadmap delivers; close them when `done` is set.
@@ -26,24 +28,43 @@ export const domainModelingRoadmap = {
         { text: '`ResourceDefinition` loaded only from the `[resources]` paths of `nyl.toml`', done: false },
         { text: 'Discovery of literal declarations with project-wide identity and Git provenance', done: false },
         { text: 'Schema validation with defaults, and `x-nyl-reference` checks', done: false },
+        {
+          text: 'Domain resources as a context of the [value-source table](/nyl/reference/value-sources/#contexts): `$fromUnit` and `$fromPromotion` carried at any depth of `spec`, other sources rejected with their fix, literal-only envelope and reference fields, and source positions skipped by schema checks',
+          done: false,
+        },
         { text: '`nyl validate` covering definitions and declarations', done: false },
         { text: '`nyl get resources` and `nyl schema resources`', done: false },
       ],
     },
     {
+      id: 'R12',
+      title: 'The standalone export',
+      summary:
+        'Domain modeling works on its own: the admitted catalog and bundles for any selection are exported as versioned documents, without units, drivers, Releases, or Kubernetes.',
+      needs: ['M6', 'R1'],
+      items: [
+        { text: 'The pure `nyl-collections` crate with membership, ordering, the `x-nyl-reference` closure, and bundle assembly, shared by every consumer', done: false },
+        { text: 'The versioned `ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` formats, with golden files and published JSON Schemas', done: false },
+        { text: '`nyl get resources -o yaml|json` printing the admitted catalog with defaults applied', done: false },
+        { text: '`nyl bundle` selecting members by kind, labels, paths, or a unit’s named collection, with referenced resources and provenance', done: false },
+        { text: 'Sources left in place and listed under `unresolved` without `-e`, and resolved read-only against current receipts with `-e`', done: false },
+      ],
+      exitCriterion:
+        'A project with only `[resources]`, definitions, and declarations, and no Environment, unit, or Release, exports its catalog and a bundle for any selection, byte-identical across machines and worktree layouts; without `-e` the bundle lists its sources and exits 0, and with `-e` they resolve against current receipts, a missing receipt exiting 2; no state is written and no driver is loaded; the published schemas and golden files pin each format.',
+    },
+    {
       id: 'R2',
       title: 'Collections and the bundle',
       summary: 'Units collect declarations and receive them as one tool-neutral bundle.',
-      needs: ['M3', 'R1'],
+      needs: ['M3', 'R12'],
       items: [
-        { text: 'The `collections` unit field with membership, ordering, and `allowEmpty`', done: false },
+        { text: 'The `collections` unit field with `allowEmpty`, assembled by the code of R12', done: false },
         { text: 'Ownership claims with `access: own` and `access: read`, with removal and transition guards only for owners', done: false },
-        { text: '`$fromUnit` references inside declarations', done: false },
-        { text: 'The versioned `ResourceBundle` and its provenance in desired state', done: false },
+        { text: '`$fromUnit` and `$fromPromotion` in declarations resolved by the consuming unit’s run, with dependency edges and `blockedBy`', done: false },
+        { text: 'The bundle and its provenance in desired state and receipts', done: false },
         { text: 'The bundle digest in the execution key', done: false },
         { text: '`$fromCollection` references and the Command unit’s `collections` input', done: false },
-        { text: '`nyl prepare` with fixture outputs', done: false },
-        { text: 'Referenced resources in the bundle: the `x-nyl-reference` closure, read-only and part of the digest', done: false },
+        { text: '`nyl prepare` with fixture outputs, writing the same `bundle.yaml` as `nyl bundle`', done: false },
       ],
     },
     {
@@ -78,7 +99,7 @@ export const domainModelingRoadmap = {
       needs: ['R3', 'R4'],
       items: [
         { text: '`x-nyl-validations` CEL rules with `self` and `oldSelf`, and the `deny` effect', done: false },
-        { text: '`--base` comparing against another revision, and an explicit `--no-base`, required outside orchestration', done: false },
+        { text: '`--base` comparing against another revision, and an explicit `--no-base`, required outside orchestration and by `nyl bundle`', done: false },
         { text: 'The bundle of the current receipt as the baseline when a unit runs', done: false },
         { text: '`oldObject` and the operation for Kyverno policies', done: false },
         { text: 'Tracked last-applied refs with `exec --advance`: permission preflight, compare-and-swap, recovery steps, and `--bootstrap`', done: false },
@@ -135,10 +156,9 @@ export const domainModelingRoadmap = {
       id: 'R10',
       title: 'Collections in Releases',
       summary: 'Releases read declaration collections as template data, without orchestration.',
-      needs: ['R1', 'R3', 'R8'],
+      needs: ['R1', 'R12', 'R3', 'R8'],
       items: [
-        { text: 'The pure `nyl-collections` crate with membership, the reference closure, and bundle assembly, shared with R2', done: false },
-        { text: 'Release `spec.collections`, read-only, with `${ … }` selector values', done: false },
+        { text: 'Release `spec.collections`, read-only, with `${ … }` selector values, assembled by the code of R12', done: false },
         { text: '`collections` and `referenced` template variables with YAML-safe output', done: false },
         { text: 'Bundle digests in the dependency recorder and the ownership index', done: false },
         { text: 'Rejection in remote sources and of unresolvable references', done: false },

@@ -17,19 +17,25 @@ bundles the declarations. Terraform, OpenTofu, or a command implements them,
 and the native tool keeps its own state. Kubernetes Releases can read
 collections too, as template data; the
 [Release catalog](release-catalog.md) describes that consumer, and this
-document the rules both share.
+document the rules both share. Tools outside Nyl read the same bundles through
+the [standalone export](#standalone-export-nyl-bundle), which needs neither
+units nor Releases.
 
 ```text
  definition ─► discovery ─► admission ─► collection ─► resolution ─► bundle ─► driver adaptation ─► execution
  (stage 0)     (stage 1)    (stage 2)    (stage 3)     (stage 4)     (stage 5)  (stage 6)            (core contract)
- ─────────── project-wide, environment-independent ───────────┘└──────────── per unit and environment ─────────────
+ ───── project-wide, environment-independent ─────┘└─── per consumer and environment ───┘└──── per unit ────────
+ └───────────────────────────── standalone: no unit, no driver ─────────────────────────┘
 ```
 
 Stages 0–2 depend only on the source commit S, so their results are the same
-for every environment and every entry point: `nyl validate`, `nyl prepare`,
-`plan`, `reconcile`, `exec --worktree`, and CI all call them. Stages 3–6 run
-during unit resolution, in the layer the core contract already defines. No
-stage has a command-specific variant.
+for every environment and every entry point: `nyl validate`, `nyl get
+resources`, `nyl bundle`, `nyl prepare`, `plan`, `reconcile`, `exec
+--worktree`, and CI all call them. Stages 3–5 run for a consumer: a unit
+during unit resolution, in the layer the core contract already defines, a
+Release when it renders, or a selection given to the
+[standalone export](#standalone-export-nyl-bundle). Only stage 6 needs a unit
+and its driver. No stage has a command-specific variant.
 
 ## Principles
 
@@ -38,9 +44,20 @@ stage has a command-specific variant.
   changes the input of the units that consume it. It never creates, deletes,
   or replaces a unit.
 - **Literal declarations.** Domain resources are not templates. A reviewer, a
-  CODEOWNERS rule, and a policy all see the same bytes that reach the bundle.
-  Per-environment variation belongs in the consuming unit, whose spec is
-  templated per environment.
+  CODEOWNERS rule, and a policy all see the same bytes that reach the bundle,
+  apart from the `$fromUnit` and `$fromPromotion`
+  [value sources](#value-sources-in-declarations) they may hold, which name
+  exactly where a value comes from. Per-environment variation belongs in the
+  consuming unit, whose spec is templated per environment.
+- **One source model.** A domain resource is a context in the
+  [value-source context table](declarative-value-sources.md#contexts), read by
+  the same walker as every other document. No schema keyword decides where a
+  source may stand.
+- **A standalone seam.** Stages 0–5 need no unit, driver, Environment, Release,
+  or Kubernetes. A project that declares only `[resources]`, definitions,
+  policies, and declarations can validate them and export the admitted
+  catalog and bundles as versioned documents for other tools, through the
+  same code that feeds units.
 - **Explicit membership.** A unit names the type, the labels, and the paths it
   collects. Nyl never links resources by matching names.
 - **Trust comes from configuration.** `nyl.toml` decides where definitions and
@@ -103,16 +120,19 @@ spec:
   resource, as Kubernetes does for structural schemas. Implementations then
   read effective values and do not repeat the defaults. Other annotations,
   such as `description` and `format`, do not change the bundle.
-- **Schema extensions.** Three keywords carry Nyl-specific meaning:
+- **Schema extensions.** Two keywords carry Nyl-specific meaning:
   - `x-nyl-reference: {kind}`. The string must name an existing resource of
     that kind in the project catalog. This is referential integrity checked
-    in stage 2, not a dependency edge.
-  - `x-nyl-accepts-references: true`. The field may hold a `$fromUnit` or
-    `$fromPromotion` reference object (see [stage 4](#stage-4-resolution)).
-    Any other field that holds a reference object is a schema error.
+    in stage 2, not a value source and not a dependency edge, so the field is
+    literal-only.
   - `x-nyl-validations`: CEL rules on any schema node, including
     [transition rules](#transition-rules) that compare a resource with its
     previous version.
+- **The schema describes resolved values.** A definition never says which
+  fields may hold a value source; the
+  [domain-resource context](#value-sources-in-declarations) does, for every
+  definition alike. The schema validates what a field holds once its source
+  resolves.
 - Definitions are pinned by S like every other file in the project. Sharing
   definitions across repositories through a locked `GitSource` is an
   [open decision](#open-decisions).
@@ -156,15 +176,82 @@ spec:
 The result is the project's **catalog**: every domain resource with its
 identity, provenance, and parsed document, sorted by identity.
 
+### Value sources in declarations
+
+A domain resource is one context of the
+[value-source context table](declarative-value-sources.md#contexts), planned
+with this design. Discovery walks each document with the one walker
+(`bindings::resolve_document`) in that context, as it walks any other
+document:
+
+| Phase | Resolves | Carries |
+| --- | --- | --- |
+| Discovery and admission (stages 1–2), once per catalog | `$literal` | `$fromUnit` and `$fromPromotion`, at any depth of `spec`, to the consumer's resolution |
+| Resolution (stage 4), per consumer and environment | `$fromUnit`, `$fromPromotion`, `$literal` | — |
+
+```yaml
+apiVersion: domain.acme.example/v1
+kind: AwsAccessGrant
+metadata: {name: payments-admins, labels: {team: payments}}
+spec:
+  account: payments-prod                         # x-nyl-reference: literal-only
+  permissionSet: AdministratorAccess
+  principalGroupId:
+    $fromUnit: {unit: identity, output: groupIds, pointer: /payments-admins}
+  sessionTags:
+    - {key: team, value: payments}
+    - {key: ticket, value: {$fromPromotion: {value: accessTicket}}}
+```
+
+- **Any depth of `spec`.** A source may stand wherever `spec` holds a value,
+  inside objects and lists alike. The definition does not mark these fields:
+  the context decides, so every definition accepts the same sources.
+- **Other sources teach the fix.** Every other source is an error that names
+  the location and says how to get the value:
+  - `$fromEnvironment`: a declaration is the same in every environment; read
+    the per-environment value in the consuming unit with `$fromEnvironment`;
+  - `$fromInput` and `$fromParameter`: a declaration has no Release inputs or
+    template parameters;
+  - `$fromFile`, `$fromGit`, and `$fromPublication`: the declaration is
+    already a file of the repository; write the value, or split it into its
+    own declaration and reference it with an `x-nyl-reference` field;
+  - `$fromCollection`: it reads a unit's collection and is valid in the unit's
+    spec, not in a declaration.
+- **Literal-only fields.** The envelope (`apiVersion`, `kind`,
+  `metadata.name`, `metadata.labels`, and `metadata.annotations`) is read by
+  discovery, selection, and policies before anything resolves, and every
+  `x-nyl-reference` field is read by stage 2 and by the
+  [reference closure](#referenced-resources) at S. A source in any of them is
+  an error.
+- **`$literal`** unwraps at discovery, so the schema checks its content,
+  unless its content holds `$` keys; then it unwraps in stage 4, so its
+  content never reads as a source, as in a unit document.
+- **The `$` namespace** follows the definition's schema as it follows a unit
+  kind's `spec_schema`: where the schema has no place for a `$` key that is no
+  source, the key is an unknown source, reported with the typo suggestion;
+  where it leaves an object open, the key is data.
+- **Data, not configuration.** A value a source reads, such as a unit's
+  output, is data and is never walked for further sources.
+- **Editor schemas.** `nyl schema resources` offers `$fromUnit`,
+  `$fromPromotion`, and `$literal` as `anyOf` alternatives next to the
+  top-level `spec` fields that are not literal-only, generated from the same
+  context table; deeper fields show only their literal type.
+- **Stored with the declaration.** The catalog keeps each source as written.
+  `nyl get resources` shows it that way, and only stage 4 replaces it.
+
 ## Stage 2: Admission
 
 Every catalog resource goes through three checks. Each check reads only S,
 so its result applies to every environment and can be cached under the
 [cache invariants](../AGENTS.md#kubernetes-gitops-cache-invariants).
 
-1. **Schema.** The definition validates `spec`, then applies its defaults.
-   Reference objects in `x-nyl-accepts-references` fields are skipped here.
-   Stage 4 checks their resolved values against the field's subschema.
+1. **Schema.** The definition validates `spec`, then applies its defaults. A
+   position that holds a carried source is not yet known: it counts as
+   present for `required` and `additionalProperties`, the checks of its own
+   subschema are skipped, and no default is applied inside it. Everything
+   else is validated and defaulted. An `x-nyl-validations` rule whose `self`
+   holds a source runs in stage 4 instead. Stage 4 validates each resolved
+   value against its field's subschema.
 2. **Referential integrity.** Every `x-nyl-reference` field must name a
    resource in the catalog.
 3. **Policy.** Kyverno validating policies run against the resource. They are
@@ -190,6 +277,9 @@ so its result applies to every environment and can be cached under the
            message: Teams may only declare sandbox accounts.
      ```
 
+   - Policies see the declaration as written, carried sources included,
+     because admission runs once per catalog, before any consumer resolves
+     them.
    - Only validating policies are accepted. A mutating policy in the policy
      paths is an error (`NYL-RESOURCE-POLICY-MUTATES`), because mutation would
      make the bundle differ from what was reviewed.
@@ -245,7 +335,7 @@ schema:
     over several commits, and it applies per consuming unit, because two
     units may have last run different versions.
   - **Against a revision**, `--base <rev>` on `validate`, `plan`,
-    `prepare`, and `exec` compares against the catalog at the merge base of
+    `prepare`, `exec`, `bundle`, and `get resources` compares against the catalog at the merge base of
     `<rev>` and the source commit. In a pull request that is where the branch
     forked. This is the only baseline outside orchestration, and it judges
     the change since that revision rather than what was applied, which the
@@ -262,16 +352,19 @@ schema:
 
 ### Choosing a base
 
-With `-e`, the receipt is always the baseline. `--base` adds a comparison
-with a revision, as a pull request plan shows it, and `--no-base` is
-rejected because the receipt comparison cannot be turned off.
+With `-e`, the consuming unit's receipt is always the baseline. `--base` adds
+a comparison with a revision, as a pull request plan shows it, and
+`--no-base` is rejected because the receipt comparison cannot be turned off.
 
-Without `-e`, nothing records what was applied, so the invocation chooses:
+Without `-e`, nothing records what was applied, so the invocation chooses.
+So does `nyl bundle`, with or without `-e`, because an export has no
+consuming unit and no receipt:
 
 - A command that would compare with a previous version requires exactly one
   of `--base <rev>` and `--no-base`: `validate` when any definition declares a
-  rule that uses `oldSelf`, and `prepare` and `exec` when the unit has
-  collections. Neither fails with `NYL-RESOURCE-BASE-REQUIRED`, exit 1, whose
+  rule that uses `oldSelf`, `prepare` and `exec` when the unit has
+  collections, and `bundle` when a selected or referenced type's definition
+  declares such a rule. Neither fails with `NYL-RESOURCE-BASE-REQUIRED`, exit 1, whose
   fix names both options. Nyl never picks a base from the upstream branch,
   the default branch, or `nyl.toml`, because the right one depends on the
   job, and the refs a clone happens to have would otherwise decide the result.
@@ -443,39 +536,45 @@ describe:
 
 ## Stage 4: Resolution
 
-Each member's `spec` may hold reference objects in fields its definition marks
-`x-nyl-accepts-references`:
+Stage 4 resolves the sources that the members and
+[referenced resources](#referenced-resources) carry, with the same walker in
+the resolution phase of the
+[domain-resource context](#value-sources-in-declarations). Each source
+resolves in the consumer's environment: the consuming unit's when a run
+resolves the unit, and the one `-e` names for `nyl bundle`.
 
-```yaml
-apiVersion: domain.acme.example/v1
-kind: AwsAccessGrant
-metadata: {name: payments-admins, labels: {team: payments}}
-spec:
-  account: payments-prod                         # x-nyl-reference: {kind: AwsAccount}
-  permissionSet: AdministratorAccess
-  principalGroupId:
-    $fromUnit: {unit: identity, output: groupIds, pointer: /payments-admins}
-```
-
-- References in members resolve in the consuming unit's environment, through
-  the one resolver in `nyl_core::bindings`
-  ([`resolve_document`](../crates/nyl-core/src/bindings/mod.rs)), with the
-  freshness, evidence, and blocking rules of
-  [References](orchestration-core.md#references). Each reference adds a
-  dependency edge from the consuming unit to the producer.
-- These edges exist at S before any value does, so the pure dependency graph,
-  the CI export, and `plan` see them and report `blockedBy` as for any other
-  reference. A blocked pointer is located inside the bundle, such as
-  `/collections/grants/items/payments-admins/spec/principalGroupId`, and the
-  report cites the member's source path.
-- A resolved value is checked against the field's subschema. A mismatch is a
-  resolution error for the consuming unit.
+- Sources resolve through the one resolver in `nyl_core::bindings`
+  ([`resolve_document`](../crates/nyl-core/src/bindings/mod.rs)) and a
+  `Providers` implementation chosen by the entry point, with the freshness,
+  evidence, and blocking rules of [References](orchestration-core.md#references):
+  the run's for `reconcile`, `plan`, and `prepare`, the read-only snapshot
+  providers of `nyl get output` for `nyl bundle -e`, and none for `nyl
+  bundle` without `-e`, which leaves every source in place (see
+  [Standalone export](#standalone-export-nyl-bundle)). Everything else in
+  stages 3–5 is the same code for every entry point.
+- For a unit, each source adds a dependency edge from the consuming unit to
+  the producer. These edges exist at S before any value does, so the pure
+  dependency graph, the CI export, and `plan` see them and report `blockedBy`
+  as for any other reference. A blocked pointer is located inside the bundle,
+  such as `/collections/grants/items/payments-admins/spec/principalGroupId`,
+  and the report cites the member's source path.
+- **Validation of resolved values.** Each resolved value is validated against
+  its field's subschema, and that subschema's defaults are applied inside it.
+  The resolved spec is then checked once more against the whole schema, so
+  keywords that relate a field to its siblings, such as `if`/`then` or
+  `dependentSchemas`, see the resolved value, and the `x-nyl-validations`
+  rules that admission deferred run now. A mismatch is a resolution error for
+  the consumer, located at the source's pointer and citing the member's source
+  path.
+- Resolved values are data: a unit's output that happens to hold a `$` key is
+  never read as a source.
 - Template lookups cannot read runtime state, because members are never
   templates.
 
 ## Stage 5: Bundle
 
-Resolution produces one **resource bundle** per unit with collections:
+Resolution produces one **resource bundle** per consumer: a unit with
+collections, a Release, or an export:
 
 ```yaml
 apiVersion: gitops.nyl/v1
@@ -502,7 +601,9 @@ referenced:
 - Items hold `labels` and the admitted, defaulted, resolved `spec`.
   Annotations stay out, because they are notes for people and for policies.
 - The bundle is versioned like every state file, with golden files and a
-  migration for each format change.
+  migration for each format change. It is also a public contract for other
+  tools, the same document whichever consumer it was built for (see
+  [The bundle as a contract](#the-bundle-as-a-contract)).
 - **Provenance** is a separate `ResourceBundleProvenance` document. It holds
   each item's source path, document index, and document digest, the
   definition's identity and digest, and, per reference pointer, the receipt
@@ -556,13 +657,212 @@ collect it. The bundle's `referenced` map therefore carries it:
   apply to them. They were admitted under their own path, and the consumer
   only reads them. Removal and transition-rule guards follow their owners'
   collections.
-- **References inside.** Reference objects in `x-nyl-accepts-references`
-  fields of referenced resources resolve like those of members, in the
-  consumer's environment, and add the same dependency edges.
+- **Sources inside.** Sources that referenced resources carry resolve like
+  those of members, in the consumer's environment, are validated against
+  their fields' subschemas in the same way, and add the same dependency
+  edges. The `x-nyl-reference` fields that build the closure are
+  literal-only, so a source can never change which resources it holds.
 - **Digest and provenance.** `referenced` is part of the bundle and its
   digest. `ResourceBundleProvenance` records each referenced resource's
   source path, document index, and digest, and the reference pointers that
   reached it.
+
+## Standalone export: `nyl bundle`
+
+Domain modeling works on its own. Stages 0–5 read only the project's
+`[resources]`, definitions, policies, and declarations, so a project with
+nothing else (no Release, Environment, unit, driver, or cluster) can validate
+its declarations and export them for tools Nyl does not drive: a service
+catalog, a provisioning script, another IaC tool, or a CI job that checks
+quotas. Two commands export, and both run stages 0–5 through the code that
+feeds units, so an export and a unit's bundle cannot disagree:
+
+| Command | Exports | Stages |
+| --- | --- | --- |
+| `nyl get resources -o yaml\|json` | The catalog: every matched declaration as admitted, with defaults applied and sources as written | 0–2 |
+| `nyl bundle` | A `ResourceBundle` for a selection, with its referenced resources and provenance | 0–5 |
+
+Neither writes state, takes a lease, loads a unit driver, renders a Release,
+or contacts a cluster. Without `-e` they read nothing but the source, so
+their output depends only on S and the arguments, and every machine and CI
+job produces the same bytes.
+
+### `nyl get resources`
+
+```text
+nyl get resources [<kind>/<name>] [--kind <type>] [-l <selector>] [--path <glob>]...
+                  [-e <env>] [--base <rev>] [-o table|wide|yaml|json|name] [<project>]
+```
+
+- `--kind` takes the kind when one definition serves it (`AwsAccount`), or
+  `<group>/<version>/<kind>`. `-l` is an equality selector over literal
+  labels (`team=payments,stage=production`), as `matchLabels` in a
+  collection. `--path` takes the globs of a collection's `paths`.
+- The table shows the name, kind, labels, source location, and admission
+  result. `-o yaml|json` prints a versioned `ResourceCatalog` document from
+  the same report:
+
+  ```yaml
+  apiVersion: gitops.nyl/v1
+  kind: ResourceCatalog
+  items:
+    - apiVersion: domain.acme.example/v1
+      kind: AwsAccount
+      metadata: {name: payments-prod, labels: {team: payments, stage: production}, annotations: {note: PCI scope}}
+      spec: {email: aws+payments-prod@acme.example, ou: workloads, owner: payments, budgetUsd: 100}
+      source: {path: /teams/payments/aws.yaml, document: 0, digest: sha256:…}
+      admission: {admitted: true}
+  ```
+
+  `spec` is defaulted for admitted resources and as written for the others,
+  whose `admission` lists the findings with their codes. Carried sources stay
+  as written: the catalog is the same in every environment.
+- Transition rules that use `oldSelf` run only with `--base <rev>`; without
+  it the report says `baseline: none` and lists them as not evaluated.
+  Listing is inspection, not a gate; `nyl validate` and `nyl bundle` are the
+  gates.
+- With `-e`, each resource also lists the units of that environment whose
+  collections include it, with their `access`. Its values stay as written;
+  `nyl bundle -e` resolves them.
+- Exit 0 when every listed resource is admitted, 1 when one is not or the
+  project's definitions fail.
+
+### `nyl bundle`
+
+```text
+nyl bundle (--kind <type> [-l <selector>] [--path <glob>]... [--as <name>] [--allow-empty]
+            | --collection <unit>/<collection>...)
+           [-e <env>] [--worktree | --source <rev>] [--base <rev> | --no-base]
+           [--allow-change <resource>:<reason>] [-o yaml|json] [--output-dir <dir>] [<project>]
+```
+
+- **Selection, like a collection.** `--kind`, `-l`, and `--path` select one
+  collection's members by the rules of [stage 3](#stage-3-collection): type,
+  literal labels, and trusted paths, from the envelope and path alone, keyed
+  by name and sorted. `--as` names the collection in the bundle, by default
+  the definition's plural (`awsaccounts`). An empty selection fails with
+  `NYL-RESOURCE-COLLECTION-EMPTY` unless `--allow-empty`, as `allowEmpty`
+  does.
+- **A named collection.** `--collection <unit>/<collection>`, repeatable,
+  takes a unit's declared collections instead. The unit document renders as
+  `nyl prepare` renders it, in the `-e` environment or, without `-e`, as `nyl
+  build` does, and only its envelope and the common `collections` field are
+  read: the kind's spec is not validated and its driver is not loaded.
+  Naming every collection of a unit gives the bundle that unit would receive,
+  byte for byte.
+- **Referenced resources** join the bundle by the
+  [closure](#referenced-resources), with provenance, exactly as for a unit.
+- **An export claims nothing.** Ownership, `removal`, and the receipt
+  baseline belong to a unit's runs; an export behaves like an `access: read`
+  collection.
+- **Transition rules** follow [Choosing a base](#choosing-a-base) as for
+  `prepare` outside orchestration: `--base <rev>` or `--no-base` is required
+  when a definition among the selected and referenced types declares a rule
+  that uses `oldSelf`, also with `-e`, because the receipt baseline belongs
+  to a consuming unit. A guarded change exits 2 unless `--allow-change` names
+  it.
+- **Failure scope.** Only the selected members and their referenced resources
+  must pass admission; another team's failing declaration does not stop the
+  export.
+- **Source files** come from the worktree or `--source`, under the rules of
+  [Which files a unit is read from](#which-files-a-unit-is-read-from).
+
+**Sources.** Without `-e`, nothing resolves: carried sources stay in place,
+their fields are not checked against their subschemas yet, and the bundle
+lists them under `unresolved`, so a tool that reads only the bundle cannot
+mistake a source for a value:
+
+```yaml
+apiVersion: gitops.nyl/v1
+kind: ResourceBundle
+collections:
+  grants:
+    apiVersion: domain.acme.example/v1
+    kind: AwsAccessGrant
+    items:
+      payments-admins:
+        labels: {team: payments}
+        spec:
+          account: payments-prod
+          permissionSet: AdministratorAccess
+          principalGroupId: {$fromUnit: {unit: identity, output: groupIds, pointer: /payments-admins}}
+referenced:
+  domain.acme.example/v1/AwsAccount:
+    payments-prod: {labels: {team: payments, stage: production}, spec: {email: aws+payments-prod@acme.example, ou: workloads, owner: payments, budgetUsd: 100}}
+unresolved:
+  - {pointer: /collections/grants/items/payments-admins/spec/principalGroupId, source: $fromUnit}
+```
+
+This is not an error: the command exits 0, and stderr lists each source with
+the member's source path under the warning `NYL-RESOURCE-SOURCES-UNRESOLVED`.
+With `-e <env>`, sources resolve in that environment, read-only against its
+current receipts and promotion records, exactly as `nyl get output` resolves
+a `$fromUnit` and with the same freshness and evidence rules; it needs read
+access to the state repository and nothing else. A resolved bundle has no
+`unresolved` key, and its resolved values pass stage 4's validation.
+
+**Output.** The bundle goes to stdout as YAML, or JSON with `-o json`, and
+diagnostics go to stderr. `--output-dir <dir>` writes `bundle.yaml` and
+`bundle-provenance.yaml`, the files and bytes `nyl prepare` writes. The
+provenance document records each item's source path, document index, and
+digest, each definition's identity and digest, the receipt citation of each
+resolved value (with `-e`, the state commit read), and the bundle's digest.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | The bundle was written. Without `-e`, sources it holds are listed under `unresolved`. |
+| 1 | A configuration, selection, admission, or resolution error: an unknown type, a `--collection` that names none, an empty selection, a selected or referenced resource that fails admission, a resolved value its subschema rejects, `NYL-RESOURCE-BASE-REQUIRED`, or an `-e` environment whose state cannot be read. |
+| 2 | With `-e`, a source is blocked (a producer without a current receipt or its evidence, or no promotion record), or a guarded change is not named by `--allow-change`. stderr lists the blocked pointers with their source paths; nothing is written to stdout or `--output-dir`. |
+
+### The bundle as a contract
+
+`ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` are
+stable, versioned documents for tools other than Nyl:
+
+- `nyl schema` publishes a JSON Schema for each, next to the resource
+  schemas, and golden files pin each version.
+- Within `gitops.nyl/v1`, a change only adds optional fields; readers ignore
+  fields they do not know. Anything else is a new version, which the
+  changelog announces.
+- The bundle is canonical: items keyed by name and sorted bytewise, the
+  `referenced` map keyed by `<apiVersion>/<kind>` and name, and a digest over
+  its canonical JSON. The same members and resolved values give the same
+  bytes from `nyl bundle`, `nyl prepare`, and a run, so a tool can compare
+  digests instead of contents.
+- A bundle holds no annotations, no provenance, and no secrets: declarations
+  live in Git, and a `$fromUnit` cannot read a sensitive output.
+- A bundle that a unit receives or Nyl stores never has `unresolved`; only an
+  export without `-e` does.
+
+### Why `nyl bundle`
+
+The bundle command is a top-level verb, like `render`, `render-tree`,
+`build`, and `prepare`, rather than a `nyl get` form:
+
+- `nyl get` reports what the source declares or the state records, with one
+  set of options (a name filter, `-o table|wide|yaml|json|name`) and exit 0 or
+  1. A standalone bundle exists nowhere until stages 3–5 assemble it from a
+  selection given on the command line; there is no name to get.
+- It takes options that no `get` form has (`--as`, `--base`, `--no-base`,
+  `--allow-change`, `--output-dir`, `--worktree`, `--source`) and exits 2 for
+  a blocked source or a guarded change, as `prepare` does.
+- `nyl get resources` stays a `get` form, because the catalog is what the
+  source declares.
+
+### Relation to `nyl prepare`
+
+| | `nyl bundle` | `nyl prepare` |
+| --- | --- | --- |
+| Consumer | None; a selection or named collections | One unit |
+| Stages | 0–5 | 0–6 |
+| Needs | `[resources]` and declarations | The unit, and its driver for `--native` |
+| Sources without `-e` | Left in place and listed under `unresolved`, exit 0 | An error naming `-e`, because the unit's native inputs need values |
+| Writes | stdout, or `bundle.yaml` and `bundle-provenance.yaml` | Those, `resolved-spec.yaml`, and with `--native` the native inputs |
+| Fixtures | No | `--fixture-outputs` |
+
+For the same members and environment, `bundle.yaml` is the same bytes from
+both. `prepare` is how a unit's author inspects what the unit receives;
+`bundle` is how anything else reads the declarations.
 
 ## Stage 6: Driver adaptation
 
@@ -570,8 +870,10 @@ The bundle reaches an implementation in one of two ways. Neither needs a
 kind-specific option.
 
 **Through references.** `$fromCollection` is a new
-[value source](declarative-value-sources.md) for the reference resolver,
-accepted wherever a kind accepts references:
+[value source](declarative-value-sources.md) of the unit contexts: a unit's
+spec carries it when the unit renders, and a run resolves it, like
+`$fromUnit`, from the unit's own bundle. Every other context rejects it with
+the fix, a declaration among them:
 
 | Reference | Resolves to |
 | --- | --- |
@@ -717,8 +1019,10 @@ tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfva
 - Without `-e`, `prepare` renders the unit as `nyl build` does, with no
   environment values and no state, from the worktree unless `--source`
   names a commit. A spec that uses
-  `values`, `environment`, or a `$fromUnit` reference, directly or inside a
-  member, fails and names `-e`.
+  `values`, `environment`, or a `$fromUnit` or `$fromPromotion` source,
+  directly or inside a member, fails and names `-e`, because the native
+  inputs need values. [`nyl bundle`](#standalone-export-nyl-bundle), which
+  feeds no driver, lists such sources instead.
 - Stages 0–6 are the same code as under orchestration, so the native inputs
   are byte-identical to what an orchestrated run of the same unit would pass.
   Adopting orchestration later means selecting the unit from an Environment.
@@ -776,7 +1080,7 @@ aws-accounts (OpenTofu)  update  awaiting-approval: members removed
 - Removed members carry the warning `NYL-RESOURCE-MEMBERS-REMOVED`. It is
   separate from `NYL-PLAN-UNITS-LEAVING`: the unit stays, and its
   implementation will likely destroy something.
-- `nyl get resources [--kind <k>] [-l <selector>]` lists the catalog. With `-e`,
+- [`nyl get resources`](#nyl-get-resources) lists the catalog. With `-e`,
   it adds the consuming units and the access of each.
   `nyl get resource AwsAccount/payments-prod` shows the source location, the
   admission results, and every collection that includes it.
@@ -813,8 +1117,8 @@ transition rule with `effect: approve` matches.
 - `--approve <unit>` approves every guarded change in that unit's plan. The
   receipt records the approved reasons. A `bind: plan` approval already
   covers them, because the change digest includes the native consequences.
-- **Outside orchestration** there is no approval record. `nyl prepare` and
-  `nyl validate` exit 2 for a guarded change against `--base`, and `nyl exec`
+- **Outside orchestration** there is no approval record. `nyl prepare`,
+  `nyl bundle`, and `nyl validate` exit 2 for a guarded change against `--base`, and `nyl exec`
   refuses with exit 125 before the tool starts, writing no
   native inputs, unless the invocation names it with
   `--allow-change <resource>:<reason>`. A pipeline ties that flag to its own
@@ -866,7 +1170,7 @@ spec:                                 # rendered once per (environment, resource
   keep their role for fields expanded later in a narrower context.
 - **`resource`** holds the instance's domain resource as admitted: its
   `apiVersion`, `kind`, `metadata.name`, `metadata.labels`, and defaulted
-  `spec`. Fields that hold references stay reference objects, because the
+  `spec`. Fields that hold a value source keep it as written, because the
   structural pass runs before resolution. To use a resolved value, select
   the resource in a collection instead.
 - **Static instances.** `forEach` is literal, like `apiVersion`, `kind`,
@@ -952,14 +1256,16 @@ instantiating it differently in some environments.
 
 | Rule or type | Home |
 | --- | --- |
-| `ResourceDefinition`, the domain envelope, `collections`, `$fromCollection`, `ResourceBundle`, its provenance, golden files | `nyl-core` (`resources::domain`, `bindings`) |
+| `ResourceDefinition`, the domain envelope, `collections`, `$fromCollection`, `ResourceBundle`, its provenance, `ResourceCatalog`, golden files and published schemas | `nyl-core` (`resources::domain`, `bindings`) |
+| The domain-resource context: which sources each phase resolves, carries, or rejects with its fix, the literal-only fields, and the editor-schema alternatives | `nyl-core` `bindings::Context`, the one context table every walker reads |
 | Identity, duplicates, ordering, membership, ownership claims, the reference closure, removal detection, transition-rule decisions | `nyl-collections`, pure rules, one module each; CEL evaluation behind a `RuleEvaluator` port in `nyl-core` |
-| Schema validation and defaulting (JSON Schema 2020-12, a new dependency to evaluate) | `nyl-collections`, pure |
-| Bundle assembly and its canonical digest | `nyl-collections`, shared by units and [Releases](release-catalog.md) |
+| Schema validation and defaulting (JSON Schema 2020-12, a new dependency to evaluate), with carried sources as not-yet-known positions, and the validation of resolved values | `nyl-collections`, pure |
+| Bundle assembly from a selection, `unresolved`, and the canonical digest | `nyl-collections`, one function shared by units, [Releases](release-catalog.md), and `nyl bundle` |
 | Discovery of definitions and resources, the catalog, Kyverno admission | `nyl-render` (`gitops::discovery`, `validation`), returned through `SourceRenderer` as part of `RenderedSource` |
-| Resolving references inside a bundle, and the bundle digest in the execution key | `nyl-orchestration` resolution, `rules::execution_key` |
+| Resolving sources inside a bundle: `bindings::resolve_document` with the providers each entry point passes (the run's, the read-only snapshot providers of `nyl get output`, or none) | `nyl-core` `bindings`; the run's providers in `nyl-orchestration` resolution, the read-only ones in `nyl-orchestration` `shell::inspect`, which `nyl get output` already uses |
+| The bundle digest in the execution key | `nyl-orchestration` `rules::execution_key` |
 | `prepare` and `NativeInputs` per kind | `nyl-units`, in the kind's module |
-| `nyl prepare`, `get resources`, `schema resources` | `nyl-cli`, wiring only |
+| `nyl prepare`, `bundle`, `get resources`, `schema resources` | `nyl-cli`, wiring only: each passes the same catalog, selection, and providers to the shared stages |
 
 Contract walkthroughs become scenarios under
 `nyl/tests/scenarios/walkthroughs/`. These include a member added, a member
@@ -971,14 +1277,20 @@ consumer, and two owners rejected.
 
 | Slice | Delivers | Needs |
 | --- | --- | --- |
-| R1 | Definitions, discovery, schema and referential admission, `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
-| R2 | `collections`, ownership, the bundle and its state files, `$fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
+| R1 | Definitions, discovery, schema and referential admission, the domain-resource context in the value-source table (sources carried, rejected with their fixes, and skipped by schema checks), `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
+| R12 | The standalone export: `nyl-collections` membership, the reference closure, and bundle assembly; the `ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` formats with golden files and published schemas; `nyl get resources -o yaml\|json`; `nyl bundle` with and without `-e` | R1, M6 |
+| R2 | `collections`, ownership, the bundle in state files and the execution key, sources in members resolved by runs, `$fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3, R12 |
 | R3 | Kyverno admission with trusted context | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4 |
-| R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base`, the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
+| R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base` (on `nyl bundle` too), the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
-| R8–R11 | The [Release catalog](release-catalog.md#rollout): Release labels and `spec.manifests`, label selection in ApplicationGroups, Release admission, collections and `forEach` in Releases | M2, R1, R3 |
+| R8–R11 | The [Release catalog](release-catalog.md#rollout): Release labels and `spec.manifests`, label selection in ApplicationGroups, Release admission, collections and `forEach` in Releases | M2, R1, R3, R12 |
+
+R12 follows R1 and comes before R2: it is the first slice that assembles
+bundles, so every later consumer (units in R2, Releases in R10) reuses its
+code rather than building its own. Slice identifiers are stable; R12 is
+numbered after the existing slices and ordered by what it needs.
 
 ## Guide sketch: implementing a domain resource
 
@@ -1014,8 +1326,11 @@ teams/
    `tofu plan -var-file=…` against a scratch backend. Move a declaration to
    another folder that the collection's `paths` still match and re-run: same
    bundle digest, same execution key. Change a budget: new key.
+   `nyl bundle --collection aws-accounts/accounts` prints the same
+   collection without preparing the unit, and `nyl bundle --kind AwsAccount
+   -l team=payments` any other selection, for tools outside Nyl.
 5. **Reference another unit.** Add `AwsAccessGrant` with a
-   `principalGroupId` that accepts references, set it with `$fromUnit` to the
+   `principalGroupId`, set it with `$fromUnit` to the
    identity unit's output, and watch `prepare` exit 2 with the blocked
    pointer until `identity` has a current receipt.
 6. **Test.** Fixture tests run `nyl prepare --fixture-outputs` and assert on
@@ -1041,7 +1356,11 @@ teams/
 
 | Decision | Needed by |
 | --- | --- |
-| JSON Schema crate and the exact subset (formats asserted or annotation-only) | R1 |
+| JSON Schema crate and the exact subset (formats asserted or annotation-only), and how not-yet-known positions interact with `if`, `oneOf`, `uniqueItems`, and `contains` at admission | R1 |
+| Whether `nyl bundle` can emit an earlier format version for tools pinned to one, or only the newest | R12 |
+| Whether `nyl get resources` needs a more specific name, because `nyl get` also reports Nyl's own project resources | R12 |
+| Whether one `nyl bundle` invocation takes several ad-hoc selections, each with its own `--as` | After R12 |
+| Whether `--collection` also names a Release's collection, as `<group>/<release>/<collection>` | R10 |
 | Definition sharing across repositories through a locked `GitSource`, refreshed by `nyl update source-locks` | After R1 |
 | Version conversion between definition versions, or coordinated bumps only | After R2 |
 | Bundle size limits for desired state, and whether large bundles stay in state or are referenced by digest | R2 |

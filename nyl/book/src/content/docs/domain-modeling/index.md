@@ -78,8 +78,10 @@ input.
    Kyverno policies, which receive the trusted source path as context.
 4. A unit declares the collections it consumes: a type, plus label and path
    filters. Membership is explicit, and nothing is linked by matching names.
-5. Nyl resolves references to other units' outputs and builds one tool-neutral
-   bundle for the unit. The bundle is part of the unit's execution key.
+5. Nyl resolves the value sources a declaration holds, such as
+   `$fromUnit` for another unit's output, in the consuming unit's
+   environment, and builds one tool-neutral bundle for the unit. The bundle
+   is part of the unit's execution key.
 6. The unit's driver turns the bundle into native input, such as a Terraform
    variable that `for_each` iterates over.
 
@@ -107,6 +109,12 @@ describes it.
 - **Sensitive changes are guarded.** A definition can forbid a change, such as
   moving a workload account back to the sandbox OU, or require approval for
   it, such as changing an account's email.
+- **Domain modeling works on its own.** Validating, admitting, collecting,
+  and bundling declarations needs no unit, driver, Release, or cluster.
+  `nyl get resources -o yaml` exports the admitted catalog, and `nyl bundle`
+  exports a versioned bundle for any selection of declarations, so other
+  tools can read them. Values that come from other units' outputs are listed
+  as unresolved, or resolved read-only with `-e`.
 - **Orchestration is optional.** In an existing Terraform or OpenTofu
   pipeline, `nyl exec` runs the tool with the collected inputs, or Nyl
   writes the inputs for the pipeline's own commands. Either way they are the
