@@ -551,7 +551,7 @@ pub struct ReceiptProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunId>,
     /// The observed value of the producer's receipt the reference read, for
-    /// a `$unit: {unit, observation}` reference; absent for an output or
+    /// a `$fromUnit: {unit, observation}` reference; absent for an output or
     /// an artifact field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<String>,

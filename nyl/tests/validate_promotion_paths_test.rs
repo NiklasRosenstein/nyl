@@ -216,7 +216,7 @@ fn test_an_unrenderable_coverage_unit_fails_validate_and_warns_plan() {
     let text = std::fs::read_to_string(&release).unwrap();
     std::fs::write(
         &release,
-        text.replace("{$input: databaseHost}", "'{{ inputs.databaseHost | nope }}'"),
+        text.replace("{$fromInput: databaseHost}", "'{{ inputs.databaseHost | nope }}'"),
     )
     .unwrap();
     nyl(&world, &checkout, &["validate"]).assert().failure().stderr(
@@ -303,7 +303,7 @@ fn chain(world: &World, edit: impl Fn(String) -> String) -> std::path::PathBuf {
         ("prod-db", "prod", "staging-to-prod"),
     ] {
         text.push_str(&edit(format!(
-            "---\napiVersion: units.gitops.nyl/v1\nkind: OpenTofu\nmetadata:\n  name: {unit}\n  labels: {{{label}: 'true'}}\nspec:\n  source: {{path: ../infra/database}}\n  backend: {{path: '{{{{ values.backendDir }}}}/{unit}.tfstate'}}\n  variables:\n    size: {{$promotion: {{path: {path}, value: dbSize}}}}\n  timeout: 60m\n"
+            "---\napiVersion: units.gitops.nyl/v1\nkind: OpenTofu\nmetadata:\n  name: {unit}\n  labels: {{{label}: 'true'}}\nspec:\n  source: {{path: ../infra/database}}\n  backend: {{path: '{{{{ values.backendDir }}}}/{unit}.tfstate'}}\n  variables:\n    size: {{$fromPromotion: {{path: {path}, value: dbSize}}}}\n  timeout: 60m\n"
         )));
     }
     std::fs::write(&units, text).unwrap();
@@ -401,7 +401,7 @@ fn test_a_named_path_into_another_environment_is_rejected() {
 fn test_value_type_mismatch_is_reported() {
     let world = World::new(&scenario::shell::shared_project());
     let checkout = chain(&world, |text| {
-        text        .replace("  source: {path: ../infra/database}\n  backend: {path: '{{ values.backendDir }}/stage-db.tfstate'}", "  source: {$promotion: {path: dev-to-staging, value: dbSize}}\n  backend: {path: '{{ values.backendDir }}/stage-db.tfstate'}")
+        text        .replace("  source: {path: ../infra/database}\n  backend: {path: '{{ values.backendDir }}/stage-db.tfstate'}", "  source: {$fromPromotion: {path: dev-to-staging, value: dbSize}}\n  backend: {path: '{{ values.backendDir }}/stage-db.tfstate'}")
     });
     nyl(&world, &checkout, &["validate"])
         .assert()
@@ -511,14 +511,14 @@ fn remote_group(directory: &Path) -> String {
 }
 
 /// A promoted value is compared with the declared type of the Release input
-/// a DeploymentTarget's `$promotion` binding fills, which the Release in
+/// a DeploymentTarget's `$fromPromotion` binding fills, which the Release in
 /// the target's selected ApplicationGroup declares: a string fits the
 /// string input `image`, and an object does not. Catches the mismatch
 /// passing `validate` and surfacing only when prod's publication resolves.
 #[test]
 fn test_validate_compares_promoted_values_with_release_input_types() {
     let world = World::new(&scenario::shell::shared_project());
-    let bindings = "    web/web:\n      image: {$promotion: {value: webImage}}\n      databaseHost: {$promotion: {value: dbHost}}\n";
+    let bindings = "    web/web:\n      image: {$fromPromotion: {value: webImage}}\n      databaseHost: {$fromPromotion: {value: dbHost}}\n";
     let sound = bound_checkout(&world, SOUND, bindings, "");
     nyl(&world, &sound, &["validate"])
         .assert()
@@ -545,7 +545,7 @@ fn test_validate_offline_types_remote_inputs_from_the_cache_only() {
     let world = World::new(&scenario::shell::shared_project());
     let remote = world.scenario_tmp().join("api-source");
     let group = remote_group(&remote);
-    let bindings = "    web/web:\n      image: {$promotion: {value: webImage}}\n    api/api:\n      replicas: {$promotion: {value: webImage}}\n";
+    let bindings = "    web/web:\n      image: {$fromPromotion: {value: webImage}}\n    api/api:\n      replicas: {$fromPromotion: {value: webImage}}\n";
     let checkout = bound_checkout(&world, SOUND, bindings, &group);
     nyl(&world, &checkout, &["validate", "--offline"])
         .assert()
@@ -580,7 +580,7 @@ fn test_an_unreadable_remote_input_type_fails_validate_and_warns_plan() {
     let world = World::new(&scenario::shell::shared_project());
     let remote = world.scenario_tmp().join("api-source");
     let group = remote_group(&remote);
-    let bindings = "    api/api:\n      replicas: {$promotion: {value: webImage}}\n";
+    let bindings = "    api/api:\n      replicas: {$fromPromotion: {value: webImage}}\n";
     let checkout = bound_checkout(&world, SOUND, bindings, &group);
     std::fs::remove_dir_all(&remote).unwrap();
     nyl(&world, &checkout, &["validate"])

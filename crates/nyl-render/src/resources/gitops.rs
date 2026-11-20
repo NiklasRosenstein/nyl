@@ -1445,7 +1445,7 @@ impl DeploymentTarget {
 
     /// Value sources are valid in a target only in its `releaseInputs`, which
     /// [`super::release_inputs::validate_bindings`] checks: anywhere else,
-    /// such as a `$parameter` an EnvironmentTemplate's values did not resolve,
+    /// such as a `$fromParameter` an EnvironmentTemplate's values did not resolve,
     /// one is an error instead of reaching a Release as data.
     fn reject_value_sources(&self) -> Result<()> {
         let mut spec = serde_json::to_value(&self.spec).map_err(|error| CoreError::config(error.to_string()))?;
@@ -2697,20 +2697,20 @@ mod tests {
     }
 
     /// Catches a value source in a declared DeploymentTarget reaching a
-    /// Release as data where it cannot resolve: `$parameter` in a binding, and
-    /// `$environment` in a `$unit`, which only unit documents resolve, fail
+    /// Release as data where it cannot resolve: `$fromParameter` in a binding, and
+    /// `$fromEnvironment` in a `$fromUnit`, which only unit documents resolve, fail
     /// with where they work.
     #[test]
     fn declared_targets_reject_sources_they_cannot_resolve() {
         let error = parse_gitops_resource(&target_with(json!({
             "reconciler": {"argocd": {}},
-            "releaseInputs": {"rise/rise": {"clusterWide": {"$parameter": "crds"}}}
+            "releaseInputs": {"rise/rise": {"clusterWide": {"$fromParameter": "crds"}}}
         })))
         .unwrap_err()
         .to_string();
         assert!(
             error.contains(
-                "spec.releaseInputs.\"rise/rise\".clusterWide holds a $parameter source, which reads a template parameter"
+                "spec.releaseInputs.\"rise/rise\".clusterWide holds a $fromParameter source, which reads a template parameter"
             ),
             "{error}"
         );
@@ -2718,16 +2718,16 @@ mod tests {
         let binding = |environment: serde_json::Value| {
             target_with(json!({
                 "reconciler": {"argocd": {}},
-                "releaseInputs": {"apps/web": {"image": {"$unit": {"unit": "image", "output": "ref", "environment": environment}}}}
+                "releaseInputs": {"apps/web": {"image": {"$fromUnit": {"unit": "image", "output": "ref", "environment": environment}}}}
             }))
         };
         assert!(parse_gitops_resource(&binding(json!("dev"))).is_ok());
-        let error = parse_gitops_resource(&binding(json!({"$environment": "/imageFrom"})))
+        let error = parse_gitops_resource(&binding(json!({"$fromEnvironment": "/imageFrom"})))
             .unwrap_err()
             .to_string();
         assert!(
             error.contains(
-                "$environment source, which reads the environment's values and resolves only in unit documents"
+                "$fromEnvironment source, which reads the environment's values and resolves only in unit documents"
             ),
             "{error}"
         );
@@ -2735,12 +2735,12 @@ mod tests {
 
         let error = parse_gitops_resource(&target_with(json!({
             "reconciler": {"argocd": {}},
-            "values": {"replicas": {"$parameter": "replicas"}},
+            "values": {"replicas": {"$fromParameter": "replicas"}},
         })))
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("spec.values.replicas holds a $parameter source"),
+            error.contains("spec.values.replicas holds a $fromParameter source"),
             "{error}"
         );
     }

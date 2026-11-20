@@ -77,7 +77,7 @@ spec:
   idempotent: true
   teardown: [sh, -c, 'true']
   values:
-    network: {$unit: {environment: '{{ values.peer }}', unit: network, output: id}}
+    network: {$fromUnit: {environment: '{{ values.peer }}', unit: network, output: id}}
 "#;
 
 struct Harness {

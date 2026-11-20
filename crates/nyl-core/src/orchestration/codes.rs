@@ -197,7 +197,7 @@ codes! {
     PromoteSelectorInvalid => "NYL-PROMOTE-SELECTOR-INVALID",
     /// A promoted value's type does not fit a binding that reads it.
     PromoteValueType => "NYL-PROMOTE-VALUE-TYPE",
-    /// A `$promotion` binding names a path or a value no PromotionPath declares.
+    /// A `$fromPromotion` binding names a path or a value no PromotionPath declares.
     PromoteBindingUnknown => "NYL-PROMOTE-BINDING-UNKNOWN",
     /// A PromotionPath's `coverage` names a unit the source environment does not select, a unit whose kind runs no deployments, or a group or deployment the unit's driver does not list for it.
     PromoteCoverageUnknown => "NYL-PROMOTE-COVERAGE-UNKNOWN",
@@ -205,7 +205,7 @@ codes! {
     PromoteCoverageIneffective => "NYL-PROMOTE-COVERAGE-INEFFECTIVE",
     /// The deployments of a unit a PromotionPath's `coverage` names could not be listed, such as when what the unit's declaration renders from cannot be read, so its names are not checked. An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`, which judge the source by what they need. A promotion still refuses a name no attestation lists.
     PromoteCoverageUnchecked => "NYL-PROMOTE-COVERAGE-UNCHECKED",
-    /// The declared type of a field a `$promotion` binding fills could not be read, so the promoted value's type is not compared with it: the unit's driver could not read what declares the type, such as a remote source that is neither fetched nor cached (`nyl validate --offline`, a `--local` run). An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`. Resolution still checks the value against the declaration.
+    /// The declared type of a field a `$fromPromotion` binding fills could not be read, so the promoted value's type is not compared with it: the unit's driver could not read what declares the type, such as a remote source that is neither fetched nor cached (`nyl validate --offline`, a `--local` run). An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`. Resolution still checks the value against the declaration.
     PromoteValueTypeUnchecked => "NYL-PROMOTE-VALUE-TYPE-UNCHECKED",
     /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing, or a publication's running-scoped attestation that no longer describes what runs (only its current receipt's counts; `--state-revision` judges an older state on its own). Nothing was written. Exit 2.
     PromoteNoEvidence => "NYL-PROMOTE-NO-EVIDENCE",
@@ -215,7 +215,7 @@ codes! {
     PromoteArtifactMissing => "NYL-PROMOTE-ARTIFACT-MISSING",
     /// A promoted artifact's kind cannot verify artifacts, so the record says `artifactsVerified: false`. A warning.
     PromoteArtifactUnverified => "NYL-PROMOTE-ARTIFACT-UNVERIFIED",
-    /// An environment's `promotion` source, or a `$promotion` binding, names a path with no record yet. Exit 2.
+    /// An environment's `promotion` source, or a `$fromPromotion` binding, names a path with no record yet. Exit 2.
     PromotionMissing => "NYL-PROMOTION-MISSING",
     /// The `record: source` block in an Environment's source has a lower `sequence` than the one a run applied, such as an older checkout or a reverted promotion commit. Rolling back is a new promotion. Exit 1.
     PromotionSequenceOlder => "NYL-PROMOTION-SEQUENCE-OLDER",
@@ -343,7 +343,7 @@ codes! {
     TemplateInvalid => "NYL-TEMPLATE-INVALID",
     /// A value source in an environment's or a template instance's values
     /// that no unit of the environment reads: sources in values resolve only
-    /// where a unit reads them with `$environment`, so this one never
+    /// where a unit reads them with `$fromEnvironment`, so this one never
     /// resolves. A warning of `nyl validate`.
     ValuesSourceUnread => "NYL-VALUES-SOURCE-UNREAD",
     /// `--renew` or `--no-extend` where it does not apply: for a declared

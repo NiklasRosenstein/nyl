@@ -2,7 +2,7 @@
 //!
 //! Contract: [References](../../../../design/orchestration-core.md#references):
 //! "References add edges implicitly", and the edge is known after rendering.
-//! The dependency graph needs every `$unit` reference of a rendered or stored
+//! The dependency graph needs every `$fromUnit` reference of a rendered or stored
 //! spec before any producer has a value, so this walk shares the walker of
 //! [`super::resolve_document`] ([`super::find_clauses`]) but reads no
 //! provider.
@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::{find_clauses, Clause, Context, UnitInputSource};
 
-/// One `$unit` reference of a document.
+/// One `$fromUnit` reference of a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitReference {
     /// JSON Pointer of the reference object, below the pointer the caller
@@ -20,7 +20,7 @@ pub struct UnitReference {
     pub source: UnitInputSource,
 }
 
-/// Every `$unit` reference in a rendered unit spec `document`, at any depth
+/// Every `$fromUnit` reference in a rendered unit spec `document`, at any depth
 /// of its objects and arrays, with `pointer` locating `document` itself. A
 /// malformed or misplaced source (unknown fields, both `output` and
 /// `artifact`) is an issue naming its location, never a dropped reference.
@@ -60,10 +60,10 @@ mod tests {
     #[test]
     fn test_unit_references_finds_nested_and_array_references() {
         let document = json!({
-            "variables": {"vpc_id": {"$unit": {"unit": "network", "output": "vpcId"}}},
-            "hosts": ["static", {"$unit": {"unit": "database", "artifact": "endpoint"}}],
-            "promoted": {"$promotion": {"value": "image"}},
-            "literal": {"$literal": {"$unit": {"unit": "data"}}},
+            "variables": {"vpc_id": {"$fromUnit": {"unit": "network", "output": "vpcId"}}},
+            "hosts": ["static", {"$fromUnit": {"unit": "database", "artifact": "endpoint"}}],
+            "promoted": {"$fromPromotion": {"value": "image"}},
+            "literal": {"$literal": {"$fromUnit": {"unit": "data"}}},
         });
         let references = unit_references("", &document).unwrap();
         assert_eq!(
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn test_unit_references_escapes_tokens_below_the_given_pointer() {
-        let document = json!({"platform/web": {"image": {"$unit": {"unit": "web-image", "artifact": "image"}}}});
+        let document = json!({"platform/web": {"image": {"$fromUnit": {"unit": "web-image", "artifact": "image"}}}});
         let references = unit_references("/releases", &document).unwrap();
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].pointer, "/releases/platform~1web/image");
@@ -92,11 +92,11 @@ mod tests {
     #[test]
     fn test_unit_references_names_the_location_of_malformed_references() {
         let document = json!({
-            "both": {"$unit": {"unit": "a", "output": "x", "artifact": "y"}},
-            "neither": {"$unit": {"unit": "a"}},
-            "unknown": {"$unit": {"unit": "a", "output": "x", "extra": 1}},
-            "mixed": {"$unit": {"unit": "a", "output": "x"}, "other": 1},
-            "scalar": {"$unit": "a"},
+            "both": {"$fromUnit": {"unit": "a", "output": "x", "artifact": "y"}},
+            "neither": {"$fromUnit": {"unit": "a"}},
+            "unknown": {"$fromUnit": {"unit": "a", "output": "x", "extra": 1}},
+            "mixed": {"$fromUnit": {"unit": "a", "output": "x"}, "other": 1},
+            "scalar": {"$fromUnit": "a"},
         });
         let issues = unit_references("", &document).unwrap_err();
         assert_eq!(issues.len(), 5, "{issues:?}");

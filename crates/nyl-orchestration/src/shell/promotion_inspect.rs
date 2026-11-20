@@ -200,7 +200,7 @@ fn states_named(record: &PromotionRecord) -> Vec<CommitId> {
 
 /// `nyl get promotions -e <env>`: the environment's PromotionRecords, the
 /// one its last run applied, the record that supplies its source and each of
-/// its units' `$promotion` bindings (as the binding resolver chooses it,
+/// its units' `$fromPromotion` bindings (as the binding resolver chooses it,
 /// [`crate::rules::sources::binding_supplier`], over the units' desired
 /// documents), and every promotion its desired history records.
 /// With `record: source`, `promoted` (the Environment's `source.promotion`

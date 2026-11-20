@@ -47,7 +47,7 @@ pub struct TerraformSpec {
     /// Terraform workspace, defaulting to the native default workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
-    /// Native input variables; $unit references may appear at any depth.
+    /// Native input variables; $fromUnit references may appear at any depth.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, Value>,
     /// Native variable files, evaluated in order before explicit variables.
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn test_spec_rejects_undeclared_credentials_unknown_fields_and_escaping_paths() {
         let spec = |value| serde_json::from_value::<TerraformSpec>(value).unwrap().validate();
-        assert!(spec(json!({"source": {"path": "infra/network"}, "backend": {"bucket": "state", "key": "dev"}, "variables": {"network": {"$unit": {"unit": "network", "output": "id"}}}})).is_ok());
+        assert!(spec(json!({"source": {"path": "infra/network"}, "backend": {"bucket": "state", "key": "dev"}, "variables": {"network": {"$fromUnit": {"unit": "network", "output": "id"}}}})).is_ok());
         assert!(
             spec(json!({"source": {"path": "infra/network"}, "backend": {"secret_key": "never-persist"}}))
                 .unwrap_err()

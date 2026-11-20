@@ -34,8 +34,8 @@ these artifacts whenever the Rust resource contracts or documentation change.
 
 Where a resource's fields accept [value sources](/nyl/reference/value-sources/),
 the schema offers them next to each top-level `spec` field, from the context
-table: a unit kind's fields accept `$environment`, `$unit`, `$promotion`, and
-`$literal`, a HelmChart's and a RemoteManifest's accept `$input` and
+table: a unit kind's fields accept `$fromEnvironment`, `$fromUnit`, `$fromPromotion`, and
+`$literal`, a HelmChart's and a RemoteManifest's accept `$fromInput` and
 `$literal`, and a DeploymentTarget's Release-input bindings accept the binding
 sources. Sources are also valid deeper in those fields and in free-form data,
 where the schemas do not offer them; an editor may flag such a source that Nyl

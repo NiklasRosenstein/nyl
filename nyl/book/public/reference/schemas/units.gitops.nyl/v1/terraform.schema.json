@@ -314,7 +314,7 @@
     },
     "PromotionInputSource": {
       "additionalProperties": false,
-      "description": "`$promotion`: a value recorded through a PromotionPath, which\norchestration resolves.",
+      "description": "`$fromPromotion`: a value recorded through a PromotionPath, which\norchestration resolves.",
       "properties": {
         "path": {
           "description": "PromotionPath the value must come from.",
@@ -486,7 +486,7 @@
               "$ref": "#/$defs/UnitDocumentValueSource"
             }
           ],
-          "description": "Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `$unit: {unit, observation}`."
+          "description": "Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `$fromUnit: {unit, observation}`."
         },
         "outputs": {
           "anyOf": [
@@ -600,7 +600,7 @@
               "$ref": "#/$defs/UnitDocumentValueSource"
             }
           ],
-          "description": "Native input variables; $unit references may appear at any depth."
+          "description": "Native input variables; $fromUnit references may appear at any depth."
         },
         "version": {
           "anyOf": [
@@ -642,7 +642,7 @@
           "additionalProperties": false,
           "description": "Reads the environment's effective values at a JSON Pointer; resolved when the unit renders.",
           "properties": {
-            "$environment": {
+            "$fromEnvironment": {
               "anyOf": [
                 {
                   "description": "Shorthand: a JSON Pointer into the values, such as /target.",
@@ -655,7 +655,7 @@
             }
           },
           "required": [
-            "$environment"
+            "$fromEnvironment"
           ],
           "type": "object"
         },
@@ -663,12 +663,12 @@
           "additionalProperties": false,
           "description": "Reads a unit's output, artifact, or observed value; resolved by orchestration.",
           "properties": {
-            "$unit": {
+            "$fromUnit": {
               "$ref": "#/$defs/UnitInputSource"
             }
           },
           "required": [
-            "$unit"
+            "$fromUnit"
           ],
           "type": "object"
         },
@@ -676,12 +676,12 @@
           "additionalProperties": false,
           "description": "Reads a value recorded through a PromotionPath; resolved by orchestration.",
           "properties": {
-            "$promotion": {
+            "$fromPromotion": {
               "$ref": "#/$defs/PromotionInputSource"
             }
           },
           "required": [
-            "$promotion"
+            "$fromPromotion"
           ],
           "type": "object"
         },
@@ -701,7 +701,7 @@
     },
     "UnitInputSource": {
       "additionalProperties": false,
-      "description": "`$unit`: a unit's output, artifact, or observed value, which orchestration\nresolves from the producer's current receipt.",
+      "description": "`$fromUnit`: a unit's output, artifact, or observed value, which orchestration\nresolves from the producer's current receipt.",
       "properties": {
         "artifact": {
           "description": "Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.",
@@ -718,7 +718,7 @@
           "type": "array"
         },
         "environment": {
-          "description": "Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$environment`, resolved when the unit renders.",
+          "description": "Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$fromEnvironment`, resolved when the unit renders.",
           "type": [
             "string",
             "null"
@@ -775,7 +775,7 @@
     },
     "ValuesSource": {
       "additionalProperties": false,
-      "description": "`$environment`: a value of the environment's effective `values`.\n\nWhen nothing is at `pointer`, or the value there is `null`, `default`\napplies; with `optional: true` the field is removed instead, as if it were\nomitted; otherwise it is an error. Shorthand: `{$environment: /pointer}`.",
+      "description": "`$fromEnvironment`: a value of the environment's effective `values`.\n\nWhen nothing is at `pointer`, or the value there is `null`, `default`\napplies; with `optional: true` the field is removed instead, as if it were\nomitted; otherwise it is an error. Shorthand: `{$fromEnvironment: /pointer}`.",
       "properties": {
         "default": {
           "description": "Value used when nothing is at `pointer` or the value there is `null`. Must not be `null`; use `optional` to leave the field out instead. Exclusive with `optional`."

@@ -2,9 +2,9 @@
 //!
 //! Contract: [Declarative value sources](../../../../design/declarative-value-sources.md#contexts),
 //! "Carried sources". An EnvironmentTemplate's or a declared environment's
-//! `values` resolve none of `$unit`, `$promotion`, `$file`, `$git`, and
-//! `$publication`: they carry them to the unit documents that read the values
-//! with `$environment`, whose context checks and resolves them there, so a
+//! `values` resolve none of `$fromUnit`, `$fromPromotion`, `$fromFile`, `$fromGit`, and
+//! `$fromPublication`: they carry them to the unit documents that read the values
+//! with `$fromEnvironment`, whose context checks and resolves them there, so a
 //! source that lands where it is not valid fails that unit's render. A
 //! carried source that no selected unit's rendered spec holds landed nowhere
 //! and never resolves: [`unread_sources`] reports it, for `nyl validate`,
@@ -39,13 +39,13 @@ pub fn unread_sources(source: &RenderedSource) -> Vec<Finding> {
                 Finding::new(
                     Code::ValuesSourceUnread,
                     format!(
-                        "{} of {} {} holds a {} source that no unit of the environment reads: a source in values resolves only where a unit reads it with $environment",
+                        "{} of {} {} holds a {} source that no unit of the environment reads: a source in values resolves only where a unit reads it with $fromEnvironment",
                         found.field,
                         if source.instance.is_some() { "instance" } else { "Environment" },
                         source.environment.metadata.name,
                         found.clause.source().key(),
                     ),
-                    "read the value in a unit with $environment, or remove it from the values",
+                    "read the value in a unit with $fromEnvironment, or remove it from the values",
                 )
             })
         })
@@ -113,15 +113,15 @@ mod tests {
     }
 
     /// Catches a carried source that lands nowhere passing `nyl validate`
-    /// silently, and one that a unit reads (through `$environment` or Jinja,
+    /// silently, and one that a unit reads (through `$fromEnvironment` or Jinja,
     /// either way its rendered spec holds it) reported.
     #[test]
     fn test_a_carried_source_no_unit_reads_is_reported() {
-        let image = json!({"$unit": {"unit": "build", "artifact": "image"}});
+        let image = json!({"$fromUnit": {"unit": "build", "artifact": "image"}});
         let values = json!({
             "target": {"inline": {"releaseInputs": {"web/web": {"image": image}}}},
-            "unused": {"$file": {"path": "config.yaml"}},
-            "unselected": {"$promotion": {"value": "image"}},
+            "unused": {"$fromFile": {"path": "config.yaml"}},
+            "unselected": {"$fromPromotion": {"value": "image"}},
             "escaped": {"$literal": {"a": 1}},
         });
         let source = source(
@@ -132,7 +132,7 @@ mod tests {
                     true,
                     json!({"target": {"inline": {"releaseInputs": {"web/web": {"image": image}}}}}),
                 ),
-                ("other", false, json!({"image": {"$promotion": {"value": "image"}}})),
+                ("other", false, json!({"image": {"$fromPromotion": {"value": "image"}}})),
             ],
         );
         let findings = unread_sources(&source);
@@ -141,7 +141,7 @@ mod tests {
             [Code::ValuesSourceUnread, Code::ValuesSourceUnread]
         );
         assert!(
-            findings[0].message.starts_with("spec.values.unselected of Environment dev holds a $promotion source that no unit of the environment reads"),
+            findings[0].message.starts_with("spec.values.unselected of Environment dev holds a $fromPromotion source that no unit of the environment reads"),
             "{}",
             findings[0].message
         );

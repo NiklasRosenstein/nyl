@@ -3,7 +3,7 @@
 //! Contract: [Inspection](../../../../design/orchestration-core.md#inspection).
 //! Both read one snapshot of the state refs (and, for status, the lease and
 //! run refs) and never write. `get output` and `get artifact` resolve
-//! exactly like `$unit`, through `rules::references::resolve_reference`.
+//! exactly like `$fromUnit`, through `rules::references::resolve_reference`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -227,7 +227,7 @@ pub enum GetValue {
 }
 
 /// `nyl get output u/o`, `nyl get artifact u/n`, and `nyl get observation u/o`: resolve `source` like a
-/// `$unit` reference against `snapshot`. Unresolvable is
+/// `$fromUnit` reference against `snapshot`. Unresolvable is
 /// [`Code::ReferenceUnresolved`](nyl_core::orchestration::codes::Code::ReferenceUnresolved),
 /// unless `allow_stale` finds an older value.
 ///
@@ -393,7 +393,7 @@ mod tests {
         EnvironmentName::new("dev").unwrap()
     }
 
-    /// Catches `get output` printing a value no `$unit` would resolve,
+    /// Catches `get output` printing a value no `$fromUnit` would resolve,
     /// or failing for a current receipt.
     #[test]
     fn test_get_value_resolves_like_a_reference() {

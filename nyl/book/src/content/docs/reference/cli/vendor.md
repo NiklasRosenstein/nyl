@@ -34,7 +34,7 @@ nyl vendor --check
 nyl vendor --check --target production
 ```
 
-The check is network-free, with one exception: targets with `$publication`
+The check is network-free, with one exception: targets with `$fromPublication`
 Release inputs refresh their publication branch when they can and otherwise use
 the cached head, so the check covers the state the next render reads. Without
 either, those inputs are unbound and fall back to their defaults. Publication

@@ -9,7 +9,7 @@
 //!
 //! - every string of the template's `values`, `state`, `source`, and
 //!   `protectedRefs` that has template syntax renders with `params` and
-//!   `environment.name`, then every `$parameter` clause of `values`
+//!   `environment.name`, then every `$fromParameter` clause of `values`
 //!   resolves to its bound parameter
 //!   ([`EnvironmentTemplate::resolve_parameter_sources`]); the result is an
 //!   ordinary [`Environment`], validated like a declared one, whose labels
@@ -171,7 +171,7 @@ pub fn instantiate(
                     .map_err(|error| invalid(template, name.as_str(), format!("spec.{field}: {error}")))?;
             }
         }
-        // Then the `$parameter` clauses of `values`, with the bound
+        // Then the `$fromParameter` clauses of `values`, with the bound
         // parameters: the value a clause reads is typed and never templated.
         if let Some(Value::Object(values)) = map.get_mut("values") {
             let rendered = values.clone().into_iter().collect();

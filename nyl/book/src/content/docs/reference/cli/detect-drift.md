@@ -14,7 +14,7 @@ Drift and attestations answer different questions. Drift says whether a unit
 must execute again: a drifted unit is work for the next reconcile.
 Attestations are evidence that dependents and promotion require, such as a
 smoke test or a publication's Argo CD health; a `dependsOn` entry or
-`$unit` [requires them](/nyl/orchestration/runs/#requiring-attestations)
+`$fromUnit` [requires them](/nyl/orchestration/runs/#requiring-attestations)
 with `evidence: attested` or `attestations`.
 
 `nyl attest --name … --result …` is the second form of `attest`: it records
@@ -176,7 +176,7 @@ knows, as `source: {external: {by, identity, source, url}}`:
   with `NYL-LEASE-HELD`.
 
 Dependents gate on these names like any other: a `dependsOn` entry or
-`$unit` that requires `qa` is [blocked](/nyl/orchestration/runs/#requiring-attestations)
+`$fromUnit` that requires `qa` is [blocked](/nyl/orchestration/runs/#requiring-attestations)
 as `attestation-pending` until a pass is recorded for the current receipt, and
 as `attestation-failing` while the recorded result is `fail`.
 

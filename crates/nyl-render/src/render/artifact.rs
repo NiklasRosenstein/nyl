@@ -41,7 +41,7 @@ pub enum ArtifactRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         subpath: Option<String>,
     },
-    /// One file at an immutable commit, as a `$git` binding reads it. The
+    /// One file at an immutable commit, as a `$fromGit` binding reads it. The
     /// repository is credential-free, and the revision is not part of the
     /// request because rendering never resolves it.
     GitBlob {

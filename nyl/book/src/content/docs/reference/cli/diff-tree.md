@@ -11,11 +11,11 @@ nyl diff-tree --target production --against published --refresh
 
 Every indexed file of the published target prefix must match its recorded
 digest. A prefix without an ownership index owns nothing yet, for example when
-another tool has committed `$publication` state before the first
+another tool has committed `$fromPublication` state before the first
 publication. It may then hold only files the target declares as
-`$publication` state paths; any other file fails the comparison, which
+`$fromPublication` state paths; any other file fails the comparison, which
 usually means `pathPrefix` names a directory that belongs to something else.
-Unindexed repository content is never treated as target-owned baseline data. `--offline` reads `$publication` state at the
+Unindexed repository content is never treated as target-owned baseline data. `--offline` reads `$fromPublication` state at the
 cached branch head, as for `render-tree`, and compares against the published
 tree at that same commit, or at the cached publication branch head, without
 contacting the publication repository. With `--against source`, `--source-ref`
@@ -51,7 +51,7 @@ location, and after the merge the entry no longer matters. A
 `--source-project-path` left in a CI job is equally harmless.
 
 When the baseline's target publishes to a different repository, branch, or
-path prefix, its `$publication` inputs read that publication, not the
+path prefix, its `$fromPublication` inputs read that publication, not the
 desired one, and the report carries a `publication_moved` warning. Nyl does not
 move state or clean up the old prefix; follow
 [Move a publication](/nyl/kubernetes-gitops/workflow/move-publication/).

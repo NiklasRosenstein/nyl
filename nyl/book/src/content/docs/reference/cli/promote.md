@@ -81,7 +81,7 @@ except a moved branch:
 - a branch with commits its upstream lacks, which the push would publish
   with the record: push or drop them first;
 - an untracked Environment file, or uncommitted changes to it;
-- a `$promotion` the Environment inherits (such as from its group), or
+- a `$fromPromotion` the Environment inherits (such as from its group), or
   one not in block style: declare it in the Environment, one key per line;
 - an Environment no file declares, such as a template's instance;
 - a push the remote refuses for another reason, such as branch protection or

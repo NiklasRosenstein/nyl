@@ -95,8 +95,8 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+      image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$fromUnit: {unit: database, output: connection, pointer: /host}}
       namespace: web
 ---
 apiVersion: gitops.nyl/v1
@@ -113,7 +113,7 @@ spec:
 ```
 
 `nyl/units.yaml` declares the three units. The publication depends on the other
-two through the target's `$unit` bindings, so nothing says so twice:
+two through the target's `$fromUnit` bindings, so nothing says so twice:
 
 ```yaml
 apiVersion: units.gitops.nyl/v1
@@ -144,9 +144,9 @@ metadata:
   name: kubernetes
   labels: {stage: dev, preview: 'true'}
 spec:
-  target: {$environment: /target}   # dev, or the preview template's inline target
+  target: {$fromEnvironment: /target}   # dev, or the preview template's inline target
   observe: {}
-  teardownWait: {$environment: /teardownWait}
+  teardownWait: {$fromEnvironment: /teardownWait}
   env: {passthrough: [KUBECONFIG]}           # the credential `nyl attest` reads Argo CD with
 ```
 
@@ -155,7 +155,7 @@ The OpenTofu unit's root module declares `backend "local" {}` and an output
 `observe: {}` is what lets `nyl attest` and `nyl observe` read Argo CD later
 (see [Observing Argo CD](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd)).
 Its `target` and `teardownWait` read the environment's values with
-[`$environment`](/nyl/reference/value-sources/#environment): dev names
+[`$fromEnvironment`](/nyl/reference/value-sources/#fromenvironment): dev names
 its static target, and each preview declares an inline one.
 A local OpenTofu backend suits a workstation; [CI needs a remote one](#reconcile-on-main).
 
@@ -184,8 +184,8 @@ spec:
         publication: {repositoryRef: {name: shop}, revision: previews, pathPrefix: '{{ environment.name }}'}
         releaseInputs:
           web/web:
-            image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-            databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+            image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+            databaseHost: {$fromUnit: {unit: database, output: connection, pointer: /host}}
             namespace: '{{ environment.name }}-web'
   state: {repositoryRef: {name: shop}, path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
   allowUnprotectedSource: true
@@ -217,8 +217,8 @@ spec:
 ```
 
 The Release in `applications/web/release.yaml` is a plain Deployment whose image
-is `{$input: image}`, whose `DATABASE_HOST` is `{$input: databaseHost}`, and
-whose namespace, like the Release's, is `{$input: namespace}`. Nothing in it
+is `{$fromInput: image}`, whose `DATABASE_HOST` is `{$fromInput: databaseHost}`, and
+whose namespace, like the Release's, is `{$fromInput: namespace}`. Nothing in it
 knows about orchestration.
 
 ## Run it locally
@@ -301,7 +301,7 @@ warning  dev/kubernetes: the self-managing catalog Application and its AppProjec
 The warning is the publication's teardown readiness: the catalog Application of
 a target lives in the tree it manages and stays when the target is removed.
 `status` shows the three receipts, and `get` resolves a value the way a
-`$unit` binding does:
+`$fromUnit` binding does:
 
 ```console
 $ nyl status -e dev
@@ -394,7 +394,7 @@ static/web/web/deployment.apps/web/web.yaml
 static/web/web/namespace/web.yaml
 ```
 
-Only `$unit` bindings need orchestration; see
+Only `$fromUnit` bindings need orchestration; see
 [Release inputs from other units](/nyl/orchestration/resource-guides/kubernetes-publication/#release-inputs-from-other-units).
 
 ### Apply the catalogs once

@@ -76,7 +76,7 @@ fn world() -> World {
         unit(
             "Typed",
             true,
-            json!({"replicas": 2, "source": {"path": "/app"}, "image": {"$unit": {"unit": "x", "artifact": "image"}}, "runs": ["accepted"]}),
+            json!({"replicas": 2, "source": {"path": "/app"}, "image": {"$fromUnit": {"unit": "x", "artifact": "image"}}, "runs": ["accepted"]}),
         )
     };
     let db = || {
@@ -517,7 +517,7 @@ fn test_attestation_scopes_must_be_declared() {
     );
 }
 
-/// A `$promotion` binding names a path and a value that exist.
+/// A `$fromPromotion` binding names a path and a value that exist.
 #[test]
 fn test_bindings_name_declared_paths_and_values() {
     let paths = [path(base(
@@ -556,8 +556,8 @@ fn test_bindings_name_declared_paths_and_values() {
 #[test]
 fn test_unit_readers_find_bindings_with_the_type_their_field_accepts() {
     let spec = json!({
-        "replicas": {"$promotion": {"value": "replicas", "path": "dev-to-prod"}},
-        "extra": {"list": [{"$promotion": {"value": "other"}}]}
+        "replicas": {"$fromPromotion": {"value": "replicas", "path": "dev-to-prod"}},
+        "extra": {"list": [{"$fromPromotion": {"value": "other"}}]}
     });
     let sources = BTreeMap::from([(
         environment("prod"),
@@ -783,7 +783,7 @@ fn test_only_checks_the_bindings_of_one_environment() {
 /// `plan` lists the values two paths into one environment promote that the
 /// supersede check cannot check, because nothing names their source
 /// commit: a command output, or a Release input written as a literal. An
-/// artifact of a unit built from Git, and a Release input a `$unit`
+/// artifact of a unit built from Git, and a Release input a `$fromUnit`
 /// reference fills from one, are checked; a value only one path carries is
 /// never compared. Catches a plan that stays silent about a value whose
 /// supersede check `nyl promote` will skip.
@@ -806,7 +806,7 @@ fn test_unchecked_lists_values_without_a_source_commit() {
                     "Test",
                     true,
                     json!({"releases": {
-                        "web/web": {"image": {"$unit": {"unit": "image", "artifact": "image", "pointer": "/reference"}}},
+                        "web/web": {"image": {"$fromUnit": {"unit": "image", "artifact": "image", "pointer": "/reference"}}},
                         "web/api": {"image": "registry.example/api:1"}
                     }}),
                 ),

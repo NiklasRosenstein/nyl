@@ -17,7 +17,7 @@ spec:
   files: ['infra/application/**', 'infra/modules/application/**']
   backend: {bucket: acme-state, key: production/application}
   variables:
-    image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+    image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
   outputs:
     endpoint: {type: string}
   approval: {mode: manual, bind: plan, requireDigest: true}
@@ -38,17 +38,17 @@ modules use that same checkout. `files` defaults to `source.path/**`, excluding
 `.terraform`; every local module must be covered, so changing a module changes
 the execution key. `varFiles` names native variable files under the same local
 path rule; their contents enter the key and their order is preserved. Explicit
-`variables` override them. `$unit` references work at any depth:
+`variables` override them. `$fromUnit` references work at any depth:
 
 ```yaml
 variables:
-  vpc_id: {$unit: {unit: network, output: vpcId}}
-  image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+  vpc_id: {$fromUnit: {unit: network, output: vpcId}}
+  image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
 ```
 
 The image reference can configure a container deployment through a native provider,
 such as an ECS task, a container-based Lambda function, or a Docker container.
-The infrastructure configuration declares how to use the image; `$unit`
+The infrastructure configuration declares how to use the image; `$fromUnit`
 supplies the built artifact reference and waits for its current receipt.
 
 The [local Docker example](https://github.com/NiklasRosenstein/nyl/tree/develop/examples/oci-image-opentofu)

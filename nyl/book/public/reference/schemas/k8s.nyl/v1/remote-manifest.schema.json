@@ -2,7 +2,7 @@
   "$defs": {
     "InputSource": {
       "additionalProperties": false,
-      "description": "`$input`: a Release input. Its declared default applies when the target\nbinds none. Shorthand: `{$input: name}`.",
+      "description": "`$fromInput`: a Release input. Its declared default applies when the target\nbinds none. Shorthand: `{$fromInput: name}`.",
       "properties": {
         "name": {
           "description": "Name of an input the Release declares.",
@@ -62,7 +62,7 @@
           "additionalProperties": false,
           "description": "Reads an input the Release declares.",
           "properties": {
-            "$input": {
+            "$fromInput": {
               "anyOf": [
                 {
                   "description": "Shorthand: the input's name.",
@@ -75,7 +75,7 @@
             }
           },
           "required": [
-            "$input"
+            "$fromInput"
           ],
           "type": "object"
         },
@@ -199,7 +199,7 @@
               "$ref": "#/$defs/ReleaseBundleValueSource"
             }
           ],
-          "description": "Single HTTPS URL to fetch (mutually exclusive with `urls`). In a Release bundle, every\nfield may read a Release input with `{$input: name}`."
+          "description": "Single HTTPS URL to fetch (mutually exclusive with `urls`). In a Release bundle, every\nfield may read a Release input with `{$fromInput: name}`."
         },
         "urls": {
           "anyOf": [

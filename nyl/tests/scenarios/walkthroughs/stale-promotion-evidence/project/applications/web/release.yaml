@@ -22,4 +22,4 @@ spec:
     spec:
       containers:
         - name: web
-          image: {$input: image}
+          image: {$fromInput: image}

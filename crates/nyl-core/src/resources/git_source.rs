@@ -1,6 +1,6 @@
 //! The one Git source shape that every resource reading files from Git uses.
 //!
-//! ApplicationGroup sources and `$git` bindings flatten [`GitSource`] into
+//! ApplicationGroup sources and `$fromGit` bindings flatten [`GitSource`] into
 //! their own fields today; unit sources, image build contexts, and
 //! Environment sources follow. Each use validates the fields it admits, and
 //! one module, nyl-render's `gitops::source_locks`, resolves and locks every
@@ -110,7 +110,7 @@ impl GitSource {
     }
 
     /// Validate the source of a file read at a locked commit, such as a
-    /// `$git` binding: a named repository, `revision`, its `commit` lock,
+    /// `$fromGit` binding: a named repository, `revision`, its `commit` lock,
     /// and a repository-relative file path.
     pub fn validate_locked_file(&self, field: &str) -> Result<()> {
         self.validate_repository(field)?;

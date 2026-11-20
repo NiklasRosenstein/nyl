@@ -164,7 +164,7 @@ impl Blocker {
             .unwrap_or_else(|| Self::other(text))
     }
 
-    /// A `$promotion` binding whose value no record carries yet
+    /// A `$fromPromotion` binding whose value no record carries yet
     /// (`NYL-PROMOTION-MISSING`). It is stored as [`Self::Other`]: the
     /// persisted form gains no variant, and [`Self::promotion_missing_of`]
     /// is the only reader of its text.

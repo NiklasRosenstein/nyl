@@ -539,7 +539,7 @@ fn arrived_consumers(
 }
 
 /// The reference a blocked consumer's observation blocker stands for: the
-/// `$unit` reference of `document.spec` at the blocked location, which
+/// `$fromUnit` reference of `document.spec` at the blocked location, which
 /// carries the pointer and attestation requirements the resolver judges.
 fn blocked_source(
     document: &DesiredUnit,
@@ -563,7 +563,7 @@ fn blocked_source(
 /// is recorded now, found from the stored documents alone (no rendering):
 ///
 /// - each active consumer of this environment with a resolved spec, for each
-///   of its `$unit: {unit, observation}` references whose producer has a
+///   of its `$fromUnit: {unit, observation}` references whose producer has a
 ///   current receipt and a usable value that is not the value the consumer
 ///   resolved;
 /// - each active consumer that is blocked only on observations (see
@@ -826,7 +826,7 @@ mod tests {
         let consumer = super::super::fixtures::desired(
             "dns",
             "Command",
-            serde_json::json!({"values": {"address": {"$unit": {"unit": "kubernetes", "observation": "ip", "output": "ip"}}}}),
+            serde_json::json!({"values": {"address": {"$fromUnit": {"unit": "kubernetes", "observation": "ip", "output": "ip"}}}}),
             "dns",
         );
         let desired = BTreeMap::from([(name("dns"), consumer)]);
@@ -1211,8 +1211,7 @@ mod tests {
 
     fn consumer(resolved: Value) -> DesiredUnit {
         let mut unit = desired_numbered("dns", 2, Some(hex_key('c')));
-        unit.spec =
-            json!({"values": {"address": {"$unit": {"unit": "kubernetes", "observation": "ip", "pointer": "/host"}}}});
+        unit.spec = json!({"values": {"address": {"$fromUnit": {"unit": "kubernetes", "observation": "ip", "pointer": "/host"}}}});
         unit.resolved_spec = Some(resolved);
         unit
     }
@@ -1343,7 +1342,7 @@ mod tests {
     /// `dns`, resolved to `resolved`, reading `kubernetes` of `environment` through `reference`.
     fn consuming(snapshot: &mut EnvironmentSnapshot, resolved: &str, reference: &Value) {
         let mut unit = desired_numbered("dns", 2, Some(hex_key('c')));
-        unit.spec = json!({"values": {"address": {"$unit": reference}}});
+        unit.spec = json!({"values": {"address": {"$fromUnit": reference}}});
         unit.resolved_spec = Some(json!({"values": {"address": resolved}}));
         snapshot.desired.insert(name("dns"), unit);
     }
@@ -1509,7 +1508,7 @@ mod tests {
     /// `producer_environment` for the `ip` its `reference` reads.
     fn waiting_consumer(snapshot: &mut EnvironmentSnapshot, producer: &str, reference: &Value) {
         let mut unit = desired_numbered("dns", 2, Some(hex_key('c')));
-        unit.spec = json!({"values": {"address": {"$unit": reference}}});
+        unit.spec = json!({"values": {"address": {"$fromUnit": reference}}});
         unit.resolved_spec = None;
         unit.execution_key = None;
         unit.readiness = Readiness::Blocked {

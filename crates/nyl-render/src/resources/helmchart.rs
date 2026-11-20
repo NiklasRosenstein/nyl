@@ -185,13 +185,13 @@ pub struct HelmChartSpec {
     pub values_from: Vec<HelmValuesSource>,
 
     /// Values to pass to the chart, merged over `valuesFrom`. In a Release bundle,
-    /// `{$input: name}` reads a Release input at any depth, before `valuesFrom` merges;
+    /// `{$fromInput: name}` reads a Release input at any depth, before `valuesFrom` merges;
     /// other `$` keys, such as `$ref`, are chart data.
     #[serde(default)]
     pub values: serde_json::Value,
 
     /// Whether to include CRDs from the chart's crds/ directory in the rendered output.
-    /// Defaults to true when unset. In a Release bundle, `{$input: name}` reads it from a
+    /// Defaults to true when unset. In a Release bundle, `{$fromInput: name}` reads it from a
     /// Release input.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "includeCrds")]
     pub include_crds: Option<bool>,
@@ -213,7 +213,7 @@ pub struct HelmChartSpec {
     /// version and API versions describe that API, plus the API versions of
     /// CustomResourceDefinitions the chart ships in `crds/`.
     ///
-    /// In a Release bundle, `{$input: name}` reads it from a Release input.
+    /// In a Release bundle, `{$fromInput: name}` reads it from a Release input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookup: Option<LookupSetting>,
 }

@@ -17,7 +17,7 @@ use nyl_core::{CoreError, Result};
 #[schemars(transform = super::catalog::remote_manifest_constraints)]
 pub struct RemoteManifestSpec {
     /// Single HTTPS URL to fetch (mutually exclusive with `urls`). In a Release bundle, every
-    /// field may read a Release input with `{$input: name}`.
+    /// field may read a Release input with `{$fromInput: name}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// List of HTTPS URL templates to fetch (mutually exclusive with `url`)

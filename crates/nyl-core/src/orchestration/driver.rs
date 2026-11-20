@@ -1092,7 +1092,7 @@ pub trait Driver: Send + Sync {
         Ok(None)
     }
     /// The declared type of each field of `spec` at `pointers` (JSON
-    /// Pointers into the spec, each holding a `$promotion` binding) that
+    /// Pointers into the spec, each holding a `$fromPromotion` binding) that
     /// the kind types beyond its schema, such as a field whose type a file
     /// the spec names declares. A pointer missing from the answer is one the
     /// kind does not type, which fits any value; the default answers none,

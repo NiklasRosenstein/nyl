@@ -20,8 +20,8 @@ spec:
         values: {namespace: '{{ environment.name }}-web'}   # its own namespace; names come from the target name
         releaseInputs:
           web/web:
-            image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-            databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+            image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+            databaseHost: {$fromUnit: {unit: database, output: connection, pointer: /host}}
             namespace: '{{ environment.name }}-web'
   state: {repositoryRef: {name: platform}, path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
   allowUnprotectedSource: true

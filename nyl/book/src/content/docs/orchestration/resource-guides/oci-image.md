@@ -32,7 +32,7 @@ connects an image build to an OpenTofu container deployment on one local daemon.
 ```yaml
 values:
   image:
-    $unit: {unit: web-image, artifact: image, pointer: /reference}
+    $fromUnit: {unit: web-image, artifact: image, pointer: /reference}
 ```
 
 ## Contexts and execution keys
@@ -48,7 +48,7 @@ spec:
   contexts:
     shared: {path: ../libs/shared}
     base:
-      image: {$unit: {unit: base-image, artifact: image, pointer: /reference}}
+      image: {$fromUnit: {unit: base-image, artifact: image, pointer: /reference}}
   dockerfile: Dockerfile
   target: runtime
   repository: registry.example.com/team/web

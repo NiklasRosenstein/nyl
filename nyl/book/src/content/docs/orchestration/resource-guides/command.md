@@ -5,7 +5,7 @@ title: 'Using Command'
 A Command unit runs a program from the environment's source commit, for a step
 no built-in kind covers, such as seeding a database or registering a webhook.
 Orchestration runs it when its execution key changes, records its outputs in
-the unit's receipt, and lets other units read them with `$unit`.
+the unit's receipt, and lets other units read them with `$fromUnit`.
 
 ```yaml
 apiVersion: units.gitops.nyl/v1
@@ -15,7 +15,7 @@ metadata:
 spec:
   files: ['../scripts/seed/**']
   values:
-    bucket: {$unit: {unit: storage, output: bucket}}
+    bucket: {$fromUnit: {unit: storage, output: bucket}}
   command: ['./run.sh']
   detectDrift: ['./drift.sh']
   attest: ['./smoke.sh']
@@ -40,7 +40,7 @@ spec:
 | `teardown` | An argument vector that removes the command's effects. Without it the unit cannot tear down and defaults to `deletionPolicy: Retain`. |
 | `fingerprint` | An argument vector whose stdout enters the execution key, such as the versions of the tools the command uses. |
 | `files` | Local-path globs. The content of the files they match enters the execution key. |
-| `values` | An object the command reads from `NYL_INPUTS`. References such as `$unit` may appear at any depth. |
+| `values` | An object the command reads from `NYL_INPUTS`. References such as `$fromUnit` may appear at any depth. |
 | `workingDir` | The directory every step runs in. Default: the directory containing `nyl.toml`. |
 | `idempotent` | Your claim that running the command again with the same inputs is safe. |
 | `outputs` | The outputs the command declares, each with a `type` and optionally `sensitive: true`. |
@@ -124,7 +124,7 @@ printf '{"seedVersion": "%s"}' "$version" > "$NYL_OUTPUTS"
   units cannot reference it.
 
 Other units read a recorded output with
-`{$unit: {unit: seed, output: seedVersion}}`.
+`{$fromUnit: {unit: seed, output: seedVersion}}`.
 
 Stdout and stderr form the transcript: Nyl prints them on stderr as the step
 runs and never parses or stores them.

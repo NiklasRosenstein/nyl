@@ -376,7 +376,7 @@ examples/platform/
     platform.yaml            # GitRepository platform; ArgoCDInstances dev and prod; PromotionPath dev-to-prod; units
     web.yaml                 # ApplicationGroup web, source ../applications/web
     dev.yaml                 # Cluster dev, DeploymentTarget dev, Environment dev (follows its worktree)
-    prod.yaml                # Cluster prod, DeploymentTarget prod, Environment prod (source $promotion)
+    prod.yaml                # Cluster prod, DeploymentTarget prod, Environment prod (source $fromPromotion)
     preview.yaml             # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
     demo.yaml                # DeploymentTarget demo: static inputs, no orchestration
   infra/network/main.tf
@@ -451,8 +451,8 @@ spec:
   reconciler: {argocd: {instanceRef: {name: prod}}}
   releaseInputs:
     web/web:
-      image: {$promotion: {value: webImage}}   # from the record that supplied prod's source
-      database: {$unit: {unit: database, output: connection}}
+      image: {$fromPromotion: {value: webImage}}   # from the record that supplied prod's source
+      database: {$fromUnit: {unit: database, output: connection}}
 ---
 # platform.yaml: one Argo CD instance per cluster with teardown-ready catalog
 # defaults; every target, inline ones included, names its instance
@@ -502,7 +502,7 @@ spec:
   source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
-    vpc_id: {$unit: {unit: network, output: vpcId}}   # previews: from environment dev, see below
+    vpc_id: {$fromUnit: {unit: network, output: vpcId}}   # previews: from environment dev, see below
   outputs:
     connection: {type: object}    # host, port, secretName; never the password
   approval: {{ values.approval | tojson }}
@@ -525,8 +525,8 @@ spec:
 spec:
   releaseInputs:
     web/web:
-      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-      database: {$unit: {unit: database, output: connection}}
+      image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      database: {$fromUnit: {unit: database, output: connection}}
 ---
 # preview.yaml
 apiVersion: gitops.nyl/v1
@@ -551,8 +551,8 @@ spec:
         values: {namespace: '{{ environment.name }}-web'}   # its own namespace; names come from the target name
         releaseInputs:
           web/web:
-            image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-            database: {$unit: {unit: database, output: connection}}
+            image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+            database: {$fromUnit: {unit: database, output: connection}}
   state: {path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
   allowUnprotectedSource: true
   deletionPolicy: Teardown
@@ -572,7 +572,7 @@ spec:
   migrations on startup, which must not touch dev's data. `database` carries
   both labels and keys its backend by environment name, so previews need no
   separate unit. Its `vpc_id` variable reads
-  `{$unit: {environment: '{{ values.networkFrom }}', unit: network, …}}`
+  `{$fromUnit: {environment: '{{ values.networkFrom }}', unit: network, …}}`
   when `networkFrom` is set, so previews use dev's network without running
   `network` themselves.
 - `network` and `database` store their inputs in `terraform_data` resources and
@@ -638,7 +638,7 @@ through the fenced push.
 | 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `seed` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
 | 5 | `nyl reconcile -e dev` → 0 | Wave 1 runs `network`, `web-image`, `seed`; wave 2 runs `database` with `network`'s `vpcId`; wave 3 runs `kubernetes`, which publishes `dev/` with the image's digest reference and the database connection. One desired and one observed commit |
 | 6 | `nyl status -e dev` → 0 | Every unit is current; the status names the publication commit and the image reference |
-| 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference`; then `nyl publish-tree --target static` → 0 | Value forms resolve like `$unit`, and the published `dev/web/` files carry those two values (step 5's `mentions`). The same Release renders with static inputs in the target `static`, which no environment uses, so without orchestration: its tree carries the written image and host |
+| 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference`; then `nyl publish-tree --target static` → 0 | Value forms resolve like `$fromUnit`, and the published `dev/web/` files carry those two values (step 5's `mentions`). The same Release renders with static inputs in the target `static`, which no environment uses, so without orchestration: its tree carries the written image and host |
 | 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no transition or publication commit; only its lease and run refs come and go |
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
@@ -796,7 +796,7 @@ then blocks exits 2.
 `promotion: {path: dev-to-prod}`, selecting `network`, `database`, and
 `kubernetes` with its own backend and `approval: {mode: manual, bind: plan,
 requireDigest: true}` for `database`. Prod's target binds the image with a
-path-less `$promotion: {value: webImage}`. dev declares the
+path-less `$fromPromotion: {value: webImage}`. dev declares the
 environment-wide attestation `qa`; `dev-to-prod` is `evidence: attested` with
 `maxAttestationAge: 1h`. S1, S2, S3 are the commits of `main` dev runs.
 

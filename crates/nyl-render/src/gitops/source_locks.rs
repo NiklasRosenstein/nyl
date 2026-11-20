@@ -1,7 +1,7 @@
 //! Source locks: groups, Release inputs, unit sources and named contexts,
 //! and Environment sources, refreshed together by `nyl update source-locks`.
 //!
-//! Contract: [`$git`](../../../../design/release-inputs.md#binding-kinds).
+//! Contract: [`$fromGit`](../../../../design/release-inputs.md#binding-kinds).
 //!
 //! - Every lock moves to the head of its revision. Moving a lock to what
 //!   another target runs is promotion, not a lock update.
@@ -26,8 +26,8 @@ use super::GitOpsInventory;
 pub enum LockOwner {
     /// `ApplicationGroup.spec.source.commit`.
     ApplicationGroup { name: String },
-    /// `DeploymentTarget.spec.releaseInputs.<key>.<input>…$git.commit`, where
-    /// `at` holds the keys from the binding to its `$git` source: none when
+    /// `DeploymentTarget.spec.releaseInputs.<key>.<input>…$fromGit.commit`, where
+    /// `at` holds the keys from the binding to its `$fromGit` source: none when
     /// the binding is the source.
     ReleaseInput {
         target: String,
@@ -159,8 +159,8 @@ pub fn collect_source_locks(
                                 raw_document: discovered.raw_document.clone(),
                                 repository_url: repository.repo_url,
                                 local: false,
-                                revision: source.revision.clone().expect("validated $git source has revision"),
-                                commit: source.commit.clone().expect("validated $git source has commit"),
+                                revision: source.revision.clone().expect("validated $fromGit source has revision"),
+                                commit: source.commit.clone().expect("validated $fromGit source has commit"),
                             });
                         }
                     }
@@ -297,7 +297,7 @@ fn collect_git_source(
 
 /// Resolve every lock to the commit it should name: the head of its revision.
 ///
-/// Contract: [`$git`](../../../../design/release-inputs.md#binding-kinds),
+/// Contract: [`$fromGit`](../../../../design/release-inputs.md#binding-kinds),
 /// source locks. Refs are fetched once per repository URL and each revision
 /// is resolved once, so locks of one repository and revision move together.
 pub fn resolve_source_locks(locks: Vec<SourceLock>, manager: &mut GitManager) -> Result<Vec<LockResolution>> {
@@ -381,7 +381,7 @@ pub fn replace_lock_commit(lock: &SourceLock, resolved: &str) -> Result<String> 
         LockOwner::ReleaseInput { key, input, at, .. } => ["spec", "releaseInputs", key.as_str(), input.as_str()]
             .into_iter()
             .chain(at.iter().map(String::as_str))
-            .chain(["$git", "commit"])
+            .chain(["$fromGit", "commit"])
             .collect(),
     };
     replace_block_scalar(&lock.raw_document, &path, &lock.commit, resolved).ok_or_else(|| {
@@ -491,14 +491,14 @@ spec:
   releaseInputs:
     platform/web:
       image:
-        $git:
+        $fromGit:
           repository: {repoURL: https://git.example.com/deploy.git}
           revision: deploy/dev
           commit: aaaa   # moved by source-locks
           path: dev/state/images.json
     "platform/api":
       image:
-        $git:
+        $fromGit:
           revision: deploy/staging
           commit: "aaaa"
           path: staging/state/images.json
@@ -508,7 +508,7 @@ spec:
     fn test_replace_block_scalar_addresses_locks_by_position() {
         let web = replace_block_scalar(
             TARGET,
-            &["spec", "releaseInputs", "platform/web", "image", "$git", "commit"],
+            &["spec", "releaseInputs", "platform/web", "image", "$fromGit", "commit"],
             "aaaa",
             "bbbb",
         )
@@ -518,7 +518,7 @@ spec:
 
         let api = replace_block_scalar(
             TARGET,
-            &["spec", "releaseInputs", "platform/api", "image", "$git", "commit"],
+            &["spec", "releaseInputs", "platform/api", "image", "$fromGit", "commit"],
             "aaaa",
             "cccc",
         )
@@ -530,12 +530,12 @@ spec:
 
     #[test]
     fn test_replace_block_scalar_refuses_missing_or_mismatched_locks() {
-        let path = ["spec", "releaseInputs", "platform/web", "image", "$git", "commit"];
+        let path = ["spec", "releaseInputs", "platform/web", "image", "$fromGit", "commit"];
         assert!(replace_block_scalar(TARGET, &path, "ffff", "bbbb").is_none());
-        let path = ["spec", "releaseInputs", "platform/web", "other", "$git", "commit"];
+        let path = ["spec", "releaseInputs", "platform/web", "other", "$fromGit", "commit"];
         assert!(replace_block_scalar(TARGET, &path, "aaaa", "bbbb").is_none());
-        let flow = "spec:\n  releaseInputs:\n    g/r: {image: {$git: {commit: aaaa}}}\n";
-        let path = ["spec", "releaseInputs", "g/r", "image", "$git", "commit"];
+        let flow = "spec:\n  releaseInputs:\n    g/r: {image: {$fromGit: {commit: aaaa}}}\n";
+        let path = ["spec", "releaseInputs", "g/r", "image", "$fromGit", "commit"];
         assert!(replace_block_scalar(flow, &path, "aaaa", "bbbb").is_none());
     }
 
@@ -546,23 +546,23 @@ spec:
     workloads/api:
       config:
         value:
-          image: {$git: none}
+          image: {$fromGit: none}
           notes: |
             path:
-              $git:
+              $fromGit:
                 commit: aaaa
       image:
-        $git:
+        $fromGit:
           commit: aaaa
           path: x.json
       path:
-        $git:
+        $fromGit:
           commit: aaaa
           path: y.json
 ";
         let image = replace_block_scalar(
             document,
-            &["spec", "releaseInputs", "workloads/api", "image", "$git", "commit"],
+            &["spec", "releaseInputs", "workloads/api", "image", "$fromGit", "commit"],
             "aaaa",
             "bbbb",
         )
@@ -577,7 +577,7 @@ spec:
         );
         let path = replace_block_scalar(
             document,
-            &["spec", "releaseInputs", "workloads/api", "path", "$git", "commit"],
+            &["spec", "releaseInputs", "workloads/api", "path", "$fromGit", "commit"],
             "aaaa",
             "bbbb",
         )

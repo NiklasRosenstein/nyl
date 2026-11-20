@@ -13,12 +13,12 @@
 //!   them.
 //! - Any other `$` key is an error in Nyl's typed resource fields
 //!   ([`Namespace::Reserved`]); in free-form data it is data, except a likely
-//!   slip ([`super::SLIPS`]).
+//!   slip ([`super::slip`]).
 //! - `$literal` yields its content verbatim, which is never walked.
 //!
 //! A source the context carries keeps its place, and its body is walked for
-//! the sources that resolve here, such as `$environment` in the `environment`
-//! of a `$unit` when its unit renders. The value an `$environment` clause
+//! the sources that resolve here, such as `$fromEnvironment` in the `environment`
+//! of a `$fromUnit` when its unit renders. The value an `$fromEnvironment` clause
 //! reads comes from the user's configuration, so it is walked too, with the
 //! references it carries; every other source reads data, which is never
 //! walked.
@@ -26,8 +26,8 @@
 use serde_json::Value;
 
 use super::{
-    clause_key, holds_dollar_key, BindingIssue, Blocked, Clause, Context, Namespace, Origin, Provided, Providers,
-    Provision, ResolvedDocument, Source, Treatment, SLIPS,
+    clause_key, holds_dollar_key, slip, suggest, BindingIssue, Blocked, Clause, Context, Namespace, Origin, Provided,
+    Providers, Provision, ResolvedDocument, Source, Treatment,
 };
 
 /// A document's context, and the contexts of parts of it, by JSON Pointer
@@ -76,7 +76,7 @@ struct At<'s> {
     /// The node's JSON Pointer inside the document, for [`Scope::within`].
     relative: String,
     context: Context,
-    /// Inside a value an `$environment` clause read.
+    /// Inside a value an `$fromEnvironment` clause read.
     environment_value: bool,
     scope: Scope<'s>,
 }
@@ -132,14 +132,14 @@ impl<'s> At<'s> {
     fn misplaced(&self, source: Source) -> String {
         if self.environment_value && source == Source::Environment {
             return format!(
-                "{} holds a $environment source inside a value an $environment source read; the environment's values cannot read its values, so write the value there",
+                "{} holds a $fromEnvironment source inside a value an $fromEnvironment source read; the environment's values cannot read its values, so write the value there",
                 self.field
             );
         }
         let message = self.context.misplaced(&self.field, source);
         if self.environment_value {
             // A source the environment's values carried here: checked where it lands.
-            format!("{message}; it came with the environment's values that $environment read here")
+            format!("{message}; it came with the environment's values that $fromEnvironment read here")
         } else {
             message
         }
@@ -185,10 +185,11 @@ fn classify(at: &At<'_>, fields: &serde_json::Map<String, Value>, issues: &mut V
                 let field = at.key(key).field;
                 if at.context.namespace() == Namespace::Reserved {
                     issues.push(format!(
-                        "{field} is not a value source; `$` keys are reserved for value sources in Nyl's resource fields (write {{$literal: …}} to use the key as data)"
+                        "{field} is not a value source; `$` keys are reserved for value sources in Nyl's resource fields{} (write {{$literal: …}} to use the key as data)",
+                        suggest(key).map(|meant| format!("; did you mean {meant}?")).unwrap_or_default()
                     ));
                     valid = false;
-                } else if let Some((_, meant)) = SLIPS.iter().find(|(slip, _)| slip == key) {
+                } else if let Some(meant) = slip(key) {
                     issues.push(format!(
                         "{field} is not a value source; did you mean {meant}? (write {{$literal: …}} to keep the key as data)"
                     ));
@@ -279,7 +280,7 @@ impl<P: Providers> Walk<'_, P> {
             }
             return After::Keep;
         }
-        // The body's own sources first, such as `$environment` in a `$unit`.
+        // The body's own sources first, such as `$fromEnvironment` in a `$fromUnit`.
         let before = self.issues.len();
         let body_at = at.key(key);
         if let Some(Value::Object(fields)) = value.get_mut(key) {
@@ -537,11 +538,11 @@ mod tests {
     #[test]
     fn test_unit_render_resolves_environment_and_carries_run_sources() {
         let document = json!({
-            "target": {"$environment": "/target"},
+            "target": {"$fromEnvironment": "/target"},
             "variables": {
-                "vpc": {"$unit": {"unit": "network", "output": "vpcId", "environment": {"$environment": "/networkFrom"}}},
-                "local": {"$unit": {"unit": "db", "output": "url", "environment": {"$environment": {"pointer": "/missing", "optional": true}}}},
-                "image": {"$promotion": {"value": "webImage"}},
+                "vpc": {"$fromUnit": {"unit": "network", "output": "vpcId", "environment": {"$fromEnvironment": "/networkFrom"}}},
+                "local": {"$fromUnit": {"unit": "db", "output": "url", "environment": {"$fromEnvironment": {"pointer": "/missing", "optional": true}}}},
+                "image": {"$fromPromotion": {"value": "webImage"}},
                 "schema": {"$ref": "#/defs/x"},
             },
         });
@@ -556,28 +557,28 @@ mod tests {
             json!({
                 "target": "prod",
                 "variables": {
-                    "vpc": {"$unit": {"unit": "network", "output": "vpcId", "environment": "infra"}},
-                    "local": {"$unit": {"unit": "db", "output": "url"}},
-                    "image": {"$promotion": {"value": "webImage"}},
+                    "vpc": {"$fromUnit": {"unit": "network", "output": "vpcId", "environment": "infra"}},
+                    "local": {"$fromUnit": {"unit": "db", "output": "url"}},
+                    "image": {"$fromPromotion": {"value": "webImage"}},
                     "schema": {"$ref": "#/defs/x"},
                 },
             })
         );
         assert_eq!(
             resolved.provenance.keys().collect::<Vec<_>>(),
-            ["/target", "/variables/vpc/$unit/environment"]
+            ["/target", "/variables/vpc/$fromUnit/environment"]
         );
     }
 
     #[test]
     fn test_missing_values_take_the_default_or_remove_the_field() {
         let document = json!({
-            "defaulted": {"$environment": {"pointer": "/missing", "default": {"strategy": "manual"}}},
-            "nullDefaulted": {"$environment": {"pointer": "/nothing", "default": 5}},
-            "optional": {"$environment": {"pointer": "/missing", "optional": true}},
-            "nullOptional": {"$environment": {"pointer": "/nothing", "optional": true}},
-            "required": {"$environment": "/missing"},
-            "list": [{"$environment": {"pointer": "/missing", "optional": true}}],
+            "defaulted": {"$fromEnvironment": {"pointer": "/missing", "default": {"strategy": "manual"}}},
+            "nullDefaulted": {"$fromEnvironment": {"pointer": "/nothing", "default": 5}},
+            "optional": {"$fromEnvironment": {"pointer": "/missing", "optional": true}},
+            "nullOptional": {"$fromEnvironment": {"pointer": "/nothing", "optional": true}},
+            "required": {"$fromEnvironment": "/missing"},
+            "list": [{"$fromEnvironment": {"pointer": "/missing", "optional": true}}],
         });
         let (resolved, issues) = resolve(
             document.clone(),
@@ -598,7 +599,7 @@ mod tests {
             issues,
             [
                 "spec.list[0]: optional removes a field, but a list item is no field; give the clause a default",
-                "spec.required needs a value, but its $environment source holds none; set a default, or optional: true to omit the field",
+                "spec.required needs a value, but its $fromEnvironment source holds none; set a default, or optional: true to omit the field",
             ]
         );
     }
@@ -609,25 +610,28 @@ mod tests {
     #[test]
     fn test_sources_outside_their_context_are_errors_that_teach_the_fix() {
         let (_, issues) = resolve(
-            json!({"includeCrds": {"$unit": {"unit": "crds", "output": "enabled"}}, "lookup": {"$input": "lookup"}}),
+            json!({"includeCrds": {"$fromUnit": {"unit": "crds", "output": "enabled"}}, "lookup": {"$fromInput": "lookup"}}),
             Context::ReleaseBundle.into(),
             &TestProviders::default(),
         );
         assert_eq!(issues.len(), 2, "{issues:?}");
         assert!(
-            issues[0].ends_with("declare a Release input and bind it on the target with $unit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)"),
+            issues[0].ends_with("declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)"),
             "{issues:?}"
         );
-        assert_eq!(issues[1], "spec.lookup.$input is not supported here");
+        assert_eq!(issues[1], "spec.lookup.$fromInput is not supported here");
 
         let (_, issues) = resolve(
-            json!({"image": {"$input": "image"}, "path": {"$file": {"path": "x.yaml"}}}),
+            json!({"image": {"$fromInput": "image"}, "path": {"$fromFile": {"path": "x.yaml"}}}),
             Context::UnitRender.into(),
             &TestProviders::default(),
         );
-        assert!(issues[0].starts_with("spec.image holds a $input source"), "{issues:?}");
         assert!(
-            issues[0].contains("read the environment's values with $environment"),
+            issues[0].starts_with("spec.image holds a $fromInput source"),
+            "{issues:?}"
+        );
+        assert!(
+            issues[0].contains("read the environment's values with $fromEnvironment"),
             "{issues:?}"
         );
         assert!(issues[1].contains("bind it to a Release input"), "{issues:?}");
@@ -636,8 +640,8 @@ mod tests {
     #[test]
     fn test_an_inline_targets_bindings_carry_render_sources() {
         let document = json!({"target": {"inline": {"releaseInputs": {"g/r": {
-            "config": {"$file": {"path": "config.yaml"}},
-            "image": {"$unit": {"unit": "build", "artifact": "image"}},
+            "config": {"$fromFile": {"path": "config.yaml"}},
+            "image": {"$fromUnit": {"unit": "build", "artifact": "image"}},
         }}}}});
         let within = [("/target/inline/releaseInputs", Context::UnitTargetInputs)];
         let scope = Scope {
@@ -653,27 +657,31 @@ mod tests {
     fn test_literal_keeps_its_content_and_slips_are_errors() {
         let document = json!({
             "plain": {"$literal": {"a": 1}},
-            "shaped": {"$literal": {"$unit": "data"}},
-            "slip": {"$values": "/x"},
+            "shaped": {"$literal": {"$fromUnit": "data"}},
+            "slip": {"$fromEnv": "/x"},
+            "noun": {"$input": "x"},
             "foreign": {"$schema": "x"},
         });
         let (resolved, issues) = resolve(document, Context::UnitRender.into(), &TestProviders::default());
         assert_eq!(resolved.value["plain"], json!({"a": 1}));
         // Unwrapped when the run resolves the unit, so it never reads as a source.
-        assert_eq!(resolved.value["shaped"], json!({"$literal": {"$unit": "data"}}));
+        assert_eq!(resolved.value["shaped"], json!({"$literal": {"$fromUnit": "data"}}));
         assert_eq!(resolved.value["foreign"], json!({"$schema": "x"}));
         assert_eq!(
             issues,
-            ["spec.slip.$values is not a value source; did you mean $environment? (write {$literal: …} to keep the key as data)"]
+            [
+                "spec.noun.$input is not a value source; did you mean $fromInput? (write {$literal: …} to keep the key as data)",
+                "spec.slip.$fromEnv is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)",
+            ]
         );
 
         let (resolved, issues) = resolve(
-            json!({"shaped": {"$literal": {"$unit": "data"}}}),
+            json!({"shaped": {"$literal": {"$fromUnit": "data"}}}),
             Context::UnitExecution.into(),
             &TestProviders::default(),
         );
         assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(resolved.value["shaped"], json!({"$unit": "data"}));
+        assert_eq!(resolved.value["shaped"], json!({"$fromUnit": "data"}));
     }
 
     #[test]
@@ -685,20 +693,31 @@ mod tests {
         );
         assert_eq!(issues.len(), 1);
         assert!(issues[0].starts_with("spec.chart.$ref is not a value source; `$` keys are reserved"));
+        assert!(!issues[0].contains("did you mean"), "{issues:?}");
+
+        let (_, issues) = resolve(
+            json!({"chart": {"$from_input": "x"}}),
+            Context::ReleaseBundle.into(),
+            &TestProviders::default(),
+        );
+        assert_eq!(
+            issues,
+            ["spec.chart.$from_input is not a value source; `$` keys are reserved for value sources in Nyl's resource fields; did you mean $fromInput? (write {$literal: …} to use the key as data)"]
+        );
     }
 
-    /// The value `$environment` reads comes from the user's configuration, so
+    /// The value `$fromEnvironment` reads comes from the user's configuration, so
     /// the references it carries land with it; a source that reads data does
     /// not.
     #[test]
     fn test_environment_values_carry_their_references() {
         let providers = TestProviders {
-            values: json!({"target": {"inline": {"releaseInputs": {"g/r": {"image": {"$unit": {"unit": "build", "artifact": "image"}}}}}}, "self": {"$environment": "/target"}}),
-            units: BTreeMap::from([("build", json!({"$unit": "data"}))]),
+            values: json!({"target": {"inline": {"releaseInputs": {"g/r": {"image": {"$fromUnit": {"unit": "build", "artifact": "image"}}}}}}, "self": {"$fromEnvironment": "/target"}}),
+            units: BTreeMap::from([("build", json!({"$fromUnit": "data"}))]),
             ..TestProviders::default()
         };
         let (resolved, issues) = resolve(
-            json!({"target": {"$environment": "/target"}}),
+            json!({"target": {"$fromEnvironment": "/target"}}),
             Context::UnitRender.into(),
             &providers,
         );
@@ -706,7 +725,7 @@ mod tests {
         assert_eq!(resolved.value, json!({"target": providers.values["target"]}));
 
         let (_, issues) = resolve(
-            json!({"x": {"$environment": "/self"}}),
+            json!({"x": {"$fromEnvironment": "/self"}}),
             Context::UnitRender.into(),
             &providers,
         );
@@ -716,36 +735,36 @@ mod tests {
         );
 
         let (resolved, issues) = resolve(
-            json!({"image": {"$unit": {"unit": "build", "artifact": "image"}}}),
+            json!({"image": {"$fromUnit": {"unit": "build", "artifact": "image"}}}),
             Context::UnitExecution.into(),
             &providers,
         );
         assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(resolved.value["image"], json!({"$unit": "data"}));
+        assert_eq!(resolved.value["image"], json!({"$fromUnit": "data"}));
     }
 
     /// Catches a source the values carry being checked against the values'
-    /// context instead of the one it lands in: `$file` in a target's
+    /// context instead of the one it lands in: `$fromFile` in a target's
     /// `values` is valid in template values, but not in a unit document.
     #[test]
     fn test_carried_sources_are_checked_where_they_land() {
         let providers = values(json!({"target": {"inline": {
-            "values": {"config": {"$file": {"path": "config.yaml"}}},
-            "releaseInputs": {"g/r": {"config": {"$file": {"path": "config.yaml"}}}},
+            "values": {"config": {"$fromFile": {"path": "config.yaml"}}},
+            "releaseInputs": {"g/r": {"config": {"$fromFile": {"path": "config.yaml"}}}},
         }}}));
         let within = [("/target/inline/releaseInputs", Context::UnitTargetInputs)];
         let scope = Scope {
             context: Context::UnitRender,
             within: &within,
         };
-        let (_, issues) = resolve(json!({"target": {"$environment": "/target"}}), scope, &providers);
+        let (_, issues) = resolve(json!({"target": {"$fromEnvironment": "/target"}}), scope, &providers);
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(
-            issues[0].starts_with("spec.target.inline.values.config holds a $file source"),
+            issues[0].starts_with("spec.target.inline.values.config holds a $fromFile source"),
             "{issues:?}"
         );
         assert!(
-            issues[0].ends_with("it came with the environment's values that $environment read here"),
+            issues[0].ends_with("it came with the environment's values that $fromEnvironment read here"),
             "{issues:?}"
         );
     }
@@ -753,9 +772,9 @@ mod tests {
     #[test]
     fn test_find_clauses_skips_literals_and_reports_misplaced_sources() {
         let document = json!({
-            "a": {"$unit": {"unit": "network", "output": "id"}},
-            "b": [{"$promotion": {"value": "image"}}],
-            "c": {"$literal": {"$unit": {"unit": "x", "output": "y"}}},
+            "a": {"$fromUnit": {"unit": "network", "output": "id"}},
+            "b": [{"$fromPromotion": {"value": "image"}}],
+            "c": {"$literal": {"$fromUnit": {"unit": "x", "output": "y"}}},
         });
         let found = find_clauses("spec", "", &document, Context::UnitExecution.into()).unwrap();
         assert_eq!(
@@ -765,10 +784,10 @@ mod tests {
         let issues = find_clauses(
             "spec",
             "",
-            &json!({"a": {"$input": "x"}}),
+            &json!({"a": {"$fromInput": "x"}}),
             Context::UnitExecution.into(),
         )
         .unwrap_err();
-        assert!(issues[0].starts_with("spec.a holds a $input source"), "{issues:?}");
+        assert!(issues[0].starts_with("spec.a holds a $fromInput source"), "{issues:?}");
     }
 }

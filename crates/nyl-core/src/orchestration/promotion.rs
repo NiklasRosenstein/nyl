@@ -34,7 +34,7 @@ use super::time::Timestamp;
 document_kind!(PromotionRecordKind, "PromotionRecord");
 
 /// Which field of the source a promoted value reads: the same selectors, with
-/// the same JSON Pointer semantics and resolver, as `$unit` references and
+/// the same JSON Pointer semantics and resolver, as `$fromUnit` references and
 /// `nyl get`.
 ///
 /// Set exactly one of the four forms:

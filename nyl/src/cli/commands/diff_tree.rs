@@ -109,7 +109,7 @@ pub struct DiffTreeArgs {
     #[arg(long)]
     pub allow_secret_inputs: bool,
 
-    /// Read Git charts, the published tree, `--source-ref`, and $publication state
+    /// Read Git charts, the published tree, `--source-ref`, and $fromPublication state
     /// from the cached refs of the local Git cache instead of fetching them.
     #[arg(long)]
     pub offline: bool,
@@ -560,7 +560,7 @@ fn write_diff_output(output: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The published tree to compare against: the commit `$publication` state
+/// The published tree to compare against: the commit `$fromPublication` state
 /// was read at, so both sides see one publication; otherwise the branch head,
 /// refreshed unless `offline`.
 fn published_tree(
@@ -739,7 +739,7 @@ fn publication_marker(compiled: &nyl_render::gitops::CompiledTargetTree) -> Resu
 /// Read the files the ownership index under `root` lists.
 ///
 /// A prefix without an index owns nothing yet. Before the first publication it
-/// may hold state files another tool committed for `$publication`
+/// may hold state files another tool committed for `$fromPublication`
 /// bindings, so it is accepted when every file in it is one of the
 /// `declared_state_paths` (relative to the prefix). Any other file means the
 /// prefix belongs to something else, such as after a mistyped `pathPrefix`.
@@ -770,7 +770,7 @@ pub(super) fn read_rendered_tree(
                 listed.push(format!("… and {} more", foreign.len() - MAX_LISTED));
             }
             return Err(NylError::config(format!(
-                "Published rendered tree {} has no ownership index but holds files no $publication binding declares:\n- {}\nCheck the DeploymentTarget publication.pathPrefix; before its first publication a prefix may hold only declared state files.",
+                "Published rendered tree {} has no ownership index but holds files no $fromPublication binding declares:\n- {}\nCheck the DeploymentTarget publication.pathPrefix; before its first publication a prefix may hold only declared state files.",
                 root.display(),
                 listed.join("\n- ")
             )));

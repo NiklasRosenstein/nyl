@@ -16,7 +16,7 @@ nyl validate [path] [--strict] [--offline]
 - `--strict`: treat warnings as errors.
 - `--offline`: never use the network, as `render-tree --offline` does: Git
   sources (charts and remote ApplicationGroup sources) come from the cache,
-  and `$publication` state from the cached publication branch head. This
+  and `$fromPublication` state from the cached publication branch head. This
   holds for the target compiles and the PromotionPath checks (Release input
   types and `coverage` names) alike. A remote source that was never fetched
   cannot be checked offline: the compile fails, and the checks report
@@ -37,7 +37,7 @@ nyl validate [path] [--strict] [--offline]
    [Other environments](/nyl/orchestration/runs/#other-environments))
 7. Unit envelopes: a literal `apiVersion`, `kind`, `metadata.name`, and
    `metadata.labels`, and names unique across unit kinds
-8. Which Environment places each DeploymentTarget, and the `$unit` bindings
+8. Which Environment places each DeploymentTarget, and the `$fromUnit` bindings
    of every placed target
 9. A complete target compilation for every configured DeploymentTarget
 10. Each Environment's units, with the checks `nyl plan` and `nyl reconcile`
@@ -45,7 +45,7 @@ nyl validate [path] [--strict] [--offline]
     `dependsOn` and references to unknown units, cycles, references to
     undeclared or sensitive outputs, and evidence requirements
 11. The value sources each Environment's and each sample instance's values
-    carry: each is checked where a unit reads it with `$environment`, and one
+    carry: each is checked where a unit reads it with `$fromEnvironment`, and one
     that no unit reads warns with `NYL-VALUES-SOURCE-UNREAD` (see
     [Carried sources](/nyl/reference/value-sources/#carried-sources-and-nyl-validate))
 
@@ -122,7 +122,7 @@ lists it; a KubernetesPublication renders its target to list them),
 values or coverage of a unit that records nothing per deployment,
 `NYL-PROMOTE-COVERAGE-UNCHECKED` when a coverage unit's deployments cannot be
 listed (with the render error), `NYL-PROMOTE-VALUE-TYPE-UNCHECKED` when the
-declared type of a Release input a `$promotion` binding fills cannot be
+declared type of a Release input a `$fromPromotion` binding fills cannot be
 read (see below), and `NYL-PROMOTE-UNSUPPORTED` for
 `changeGate: pullRequest` or a DeploymentTarget in `from` or `to`, which M11
 delivers. `nyl plan -e <environment>`, `nyl reconcile`, `nyl promote`, and
@@ -132,7 +132,7 @@ touch the environment, except that `NYL-PROMOTE-COVERAGE-UNCHECKED` and
 environment only by what they need, and resolution checks a value against its
 declaration again.
 
-A `$promotion` binding in a DeploymentTarget's `releaseInputs` is compared
+A `$fromPromotion` binding in a DeploymentTarget's `releaseInputs` is compared
 with the type the Release declares for that input
 ([PromotionPath validation](/nyl/orchestration/resource-guides/promotion-path/#validation)).
 The declaration is read from the ApplicationGroups the target selects without
@@ -151,12 +151,12 @@ spec that is no DeploymentTarget spec, naming the unit's file. A disabled unit
 contributes no inline target.
 
 A placed target compiles with a placeholder of the declared type for each
-`$unit` and `$promotion` binding, because only a run resolves their
-values. Each `$unit` binding must instead name a unit the Environment
+`$fromUnit` and `$fromPromotion` binding, because only a run resolves their
+values. Each `$fromUnit` binding must instead name a unit the Environment
 selects and enables; an `output` reference must name an output the unit
 declares and does not mark `sensitive`. An `artifact` reference is checked
 only for the unit's existence. Every problem names its binding, such as
-`spec.releaseInputs."web/web".databaseHost.$unit`.
+`spec.releaseInputs."web/web".databaseHost.$fromUnit`.
 
 A publication unit with `enabled: false` still places its target, because
 the target belongs to the Environment until its teardown completes. Its
@@ -164,7 +164,7 @@ bindings are not checked, so a stack can be disabled together, and its
 target may already be removed.
 
 A target no publication unit places compiles as `render-tree` would, so a
-`$unit` or `$promotion` binding on it fails and names the binding.
+`$fromUnit` or `$fromPromotion` binding on it fails and names the binding.
 `render-tree`, `publish-tree`, `diff-tree`, and the direct commands never
 resolve these bindings.
 

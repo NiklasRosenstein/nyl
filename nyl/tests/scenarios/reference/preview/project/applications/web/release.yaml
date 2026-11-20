@@ -13,7 +13,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web
-  namespace: {$input: namespace}
+  namespace: {$fromInput: namespace}
 spec:
   replicas: 1
   selector:
@@ -24,7 +24,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: {$input: image}
+          image: {$fromInput: image}
           env:
             - name: DATABASE_HOST
-              value: {$input: databaseHost}
+              value: {$fromInput: databaseHost}

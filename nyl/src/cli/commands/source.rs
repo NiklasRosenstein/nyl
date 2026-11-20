@@ -156,7 +156,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let first = group("first");
         fs::write(temp.path().join("a.yaml"), &first).unwrap();
-        let unlocatable = "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: b\nspec:\n  releaseInputs:\n    g/r: {image: {$git: {commit: aaaa}}}\n";
+        let unlocatable = "apiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: b\nspec:\n  releaseInputs:\n    g/r: {image: {$fromGit: {commit: aaaa}}}\n";
         fs::write(temp.path().join("b.yaml"), unlocatable).unwrap();
         let resolutions = [
             stale(

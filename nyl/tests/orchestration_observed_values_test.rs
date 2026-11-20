@@ -53,7 +53,7 @@ metadata:
 spec:
   command: [sh, -c, 'true']
   values:
-    address: {{$unit: {{unit: lb, observation: ip}}}}
+    address: {{$fromUnit: {{unit: lb, observation: ip}}}}
 {extra_dns}---
 apiVersion: units.gitops.nyl/v1
 kind: Command

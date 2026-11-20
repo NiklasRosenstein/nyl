@@ -67,7 +67,7 @@ transition. Independent jobs may be queued together, but effects within one
 environment serialize. No per-unit leases are introduced.
 
 The exporter reads the full environment ownership set, including units that
-already have current receipts. It derives edges from `dependsOn` and `$unit`
+already have current receipts. It derives edges from `dependsOn` and `$fromUnit`
 references after structural rendering, including dependencies whose values are
 not yet available. It does not require a complete native plan. Workers resolve
 again against current evidence; a producer may execute and leave the consumer's
@@ -139,11 +139,11 @@ which defaults to the desired ref. Only a newer admission replaces it.
 lease:
 
 1. Resolve S with the environment's ordinary source rules (entry worktree,
-   `revision`, `commit`, or `$promotion`), with the same reachability
+   `revision`, `commit`, or `$fromPromotion`), with the same reachability
    checks as any run. Admission never chooses a source those rules would not.
 2. Compare with the current generation. The same S and graph digest return the
    current generation unchanged, so a retried dispatch is idempotent. A newer S
-   (a descendant of the admitted commit, or for `$promotion` a newer or
+   (a descendant of the admitted commit, or for `$fromPromotion` a newer or
    equal promotion sequence) mints the next generation.
 3. Anything else is a rollback: an older or diverging commit, or an explicit
    `--source <rev>`. It requires `--rollback --reason <text>` and authorization

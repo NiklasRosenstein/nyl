@@ -34,11 +34,11 @@ values from one recorded state into another environment's desired state.
 | `coverage.<unit>.groups` | list of group names | every group | Narrows the deployments that count toward a source promotion to those of these groups; never what moves. Refused on a path that promotes only values |
 | `coverage.<unit>.exclude` | list of deployment names | none | Deployments knowingly accepted as falling short; they leave the unit's aggregate for this path and are listed in each record |
 | `coverage.<unit>.require` | list of deployment names | none | Deployments that must meet the required attestations at whatever publication they run, without contributing values |
-| `values` | map of value name to `{select}` | `{}` | The promoted values; value names are what `$promotion` bindings read |
+| `values` | map of value name to `{select}` | `{}` | The promoted values; value names are what `$fromPromotion` bindings read |
 
 A `select` names exactly one source field, with the same JSON Pointer
 semantics ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)) and resolver as
-`$unit` references and `nyl get`:
+`$fromUnit` references and `nyl get`:
 
 | Selector | Reads |
 | --- | --- |
@@ -71,7 +71,7 @@ as from a remote source neither fetched nor cached; offline, `nyl validate
 --offline` and `--local` runs, reads the cache only; an error in `nyl
 validate`, a warning in the commands that work on one environment, since
 resolution checks the value again),
-`NYL-PROMOTE-BINDING-UNKNOWN` (a `$promotion` binding names a path or value no
+`NYL-PROMOTE-BINDING-UNKNOWN` (a `$fromPromotion` binding names a path or value no
 path declares), `NYL-ATTESTATION-UNDECLARED` (a required attestation its scope
 does not declare), `NYL-PROMOTE-COVERAGE-UNKNOWN` (`coverage` names a unit
 the source does not declare, select, or enable, a unit whose kind runs no
@@ -114,7 +114,7 @@ writes it, and a reader loads it.
 | `artifactsVerified` | Whether the artifact check ran |
 | `requested` | `{by, identity, source, at, reason}`, recorded like an approval |
 
-Resolution of `$promotion` reads only records. `desired/environment.yaml`
+Resolution of `$fromPromotion` reads only records. `desired/environment.yaml`
 records the highest `sequence` a run applied, so a run refuses an older
 `record: source` block, as described below.
 
@@ -138,7 +138,7 @@ the file, and its `state restore` leaves the file as it is.
 
 Other codes of the promotion rules: `NYL-PROMOTION-MISSING` (exit 2 of a
 `reconcile` or `plan`: an environment's `promotion` source, or a
-`$promotion` binding, whose path has no record yet; the fix names `nyl
+`$fromPromotion` binding, whose path has no record yet; the fix names `nyl
 promote <path>`); `NYL-PROMOTION-SEQUENCE-OLDER` (exit 1: a `record: source`
 block, or (M11) a target's record, with a lower `sequence` than the one
 applied; the fix names `nyl promote <path> --revision`);
@@ -215,11 +215,11 @@ for the path-less form):
 # staging DeploymentTarget
 releaseInputs:
   platform/web:
-    image: {$promotion: {path: dev-to-staging, value: webImage}}
+    image: {$fromPromotion: {path: dev-to-staging, value: webImage}}
 ---
 # staging Terraform unit (units.gitops.nyl/v1 Terraform)
 spec:
-  source: {$promotion: {path: dev-to-staging, value: databaseSource}}
+  source: {$fromPromotion: {path: dev-to-staging, value: databaseSource}}
 ```
 
 - `select` reads either a source unit's **resolved input** from its desired unit
@@ -347,12 +347,12 @@ spec:
 ### Promoting an environment's source
 
 An environment whose `source` is
-`$promotion` runs its definitions at a source commit its promotion path's
+`$fromPromotion` runs its definitions at a source commit its promotion path's
 source proved, so a change to what the code does reaches it only through
 promotion. Values then carry only results that must not be rebuilt, such as
 image digests. A `revision` with a `commit` lock is an ordinary lock that
 `nyl update source-locks` moves; it is never a promotion target and cannot
-bind `$promotion`.
+bind `$fromPromotion`.
 
 ```yaml
 # config/environments/prod.yaml
@@ -584,7 +584,7 @@ spec:
 - Before the first promotion, an environment with a `promotion` source has
   no source commit, and `reconcile` exits 2 naming `nyl promote`.
 - The target may rebuild a unit dev also runs, such as `web-image`, at the
-  promoted commit, or bind dev's result with a `$promotion` binding.
+  promoted commit, or bind dev's result with a `$fromPromotion` binding.
   Either is an explicit choice of the target's configuration, and Nyl does
   not warn about either, nor about a target that does both. The
   PromotionRecord states exactly the values it carries and the evidence for
@@ -608,7 +608,7 @@ takes `path` for one path or `paths` for several; the source commit comes from
 the newest PromotionRecord on those paths, and desired state records which
 path supplied it.
 
-A `$promotion` binding names a `value` and, optionally, a `path`:
+A `$fromPromotion` binding names a `value` and, optionally, a `path`:
 
 - Without `path`, it reads the newest record into this environment that
   carries the value. In an environment whose source is promoted, only records
@@ -647,7 +647,7 @@ decided when `nyl promote` writes, by the supersede check:
   listing is static, judged from the source environment's rendered units
   rather than a recorded state: an artifact or output of a unit with no
   Git source field, or an input that neither lies in one nor is filled by
-  a `$unit` reference to such a unit. It can therefore differ from what
+  a `$fromUnit` reference to such a unit. It can therefore differ from what
   `nyl promote` finds in a state, such as a reference to another
   environment's unit, which it lists as unchecked. A
   subset promotion checks only the values it writes. Commits are paired by
@@ -815,7 +815,7 @@ This section is M11; M6 rejects a target in `from`.
 
 `from` selects either an environment, as above, or a
 DeploymentTarget. A target source lets a dev target that renders from literal,
-`$git`, or `$publication` bindings (including `carryFileFromWorktree`) feed an
+`$fromGit`, or `$fromPublication` bindings (including `carryFileFromWorktree`) feed an
 orchestrated environment without being orchestrated itself:
 
 ```yaml
@@ -842,7 +842,7 @@ spec:
   evidence.
 - The ownership index stores input digests, not values. Promotion recovers each
   value from its recorded provenance: the carried or base-commit state file, the
-  locked `$git` blob, or the binding at the recorded source commit. It then
+  locked `$fromGit` blob, or the binding at the recorded source commit. It then
   verifies the value against the recorded `@input` digest. A publication made
   from a dirty source worktree is not a promotion source.
 - A non-orchestrated target records its attestations on its own publication
@@ -880,7 +880,7 @@ spec:
 spec:
   releaseInputs:
     platform/web:
-      image: {$promotion: {path: dev-to-production, value: webImage}}
+      image: {$fromPromotion: {path: dev-to-production, value: webImage}}
   promotions:                        # written by nyl promote, never by hand
     dev-to-production:
       path: dev-to-production        # the one PromotionRecord shape, as in state
@@ -912,7 +912,7 @@ spec:
   its own output without review.
 - **Values only.** A target renders the source it is published from, so a path
   into a target promotes values, never a source commit.
-- **Bindings.** `$promotion` bindings of the target read `spec.promotions`,
+- **Bindings.** `$fromPromotion` bindings of the target read `spec.promotions`,
   with the rules of [Several paths into one environment](#several-paths-into-one-environment):
   without `path`, the record with the highest `sequence` that carries the
   value. `render-tree`, `publish-tree`, `diff-tree`, and direct commands
@@ -933,7 +933,7 @@ spec:
   environment's desired state.
 
 A target can also follow another target's published state with a locked
-`$git` binding. `nyl update source-locks` moves such a lock to the branch
+`$fromGit` binding. `nyl update source-locks` moves such a lock to the branch
 head, with no health gate and no record: it follows the branch, not what the
 source target runs.
 
@@ -989,7 +989,7 @@ so every source writes the same record:
 - **Use.** Promotion requires them through `evidence: attested` and a path's
   `attestations` (see [Promotion paths](#promotion-paths)), and a failing one blocks promotion of
   its state on every path. Dependents require them with `dependsOn` or
-  `$unit` (see the orchestration core contract). `nyl get states` and
+  `$fromUnit` (see the orchestration core contract). `nyl get states` and
   `nyl get promotion-candidates` show them per state, and `status` shows
   failing ones.
 
@@ -1135,7 +1135,7 @@ nothing itself, so there is one evidence path.
   in the others, which judge another environment only by what they need. A
   KubernetesPublication lists the deployments its resolved spec recorded,
   or renders its target for validation, with each binding orchestration
-  resolves taking a placeholder and `$publication` inputs read fresh or
+  resolves taking a placeholder and `$fromPublication` inputs read fresh or
   from the cached branch, so it works offline.
   Coverage still never fails open at promotion time, for what changed since:
   a named group no deployment of the attestation belongs to, a coverage that

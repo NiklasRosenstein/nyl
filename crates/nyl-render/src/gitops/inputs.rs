@@ -5,9 +5,9 @@
 //! - [Bindings](../../../../design/release-inputs.md#bindings): the key table and
 //!   `effective input = target binding, otherwise Release default`.
 //! - [Binding kinds](../../../../design/release-inputs.md#binding-kinds): `value`,
-//!   `$file`, and `$git` resolve here; `$unit` and `$promotion`
-//!   need orchestrated execution and are rejected. `$git` reads only its
-//!   locked commit and never resolves `revision`. `$publication` reads the
+//!   `$fromFile`, and `$fromGit` resolve here; `$fromUnit` and `$fromPromotion`
+//!   need orchestrated execution and are rejected. `$fromGit` reads only its
+//!   locked commit and never resolves `revision`. `$fromPublication` reads the
 //!   target's own publication branch at the base commit, or a carried
 //!   working-tree file; a missing branch or file leaves the input unbound.
 //! - [Provenance, caching, and validation](../../../../design/release-inputs.md#provenance-caching-and-validation):
@@ -40,16 +40,16 @@ use nyl_core::resources::InlineGitRepository;
 /// Ownership-index key prefix of resolved input digests.
 pub const INDEX_INPUT_PREFIX: &str = "@input/";
 
-/// Ownership-index key prefix of `$git` blob digests.
+/// Ownership-index key prefix of `$fromGit` blob digests.
 pub const INDEX_GIT_PREFIX: &str = "@git/";
 /// Ownership-index key prefix of state files read from the publication base commit.
 pub const INDEX_PUBLICATION_PREFIX: &str = "@publication/";
 /// Ownership-index key prefix of state files carried from the working tree.
 pub const INDEX_CARRIED_PREFIX: &str = "@carried/";
 
-/// How a command reads the publication branch head for `$publication`.
+/// How a command reads the publication branch head for `$fromPublication`.
 ///
-/// Contract: [`$publication`](../../../../design/release-inputs.md#binding-kinds),
+/// Contract: [`$fromPublication`](../../../../design/release-inputs.md#binding-kinds),
 /// Local commands and vendoring.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PublicationRead {
@@ -88,7 +88,7 @@ pub enum PublicationBaseOrigin {
     Unavailable,
 }
 
-/// The publication branch head that `$publication` bindings read.
+/// The publication branch head that `$fromPublication` bindings read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationBase {
     /// Repository URL the state is read from.
@@ -116,7 +116,7 @@ impl PublicationBase {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch).to_owned();
         let error = |error: NylError, hint: &str| {
             NylError::config(format!(
-                "Cannot read publication branch {branch} of {} for $publication Release inputs: {error}{hint}",
+                "Cannot read publication branch {branch} of {} for $fromPublication Release inputs: {error}{hint}",
                 nyl_git::sanitize_url(url),
             ))
         };
@@ -179,7 +179,7 @@ impl PublicationBase {
         let url = nyl_git::sanitize_url(&self.url);
         match (&self.commit, self.origin) {
             (_, PublicationBaseOrigin::Unavailable) => format!(
-                "Publication branch {} of {url} is not in the local Git cache (it was never fetched, or does not exist yet) and was not refreshed; $publication inputs are unbound",
+                "Publication branch {} of {url} is not in the local Git cache (it was never fetched, or does not exist yet) and was not refreshed; $fromPublication inputs are unbound",
                 self.branch
             ),
             (Some(commit), origin) => format!(
@@ -192,7 +192,7 @@ impl PublicationBase {
                 }
             ),
             (None, _) => format!(
-                "Publication branch {} of {url} does not exist yet; $publication inputs are unbound",
+                "Publication branch {} of {url} does not exist yet; $fromPublication inputs are unbound",
                 self.branch
             ),
         }
@@ -207,7 +207,7 @@ impl PublicationBase {
     }
 }
 
-/// The state `$publication` bindings read must be the state at the base
+/// The state `$fromPublication` bindings read must be the state at the base
 /// commit a publication builds on, so the published commit holds the state
 /// and the manifests rendered from it. `head` is the publication branch head
 /// the commit is built on; a branch created while rendering counts as a push.
@@ -224,7 +224,7 @@ pub fn verify_publication_base(
         return Ok(());
     }
     Err(NylError::PublicationMoved(format!(
-        "Publication {}@{branch} is at {} but $publication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
+        "Publication {}@{branch} is at {} but $fromPublication state was read at {}; another writer pushed while rendering, so rerun publish-tree",
         nyl_git::sanitize_url(publication_url),
         head.unwrap_or("no commit"),
         base.commit.as_deref().unwrap_or("no commit"),
@@ -233,19 +233,19 @@ pub fn verify_publication_base(
 
 /// Where resolution may read binding sources from.
 pub struct InputSources<'a> {
-    /// Local path rule of this project, for `$file`.
+    /// Local path rule of this project, for `$fromFile`.
     pub paths: &'a ProjectPaths,
     /// Git-visible YAML and JSON files, relative to the worktree root. A
-    /// `$file` binding reads only these, so published output reproduces
+    /// `$fromFile` binding reads only these, so published output reproduces
     /// from committed source.
     pub visible_files: &'a BTreeSet<PathBuf>,
-    /// Resolves a `$git` `repositoryRef` to the GitRepository it names and
+    /// Resolves a `$fromGit` `repositoryRef` to the GitRepository it names and
     /// that resource's absolute source file, through
     /// [`GitOpsInventory::resolve_git_repository`](super::GitOpsInventory::resolve_git_repository).
     pub repositories: &'a RepositoryResolver<'a>,
-    /// Reader of files at locked commits, for `$git` and `$publication`.
+    /// Reader of files at locked commits, for `$fromGit` and `$fromPublication`.
     pub git: &'a dyn GitBlobSource,
-    /// Publication branch head, for `$publication`. Resolution fails when
+    /// Publication branch head, for `$fromPublication`. Resolution fails when
     /// a binding needs it and it is absent.
     pub publication: Option<&'a PublicationBase>,
     /// State bytes of another render of the same command, by path relative
@@ -253,8 +253,8 @@ pub struct InputSources<'a> {
     /// of the worktree, so a comparison baseline sees the desired render's
     /// carried state.
     pub pinned_state: Option<&'a BTreeMap<PathBuf, Vec<u8>>>,
-    /// Values for bindings only orchestration resolves (`$unit`,
-    /// `$promotion`); `None` rejects them, as tree and direct commands do.
+    /// Values for bindings only orchestration resolves (`$fromUnit`,
+    /// `$fromPromotion`); `None` rejects them, as tree and direct commands do.
     pub orchestrated: Option<&'a OrchestratedInputs>,
 }
 
@@ -276,7 +276,7 @@ pub enum OrchestratedInputs {
     /// take an override's precedence over the binding.
     Pinned(InputSnapshot),
     /// `nyl validate` of a target an environment's publication unit owns:
-    /// each `$unit`/`$promotion` binding takes a placeholder of its
+    /// each `$fromUnit`/`$fromPromotion` binding takes a placeholder of its
     /// declared type, so the target compiles; the references themselves are
     /// checked against the owning environment's units separately.
     Placeholders,
@@ -305,7 +305,7 @@ pub type RepositoryResolver<'a> =
 pub trait GitBlobSource {
     /// The bytes of `path` at `commit` of `url`, or `None` when the commit has
     /// no such path.
-    /// Locked `$git` files go through the vendor policy.
+    /// Locked `$fromGit` files go through the vendor policy.
     fn read_blob(&self, url: &str, commit: &str, path: &str) -> Result<Option<Vec<u8>>>;
 
     /// A file of the publication branch at `commit`, read from Git and never
@@ -320,7 +320,7 @@ pub trait GitBlobSource {
 /// [`GitBlobSource`] over the project's remote artifacts: the vendor snapshot,
 /// then the exact source cache, then the shared bare-repository cache.
 ///
-/// Contract: [`$git`](../../../../design/release-inputs.md#binding-kinds).
+/// Contract: [`$fromGit`](../../../../design/release-inputs.md#binding-kinds).
 /// A locked file is a remote renderer input like a remote group source, so
 /// `nyl vendor` captures it, `nyl vendor --check` requires it, and vendor mode
 /// `required` never reads it from the network.
@@ -329,7 +329,7 @@ pub struct CachedGitBlobSource {
     project_root: PathBuf,
     project_config: crate::config::ProjectConfig,
     cache: Option<crate::render::cache::RenderCache>,
-    /// Created on first use, so targets without `$git` bindings never
+    /// Created on first use, so targets without `$fromGit` bindings never
     /// load the vendor lock.
     artifacts: std::cell::OnceCell<crate::render::artifact::ArtifactResolver>,
 }
@@ -430,9 +430,9 @@ pub enum InputOrigin {
     Default,
     /// An inline `value` binding.
     Value,
-    /// A `$file` binding reading this project file.
+    /// A `$fromFile` binding reading this project file.
     File(PathBuf),
-    /// A `$git` binding reading `path` at `commit` of `url`.
+    /// A `$fromGit` binding reading `path` at `commit` of `url`.
     Git {
         /// Repository URL without credentials.
         url: String,
@@ -443,7 +443,7 @@ pub enum InputOrigin {
         /// Source file of the referenced GitRepository resource.
         repository_source: Option<PathBuf>,
     },
-    /// A `$publication` binding reading `path` at the publication base commit.
+    /// A `$fromPublication` binding reading `path` at the publication base commit.
     Publication {
         /// Path relative to the publication prefix.
         path: String,
@@ -452,7 +452,7 @@ pub enum InputOrigin {
         /// The bytes to write back to `path`, when the binding declares `carryFileFromWorktree`.
         carried_back: Option<Vec<u8>>,
     },
-    /// A `$publication` binding reading its `carryFileFromWorktree` file from the working tree.
+    /// A `$fromPublication` binding reading its `carryFileFromWorktree` file from the working tree.
     Carried {
         /// Path relative to the publication prefix that receives the bytes.
         path: String,
@@ -488,15 +488,15 @@ impl ResolvedReleaseInputs {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedTargetInputs {
     pub releases: BTreeMap<ReleaseKey, ResolvedReleaseInputs>,
-    /// Every `$publication` path the target's bindings name, bound or not,
+    /// Every `$fromPublication` path the target's bindings name, bound or not,
     /// to whether an enabled binding declares `carryFileFromWorktree`. Paths of
     /// disabled groups only are not carried, so their files are kept unowned.
     pub state_paths: BTreeMap<String, bool>,
 }
 
 impl ResolvedTargetInputs {
-    /// Project files the bindings read: `$file` files and the resources of
-    /// GitRepositories that `$git` names.
+    /// Project files the bindings read: `$fromFile` files and the resources of
+    /// GitRepositories that `$fromGit` names.
     pub fn files(&self) -> BTreeSet<PathBuf> {
         self.releases
             .values()
@@ -766,11 +766,11 @@ impl nyl_core::bindings::Origin for InputOrigin {
         match self {
             Self::Default => "The default".to_owned(),
             Self::Value => field.to_owned(),
-            Self::File(path) => format!("{field}.$file ({})", path.display()),
-            Self::Git { url, commit, path, .. } => format!("{field}.$git ({url}@{commit}/{path})"),
-            Self::Publication { path, commit, .. } => format!("{field}.$publication ({path} at {commit})"),
+            Self::File(path) => format!("{field}.$fromFile ({})", path.display()),
+            Self::Git { url, commit, path, .. } => format!("{field}.$fromGit ({url}@{commit}/{path})"),
+            Self::Publication { path, commit, .. } => format!("{field}.$fromPublication ({path} at {commit})"),
             Self::Carried { source, .. } => {
-                format!("{field}.$publication carryFileFromWorktree ({})", source.display())
+                format!("{field}.$fromPublication carryFileFromWorktree ({})", source.display())
             }
             Self::Override => "The --input/--inputs override".to_owned(),
         }
@@ -778,7 +778,7 @@ impl nyl_core::bindings::Origin for InputOrigin {
 }
 
 /// Release input sources: project files, locked Git blobs, and publication
-/// state. `$unit` and `$promotion` need orchestrated execution.
+/// state. `$fromUnit` and `$fromPromotion` need orchestrated execution.
 impl Providers for InputSources<'_> {
     type Origin = InputOrigin;
 
@@ -801,14 +801,14 @@ impl Providers for InputSources<'_> {
     }
 
     fn unit(&self, field: &str, _source: &UnitInputSource) -> Provided<InputOrigin> {
-        Err(needs_orchestration(field, "$unit").into())
+        Err(needs_orchestration(field, "$fromUnit").into())
     }
 
     fn promotion(&self, field: &str, _source: &PromotionInputSource) -> Provided<InputOrigin> {
-        Err(needs_orchestration(field, "$promotion").into())
+        Err(needs_orchestration(field, "$fromPromotion").into())
     }
 
-    /// Only `$publication` leaves an input unbound: before its state file
+    /// Only `$fromPublication` leaves an input unbound: before its state file
     /// exists, or when its branch is unavailable.
     fn unbound(&self, field: &str, clause: &Clause, requirement: &str) -> Option<String> {
         let Clause::Publication(source) = clause else {
@@ -821,11 +821,11 @@ impl Providers for InputSources<'_> {
                 .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable)
             {
                 format!(
-                "{requirement}, but {field}.$publication state file {path} is unavailable: the publication branch was not refreshed and is not in the local Git cache, and the input has no default; run once with network access or declare a default"
+                "{requirement}, but {field}.$fromPublication state file {path} is unavailable: the publication branch was not refreshed and is not in the local Git cache, and the input has no default; run once with network access or declare a default"
             )
             } else {
                 format!(
-                "{requirement}, but {field}.$publication state file {path} does not exist on the publication branch yet and the input has no default; commit the state file, provide its carryFileFromWorktree, or declare a default"
+                "{requirement}, but {field}.$fromPublication state file {path} does not exist on the publication branch yet and the input has no default; commit the state file, provide its carryFileFromWorktree, or declare a default"
             )
             },
         )
@@ -843,7 +843,7 @@ fn resolve_publication(
     source: &PublicationInputSource,
     sources: &InputSources<'_>,
 ) -> std::result::Result<Option<ResolvedInput>, String> {
-    let field = format!("{field}.$publication");
+    let field = format!("{field}.$fromPublication");
     if let Some(carry) = &source.carry_file_from_worktree {
         let carry_path = sources
             .paths
@@ -851,7 +851,7 @@ fn resolve_publication(
             .map_err(|error| error.to_string())?;
         if is_tracked(&carry_path) {
             return Err(format!(
-                "{field}.carryFileFromWorktree {carry} is tracked by Git; a carried file is produced by this run and left uncommitted, so bind tracked files with $file"
+                "{field}.carryFileFromWorktree {carry} is tracked by Git; a carried file is produced by this run and left uncommitted, so bind tracked files with $fromFile"
             ));
         }
         // A pinned state (a comparison baseline) replaces the worktree file.
@@ -962,20 +962,20 @@ fn resolve_file(
 ) -> std::result::Result<ResolvedInput, String> {
     let path = sources
         .paths
-        .resolve(&format!("{field}.$file.path"), &source.path)
+        .resolve(&format!("{field}.$fromFile.path"), &source.path)
         .map_err(|error| error.to_string())?;
     let visible = path
         .strip_prefix(&sources.paths.worktree_root)
         .is_ok_and(|relative| sources.visible_files.contains(relative));
     if !visible {
         return Err(format!(
-            "{field}.$file.path {:?} names no Git-visible YAML or JSON file of this repository; the file must exist and must not be ignored by Git or lie in the output or vendor subtree",
+            "{field}.$fromFile.path {:?} names no Git-visible YAML or JSON file of this repository; the file must exist and must not be ignored by Git or lie in the output or vendor subtree",
             source.path
         ));
     }
-    let document = read_single_document(&path).map_err(|reason| format!("{field}.$file: {reason}"))?;
+    let document = read_single_document(&path).map_err(|reason| format!("{field}.$fromFile: {reason}"))?;
     let value =
-        select(&document, &source.pointer).map_err(|reason| format!("{field}.$file: {} {reason}", source.path))?;
+        select(&document, &source.pointer).map_err(|reason| format!("{field}.$fromFile: {} {reason}", source.path))?;
     Ok(ResolvedInput {
         value,
         origin: InputOrigin::File(path),
@@ -990,11 +990,11 @@ fn resolve_git(
     let (repository, repository_source) = match (&source.git.repository, &source.git.repository_ref) {
         (Some(repository), _) => (repository.repo_url.clone(), None),
         (None, Some(reference)) => {
-            let (repository, path) =
-                (sources.repositories)(reference).map_err(|error| format!("{field}.$git.repositoryRef: {error}"))?;
+            let (repository, path) = (sources.repositories)(reference)
+                .map_err(|error| format!("{field}.$fromGit.repositoryRef: {error}"))?;
             (repository.repo_url, Some(path))
         }
-        (None, None) => unreachable!("validated $git names a repository"),
+        (None, None) => unreachable!("validated $fromGit names a repository"),
     };
     let (commit, path) = (source.commit(), source.path());
     let bytes = sources
@@ -1002,7 +1002,7 @@ fn resolve_git(
         .read_blob(&repository, commit, path)
         .map_err(|error| match error {
             NylError::Git(_) => format!(
-                "{field}.$git cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
+                "{field}.$fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
                 path,
                 commit,
                 nyl_git::sanitize_url(&repository),
@@ -1010,24 +1010,24 @@ fn resolve_git(
             ),
             // Vendor policy errors carry their own fix.
             NylError::Config(message) => format!(
-                "{field}.$git: {}",
+                "{field}.$fromGit: {}",
                 nyl_git::redact_url_credentials(&message, &repository)
             ),
             other => format!(
-                "{field}.$git: {}",
+                "{field}.$fromGit: {}",
                 nyl_git::redact_url_credentials(&other.to_string(), &repository)
             ),
         })?
         .ok_or_else(|| {
             format!(
-                "{field}.$git: commit {} of {} has no file {}",
+                "{field}.$fromGit: commit {} of {} has no file {}",
                 commit,
                 nyl_git::sanitize_url(&repository),
                 path
             )
         })?;
-    let document = parse_single_document(&bytes).map_err(|reason| format!("{field}.$git: {} {reason}", path))?;
-    let value = select(&document, &source.pointer).map_err(|reason| format!("{field}.$git: {} {reason}", path))?;
+    let document = parse_single_document(&bytes).map_err(|reason| format!("{field}.$fromGit: {} {reason}", path))?;
+    let value = select(&document, &source.pointer).map_err(|reason| format!("{field}.$fromGit: {} {reason}", path))?;
     Ok(ResolvedInput {
         value,
         origin: InputOrigin::Git {
@@ -1040,7 +1040,7 @@ fn resolve_git(
     })
 }
 
-/// Working-tree files the target's `$publication` bindings carry.
+/// Working-tree files the target's `$fromPublication` bindings carry.
 ///
 /// They are excluded from the source dirty check, because a carried file is
 /// an output of this run, and the clean-`HEAD` verification render receives
@@ -1060,7 +1060,7 @@ pub fn carry_paths(inventory: &super::GitOpsInventory, target_name: &str) -> Res
             for source in binding.publications() {
                 if let Some(carry) = &source.carry_file_from_worktree {
                     carried.push(paths.resolve(
-                        &format!("spec.releaseInputs.{key:?}.{name}.$publication.carryFileFromWorktree"),
+                        &format!("spec.releaseInputs.{key:?}.{name}.$fromPublication.carryFileFromWorktree"),
                         carry,
                     )?);
                 }
@@ -1070,10 +1070,10 @@ pub fn carry_paths(inventory: &super::GitOpsInventory, target_name: &str) -> Res
     Ok(carried)
 }
 
-/// Check the placement of `$publication` state files and return the ones
+/// Check the placement of `$fromPublication` state files and return the ones
 /// this target writes: carried bytes, or the base copy written back.
 ///
-/// Contract: [`$publication`](../../../../design/release-inputs.md#binding-kinds),
+/// Contract: [`$fromPublication`](../../../../design/release-inputs.md#binding-kinds),
 /// Placement. Every state path lies outside the directories generated Argo CD
 /// Applications sync (workload Release directories and `_nyl`, which holds the
 /// catalog), so Argo CD never applies a state file as a manifest. A committed
@@ -1107,7 +1107,7 @@ pub fn validate_state_placement(
         let relative = Path::new(path);
         if relative.starts_with("_nyl") {
             return Err(NylError::config(format!(
-                "$publication state file {path} lies inside _nyl, which the catalog Application syncs; choose a path outside _nyl"
+                "$fromPublication state file {path} lies inside _nyl, which the catalog Application syncs; choose a path outside _nyl"
             )));
         }
         if let Some(directory) = release_directories
@@ -1116,14 +1116,14 @@ pub fn validate_state_placement(
         {
             let directory = directory.to_string_lossy().replace('\\', "/");
             return Err(NylError::config(format!(
-                "$publication state file {path} lies inside workload Release directory {directory}, which its Argo CD Application syncs; choose a path outside every Release directory",
+                "$fromPublication state file {path} lies inside workload Release directory {directory}, which its Argo CD Application syncs; choose a path outside every Release directory",
             )));
         }
         if files.contains_key(relative) {
             return Err(NylError::config(if *carried {
-                format!("Carried $publication state file {path} collides with a rendered file")
+                format!("Carried $fromPublication state file {path} collides with a rendered file")
             } else {
-                format!("$publication state file {path} is a file this target renders; a committed state file must not be owned by the target")
+                format!("$fromPublication state file {path} is a file this target renders; a committed state file must not be owned by the target")
             }));
         }
     }
@@ -1355,8 +1355,8 @@ mod tests {
         }));
         let target = target(json!({"platform/web": {
             "image": "registry.example/web@sha256:1",
-            "database": {"$file": {"path": "db.yaml", "pointer": "/database"}},
-            "host": {"$file": {"path": "db.yaml", "pointer": "/database/host"}},
+            "database": {"$fromFile": {"path": "db.yaml", "pointer": "/database"}},
+            "host": {"$fromFile": {"path": "db.yaml", "pointer": "/database/host"}},
         }}));
         let resolved = resolve(&target, &[("platform/web", &declared)], &[], temp.path()).unwrap();
         let web = &resolved.releases[&ReleaseKey::parse("platform/web").unwrap()];
@@ -1399,8 +1399,8 @@ mod tests {
             "platform/web": {
                 "unknown": 1,
                 "replicas": 2.5,
-                "tier": {"$file": {"path": "two.yaml"}},
-                "seed": {"$unit": {"unit": "seed", "output": "version"}},
+                "tier": {"$fromFile": {"path": "two.yaml"}},
+                "seed": {"$fromUnit": {"unit": "seed", "output": "version"}},
             },
         }));
         let error = resolve(
@@ -1419,7 +1419,7 @@ mod tests {
             "requires input \"image\" (Immutable image reference)",
             "expected integer, got number",
             "contains 2 YAML documents",
-            "$unit needs orchestrated execution",
+            "$fromUnit needs orchestrated execution",
         ] {
             assert!(error.contains(expected), "missing {expected:?} in:\n{error}");
         }
@@ -1469,8 +1469,8 @@ mod tests {
         )]);
         let declared = declarations(json!({"tier": {"type": "string"}, "missing": {"type": "string", "default": "x"}}));
         let target = target(json!({"platform/web": {
-            "tier": {"$git": {"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "staging/sizing.yaml", "pointer": "/web/tier"}},
-            "missing": {"$git": {"repository": {"repoURL": "https://git.example.com/state.git"}, "revision": "main", "commit": commit, "path": "absent.yaml"}},
+            "tier": {"$fromGit": {"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "staging/sizing.yaml", "pointer": "/web/tier"}},
+            "missing": {"$fromGit": {"repository": {"repoURL": "https://git.example.com/state.git"}, "revision": "main", "commit": commit, "path": "absent.yaml"}},
         }}));
         let paths = ProjectPaths::new(temp.path().to_path_buf(), temp.path().to_path_buf());
         let releases = [ReleaseDeclaration {
@@ -1498,7 +1498,7 @@ mod tests {
         assert!(error.contains("has no file absent.yaml"), "{error}");
 
         let target = super::tests::target(json!({"platform/web": {
-            "tier": {"$git": {"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "staging/sizing.yaml", "pointer": "/web/tier"}},
+            "tier": {"$fromGit": {"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "staging/sizing.yaml", "pointer": "/web/tier"}},
         }}));
         let resolved = resolve_target_inputs(&target, &releases, &BTreeSet::new(), &sources).unwrap();
         let web = &resolved.releases[&ReleaseKey::parse("platform/web").unwrap()];
@@ -1533,7 +1533,7 @@ mod tests {
         std::fs::write(temp.path().join("ignored.yaml"), "port: 1\n").unwrap();
         let declared = declarations(json!({"port": {"type": "integer"}}));
         for path in ["ignored.yaml", "missing.yaml"] {
-            let target = target(json!({"platform/web": {"port": {"$file": {"path": path, "pointer": "/port"}}}}));
+            let target = target(json!({"platform/web": {"port": {"$fromFile": {"path": path, "pointer": "/port"}}}}));
             let error = resolve(&target, &[("platform/web", &declared)], &[], temp.path())
                 .unwrap_err()
                 .to_string();
@@ -1546,7 +1546,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         std::fs::write(temp.path().join("db.json"), "{\"host\": \"db\"}").unwrap();
         let declared = declarations(json!({"port": {"type": "integer"}}));
-        let target = target(json!({"platform/web": {"port": {"$file": {"path": "db.json", "pointer": "/port"}}}}));
+        let target = target(json!({"platform/web": {"port": {"$fromFile": {"path": "db.json", "pointer": "/port"}}}}));
         let error = resolve(&target, &[("platform/web", &declared)], &[], temp.path())
             .unwrap_err()
             .to_string();
@@ -1598,7 +1598,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let declared = declarations(json!({"image": {"type": "string", "default": "x"}}));
         let target = target(
-            json!({"platform/web": {"image": {"$publication": {"path": "state/images.json", "carryFileFromWorktree": "build/images.json"}}}}),
+            json!({"platform/web": {"image": {"$fromPublication": {"path": "state/images.json", "carryFileFromWorktree": "build/images.json"}}}}),
         );
         let resolved = resolve(&target, &[("platform/web", &declared)], &["platform"], temp.path()).unwrap();
         assert_eq!(
@@ -1612,7 +1612,7 @@ mod tests {
     fn test_missing_required_publication_state_names_the_state_file() {
         let temp = TempDir::new().unwrap();
         let declared = declarations(json!({"image": {"type": "string"}}));
-        let target = target(json!({"platform/web": {"image": {"$publication": {"path": "state/images.json"}}}}));
+        let target = target(json!({"platform/web": {"image": {"$fromPublication": {"path": "state/images.json"}}}}));
         let base = PublicationBase {
             url: "https://example.invalid/deploy.git".to_owned(),
             branch: "deploy".to_owned(),
@@ -1781,7 +1781,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         std::fs::write(temp.path().join("carried.json"), r#"{"image": "worktree"}"#).unwrap();
         let declared = declarations(json!({"image": {"type": "string"}}));
-        let target = target(json!({"platform/web": {"image": {"$publication": {
+        let target = target(json!({"platform/web": {"image": {"$fromPublication": {
             "path": "state.json", "pointer": "/image", "carryFileFromWorktree": "carried.json"
         }}}}));
         let paths = ProjectPaths::new(temp.path().to_path_buf(), temp.path().to_path_buf());

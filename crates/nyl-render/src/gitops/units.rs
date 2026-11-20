@@ -19,9 +19,9 @@
 //!   Environment winning), the sanitized `environment`, and later `params`:
 //!   never secrets or the process environment. A document that renders to
 //!   nothing has no spec.
-//! - Then its `$environment` sources resolve against the same effective
-//!   `values`, at any depth, including the `environment` of each `$unit`;
-//!   `$unit` and `$promotion` are carried to the run, and any other source is
+//! - Then its `$fromEnvironment` sources resolve against the same effective
+//!   `values`, at any depth, including the `environment` of each `$fromUnit`;
+//!   `$fromUnit` and `$fromPromotion` are carried to the run, and any other source is
 //!   an error ([`resolve_value_sources`]).
 //! - A `KubernetesPublication` unit's rendered spec gains `releases`: for
 //!   each `<group>/<release>` of its target's `releaseInputs`, the bindings
@@ -508,8 +508,8 @@ fn render_unit(
 const PUBLICATION_TARGET_INPUTS: &[(&str, Context)] = &[("/target/inline/releaseInputs", Context::UnitTargetInputs)];
 
 /// Resolve the value sources of a rendered unit spec when its unit renders:
-/// `$environment` against the environment's effective values, at any depth,
-/// including inside each `$unit`. `$unit` and `$promotion` are checked and
+/// `$fromEnvironment` against the environment's effective values, at any depth,
+/// including inside each `$fromUnit`. `$fromUnit` and `$fromPromotion` are checked and
 /// carried to the run, which resolves them; in an inline target's
 /// `releaseInputs`, so are the sources a target's rendering reads. Any other
 /// source is an error that names where it works.
@@ -543,7 +543,7 @@ fn resolve_value_sources(
     Ok(())
 }
 
-/// Where a resolved `$environment` source read its value.
+/// Where a resolved `$fromEnvironment` source read its value.
 #[derive(Debug, Clone, PartialEq)]
 enum ValuesOrigin {
     /// The environment's effective values, at the source's pointer.
@@ -570,7 +570,7 @@ impl Origin for ValuesOrigin {
     }
 }
 
-/// The `$environment` source of unit rendering: the effective `values` of
+/// The `$fromEnvironment` source of unit rendering: the effective `values` of
 /// one environment, a declared Environment with its groups' values or a
 /// template instance.
 struct EnvironmentValues<'a> {
@@ -605,7 +605,7 @@ impl Providers for EnvironmentValues<'_> {
     fn environment(&self, field: &str, source: &ValuesSource) -> Provided<ValuesOrigin> {
         if self.environment.is_none() {
             return Err(BindingIssue::new(format!(
-                "{field}.$environment reads the environment's values at {}, and no environment is given",
+                "{field}.$fromEnvironment reads the environment's values at {}, and no environment is given",
                 source.pointer
             )));
         }
@@ -627,11 +627,11 @@ impl Providers for EnvironmentValues<'_> {
         let fix = "set it in the values, or give the source a default, or optional: true to omit the field";
         if self.values.pointer(pointer).is_some() {
             return Some(BindingIssue::new(format!(
-                "{field}.$environment reads {pointer}, which is null in the values of {environment}; {fix}"
+                "{field}.$fromEnvironment reads {pointer}, which is null in the values of {environment}; {fix}"
             )));
         }
         Some(BindingIssue::new(format!(
-            "{field}.$environment reads {pointer}, which is not in the values of {environment}: {}; {fix}",
+            "{field}.$fromEnvironment reads {pointer}, which is not in the values of {environment}: {}; {fix}",
             missing_key(&self.values, pointer)
         )))
     }
@@ -733,8 +733,8 @@ fn render_unit_template(unit: &DiscoveredUnit, context: &Value) -> Result<Option
 }
 
 /// Fill a publication unit's `releases` with the target's bindings that only
-/// orchestration resolves, as written: the run resolves their `$unit` and
-/// `$promotion` sources. Other bindings stay with rendering (M3 status of the
+/// orchestration resolves, as written: the run resolves their `$fromUnit` and
+/// `$fromPromotion` sources. Other bindings stay with rendering (M3 status of the
 /// publication unit contract).
 fn expand_publication_releases(
     inventory: &GitOpsInventory,
@@ -1032,7 +1032,7 @@ pub fn with_inline_targets_except(inventory: &GitOpsInventory, except: Option<&s
     Ok(extended)
 }
 
-/// Check the `$unit` bindings of a target placed into `environment`: each
+/// Check the `$fromUnit` bindings of a target placed into `environment`: each
 /// names a selected, enabled unit of that environment and, for `output`, an
 /// output it declares and does not mark sensitive. Problems are listed
 /// together, each naming the binding.
@@ -1069,7 +1069,7 @@ pub fn check_unit_bindings(
         for (input, binding) in bindings {
             for source in binding.units() {
                 let source = &source;
-                let field = format!("spec.releaseInputs.{release:?}.{input}.$unit");
+                let field = format!("spec.releaseInputs.{release:?}.{input}.$fromUnit");
                 let producer_environment = source.environment.as_deref().unwrap_or(environment.as_str());
                 let external;
                 let producer_units = if producer_environment == environment.as_str() {
@@ -1186,8 +1186,8 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {$unit: {unit: database, output: host}}
+      image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$fromUnit: {unit: database, output: host}}
       replicas: 2
 ---
 apiVersion: gitops.nyl/v1
@@ -1517,7 +1517,7 @@ spec:
             ),
         ]);
         let (_, spec) = direct(&literal, None).unwrap();
-        assert!(spec["releases"]["web/web"]["image"]["$unit"].is_object(), "{spec}");
+        assert!(spec["releases"]["web/web"]["image"]["$fromUnit"].is_object(), "{spec}");
 
         let worktree = inline_project(INLINE_UNIT);
         fs::write(worktree.path().join("nyl/units.yaml"), units_without_publication()).unwrap();
@@ -1552,8 +1552,8 @@ spec:
                 "target": "dev",
                 "releases": {
                     "web/web": {
-                        "image": {"$unit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
-                        "databaseHost": {"$unit": {"unit": "database", "output": "host"}}
+                        "image": {"$fromUnit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
+                        "databaseHost": {"$fromUnit": {"unit": "database", "output": "host"}}
                     }
                 }
             }))
@@ -1632,7 +1632,7 @@ spec:
       values: {hostname: '{{ values.region }}.example.com'}
       releaseInputs:
         web/web:
-          image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+          image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
           replicas: 2
 ";
 
@@ -1654,7 +1654,7 @@ spec:
 
     /// Catches an inline target that renders differently from a declared
     /// one: the renderer names it `<environment>-<unit>`, records the file
-    /// that declares the unit, expands the target's `$unit` bindings into
+    /// that declares the unit, expands the target's `$fromUnit` bindings into
     /// `releases` as for any target, and renders its templates with the
     /// environment's context.
     #[test]
@@ -1673,7 +1673,7 @@ spec:
         assert_eq!(spec["target"]["inline"]["values"]["hostname"], json!("eu.example.com"));
         assert_eq!(
             spec["releases"],
-            json!({"web/web": {"image": {"$unit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}}}})
+            json!({"web/web": {"image": {"$fromUnit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}}}})
         );
         let PublicationTarget::Inline(inline) = PublicationTarget::from_spec(&spec).unwrap() else {
             panic!("the unit declares its target");
@@ -2014,16 +2014,16 @@ spec:
             .expect("the unit renders"))
     }
 
-    const SOURCED_UNIT: &str = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata: {name: kubernetes, labels: {preview: 'true'}}\nspec:\n  target: {$environment: /target}\n  teardownWait: {$environment: {pointer: /teardownWait, default: {strategy: manual}}}\n  approval: {$environment: {pointer: /approval, optional: true}}\n  timeout: {$environment: /timeout}\n  observations:\n    network:\n      from: {$unit: {unit: network, output: id, environment: {$environment: {pointer: /networkFrom, optional: true}}}}\n    local:\n      from: {$unit: {unit: network, output: id, environment: {$environment: {pointer: /localFrom, optional: true}}}}\n";
+    const SOURCED_UNIT: &str = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata: {name: kubernetes, labels: {preview: 'true'}}\nspec:\n  target: {$fromEnvironment: /target}\n  teardownWait: {$fromEnvironment: {pointer: /teardownWait, default: {strategy: manual}}}\n  approval: {$fromEnvironment: {pointer: /approval, optional: true}}\n  timeout: {$fromEnvironment: /timeout}\n  observations:\n    network:\n      from: {$fromUnit: {unit: network, output: id, environment: {$fromEnvironment: {pointer: /networkFrom, optional: true}}}}\n    local:\n      from: {$fromUnit: {unit: network, output: id, environment: {$fromEnvironment: {pointer: /localFrom, optional: true}}}}\n";
 
     /// Catches a field filled from values that renders anything but what the
     /// structural Jinja it replaces renders, which would change the unit's
     /// execution key and re-run it: both forms render byte-identical specs,
-    /// including a default, an omitted optional field, and `$environment`
-    /// inside `$unit.environment`.
+    /// including a default, an omitted optional field, and `$fromEnvironment`
+    /// inside `$fromUnit.environment`.
     #[test]
     fn test_environment_sources_render_the_same_spec_as_structural_jinja() {
-        let jinja = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: kubernetes\n  labels:\n    preview: 'true'\nspec:\n  target: {{ values.target | tojson }}\n  {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% else %}teardownWait: {strategy: manual}{% endif %}\n  {% if values.approval %}approval: {{ values.approval | tojson }}{% endif %}\n  timeout: {{ values.timeout | tojson }}\n  observations:\n    network:\n      from: {$unit: {% if values.networkFrom %}{unit: network, output: id, environment: '{{ values.networkFrom }}'}{% else %}{unit: network, output: id}{% endif %}}\n    local:\n      from: {$unit: {% if values.localFrom %}{unit: network, output: id, environment: '{{ values.localFrom }}'}{% else %}{unit: network, output: id}{% endif %}}\n";
+        let jinja = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata:\n  name: kubernetes\n  labels:\n    preview: 'true'\nspec:\n  target: {{ values.target | tojson }}\n  {% if values.teardownWait %}teardownWait: {{ values.teardownWait | tojson }}{% else %}teardownWait: {strategy: manual}{% endif %}\n  {% if values.approval %}approval: {{ values.approval | tojson }}{% endif %}\n  timeout: {{ values.timeout | tojson }}\n  observations:\n    network:\n      from: {$fromUnit: {% if values.networkFrom %}{unit: network, output: id, environment: '{{ values.networkFrom }}'}{% else %}{unit: network, output: id}{% endif %}}\n    local:\n      from: {$fromUnit: {% if values.localFrom %}{unit: network, output: id, environment: '{{ values.localFrom }}'}{% else %}{unit: network, output: id}{% endif %}}\n";
         let from_jinja = render_instance(&sourced_preview_project(jinja)).unwrap();
         let from_values = render_instance(&sourced_preview_project(SOURCED_UNIT)).unwrap();
         assert_eq!(
@@ -2039,11 +2039,11 @@ spec:
         assert_eq!(from_values["timeout"], json!("10m"));
         assert!(from_values.get("approval").is_none());
         assert_eq!(
-            from_values["observations"]["network"]["from"]["$unit"]["environment"],
+            from_values["observations"]["network"]["from"]["$fromUnit"]["environment"],
             json!("dev")
         );
         assert_eq!(
-            from_values["observations"]["local"]["from"]["$unit"],
+            from_values["observations"]["local"]["from"]["$fromUnit"],
             json!({"unit": "network", "output": "id"})
         );
     }
@@ -2054,31 +2054,34 @@ spec:
     /// resolve is an error that names where it works.
     #[test]
     fn test_environment_sources_fail_closed() {
-        let typo = SOURCED_UNIT.replace("{$environment: /timeout}", "{$environment: /timout}");
+        let typo = SOURCED_UNIT.replace("{$fromEnvironment: /timeout}", "{$fromEnvironment: /timout}");
         let error = render_instance(&sourced_preview_project(&typo))
             .unwrap_err()
             .to_string();
         assert!(error.contains("NYL-UNIT-INVALID"), "{error}");
         assert!(
             error.contains(
-                "spec.timeout.$environment reads /timout, which is not in the values of Environment pr-5 (an instance of EnvironmentTemplate preview)"
+                "spec.timeout.$fromEnvironment reads /timout, which is not in the values of Environment pr-5 (an instance of EnvironmentTemplate preview)"
             ),
             "{error}"
         );
         assert!(error.contains(r#"the values have keys "host", "networkFrom", "region", "target", "timeout" (nearest to "timout": "timeout")"#), "{error}");
 
-        let nested = SOURCED_UNIT.replace("{$environment: /target}", "{$environment: /target/inline/hostname}");
+        let nested = SOURCED_UNIT.replace(
+            "{$fromEnvironment: /target}",
+            "{$fromEnvironment: /target/inline/hostname}",
+        );
         let error = render_instance(&sourced_preview_project(&nested))
             .unwrap_err()
             .to_string();
         assert!(error.contains("/target/inline has keys \"clusterRef\""), "{error}");
 
-        let unmarked = SOURCED_UNIT.replace("  observations:", "  observe: {$input: observe}\n  observations:");
+        let unmarked = SOURCED_UNIT.replace("  observations:", "  observe: {$fromInput: observe}\n  observations:");
         let error = render_instance(&sourced_preview_project(&unmarked))
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("spec.observe holds a $input source, which reads a Release input"),
+            error.contains("spec.observe holds a $fromInput source, which reads a Release input"),
             "{error}"
         );
 
@@ -2089,7 +2092,7 @@ spec:
             .to_string();
         assert!(
             error.contains(
-                "spec.target.$environment reads the environment's values at /target, and no environment is given"
+                "spec.target.$fromEnvironment reads the environment's values at /target, and no environment is given"
             ),
             "{error}"
         );
@@ -2117,7 +2120,7 @@ spec:
         ])
     }
 
-    const TARGET_FROM_VALUES: &str = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata: {name: kubernetes, labels: {preview: 'true'}}\nspec:\n  target: {$environment: /target}\n";
+    const TARGET_FROM_VALUES: &str = "apiVersion: units.gitops.nyl/v1\nkind: KubernetesPublication\nmetadata: {name: kubernetes, labels: {preview: 'true'}}\nspec:\n  target: {$fromEnvironment: /target}\n";
 
     fn render_parameter_instance(worktree: &TempDir, params: Value) -> Result<RenderedSource> {
         let params = serde_json::from_value(params).unwrap();
@@ -2138,13 +2141,13 @@ spec:
 
     /// Catches a template parameter reaching a Release input binding as
     /// anything but its declared type, or a unit seeing the clause instead of
-    /// its value: `$parameter` as the inline target's binding resolves when
+    /// its value: `$fromParameter` as the inline target's binding resolves when
     /// the instance's values are computed, before the unit renders, so
-    /// `$environment` reads a target whose binding is the literal boolean,
+    /// `$fromEnvironment` reads a target whose binding is the literal boolean,
     /// given or defaulted.
     #[test]
     fn test_parameter_resolves_before_units_read_the_values() {
-        let worktree = parameter_preview_project("{$parameter: crds}", TARGET_FROM_VALUES);
+        let worktree = parameter_preview_project("{$fromParameter: crds}", TARGET_FROM_VALUES);
         for (params, expected) in [
             (json!({"pr": 5, "crds": true}), json!(true)),
             (json!({"pr": 5}), json!(false)),
@@ -2164,29 +2167,29 @@ spec:
         }
 
         // An undeclared parameter names the template and what it declares.
-        let worktree = parameter_preview_project("{$parameter: crd}", TARGET_FROM_VALUES);
+        let worktree = parameter_preview_project("{$fromParameter: crd}", TARGET_FROM_VALUES);
         let error = render_parameter_instance(&worktree, json!({"pr": 5}))
             .unwrap_err()
             .to_string();
         assert!(error.contains("NYL-TEMPLATE-INVALID"), "{error}");
         assert!(
-            error.contains("spec.values.target.inline.releaseInputs.rise/rise.clusterWide.$parameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: crds, pr)"),
+            error.contains("spec.values.target.inline.releaseInputs.rise/rise.clusterWide.$fromParameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: crds, pr)"),
             "{error}"
         );
     }
 
-    /// Catches a `$parameter` clause in a unit document reaching a driver
+    /// Catches a `$fromParameter` clause in a unit document reaching a driver
     /// as data: only an EnvironmentTemplate's values resolve one.
     #[test]
     fn test_parameter_in_a_unit_document_is_an_error() {
-        let unit = format!("{TARGET_FROM_VALUES}  timeout: {{$parameter: pr}}\n");
+        let unit = format!("{TARGET_FROM_VALUES}  timeout: {{$fromParameter: pr}}\n");
         let worktree = parameter_preview_project("true", &unit);
         let error = render_parameter_instance(&worktree, json!({"pr": 5}))
             .unwrap_err()
             .to_string();
         assert!(error.contains("NYL-UNIT-INVALID"), "{error}");
         assert!(
-            error.contains("spec.timeout holds a $parameter source, which reads a template parameter and resolves only in an EnvironmentTemplate's spec.values; set the value in the EnvironmentTemplate's spec.values with $parameter, and read it here with $environment"),
+            error.contains("spec.timeout holds a $fromParameter source, which reads a template parameter and resolves only in an EnvironmentTemplate's spec.values; set the value in the EnvironmentTemplate's spec.values with $fromParameter, and read it here with $fromEnvironment"),
             "{error}"
         );
     }
@@ -2221,9 +2224,9 @@ spec:
         assert_eq!(
             issues,
             [
-                "spec.releaseInputs.\"web/web\".databaseHost.$unit names output password of unit database, which \
+                "spec.releaseInputs.\"web/web\".databaseHost.$fromUnit names output password of unit database, which \
                  is sensitive and cannot be referenced",
-                "spec.releaseInputs.\"web/web\".image.$unit names unit web-image, which is not declared",
+                "spec.releaseInputs.\"web/web\".image.$fromUnit names unit web-image, which is not declared",
             ]
         );
 
@@ -2238,9 +2241,9 @@ spec:
         assert_eq!(
             issues,
             [
-                "spec.releaseInputs.\"web/web\".databaseHost.$unit names output port of unit database, which the \
+                "spec.releaseInputs.\"web/web\".databaseHost.$fromUnit names output port of unit database, which the \
                  unit does not declare",
-                "spec.releaseInputs.\"web/web\".image.$unit names unit web-image, which Environment dev does not \
+                "spec.releaseInputs.\"web/web\".image.$fromUnit names unit web-image, which Environment dev does not \
                  select",
             ]
         );
@@ -2312,7 +2315,7 @@ spec:
         assert_eq!(
             check_unit_bindings(&super::tests::inventory(&worktree), "dev", &environment).unwrap(),
             [
-                "spec.releaseInputs.\"web/web\".databaseHost.$unit names unit database, which is not enabled in \
+                "spec.releaseInputs.\"web/web\".databaseHost.$fromUnit names unit database, which is not enabled in \
               Environment dev"
             ]
         );
@@ -2348,10 +2351,10 @@ spec:
         }))
         .unwrap();
         let bindings: BTreeMap<String, InputBinding> = serde_json::from_value(json!({
-            "image": {"$unit": {"unit": "web-image", "artifact": "image"}},
-            "replicas": {"$promotion": {"value": "replicas"}},
-            "flags": {"$unit": {"unit": "flags", "output": "list"}},
-            "size": {"$unit": {"unit": "sizing", "output": "size"}},
+            "image": {"$fromUnit": {"unit": "web-image", "artifact": "image"}},
+            "replicas": {"$fromPromotion": {"value": "replicas"}},
+            "flags": {"$fromUnit": {"unit": "flags", "output": "list"}},
+            "size": {"$fromUnit": {"unit": "sizing", "output": "size"}},
             "plain": "kept"
         }))
         .unwrap();

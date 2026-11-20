@@ -14,7 +14,7 @@ nyl render-tree --target production --output-dir deploy --no-cache
 nyl render-tree --target production --output-dir deploy --offline
 ```
 
-When a target has `$publication` Release inputs, `render-tree` fetches its
+When a target has `$fromPublication` Release inputs, `render-tree` fetches its
 publication branch and reports the commit it read the state from; `--offline`
 reads the cached branch head instead and says so. `--offline` also reads Git
 charts and remote ApplicationGroup sources from the Git cache only.

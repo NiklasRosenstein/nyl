@@ -110,7 +110,7 @@ test('field references retain nested descriptions, sibling annotations, alternat
   assert.ok(rendered.code.includes('Chosen <strong>item</strong>'));
 });
 
-test('all references render resource usage, schema examples, and resolvable fields', async () => {
+test('all references render resource usage, and schema examples', async () => {
   const processor = await createMarkdownProcessor();
   for (const resource of resources) {
     const markdown = resourceMarkdown(schemaFor(resource));

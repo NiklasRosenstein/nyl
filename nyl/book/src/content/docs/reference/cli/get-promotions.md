@@ -114,7 +114,7 @@ path validation rejects, is refused here the same way, exit 1.
 
 The PromotionRecords in the environment's desired state, highest sequence
 first, the record whose source commit the environment's last run applied, the
-record the next run takes its source from, each `$promotion` binding of
+record the next run takes its source from, each `$fromPromotion` binding of
 the environment's units with the record that supplies it, and every
 promotion its desired history records, newest first, including records a
 later promotion replaced and `record: source` promotions, whose marker

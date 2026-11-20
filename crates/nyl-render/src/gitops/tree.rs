@@ -43,12 +43,12 @@ pub struct TreeRenderOptions {
     /// Allow the trusted central project to read its secrets provider and
     /// `NYL_*` process environment.
     pub allow_secret_inputs: bool,
-    /// How `$publication` state is read from the publication branch.
+    /// How `$fromPublication` state is read from the publication branch.
     /// Not part of the render-cache key: the publication state it reads is
     /// recorded through the resolved inputs' digests.
     #[serde(skip)]
     pub publication_read: super::inputs::PublicationRead,
-    /// Read `$publication` state at this base instead of resolving the
+    /// Read `$fromPublication` state at this base instead of resolving the
     /// branch head, so a second compile of the same publication, such as the
     /// clean-`HEAD` verification, reads the same state.
     #[serde(skip)]
@@ -96,17 +96,17 @@ pub struct CompiledTargetTree {
     /// `@input/<group>/<release>/<input>` digests of resolved Release inputs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_digests: BTreeMap<String, String>,
-    /// `$publication` state files this target writes, keyed by path
+    /// `$fromPublication` state files this target writes, keyed by path
     /// relative to the prefix. They are owned and published with `files` but
     /// are not Kubernetes manifests.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state_files: BTreeMap<PathBuf, Vec<u8>>,
-    /// `$publication` state paths declared without `carryFileFromWorktree`. Other tools
+    /// `$fromPublication` state paths declared without `carryFileFromWorktree`. Other tools
     /// commit them, so reconciliation never deletes them, even when a previous
     /// generation owned them through `carryFileFromWorktree`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub committed_state_paths: BTreeSet<PathBuf>,
-    /// Publication branch head that `$publication` bindings read; `None`
+    /// Publication branch head that `$fromPublication` bindings read; `None`
     /// when the target has none. Never cached: it is re-resolved every run.
     #[serde(skip)]
     pub publication_base: Option<super::inputs::PublicationBase>,
@@ -129,7 +129,7 @@ impl CompiledTargetTree {
             .collect()
     }
 
-    /// Every `$publication` state path the target declares, carried or
+    /// Every `$fromPublication` state path the target declares, carried or
     /// committed, relative to the prefix.
     pub fn declared_state_paths(&self) -> BTreeSet<PathBuf> {
         self.state_files
@@ -3552,7 +3552,7 @@ fn resolve_prepared_release_inputs(
     let repositories = |reference: &nyl_core::resources::LocalReference| {
         let (repository, source) = inventory.resolve_git_repository(Some(reference), None)?;
         let source = source.expect("a referenced GitRepository has a source file");
-        // Absolute, like `$file` paths, so the cache recorder reads the
+        // Absolute, like `$fromFile` paths, so the cache recorder reads the
         // file wherever the command runs.
         Ok((repository, inventory.project_root.join(source)))
     };

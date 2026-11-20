@@ -10,7 +10,7 @@ instead of rebuilding or retyping it. The link is a
 reads it when it reconciles.
 
 :::note[Status]
-M6 delivers promotion in steps. `nyl promote`, `promotion` sources and `$promotion`
+M6 delivers promotion in steps. `nyl promote`, `promotion` sources and `$fromPromotion`
 bindings, artifact verification, `nyl get states`, `promotion-candidates`,
 and `promotions`, `status` lineage, `record: source`, several paths into
 one environment with the supersede check and hotfixes, value-only paths
@@ -46,13 +46,13 @@ that reads it, before any promotion runs. A value's type comes from what its
 selector reads: a rendered literal, a declared output, the kind's schema, or
 an artifact's schema. A place is a field of a unit's spec, typed by its
 kind's schema, or a Release input a DeploymentTarget's `releaseInputs` fills
-with `$promotion`, typed by the Release's `spec.inputs.<name>.type`. A
+with `$fromPromotion`, typed by the Release's `spec.inputs.<name>.type`. A
 mismatch is `NYL-PROMOTE-VALUE-TYPE`:
 
 ```yaml
 releaseInputs:
   web/web:
-    image: {$promotion: {value: webImage}}   # Release web declares image: {type: string}
+    image: {$fromPromotion: {value: webImage}}   # Release web declares image: {type: string}
 ```
 
 The Release's declaration is read from the ApplicationGroups the target
@@ -189,7 +189,7 @@ its Release. The catalog Application belongs to no group.
   exit 2 with `NYL-PROMOTION-MISSING`; its fix names `nyl promote <path>`.
   With `record: source` the record lives in the Environment itself, as
   described [below](#keeping-the-record-in-source).
-- **Bindings.** `{$promotion: {value: webImage}}` in a unit's spec, or in a
+- **Bindings.** `{$fromPromotion: {value: webImage}}` in a unit's spec, or in a
   DeploymentTarget's `releaseInputs`, resolves through the one binding
   resolver. With `path` it reads that path's record; without it, the newest
   record carrying the value. In an environment whose source is promoted, a

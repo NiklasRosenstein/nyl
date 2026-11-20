@@ -1,7 +1,7 @@
 //! `nyl validate` of a project with orchestration units, in the scenario test
 //! world with the walkthroughs' shared project: a DeploymentTarget that an
 //! environment's publication unit places compiles with placeholders for its
-//! `$unit` bindings, which are checked against that environment's units;
+//! `$fromUnit` bindings, which are checked against that environment's units;
 //! a target no publication unit places keeps rejecting them.
 
 mod scenario;
@@ -51,8 +51,8 @@ fn test_validate_rejects_from_unit_on_a_target_without_a_publication_unit() {
     std::fs::write(&units, kept).unwrap();
 
     nyl_validate(&world, &checkout).assert().failure().stderr(
-        predicate::str::contains("spec.releaseInputs.\"web/web\".image.$unit needs orchestrated execution").and(
-            predicate::str::contains("spec.releaseInputs.\"web/web\".databaseHost.$unit"),
+        predicate::str::contains("spec.releaseInputs.\"web/web\".image.$fromUnit needs orchestrated execution").and(
+            predicate::str::contains("spec.releaseInputs.\"web/web\".databaseHost.$fromUnit"),
         ),
     );
 }
@@ -69,7 +69,7 @@ fn test_validate_rejects_a_placed_target_whose_unit_reference_is_undeclared() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "spec.releaseInputs.\"web/web\".databaseHost.$unit names output port of unit database, which the unit \
+            "spec.releaseInputs.\"web/web\".databaseHost.$fromUnit names output port of unit database, which the unit \
          does not declare",
         ));
 }
@@ -91,7 +91,7 @@ fn test_validate_runs_the_unit_checks_plan_runs() {
             "NYL-DEPENDENCY-CYCLE",
         ),
         (
-            "kind: Command\nmetadata:\n  name: reader\n  labels: {dev: 'true'}\nspec:\n  command: [./read.sh]\n  values:\n    h: {$unit: {unit: network, output: missing}}\n",
+            "kind: Command\nmetadata:\n  name: reader\n  labels: {dev: 'true'}\nspec:\n  command: [./read.sh]\n  values:\n    h: {$fromUnit: {unit: network, output: missing}}\n",
             "NYL-REFERENCE-INVALID",
         ),
         (
@@ -139,7 +139,7 @@ fn test_validate_warns_about_a_carried_source_no_unit_reads() {
     let contents = std::fs::read_to_string(&platform).unwrap().replace("\r\n", "\n");
     let changed = contents.replace(
         "  values:\n    target: dev\n",
-        "  values:\n    target: dev\n    unused: {$promotion: {value: image}}\n",
+        "  values:\n    target: dev\n    unused: {$fromPromotion: {value: image}}\n",
     );
     assert_ne!(changed, contents, "the shared project's Environment declares values");
     std::fs::write(&platform, changed).unwrap();
@@ -148,7 +148,7 @@ fn test_validate_warns_about_a_carried_source_no_unit_reads() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "NYL-VALUES-SOURCE-UNREAD: spec.values.unused of Environment dev holds a $promotion source that no unit of the environment reads",
+            "NYL-VALUES-SOURCE-UNREAD: spec.values.unused of Environment dev holds a $fromPromotion source that no unit of the environment reads",
         ));
     nyl_validate(&world, &checkout).arg("--strict").assert().failure();
 }

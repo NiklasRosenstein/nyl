@@ -16,7 +16,7 @@ and `record: source` follow.
 
 A PromotionPath is the explicit link between a source Environment and a target
 Environment. It says how strong the evidence must be and which fields of the
-source become named values that `$promotion` bindings read. Source and target
+source become named values that `$fromPromotion` bindings read. Source and target
 may differ in unit names, input names, and document shape; the path states the
 mapping.
 
@@ -58,7 +58,7 @@ spec:
 
 ## Selecting values
 
-Each value reads one source field, with the JSON Pointer semantics of `$unit`
+Each value reads one source field, with the JSON Pointer semantics of `$fromUnit`
 references:
 
 | Selector | Reads |
@@ -67,13 +67,13 @@ references:
 | `{unit, output, pointer?}` | A declared, non-sensitive output of the unit's receipt |
 | `{unit, artifact, kind?, pointer}` | A field of an artifact the unit's receipt lists, relative to the artifact's `spec` |
 
-The target reads a value with a `$promotion` binding, naming the value and,
+The target reads a value with a `$fromPromotion` binding, naming the value and,
 optionally, the path:
 
 ```yaml
 releaseInputs:
   platform/web:
-    image: {$promotion: {path: dev-to-prod, value: webImage}}
+    image: {$fromPromotion: {path: dev-to-prod, value: webImage}}
 ```
 
 ## Validation
@@ -89,7 +89,7 @@ environment. Every finding has a stable code and a fix:
 | `NYL-PROMOTE-SELECTOR-INVALID` | A pointer resolves neither in the unit's rendered spec nor in its kind's schema, or an output is undeclared or `sensitive` |
 | `NYL-PROMOTE-VALUE-TYPE` | A value's type does not fit a unit field or Release input that reads it |
 | `NYL-PROMOTE-VALUE-TYPE-UNCHECKED` | The declared type of a field a binding fills cannot be read, such as a Release input declared in a remote ApplicationGroup source that is neither fetched nor cached; an error in `nyl validate`, a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates` |
-| `NYL-PROMOTE-BINDING-UNKNOWN` | A `$promotion` binding names a path or value no path declares |
+| `NYL-PROMOTE-BINDING-UNKNOWN` | A `$fromPromotion` binding names a path or value no path declares |
 | `NYL-ATTESTATION-UNDECLARED` | The path requires an attestation its unit or environment scope does not declare |
 | `NYL-PROMOTE-COVERAGE-UNKNOWN` | `coverage` names a unit the source does not declare, select, or enable, a unit whose kind runs no deployments, or a group or deployment the unit does not run; the message lists the names it has |
 | `NYL-PROMOTE-COVERAGE-INEFFECTIVE` | A path that promotes only values sets a unit's `groups`, which only a source path uses, or the unit records nothing per deployment (a KubernetesPublication without `observe`) |
@@ -99,7 +99,7 @@ environment. Every finding has a stable code and a fix:
 Types are compared when both sides are known: what a selector reads (a rendered
 literal, a declared output's type, the kind's schema at the pointer, or the
 schema the producing kind declares for an artifact) against the place a
-`$promotion` binding fills: the field of a unit's spec as its kind's schema
+`$fromPromotion` binding fills: the field of a unit's spec as its kind's schema
 types it, or, for a binding in a DeploymentTarget's `releaseInputs`, the type
 the Release declares for that input (`spec.inputs.<name>.type`). An unknown
 side fits anything.

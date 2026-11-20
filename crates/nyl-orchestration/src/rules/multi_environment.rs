@@ -264,7 +264,7 @@ fn check_references(
         Finding::new(
             Code::ReferenceInvalid,
             format!("{at}: {}", issues.join("; ")),
-            "correct the reference so that it parses: a $unit names a unit and exactly one of output, artifact, and observation",
+            "correct the reference so that it parses: a $fromUnit names a unit and exactly one of output, artifact, and observation",
         )
     })?;
     for reference in references {
@@ -415,7 +415,7 @@ mod tests {
     fn test_instance_producers_are_found_in_references_and_depends_on() {
         let instances = BTreeSet::from([name("pr-1")]);
         let by_reference =
-            json!({"values": {"vpc": {"$unit": {"environment": "pr-1", "unit": "network", "output": "id"}}}});
+            json!({"values": {"vpc": {"$fromUnit": {"environment": "pr-1", "unit": "network", "output": "id"}}}});
         let by_depends_on = json!({"dependsOn": [{"environment": "pr-1", "unit": "seed"}]});
         let declared = json!({"dependsOn": [{"environment": "dev", "unit": "seed"}]});
         assert_eq!(
@@ -437,11 +437,11 @@ mod tests {
     fn test_dependencies_and_qualified_units() {
         assert_eq!(
             dependencies(
-                &json!({"values": {"vpc": {"$unit": {"environment": "infra", "unit": "network", "output": "id"}}}, "dependsOn": [{"environment": "dev", "unit": "seed"}]})
+                &json!({"values": {"vpc": {"$fromUnit": {"environment": "infra", "unit": "network", "output": "id"}}}, "dependsOn": [{"environment": "dev", "unit": "seed"}]})
             ),
             BTreeSet::from([name("dev"), name("infra")])
         );
-        assert!(dependencies(&json!({"enabled": false, "dependsOn": [{"environment": "infra", "unit": "network"}], "values": {"id": {"$unit": {"environment": "infra", "unit": "network", "output": "id"}}}})).is_empty());
+        assert!(dependencies(&json!({"enabled": false, "dependsOn": [{"environment": "infra", "unit": "network"}], "values": {"id": {"$fromUnit": {"environment": "infra", "unit": "network", "output": "id"}}}})).is_empty());
         let selected = vec!["dev".to_owned(), "prod".to_owned()];
         assert_eq!(
             units(

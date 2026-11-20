@@ -107,7 +107,7 @@ kind: Command
 metadata: {name: consumer}
 spec:
   values:
-    value: {$unit: {unit: producer, output: value}}
+    value: {$fromUnit: {unit: producer, output: value}}
   command: [sh, -c, 'grep -q working "$NYL_INPUTS"']
   idempotent: true
 "#,
