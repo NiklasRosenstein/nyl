@@ -478,9 +478,10 @@ value has the input’s declared type: the target’s binding, or the declared
 default when the target binds none. An input a target binds with <code dir="auto">$fromUnit</code>
 or <code dir="auto">$fromPromotion</code> has no value before a run, so
 <a href="/nyl/pr-preview/pr-309/reference/cli/validate/"><code dir="auto">nyl validate</code></a> gives it a placeholder of its
-declared type, and what a <code dir="auto">pointer</code> selects in it is unknown and not checked:
-an <code dir="auto">object</code> input that holds an image artifact can be read with
-<code dir="auto">{$fromInput: {name: image, pointer: /digest}}</code>. A <code dir="auto">pointer</code> that selects nothing, a
+declared type, and what a <code dir="auto">pointer</code> selects in an <code dir="auto">object</code> or <code dir="auto">array</code> input
+is unknown and not checked: an <code dir="auto">object</code> input that holds an image artifact
+can be read with <code dir="auto">{$fromInput: {name: image, pointer: /digest}}</code>. A <code dir="auto">pointer</code>
+into a <code dir="auto">string</code>, <code dir="auto">integer</code>, <code dir="auto">number</code>, or <code dir="auto">boolean</code> input, a <code dir="auto">pointer</code> that selects nothing, a
 <code dir="auto">null</code> value, an input the Release does not declare, and a resource outside a
 Release that declares inputs are errors. String interpolation such as
 <code dir="auto">'web-{{ inputs.tier }}'</code> stays Jinja.</p>
@@ -488,6 +489,14 @@ Release that declares inputs are errors. String interpolation such as
 keys, and the resolved chart values are part of the Helm cache key, so a
 changed binding renders again. What a chart or a remote manifest generates
 takes no <code dir="auto">$fromInput</code>: see <a href="#data-and-configuration">Data and configuration</a>.</p>
+<p>In a run, a mistake with value sources in what a KubernetesPublication’s
+target renders fails the unit with <code dir="auto">NYL-UNIT-INVALID</code> (detail
+<code dir="auto">value-source-invalid</code>) and the fix the message names: in its Release
+bundles, in what they generate, and in its <code dir="auto">releaseInputs</code>, such as a binding
+of an input the Release does not declare or a value of the wrong type.
+Messages name files relative to the project, never the run’s temporary
+checkout. A source that cannot be read, such as a <code dir="auto">valuesFrom</code> or <code dir="auto">$fromFile</code>
+file or a Git object, keeps its own error and fails the driver call.</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="console"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">$ nyl render apps/web/web.yaml</span></div></div><div class="ec-line output"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">2026-11-20T08:07:09.027321Z ERROR nyl: Configuration error: Deployment "web" in apps/web/web.yaml: spec.template.spec.containers[0].env[0].value holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); spec.template.spec.containers[0].image.$inputs is not a value source; did you mean $fromInput? (write {$literal: …} to keep the key as data)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="nyl render apps/web/web.yaml"><div></div></button></div></figure></div>
 <div class="sl-heading-wrapper level-h3"><h3 id="fromparameter"><code dir="auto">$fromParameter</code></h3><a class="sl-anchor-link" href="#fromparameter"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “$fromParameter”</span></a></div>
 <p><code dir="auto">$fromParameter</code> reads a value from a parameter an EnvironmentTemplate
