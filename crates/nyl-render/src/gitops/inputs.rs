@@ -282,6 +282,11 @@ pub enum OrchestratedInputs {
     Placeholders,
 }
 
+/// The value `nyl validate` gives a Release input, or what a `$fromInput`
+/// pointer selects in one, whose value only orchestration knows
+/// ([`OrchestratedInputs::Placeholders`]).
+pub const ORCHESTRATED_PLACEHOLDER: &str = "<from orchestration>";
+
 impl OrchestratedInputs {
     /// Overrides for one Release's declared inputs.
     fn overrides(
@@ -472,6 +477,11 @@ pub type ResolvedInput = Resolved<InputOrigin>;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedReleaseInputs {
     pub inputs: BTreeMap<String, ResolvedInput>,
+    /// Inputs whose value only orchestration knows, in a render with
+    /// [`OrchestratedInputs::Placeholders`]: each holds a placeholder of its
+    /// declared type, and what a `$fromInput` pointer selects in it is
+    /// unknown, so the bundle does not check it.
+    pub unknown: BTreeSet<String>,
 }
 
 impl ResolvedReleaseInputs {
@@ -673,7 +683,7 @@ pub fn resolve_target_inputs(
             .orchestrated
             .map(|orchestrated| orchestrated.overrides(&key.to_string(), release.declarations, bindings))
             .unwrap_or_default();
-        let inputs = resolve_release_inputs(
+        let mut inputs = resolve_release_inputs(
             &format!("spec.releaseInputs.{:?}", key.to_string()),
             &key.to_string(),
             release.declarations,
@@ -682,6 +692,9 @@ pub fn resolve_target_inputs(
             sources,
             &mut issues,
         );
+        if matches!(sources.orchestrated, Some(OrchestratedInputs::Placeholders)) {
+            inputs.unknown = overrides.into_keys().collect();
+        }
         resolved.releases.insert(key.clone(), inputs);
     }
 
@@ -746,7 +759,10 @@ pub fn resolve_release_inputs(
             .into_iter()
             .map(|blocked| format!("{} is not available yet: {}", blocked.field, blocked.reason)),
     );
-    ResolvedReleaseInputs { inputs: slots.values }
+    ResolvedReleaseInputs {
+        inputs: slots.values,
+        unknown: BTreeSet::new(),
+    }
 }
 
 impl nyl_core::bindings::Origin for InputOrigin {

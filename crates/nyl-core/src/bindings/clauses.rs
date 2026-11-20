@@ -585,8 +585,24 @@ impl Context {
     /// The error for a `source` clause at `field`, which this context rejects:
     /// where the source is valid, and how to get the value here instead.
     pub fn misplaced(self, field: &str, source: Source) -> String {
+        self.misplaced_with(field, source, None)
+    }
+
+    /// [`Self::misplaced`], with `fix` in place of the context's own when the
+    /// caller knows a source valid here that reads what was meant.
+    pub fn misplaced_with(self, field: &str, source: Source, fix: Option<String>) -> String {
         let key = source.key();
-        let fix = match (self, source) {
+        let fix = fix.unwrap_or_else(|| self.fix(source));
+        format!(
+            "{field} holds a {key} source, which {}; {fix} (see {VALUE_SOURCES_DOCS})",
+            source.valid_where()
+        )
+    }
+
+    /// How to get the value of a `source` this context rejects.
+    fn fix(self, source: Source) -> String {
+        let key = source.key();
+        match (self, source) {
             (Self::ReleaseBundle | Self::ReleaseData, _) => {
                 format!("declare a Release input and bind it on the target{}", match source {
                     Source::Unit | Source::Promotion | Source::File | Source::Git | Source::Publication => {
@@ -627,11 +643,7 @@ impl Context {
             (Self::ReleaseInputs, Source::Input) => "a binding fills a Release input; it cannot read one".to_owned(),
             (Self::Literal, _) => "write a literal value".to_owned(),
             _ => "move it to where it resolves".to_owned(),
-        };
-        format!(
-            "{field} holds a {key} source, which {}; {fix} (see {VALUE_SOURCES_DOCS})",
-            source.valid_where()
-        )
+        }
     }
 }
 

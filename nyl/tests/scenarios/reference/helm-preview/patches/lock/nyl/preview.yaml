@@ -26,9 +26,9 @@ spec:
             namespace: '{{ environment.name }}'
             fullname: 'platform-{{ environment.name }}'
             host: 'pr-{{ params.pr }}.preview.example.invalid'
-            # The image the instance's own unit built, by digest; carried to the run.
-            imageRepository: {$fromUnit: {unit: platform-image, artifact: image, pointer: /repository}}
-            imageDigest: {$fromUnit: {unit: platform-image, artifact: image, pointer: /digest}}
+            # The artifact of the image the instance's own unit built, carried
+            # to the run; the chart values read its repository and digest.
+            image: {$fromUnit: {unit: platform-image, artifact: image}}
             clusterWide: {$fromParameter: crds}   # a boolean, as the parameter declares
             chartValues: {ingress: {className: preview}}
             # Sizing from the capacity file at a reviewed commit: a change on

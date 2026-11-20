@@ -498,6 +498,7 @@ metadata:
             cluster: None,
             target: None,
             inputs: None,
+            unknown_inputs: std::collections::BTreeSet::new(),
         };
         let resource = serde_json::json!({
             "apiVersion": "k8s.nyl/v1",
@@ -948,6 +949,7 @@ spec:
             cluster: None,
             target: None,
             inputs: None,
+            unknown_inputs: std::collections::BTreeSet::new(),
         };
 
         let bundle = load_release_bundle_with_root(
@@ -993,6 +995,7 @@ spec:
             cluster: None,
             target: None,
             inputs: None,
+            unknown_inputs: std::collections::BTreeSet::new(),
         };
         assert!(load_release_bundle(&entry, &context)
             .unwrap_err()

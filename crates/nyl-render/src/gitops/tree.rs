@@ -960,7 +960,7 @@ async fn compile_target_tree_recording(
             inputs.insert(input_path);
             let provenance_root = &source.provenance_root;
             let worktree_root = (!source.remote).then_some(inventory.worktree_root.as_path());
-            let resolved_inputs = source_file
+            let resolved_release = source_file
                 .name
                 .as_ref()
                 .filter(|_| !source_file.inputs.is_empty())
@@ -969,14 +969,15 @@ async fn compile_target_tree_recording(
                         group: group.metadata.name.clone(),
                         release: name.clone(),
                     })
-                })
-                .map(super::inputs::ResolvedReleaseInputs::values);
+                });
+            let resolved_inputs = resolved_release.map(super::inputs::ResolvedReleaseInputs::values);
             let mut rendered = session
                 .render_release_file_with_inputs(
                     &source_file.path,
                     provenance_root,
                     worktree_root,
                     resolved_inputs.as_ref(),
+                    resolved_release.map(|resolved| &resolved.unknown),
                     Some(lookup_scope.clone()),
                     group.spec.destination_namespace.as_deref(),
                     source.remote.then_some(provenance_root.as_path()),

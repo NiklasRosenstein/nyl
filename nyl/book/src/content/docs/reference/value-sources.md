@@ -121,8 +121,10 @@ Wrap the object in `$literal` to keep one of them as data.
 In a unit document, the kind's schema says which fields are typed: where it
 has no place for a `$` key that is no source, the key is an unknown source,
 reported with the typo's suggestion or else the source it is closest to,
-compared the same way; where it leaves an object open,
-such as a Terraform unit's `variables`, the key is data:
+compared the same way. An object whose schema names its fields is typed, such
+as an OciImage's `context`, even when the schema does not reject other keys;
+where the schema leaves an object open, such as a Terraform unit's
+`variables`, the key is data:
 
 ```console
 $ nyl validate
@@ -172,7 +174,7 @@ a mistake:
 
   ```console
   $ nyl render apps/web/web.yaml
-  2026-11-20T02:37:25.732037Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.valuesFrom[0]: values file apps/web/values-base.yaml holds a $fromInput source at image.tag; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
+  2026-11-20T08:07:08.948496Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.valuesFrom[0]: values file apps/web/values-base.yaml holds a $fromInput source at image.tag; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
   ```
 
 - A value source in the output of recursive expansion (what a HelmChart's or
@@ -364,7 +366,12 @@ a literal would, and a manifest's namespace is resolved before namespace
 defaults apply. A HelmChart's inline `values` resolve before
 [`valuesFrom`](#helmchart-valuesfrom) merges, and still merge last. The
 value has the input's declared type: the target's binding, or the declared
-default when the target binds none. A `pointer` that selects nothing, a
+default when the target binds none. An input a target binds with `$fromUnit`
+or `$fromPromotion` has no value before a run, so
+[`nyl validate`](/nyl/reference/cli/validate/) gives it a placeholder of its
+declared type, and what a `pointer` selects in it is unknown and not checked:
+an `object` input that holds an image artifact can be read with
+`{$fromInput: {name: image, pointer: /digest}}`. A `pointer` that selects nothing, a
 `null` value, an input the Release does not declare, and a resource outside a
 Release that declares inputs are errors. String interpolation such as
 `'web-{{ inputs.tier }}'` stays Jinja.
@@ -376,8 +383,7 @@ takes no `$fromInput`: see [Data and configuration](#data-and-configuration).
 
 ```console
 $ nyl render apps/web/web.yaml
-2026-11-20T02:37:25.751364Z ERROR nyl: Configuration error: Deployment "web" in apps/web/web.yaml: spec.template.spec.containers[0].env[0].value holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); spec.template.spec.containers[0].image.$inputs is not a value source; did you mean $fromInput? (write {$literal: …} to keep the key as data)
-Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
+2026-11-20T08:07:09.027321Z ERROR nyl: Configuration error: Deployment "web" in apps/web/web.yaml: spec.template.spec.containers[0].env[0].value holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); spec.template.spec.containers[0].image.$inputs is not a value source; did you mean $fromInput? (write {$literal: …} to keep the key as data)
 ```
 
 ### `$fromParameter`
@@ -422,7 +428,19 @@ instances of every template, so it fails before any instance exists:
 ```console
 $ nyl validate
 …
-2026-11-20T02:01:10.922110Z ERROR nyl: Configuration error: Configuration error: NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.replicas.$fromParameter names parameter "size", which EnvironmentTemplate preview does not declare (declared: pr, sizes); declare it in spec.parameters, or name a declared one (fix EnvironmentTemplate preview in source)
+2026-11-20T08:07:52.188460Z ERROR nyl: Configuration error: NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.replicas.$fromParameter names parameter "size", which EnvironmentTemplate preview does not declare (declared: crds, pr, sizes); declare it in spec.parameters, or name a declared one (fix EnvironmentTemplate preview in source)
+Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
+```
+
+A template's values read parameters, not Release inputs. `$fromInput` that
+names a declared parameter is an error that gives the `$fromParameter` to write
+instead:
+
+```console
+$ nyl validate
+…
+2026-11-20T08:06:03.723230Z ERROR nyl: Configuration error: NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.target.inline.releaseInputs.platform/platform.clusterWide holds a $fromInput source, which reads a Release input and resolves only in the resources of a Release bundle; EnvironmentTemplate preview declares parameter "crds", which its values read with $fromParameter; write {$fromParameter: crds} (see https://niklasrosenstein.github.io/nyl/reference/value-sources/) (fix EnvironmentTemplate preview in source)
+Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
 ```
 
 ### `$fromUnit`
@@ -576,8 +594,7 @@ not accept it says where it works:
 
 ```console
 $ nyl render apps/web/web.yaml
-2026-11-20T02:01:10.850437Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.includeCrds holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
-Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
+2026-11-20T08:07:09.102785Z ERROR nyl: Configuration error: HelmChart "web" in apps/web/web.yaml: spec.includeCrds holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)
 ```
 
 A common typo, and a source with other keys next to it:
@@ -585,6 +602,6 @@ A common typo, and a source with other keys next to it:
 ```console
 $ nyl validate
 …
-2026-11-20T05:26:54.878781Z ERROR nyl: Configuration error: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$fromEnv is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)
-…
+2026-11-20T08:07:44.058147Z ERROR nyl: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$fromEnv is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)
+Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
 ```

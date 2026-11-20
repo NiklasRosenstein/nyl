@@ -152,7 +152,9 @@ contributes no inline target.
 
 A placed target compiles with a placeholder of the declared type for each
 `$fromUnit` and `$fromPromotion` binding, because only a run resolves their
-values. Each `$fromUnit` binding must instead name a unit the Environment
+values. What a `$fromInput` `pointer` selects in such an input is unknown, so
+neither the pointer nor the selected value's type is checked; the input's
+declared type is. Each `$fromUnit` binding must instead name a unit the Environment
 selects and enables; an `output` reference must name an output the unit
 declares and does not mark `sensitive`. An `artifact` reference is checked
 only for the unit's existence. Every problem names its binding, such as

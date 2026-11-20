@@ -15,7 +15,7 @@ use super::strict::DenyUnknownFields;
 use super::units::DeletionPolicy;
 use super::{GitSource, InlineGitRepository, LabelSelector, LocalReference};
 use crate::bindings::{
-    find_clauses, resolve_document, validate_declarations_at, BindingIssue, Context, InputDeclaration, Origin,
+    find_clauses, resolve_document, validate_declarations_at, BindingIssue, Clause, Context, InputDeclaration, Origin,
     ParameterSource, Provided, Providers, Provision, Resolved,
 };
 use crate::constants::API_VERSION_GITOPS;
@@ -836,6 +836,24 @@ impl Providers for BoundParameters<'_> {
             origin: ParameterOrigin,
         }))
     }
+
+    /// A `$fromInput` that names a declared parameter meant the parameter:
+    /// the template's values read parameters, not Release inputs.
+    fn instead(&self, clause: &Clause) -> Option<String> {
+        let Clause::Input(source) = clause else {
+            return None;
+        };
+        self.template.spec.parameters.get(&source.name)?;
+        let name = &source.name;
+        let replacement = match source.pointer.as_deref().filter(|pointer| !pointer.is_empty()) {
+            Some(pointer) => format!("{{$fromParameter: {{name: {name}, pointer: {pointer}}}}}"),
+            None => format!("{{$fromParameter: {name}}}"),
+        };
+        Some(format!(
+            "EnvironmentTemplate {} declares parameter {name:?}, which its values read with $fromParameter; write {replacement}",
+            self.template.metadata.name
+        ))
+    }
 }
 
 fn validate_envelope(api_version: &str, kind: &str, expected: &str) -> Result<()> {
@@ -946,6 +964,36 @@ mod tests {
             "spec.values.c holds $fromParameter next to other keys (other)",
             "spec.values.d.$fromParameter is not valid: unknown field `default`",
             "spec.values.e holds a $fromEnvironment source, which reads the environment's values and resolves only in unit documents; the environment's values cannot read its values",
+        ] {
+            assert!(error.contains(expected), "{expected}\n{error}");
+        }
+    }
+
+    /// Catches a template's values that read a declared parameter with
+    /// `$fromInput` told to bind the input on the target, which is what they
+    /// do: the fix is the `$fromParameter` to write. A name that is no
+    /// parameter keeps the context's own fix.
+    #[test]
+    fn test_input_naming_a_parameter_in_template_values_suggests_the_parameter() {
+        let template = template(json!({
+            "parameters": {"crds": {"type": "boolean", "default": false}, "sizes": {"type": "object", "default": {}}},
+            "values": {},
+        }));
+        let bound = template.bind_parameters(&BTreeMap::new()).unwrap();
+        let error = template
+            .resolve_parameter_sources(
+                &map(json!({
+                    "crds": {"$fromInput": "crds"},
+                    "replicas": {"$fromInput": {"name": "sizes", "pointer": "/web"}},
+                    "image": {"$fromInput": "image"},
+                })),
+                &bound,
+            )
+            .unwrap_err();
+        for expected in [
+            "spec.values.crds holds a $fromInput source, which reads a Release input and resolves only in the resources of a Release bundle; EnvironmentTemplate preview declares parameter \"crds\", which its values read with $fromParameter; write {$fromParameter: crds}",
+            "EnvironmentTemplate preview declares parameter \"sizes\", which its values read with $fromParameter; write {$fromParameter: {name: sizes, pointer: /web}}",
+            "spec.values.image holds a $fromInput source, which reads a Release input and resolves only in the resources of a Release bundle; values do not reach a Release's inputs; bind the input on the target",
         ] {
             assert!(error.contains(expected), "{expected}\n{error}");
         }

@@ -25,6 +25,12 @@
 //!   with the fix.
 //! - What rendering generates (a chart's output, a Component's, a remote
 //!   manifest) holds no source ([`reject_sources_in_output`]).
+//! - An input only orchestration fills (`$fromUnit`, `$fromPromotion`) holds a
+//!   placeholder of its declared type in `nyl validate`. What a `pointer`
+//!   selects in it is unknown, like a blocked value: the pointer and the
+//!   selected value's type are not checked, and the selected value is a
+//!   placeholder string; a `valuesFrom` entry with a `pointer` into it adds
+//!   nothing. The input's own type and every structural check still apply.
 //!
 //! Every value read enters the dependency recorder at the layer that consumes
 //! it: a values file is returned to the caller as a bundle input (the Release
@@ -33,6 +39,7 @@
 //! key; and the resolved documents are what the Helm cache key (chart values)
 //! and the remote manifest cache (URLs) read.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use nyl_core::bindings::{
@@ -42,6 +49,7 @@ use nyl_core::bindings::{
 use nyl_core::constants::API_VERSION;
 use serde_json::Value;
 
+use super::bundle::{provenance_path, ProvenanceRoots};
 use crate::gitops::values::{load_chart_values_file, ValuesFileRoot};
 use crate::resources::{merge_chart_values, HelmValuesOrigin, HelmValuesSource, Release, RemoteManifest};
 use crate::{NylError, Result};
@@ -70,12 +78,16 @@ impl BundleFiles<'_> {
 
 /// Resolve the value sources of one resource that `file` declares, in place.
 /// `inputs` are the Release's resolved inputs, when the bundle's Release
-/// declares any. Values files read are appended to `read`.
+/// declares any, and `unknown` names those whose value only orchestration
+/// knows. Values files read are appended to `read`. Messages show paths as
+/// provenance records them (`roots`).
 pub(crate) fn resolve_bundle_resource(
     resource: &mut Value,
     file: &Path,
     files: BundleFiles<'_>,
+    roots: ProvenanceRoots<'_>,
     inputs: Option<&Value>,
+    unknown: &BTreeSet<String>,
     read: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let subject = BundleResource::of(resource);
@@ -84,7 +96,7 @@ pub(crate) fn resolve_bundle_resource(
         .map(BindingIssue::new)
         .collect::<Vec<_>>();
     if issues.is_empty() {
-        let provider = ReleaseInputs { inputs };
+        let provider = ReleaseInputs { inputs, unknown };
         let resolved = resolve_document("", "", resource, subject.scope(), &provider, &mut issues);
         for issue in &mut issues {
             if let Some(field) = issue.message.strip_prefix('.') {
@@ -94,7 +106,7 @@ pub(crate) fn resolve_bundle_resource(
         if issues.is_empty() {
             *resource = resolved.value;
             if subject == BundleResource::HelmChart {
-                merge_values_from(resource, file, files, &provider, read, &mut issues);
+                merge_values_from(resource, file, files, roots, &provider, read, &mut issues);
             }
         }
     }
@@ -102,10 +114,10 @@ pub(crate) fn resolve_bundle_resource(
         return Ok(());
     }
     let messages = issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>();
-    Err(NylError::config(format!(
+    Err(NylError::value_source(format!(
         "{} in {}: {}",
         describe(resource),
-        crate::util::path_for_display(file).display(),
+        provenance_path(file, roots).display(),
         messages.join("; ")
     )))
 }
@@ -175,6 +187,7 @@ fn merge_values_from(
     resource: &mut Value,
     file: &Path,
     files: BundleFiles<'_>,
+    roots: ProvenanceRoots<'_>,
     provider: &ReleaseInputs<'_>,
     read: &mut Vec<PathBuf>,
     issues: &mut Vec<BindingIssue>,
@@ -207,7 +220,7 @@ fn merge_values_from(
                 let directory = file.parent().filter(|parent| !parent.as_os_str().is_empty());
                 match load_chart_values_file(files.root(), directory.unwrap_or_else(|| Path::new(".")), path) {
                     Ok((path, document)) => {
-                        let what = format!("values file {}", crate::util::path_for_display(&path).display());
+                        let what = format!("values file {}", provenance_path(&path, roots).display());
                         read.push(path);
                         match sources_in("", &document).first() {
                             Some((at, source)) => Err(format!(
@@ -223,6 +236,9 @@ fn merge_values_from(
                 }
             }
             HelmValuesOrigin::Input(name) => match provider.input_value(&format!("{field}.input"), name) {
+                // What a pointer selects in an unknown input is unknown: the
+                // entry contributes nothing, and the input's type still counts.
+                Ok(value) if value.is_object() && provider.selects_unknown(name, entry.pointer.as_deref()) => continue,
                 Ok(value) if value.is_object() => entry.select(value, &format!("Release input {name:?}")),
                 Ok(value) => Err(format!(
                     "Release input {name:?} has type {}; valuesFrom reads only inputs of type object",
@@ -255,9 +271,21 @@ fn merge_values_from(
 /// when its Release declares any.
 struct ReleaseInputs<'a> {
     inputs: Option<&'a Value>,
+    /// Inputs whose value only orchestration knows (`nyl validate`): each
+    /// holds a placeholder of its declared type, so what a pointer selects in
+    /// one is unknown and not checked.
+    unknown: &'a BTreeSet<String>,
 }
 
 impl ReleaseInputs<'_> {
+    /// Whether reading `pointer` of input `name` selects a value only
+    /// orchestration knows: a non-empty pointer into an unknown input.
+    fn selects_unknown(&self, name: &str, pointer: Option<&str>) -> bool {
+        pointer.is_some_and(|pointer| !pointer.is_empty())
+            && self.unknown.contains(name)
+            && self.inputs.and_then(|inputs| inputs.get(name)).is_some()
+    }
+
     /// The resolved value of input `name`, read at `field`.
     fn input_value(&self, field: &str, name: &str) -> std::result::Result<&Value, BindingIssue> {
         let Some(inputs) = self.inputs.and_then(Value::as_object) else {
@@ -307,6 +335,14 @@ impl Providers for ReleaseInputs<'_> {
     fn input(&self, field: &str, source: &InputSource) -> Provided<ReleaseInputOrigin> {
         let field = format!("{field}.$fromInput");
         let input = self.input_value(&field, &source.name)?;
+        if self.selects_unknown(&source.name, source.pointer.as_deref()) {
+            // The placeholder's shape says nothing about the value
+            // orchestration delivers; the value's type is unknown too.
+            return Ok(Provision::Value(Resolved {
+                value: Value::String(crate::gitops::inputs::ORCHESTRATED_PLACEHOLDER.to_owned()),
+                origin: ReleaseInputOrigin,
+            }));
+        }
         let pointer = source.pointer.as_deref().unwrap_or_default();
         let Some(value) = input.pointer(pointer) else {
             return Err(BindingIssue::new(format!(
@@ -339,7 +375,7 @@ pub(crate) fn reject_generated_values_from(resource: &Value) -> Result<()> {
     if resource.pointer("/spec/valuesFrom").is_none() {
         return Ok(());
     }
-    Err(NylError::config(format!(
+    Err(NylError::value_source(format!(
         "{} was generated while rendering, and spec.valuesFrom is read only in the files of a Release bundle",
         describe(resource)
     )))
@@ -367,7 +403,7 @@ pub(crate) fn reject_sources_in_output(expanding: &str, generated: &[Value]) -> 
     if issues.is_empty() {
         return Ok(());
     }
-    Err(NylError::config(format!(
+    Err(NylError::value_source(format!(
         "{expanding} generated value sources, which resolve only in the files of a Release bundle, never in what rendering generates: {}; write the value in the bundle's own files, such as the chart's values (see {VALUE_SOURCES_DOCS})",
         issues.join("; ")
     )))
@@ -392,6 +428,7 @@ mod tests {
             cluster: None,
             target: None,
             inputs,
+            unknown_inputs: BTreeSet::new(),
         }
     }
 
@@ -657,6 +694,75 @@ mod tests {
         let message = error(&temp, Some(json!({"image": "web:1"})));
         assert!(
             message.contains("spec.valuesFrom[0]: values file") && message.contains("holds a $fromInput source at web.image; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values"),
+            "{message}"
+        );
+    }
+
+    /// Catches `nyl validate` failing a correct bundle that reads an object
+    /// input by pointer, when a target binds the input with `$fromUnit`: the
+    /// input holds a placeholder before a run, so what the pointer selects is
+    /// unknown and unchecked, while the input's own type still is. Catches,
+    /// too, a pointer into a known input left unchecked.
+    #[test]
+    fn test_a_pointer_into_an_input_only_orchestration_knows_is_unchecked() {
+        let temp = project(
+            "  valuesFrom: [{input: image, pointer: /extra}]
+  values:
+    image:
+      repository: {$fromInput: {name: image, pointer: /repository}}
+      digest: {$fromInput: {name: image, pointer: /digest}}
+",
+            &[],
+        );
+        let unknown = BTreeSet::from(["image".to_owned()]);
+        let mut context = context(Some(json!({"image": {}})));
+        context.unknown_inputs = unknown;
+        let bundle = load_release_bundle(&temp.path().join("apps/app.yaml"), &context).unwrap();
+        let chart = &bundle.resources[1].value;
+        let placeholder = crate::gitops::inputs::ORCHESTRATED_PLACEHOLDER;
+        assert_eq!(
+            chart["spec"]["values"],
+            json!({"image": {"repository": placeholder, "digest": placeholder}})
+        );
+
+        let known = error(&temp, Some(json!({"image": {}})));
+        assert!(
+            known.contains("reads \"/repository\" of Release input \"image\", which holds nothing there"),
+            "{known}"
+        );
+    }
+
+    /// Catches a run's error naming the absolute path of its temporary
+    /// checkout: the resource's file and a values file show as provenance
+    /// records them, relative to the project or the worktree.
+    #[test]
+    fn test_errors_name_files_as_provenance_records_them() {
+        let temp = project(
+            "  valuesFrom: [{file: base.yaml}, {file: /shared/values.yaml}]\n",
+            &[
+                ("apps/base.yaml", "web: {image: {$fromInput: image}}\n"),
+                ("shared/values.yaml", "host: {$fromInput: host}\n"),
+            ],
+        );
+        let roots = ProvenanceRoots {
+            root: Some(&temp.path().join("apps")),
+            worktree: Some(temp.path()),
+        };
+        let files = BundleFiles {
+            project_root: temp.path(),
+            checkout: None,
+        };
+        let message = crate::render::bundle::load_release_bundle_with_root(
+            &temp.path().join("apps/app.yaml"),
+            &context(Some(json!({"image": "web:1", "host": "web"}))),
+            roots,
+            files,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("HelmChart \"web\" in app.yaml: spec.valuesFrom[0]: values file base.yaml holds")
+                && message.contains("spec.valuesFrom[1]: values file /shared/values.yaml holds"),
             "{message}"
         );
     }

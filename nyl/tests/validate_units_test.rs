@@ -37,6 +37,41 @@ fn test_validate_accepts_a_target_placed_by_a_publication_unit() {
         .stdout(predicate::str::contains("GitOps configuration is valid").and(predicate::str::contains("4 unit(s)")));
 }
 
+/// Catches validation failing a correct bundle that reads an object input by
+/// pointer when the target binds the input with `$fromUnit`: before a run the
+/// input holds a placeholder, so what the pointer selects is unknown.
+#[test]
+fn test_validate_accepts_a_pointer_into_an_input_a_unit_fills() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    let edit = |path: &str, from: &str, to: &str| {
+        let path = checkout.join(path);
+        let contents = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        assert!(contents.contains(from), "{path:?} holds {from:?}");
+        std::fs::write(&path, contents.replace(from, to)).unwrap();
+    };
+    edit(
+        "nyl/platform.yaml",
+        "image: {$fromUnit: {unit: web-image, artifact: image, pointer: /reference}}",
+        "image: {$fromUnit: {unit: web-image, artifact: image}}",
+    );
+    edit(
+        "applications/web/release.yaml",
+        "image: {type: string}",
+        "image: {type: object}",
+    );
+    edit(
+        "applications/web/release.yaml",
+        "image: {$fromInput: image}",
+        "image: {$fromInput: {name: image, pointer: /reference}}",
+    );
+
+    nyl_validate(&world, &checkout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("GitOps configuration is valid"));
+}
+
 #[test]
 fn test_validate_rejects_from_unit_on_a_target_without_a_publication_unit() {
     let world = World::new(&project());

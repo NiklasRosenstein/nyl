@@ -15,6 +15,8 @@ milestone: M6
 steps:
   # 1. The previews' sizing reads config/capacity.yaml at a locked commit:
   #    the one this change starts from, as `nyl update source-locks` writes it.
+  #    No image is built yet: validation reads the image artifact's fields by
+  #    pointer from a placeholder, and does not check them.
   - commit: {branch: main, message: "Lock the capacity file for previews", apply: patches/lock}
   - nyl: [validate]
     exit: 0
@@ -164,7 +166,7 @@ steps:
     expect:
       executed: [platform-image]
       blocked: [kubernetes]
-      codes: [NYL-DRIVER-ERROR]
+      codes: [NYL-UNIT-INVALID]
       messages:
         - 'spec.values.image.digest holds a $fromUnit source'
         - 'declare a Release input and bind it on the target with $fromUnit'
@@ -175,7 +177,7 @@ steps:
     at: pr-3
     exit: 1
     expect:
-      codes: [NYL-DRIVER-ERROR]
+      codes: [NYL-UNIT-INVALID]
       messages: ['spec.values.host.$fromInputs is not a value source; did you mean $fromInput?']
   #    c) A source in the valuesFrom file, which is data.
   - commit: {branch: pr-3, message: "Move the host to the values file", apply: patches/values-file}
@@ -183,9 +185,9 @@ steps:
     at: pr-3
     exit: 1
     expect:
-      codes: [NYL-DRIVER-ERROR]
+      codes: [NYL-UNIT-INVALID]
       messages:
-        - 'values-preview.yaml holds a $fromInput source at host'
+        - 'values file /charts/platform/values-preview.yaml holds a $fromInput source at host'
         - 'move it to the inline values'
   #    d) Fixed, the preview publishes.
   - commit: {branch: pr-3, message: "Keep the host in the inline values", apply: patches/fixed}
@@ -201,7 +203,7 @@ steps:
         unchanged: ['pr-1/**']
 
   # 10. A template that reads its parameter with $fromInput fails `nyl
-  #     validate`, before any instance exists.
+  #     validate`, before any instance exists, with the $fromParameter to write.
   - branch: {name: crds-input, from: main}
   - commit: {branch: crds-input, message: "Read crds as an input", apply: patches/crds-input}
   - nyl: [validate]
@@ -211,3 +213,4 @@ steps:
       messages:
         - 'NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1'
         - 'spec.values.target.inline.releaseInputs.platform/platform.clusterWide holds a $fromInput source'
+        - 'EnvironmentTemplate preview declares parameter "crds", which its values read with $fromParameter; write {$fromParameter: crds}'

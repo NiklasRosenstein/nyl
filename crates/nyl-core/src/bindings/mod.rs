@@ -158,6 +158,15 @@ pub trait Providers {
     fn unbound(&self, _field: &str, _clause: &Clause, _requirement: &str) -> Option<String> {
         None
     }
+
+    /// The fix for `clause`, a source this context rejects, when the provider
+    /// can read what it meant with a source valid here: such as
+    /// `$fromParameter: crds` for `$fromInput: crds` in an EnvironmentTemplate's
+    /// values that declares parameter `crds`. It replaces the context's
+    /// generic fix ([`Context::misplaced`]).
+    fn instead(&self, _clause: &Clause) -> Option<String> {
+        None
+    }
 }
 
 fn unsupported(field: &str, source: Source) -> BindingIssue {

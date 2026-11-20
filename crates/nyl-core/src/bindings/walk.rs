@@ -129,14 +129,16 @@ impl<'s> At<'s> {
         self.context.treats(source)
     }
 
-    fn misplaced(&self, source: Source) -> String {
+    /// The error for a `source` this node's context rejects, with `fix` when
+    /// the provider knows a source valid here that reads what was meant.
+    fn misplaced(&self, source: Source, fix: Option<String>) -> String {
         if self.environment_value && source == Source::Environment {
             return format!(
                 "{} holds a $fromEnvironment source inside a value an $fromEnvironment source read; the environment's values cannot read its values, so write the value there",
                 self.field
             );
         }
-        let message = self.context.misplaced(&self.field, source);
+        let message = self.context.misplaced_with(&self.field, source, fix);
         if self.environment_value {
             // A source the environment's values carried here: checked where it lands.
             format!("{message}; it came with the environment's values that $fromEnvironment read here")
@@ -266,7 +268,10 @@ impl<P: Providers> Walk<'_, P> {
         let key = source.key();
         let treatment = at.treats(source);
         if treatment == Treatment::Reject {
-            let message = at.misplaced(source);
+            let fix = Clause::parse(&at.field, source, &value[key])
+                .ok()
+                .and_then(|clause| self.providers.instead(&clause));
+            let message = at.misplaced(source, fix);
             self.issue(message);
             return After::Keep;
         }
@@ -474,7 +479,7 @@ fn find(at: &At<'_>, value: &Value, found: &mut Vec<FoundClause>, issues: &mut V
             }
             Node::Clause(source) => {
                 if at.treats(source) == Treatment::Reject {
-                    issues.push(at.misplaced(source));
+                    issues.push(at.misplaced(source, None));
                     return;
                 }
                 if source == Source::Literal {

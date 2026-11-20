@@ -25,6 +25,16 @@ pub enum NylError {
     #[error("Configuration error: {0}\nHint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.")]
     Config(String),
 
+    /// A value source or Release input is configured wrong: a source where
+    /// its context does not resolve it, a typo of a source's name, a source in
+    /// a file read as data, or a binding that does not fit its Release's
+    /// declarations. The message names the field and the fix. Unlike
+    /// [`NylError::Config`], it never stands for a failure of the environment,
+    /// such as a repository that cannot be read; see
+    /// [`NylError::is_value_source_config`].
+    #[error("Configuration error: {0}")]
+    ValueSource(String),
+
     #[error("API resource not found: {0}\nHint: The CRD for this resource type may not be installed, or the apiVersion/kind may not be supported by the cluster.")]
     ApiResourceNotFound(String),
 
@@ -143,6 +153,18 @@ pub enum KubeErrorKind {
 pub type Result<T> = std::result::Result<T, NylError>;
 
 impl NylError {
+    /// A value-source configuration error ([`NylError::ValueSource`]).
+    pub fn value_source(message: impl Into<String>) -> Self {
+        NylError::ValueSource(message.into())
+    }
+
+    /// Whether this is a mistake in how the configuration uses value sources
+    /// or Release inputs, which the configuration's author fixes, rather
+    /// than a failure to render.
+    pub fn is_value_source_config(&self) -> bool {
+        matches!(self, NylError::ValueSource(_))
+    }
+
     /// Create a configuration error with context
     pub fn config(msg: impl Into<String>) -> Self {
         NylError::Config(msg.into())

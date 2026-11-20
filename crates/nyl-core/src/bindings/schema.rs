@@ -141,13 +141,40 @@ fn reserved(field: &str, value: &Value, nodes: &[Value], root: &Value, issues: &
             }
         }
         if next.is_empty() {
-            if !free && segment.starts_with('$') && value.is_object() {
+            let dollar = segment.starts_with('$') && value.is_object();
+            if dollar && !(free && nodes.iter().any(|node| admits_foreign_keys(root, node))) {
                 issues.push(unknown_source(&child_field, &segment));
             }
             continue;
         }
         reserved(&child_field, child, &next, root, issues);
     }
+}
+
+/// Whether an object `node` describes has room for a `$` key it does not
+/// name: one of its alternatives declares no members, such as free-form data
+/// (`{"type": "object"}` or no schema at all), or admits others explicitly
+/// (`additionalProperties` true or a schema). An object that names its
+/// members (`properties` or `required`) and says nothing more is a typed
+/// field, whose `$` namespace is reserved even when its schema does not close
+/// it, so a slip there is reported as an unknown source instead of reaching
+/// the kind's own validation as a missing or unknown field.
+fn admits_foreign_keys(root: &Value, node: &Value) -> bool {
+    schema_alternatives(root, node)
+        .iter()
+        .any(|branch| match branch.get("additionalProperties") {
+            Some(Value::Bool(false)) => false,
+            Some(_) => true,
+            None => {
+                let names_members = branch.get("properties").is_some() || branch.get("required").is_some();
+                let scalar = match branch.get("type") {
+                    Some(Value::String(kind)) => kind != "object",
+                    Some(Value::Array(kinds)) => !kinds.iter().any(|kind| kind == "object"),
+                    _ => false,
+                };
+                !names_members && !scalar && branch.get("items").is_none()
+            }
+        })
 }
 
 /// The error for `key`, an unknown `$` key at `field` of a typed field.
@@ -354,6 +381,43 @@ mod tests {
                 && issues[1].ends_with(
                     "did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)"
                 ),
+            "{issues:?}"
+        );
+    }
+
+    /// Catches an unknown `$` key in a typed field whose schema names its
+    /// members without closing the object (a struct without
+    /// `deny_unknown_fields`, or a kind's hand-written schema) read as data,
+    /// so the kind's own validation reports a missing field instead of the
+    /// unknown source. An object left free-form or opened explicitly keeps
+    /// such a key as data.
+    #[test]
+    fn test_an_object_that_names_its_members_reserves_dollar_keys() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "context": {"type": "object", "properties": {"path": {"type": "string"}}},
+                "required": {"type": "object", "required": ["path"]},
+                "free": {"type": "object"},
+                "open": {"type": "object", "properties": {"path": {"type": "string"}}, "additionalProperties": true},
+                "any": true,
+            },
+        });
+        let document = json!({
+            "context": {"$fromEnviroment": "/context"},
+            "required": {"$fromEnviroment": "/context"},
+            "free": {"$ref": "#/x"},
+            "open": {"$ref": "#/x"},
+            "any": {"$ref": "#/x"},
+        });
+        let issues = reserved_key_issues("spec", &document, &schema);
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        assert!(
+            issues[0].starts_with("spec.context.$fromEnviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
+            "{issues:?}"
+        );
+        assert!(
+            issues[1].starts_with("spec.required.$fromEnviroment is not a value source;"),
             "{issues:?}"
         );
     }

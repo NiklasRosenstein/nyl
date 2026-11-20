@@ -291,7 +291,15 @@ fn load_resource_file(
     let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
     let source_path = provenance_path(path, provenance_root);
     for (index, mut value) in source_ctx.parse_yaml_documents(&rendered)?.into_iter().enumerate() {
-        resolve_bundle_resource(&mut value, path, files, context.inputs.as_ref(), values_files)?;
+        resolve_bundle_resource(
+            &mut value,
+            path,
+            files,
+            provenance_root,
+            context.inputs.as_ref(),
+            &context.unknown_inputs,
+            values_files,
+        )?;
         resources.push(RenderResource {
             value,
             provenance: RenderProvenance::source(source_path.clone(), index + 1),
@@ -301,7 +309,11 @@ fn load_resource_file(
     Ok(resources)
 }
 
-fn provenance_path(path: &Path, roots: ProvenanceRoots<'_>) -> PathBuf {
+/// `path` as provenance records it, and as messages show it: relative to the
+/// provenance root, `/` plus its worktree-relative path, or else relative to
+/// the current directory. A file of a temporary checkout, as a run renders
+/// from, so never shows its absolute location.
+pub(crate) fn provenance_path(path: &Path, roots: ProvenanceRoots<'_>) -> PathBuf {
     if let Some(relative) = roots.root.and_then(|root| relative_to(path, root)) {
         return relative;
     }
