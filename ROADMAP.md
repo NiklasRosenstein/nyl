@@ -536,10 +536,32 @@ both run the code `reconcile` runs, so an export and a unit's bundle are the
 same bytes. The bundle is a versioned contract with published schemas, which
 lets other tools consume team declarations without adopting orchestration.
 
+An Environment represents state and configuration, and that configuration may
+be domain resources alone. Its literal `resourceSelector`, by labels, kinds,
+and paths, decides which admitted resources are active in it; without one,
+all are. Collections and exports in an environment select within its active
+set, so a resource that leaves one environment's selection leaves its
+collections there only, under the removal approval of that environment.
+Per-environment content stays out: a resource that differs between
+environments is declared once per environment.
+
+A definition may declare a status schema: facts per environment, such as a
+service's URL, kept in the environment's state and never in Git. Each field
+has one writer per environment. The owning unit projects it from its outputs
+in an `access: own` collection, as a view of its current receipt validated
+when the receipt is recorded; otherwise `nyl resources status set` writes it
+from outside, for one resource or from a document through the same pointer
+mapping, under the environment's lease with provenance, and an optional
+maximum age makes a stale value block its readers. `$fromResource` reads a
+resource's spec or status wherever `$fromUnit` is valid, with the owner's
+dependency edge when the status is projected, and `nyl get resources -e` and
+`nyl bundle -e` include status.
+
 The slices ship in this order: R1, definitions and the catalog with the
 value-source context; R12, the standalone export, on which every later
-consumer builds; then R2 onward. Slice identifiers stay stable, so the export
-takes the next free number.
+consumer builds; R13, environment scoping; R2, collections in units; R14,
+resource status; then R3 onward. Slice identifiers stay stable, so new
+slices take the next free number.
 
 Kubernetes Releases consume collections too, without orchestration, as
 described in the [Release catalog design](design/release-catalog.md). The
