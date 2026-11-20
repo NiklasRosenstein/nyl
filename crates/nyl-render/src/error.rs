@@ -160,9 +160,14 @@ impl NylError {
 
     /// Whether this is a mistake in how the configuration uses value sources
     /// or Release inputs, which the configuration's author fixes, rather
-    /// than a failure to render.
+    /// than a failure to render. A [`NylError::Render`] is one when its cause
+    /// is, such as a value source in what a chart or a Component generated.
     pub fn is_value_source_config(&self) -> bool {
-        matches!(self, NylError::ValueSource(_))
+        match self {
+            NylError::ValueSource(_) => true,
+            NylError::Render { source, .. } => source.is_value_source_config(),
+            _ => false,
+        }
     }
 
     /// Create a configuration error with context
@@ -431,6 +436,19 @@ mod tests {
         let display = error.to_string();
         assert!(display.contains("Source: system/flyctr.yaml (document 4)"));
         assert!(display.contains("Helm chart error: invalid values"));
+    }
+
+    /// Catches a value-source mistake in generated output, which expansion
+    /// wraps with its provenance, reading as a failure to render.
+    #[test]
+    fn test_a_value_source_mistake_keeps_its_kind_under_render_provenance() {
+        let wrapped = NylError::value_source("x")
+            .with_render_provenance("Source: a.yaml")
+            .with_render_provenance("Source: b.yaml");
+        assert!(wrapped.is_value_source_config());
+        assert!(!NylError::config("x")
+            .with_render_provenance("Source: a.yaml")
+            .is_value_source_config());
     }
 
     #[test]

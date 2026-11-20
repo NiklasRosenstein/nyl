@@ -1393,6 +1393,64 @@ mod tests {
         assert_eq!(other.code(), None);
     }
 
+    /// Catches a value source in what rendering generated reaching the unit
+    /// as the driver's own failure: the expansion wraps the error with the
+    /// generating resource's provenance, and the unit still reports its
+    /// invalid configuration. A vendored RemoteManifest generates the output,
+    /// so no tool or network is needed.
+    #[test]
+    fn test_a_value_source_in_generated_output_is_the_units_invalid_configuration() {
+        let world = world::World::new();
+        let url = "https://manifests.invalid/web.yaml";
+        let manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: generated, namespace: web}\ndata: {image: {$fromInput: image}}\n";
+        let request = nyl_render::render::artifact::ArtifactRequest::RemoteManifest { url: url.to_owned() };
+        let vendor = world.work().join("nyl/vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join("web.yaml"), manifest).unwrap();
+        std::fs::write(
+            vendor.join("lock.yaml"),
+            format!(
+                "version: 1\nartifacts:\n  {}:\n    request: {{kind: remote-manifest, coordinate: '{url}'}}\n    path: web.yaml\n    format: manifest\n    size: {}\n    digest: {}\n",
+                request.fingerprint().unwrap(),
+                manifest.len(),
+                nyl_core::digest::sha256_hex(manifest.as_bytes()),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            world.work().join("nyl/nyl.toml"),
+            "[project]\n\n[vendor]\nmode = 'required'\n",
+        )
+        .unwrap();
+        let release = world.work().join("applications/web/release.yaml");
+        let mut text = std::fs::read_to_string(&release).unwrap();
+        text.push_str(&format!(
+            "---\napiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {{name: generated, namespace: web}}\nspec: {{url: '{url}'}}\n"
+        ));
+        std::fs::write(&release, text).unwrap();
+        let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
+        descriptors.extend_from_slice(crate::catalog::RESOURCES);
+        let error = render(
+            &nyl_render::config::ResourceCatalogue(descriptors),
+            &world.work(),
+            &world.work().join("nyl"),
+            &world.root.path().join("cache"),
+            &nyl_core::orchestration::instance::NO_INSTANCES,
+            &world::spec(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("ConfigMap \"generated\" holds a $fromInput source at data.image"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(error.code(), Some(Code::UnitInvalid), "{}", error.message());
+        assert_eq!(error.detail(), Some(VALUE_SOURCE_INVALID));
+    }
+
     /// Catches "create only when absent" being a blind push: a publication
     /// that loses the race for the branch head, after another created the
     /// manifest, reads the new head again and stops as `Differs` (or `Current`),
