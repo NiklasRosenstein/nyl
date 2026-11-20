@@ -124,7 +124,7 @@ migrates it.</p>
 <ul>
 <li>A Nyl older than this release keeps the file through its transitions, <code dir="auto">hold</code>,
 <code dir="auto">resume</code>, and <code dir="auto">state forget</code>, but cannot act on it: it refuses an environment
-whose <code dir="auto">source</code> is <code dir="auto">fromPromotion</code>, and it must not run <code dir="auto">reconcile</code> in an
+whose <code dir="auto">source</code> is <code dir="auto">$fromPromotion</code>, and it must not run <code dir="auto">reconcile</code> in an
 environment whose bindings read promotions, because it cannot resolve them.
 Upgrade every Nyl that shares the state before an environment uses promotion.</li>
 <li>This release’s snapshots, <code dir="auto">state move</code>, and <code dir="auto">state restore</code> include the

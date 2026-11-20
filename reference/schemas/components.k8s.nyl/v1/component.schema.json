@@ -87,7 +87,7 @@
     },
     "spec": {
       "default": {},
-      "description": "Helm values — defaults to an empty object when omitted"
+      "description": "Helm values — defaults to an empty object when omitted. In a Release bundle,\n`{$fromInput: name}` reads a Release input at any depth; other `$` keys, such as\n`$ref`, are chart data."
     },
     "valueImports": {
       "anyOf": [

@@ -1,5 +1,26 @@
 {
   "$defs": {
+    "InputSource": {
+      "additionalProperties": false,
+      "description": "`$fromInput`: a Release input. Its declared default applies when the target\nbinds none. Shorthand: `{$fromInput: name}`.",
+      "properties": {
+        "name": {
+          "description": "Name of an input the Release declares.",
+          "type": "string"
+        },
+        "pointer": {
+          "description": "JSON Pointer inside the input's value; the whole value when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "ObjectMetadata": {
       "additionalProperties": false,
       "description": "Kubernetes object metadata",
@@ -34,6 +55,43 @@
         "name"
       ],
       "type": "object"
+    },
+    "ReleaseBundleValueSource": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Reads an input the Release declares.",
+          "properties": {
+            "$fromInput": {
+              "anyOf": [
+                {
+                  "description": "Shorthand: the input's name.",
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/InputSource"
+                }
+              ]
+            }
+          },
+          "required": [
+            "$fromInput"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The content, verbatim, even when it looks like a value source.",
+          "properties": {
+            "$literal": true
+          },
+          "required": [
+            "$literal"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A value source this field accepts instead of a literal. See https://niklasrosenstein.github.io/nyl/reference/value-sources/."
     },
     "RemoteManifestSpec": {
       "additionalProperties": false,
@@ -102,35 +160,63 @@
       ],
       "properties": {
         "overrideNamespace": {
-          "description": "Overwrite fetched manifest metadata.namespace with RemoteManifest metadata.namespace",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "Overwrite fetched manifest metadata.namespace with RemoteManifest metadata.namespace"
         },
         "params": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Parameters for `{key}` substitution in `urls` URL templates",
-          "type": [
-            "object",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "Parameters for `{key}` substitution in `urls` URL templates"
         },
         "url": {
-          "description": "Single HTTPS URL to fetch (mutually exclusive with `urls`)",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "Single HTTPS URL to fetch (mutually exclusive with `urls`). In a Release bundle, every\nfield may read a Release input with `{$fromInput: name}`."
         },
         "urls": {
-          "description": "List of HTTPS URL templates to fetch (mutually exclusive with `url`)",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "List of HTTPS URL templates to fetch (mutually exclusive with `url`)"
         }
       },
       "type": "object"

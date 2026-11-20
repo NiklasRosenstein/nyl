@@ -390,6 +390,7 @@
         "NYL-INSTANCE-TEMPLATE-REQUIRED",
         "NYL-INSTANCE-AMBIGUOUS",
         "NYL-TEMPLATE-INVALID",
+        "NYL-VALUES-SOURCE-UNREAD",
         "NYL-INSTANCE-OPTION-INVALID",
         "NYL-INSTANCE-EXPIRED",
         "NYL-INSTANCE-REMOVAL-PENDING",
@@ -901,7 +902,7 @@
           "$ref": "#/$defs/ExecutionKey"
         },
         "observation": {
-          "description": "The observed value of the producer's receipt the reference read, for\na `fromUnit: {unit, observation}` reference; absent for an output or\nan artifact field.",
+          "description": "The observed value of the producer's receipt the reference read, for\na `$fromUnit: {unit, observation}` reference; absent for an output or\nan artifact field.",
           "type": [
             "string",
             "null"

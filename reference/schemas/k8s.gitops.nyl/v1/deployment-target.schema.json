@@ -527,539 +527,88 @@
       "type": "object"
     },
     "InputBinding": {
-      "additionalProperties": false,
-      "description": "Where one Release input's value comes from. Set exactly one field.",
-      "oneOf": [
+      "anyOf": [
         {
-          "description": "Binds an inline literal value.",
-          "not": {
-            "anyOf": [
-              {
-                "properties": {
-                  "fromFile": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromFile"
-                ]
-              },
-              {
-                "properties": {
-                  "fromGit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromGit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPublication": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPublication"
-                ]
-              },
-              {
-                "properties": {
-                  "fromUnit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromUnit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPromotion": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPromotion"
-                ]
-              }
-            ]
-          },
-          "properties": {
-            "value": {
-              "not": {
-                "type": "null"
-              }
-            }
-          },
-          "required": [
-            "value"
-          ],
-          "title": "value"
-        },
-        {
+          "additionalProperties": false,
           "description": "Reads the value from a YAML or JSON file of this repository.",
-          "not": {
-            "anyOf": [
-              {
-                "properties": {
-                  "value": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "value"
-                ]
-              },
-              {
-                "properties": {
-                  "fromGit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromGit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPublication": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPublication"
-                ]
-              },
-              {
-                "properties": {
-                  "fromUnit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromUnit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPromotion": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPromotion"
-                ]
-              }
-            ]
-          },
           "properties": {
-            "fromFile": {
-              "not": {
-                "type": "null"
-              }
+            "$fromFile": {
+              "$ref": "#/$defs/FileInputSource"
             }
           },
           "required": [
-            "fromFile"
+            "$fromFile"
           ],
-          "title": "fromFile"
+          "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Reads the value from a file of a Git repository at a locked commit.",
-          "not": {
-            "anyOf": [
-              {
-                "properties": {
-                  "value": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "value"
-                ]
-              },
-              {
-                "properties": {
-                  "fromFile": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromFile"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPublication": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPublication"
-                ]
-              },
-              {
-                "properties": {
-                  "fromUnit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromUnit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPromotion": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPromotion"
-                ]
-              }
-            ]
-          },
           "properties": {
-            "fromGit": {
-              "not": {
-                "type": "null"
-              }
+            "$fromGit": {
+              "$ref": "#/$defs/GitInputSource"
             }
           },
           "required": [
-            "fromGit"
+            "$fromGit"
           ],
-          "title": "fromGit"
+          "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Reads the value from a state file in this target's publication branch.",
-          "not": {
-            "anyOf": [
-              {
-                "properties": {
-                  "value": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "value"
-                ]
-              },
-              {
-                "properties": {
-                  "fromFile": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromFile"
-                ]
-              },
-              {
-                "properties": {
-                  "fromGit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromGit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromUnit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromUnit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPromotion": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPromotion"
-                ]
-              }
-            ]
-          },
           "properties": {
-            "fromPublication": {
-              "not": {
-                "type": "null"
-              }
+            "$fromPublication": {
+              "$ref": "#/$defs/PublicationInputSource"
             }
           },
           "required": [
-            "fromPublication"
+            "$fromPublication"
           ],
-          "title": "fromPublication"
+          "type": "object"
         },
         {
-          "description": "Reserved for orchestration: reads a recorded unit output or artifact field.",
-          "not": {
-            "anyOf": [
-              {
-                "properties": {
-                  "value": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "value"
-                ]
-              },
-              {
-                "properties": {
-                  "fromFile": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromFile"
-                ]
-              },
-              {
-                "properties": {
-                  "fromGit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromGit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPublication": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPublication"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPromotion": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPromotion"
-                ]
-              }
-            ]
-          },
+          "additionalProperties": false,
+          "description": "Reads a unit's output, artifact, or observed value; resolved by orchestration.",
           "properties": {
-            "fromUnit": {
-              "not": {
-                "type": "null"
-              }
+            "$fromUnit": {
+              "$ref": "#/$defs/UnitInputSource"
             }
           },
           "required": [
-            "fromUnit"
+            "$fromUnit"
           ],
-          "title": "fromUnit"
+          "type": "object"
         },
         {
-          "description": "Reserved for orchestration: reads a value recorded through a PromotionPath.",
-          "not": {
-            "anyOf": [
-              {
-                "properties": {
-                  "value": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "value"
-                ]
-              },
-              {
-                "properties": {
-                  "fromFile": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromFile"
-                ]
-              },
-              {
-                "properties": {
-                  "fromGit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromGit"
-                ]
-              },
-              {
-                "properties": {
-                  "fromPublication": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromPublication"
-                ]
-              },
-              {
-                "properties": {
-                  "fromUnit": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                },
-                "required": [
-                  "fromUnit"
-                ]
-              }
-            ]
-          },
+          "additionalProperties": false,
+          "description": "Reads a value recorded through a PromotionPath; resolved by orchestration.",
           "properties": {
-            "fromPromotion": {
-              "not": {
-                "type": "null"
-              }
+            "$fromPromotion": {
+              "$ref": "#/$defs/PromotionInputSource"
             }
           },
           "required": [
-            "fromPromotion"
+            "$fromPromotion"
           ],
-          "title": "fromPromotion"
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The content, verbatim, even when it looks like a value source.",
+          "properties": {
+            "$literal": true
+          },
+          "required": [
+            "$literal"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A literal value."
         }
       ],
-      "properties": {
-        "fromFile": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileInputSource"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "A YAML or JSON file of this repository."
-        },
-        "fromGit": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/GitInputSource"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "A YAML or JSON file of a Git repository at a locked commit."
-        },
-        "fromPromotion": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PromotionInputSource"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Reserved for orchestration: a value recorded through a PromotionPath. Rejected outside orchestrated execution."
-        },
-        "fromPublication": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PublicationInputSource"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "A state file in this target's publication branch, read at the publication base commit."
-        },
-        "fromUnit": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UnitInputSource"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Reserved for orchestration: a recorded unit output or artifact field. Rejected outside orchestrated execution."
-        },
-        "value": {
-          "description": "Inline literal value. DeploymentTargets are static, so it is never templated."
-        }
-      },
-      "type": "object"
+      "description": "The input's value: a literal, or a value source that reads it. See https://niklasrosenstein.github.io/nyl/reference/value-sources/."
     },
     "LabelSelector": {
       "additionalProperties": false,
@@ -1108,7 +657,7 @@
     },
     "PromotionInputSource": {
       "additionalProperties": false,
-      "description": "Reserved orchestration reference to a promoted value.",
+      "description": "`$fromPromotion`: a value recorded through a PromotionPath, which\norchestration resolves.",
       "properties": {
         "path": {
           "description": "PromotionPath the value must come from.",
@@ -1327,7 +876,7 @@
     },
     "UnitInputSource": {
       "additionalProperties": false,
-      "description": "Reserved orchestration reference to a unit output or artifact field.",
+      "description": "`$fromUnit`: a unit's output, artifact, or observed value, which orchestration\nresolves from the producer's current receipt.",
       "properties": {
         "artifact": {
           "description": "Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.",
@@ -1344,7 +893,7 @@
           "type": "array"
         },
         "environment": {
-          "description": "Environment of the unit, for cross-environment references.",
+          "description": "Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$fromEnvironment`, resolved when the unit renders.",
           "type": [
             "string",
             "null"
