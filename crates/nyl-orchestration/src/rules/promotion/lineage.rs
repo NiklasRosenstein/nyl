@@ -32,7 +32,7 @@ pub fn lineage(snapshot: &EnvironmentSnapshot) -> Option<PromotionLineage> {
     lineage_with(snapshot, None)
 }
 
-/// [`lineage`] with the Environment's `source.fromPromotion` as the entry
+/// [`lineage`] with the Environment's `source.promotion` as the entry
 /// worktree declares it: with `record: source` the path's current record is
 /// the block the last run applied, or a newer block in the entry worktree
 /// that no run applied yet ([`crate::rules::sources::recorded_promotions`]).
@@ -178,7 +178,7 @@ mod tests {
     fn test_lineage_pending_sequence_counts_every_source_path() {
         let mut state = snapshot(promoted(1), Some(record(1, 'd')));
         state.environment.as_mut().unwrap().spec =
-            json!({"source": {"fromPromotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}});
+            json!({"source": {"promotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}});
         let hotfix = record_on("hotfix-to-prod", 2, 'e');
         state.promotions.insert(hotfix.path.clone(), hotfix);
         let lineage = lineage(&state).unwrap();
@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(lineage.pending_sequence, Some(2));
 
         // A record on a path that does not supply the source is not pending.
-        state.environment.as_mut().unwrap().spec = json!({"source": {"fromPromotion": {"path": "dev-to-prod"}}});
+        state.environment.as_mut().unwrap().spec = json!({"source": {"promotion": {"path": "dev-to-prod"}}});
         assert_eq!(super::lineage(&state).unwrap().pending_sequence, None);
     }
 

@@ -307,7 +307,7 @@ mod tests {
             "teardownWait": {"strategy": "delay", "duration": "10m"},
             "timeout": "10m",
             "env": {"passthrough": ["GIT_TOKEN"]},
-            "releases": {"web/web": {"image": {"fromUnit": {"unit": "web-image", "artifact": "image"}}}}
+            "releases": {"web/web": {"image": {"$unit": {"unit": "web-image", "artifact": "image"}}}}
         }))
         .is_ok());
         assert!(validate(&json!({"target": "dev"})).is_ok());

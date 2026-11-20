@@ -276,7 +276,7 @@ spec:
   command: [sh, -c, 'true']
   dependsOn: [{{unit: lb, attestations: [healthy]}}]
   values:
-    address: {{fromUnit: {{unit: lb, observation: ip}}}}
+    address: {{$unit: {{unit: lb, observation: ip}}}}
 {solo}"
         );
         let project = project(&[

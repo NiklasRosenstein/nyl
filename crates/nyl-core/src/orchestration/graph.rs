@@ -63,7 +63,7 @@ pub enum EdgeSource {
         #[serde(default)]
         evidence: Evidence,
     },
-    /// A `fromUnit` reference at `pointer` of the consumer's spec.
+    /// A `$unit` reference at `pointer` of the consumer's spec.
     #[serde(rename_all = "camelCase")]
     Reference {
         pointer: JsonPointer,

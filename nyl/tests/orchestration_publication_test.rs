@@ -73,7 +73,7 @@ fn published_deployment(harness: &harness::Harness) -> String {
 /// in the ownership index, and records the target's teardown settings in the
 /// stored document, where `status` reads readiness without rendering. A
 /// second reconcile finds the receipt current and publishes nothing. Catches
-/// a `fromUnit` value that reaches the render by any other path, a published
+/// a `$unit` value that reaches the render by any other path, a published
 /// index that lacks the input provenance, or readiness invented rather than
 /// read from the target.
 #[test]
@@ -460,7 +460,7 @@ fn test_reconcile_refuses_inline_targets_that_collide_across_environments() {
 }
 
 /// `nyl validate` compiles an inline target with every other target, so a
-/// spec that is no DeploymentTarget, or a `fromUnit` binding naming a unit the
+/// spec that is no DeploymentTarget, or a `$unit` binding naming a unit the
 /// environment does not select, fails before any run, naming the unit's file.
 #[test]
 fn test_validate_checks_inline_targets() {
@@ -501,7 +501,7 @@ fn test_validate_checks_inline_targets() {
 /// The same Release renders with static inputs outside orchestration: a
 /// second target of the walkthrough project binds `value` inputs and renders
 /// with `render-tree`, where the target its environment's publication owns
-/// is refused because its `fromUnit` bindings need orchestrated execution.
+/// is refused because its `$unit` bindings need orchestrated execution.
 /// Catches orchestration changing what a project without it renders.
 #[test]
 fn test_the_same_release_renders_with_static_inputs_outside_orchestration() {
@@ -510,7 +510,7 @@ fn test_the_same_release_renders_with_static_inputs_outside_orchestration() {
         .unwrap()
         .replace("\r\n", "\n");
     // Its own Cluster keeps the generated Argo CD names apart from dev's.
-    let static_target = "---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: static\nspec:\n  destination:\n    server: https://static.example.invalid\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]\n    clusterScopedKinds: [core/Namespace]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: static\nspec:\n  reconciler: {argocd: {}}\n  clusterRef: {name: static}\n  applicationGroupSelector:\n    matchLabels: {app: web}\n  publication:\n    repositoryRef: {name: platform}\n    revision: static\n    pathPrefix: static\n  releaseInputs:\n    web/web:\n      image: {value: 'registry.example.com/web@sha256:feed'}\n      databaseHost: {value: db.static.internal}\n";
+    let static_target = "---\napiVersion: k8s.nyl/v1\nkind: Cluster\nmetadata:\n  name: static\nspec:\n  destination:\n    server: https://static.example.invalid\n  kubernetes:\n    kubeVersion: 1.31.4\n    apiVersions: [v1, apps/v1, v1/Namespace, apps/v1/Deployment]\n    clusterScopedKinds: [core/Namespace]\n---\napiVersion: k8s.gitops.nyl/v1\nkind: DeploymentTarget\nmetadata:\n  name: static\nspec:\n  reconciler: {argocd: {}}\n  clusterRef: {name: static}\n  applicationGroupSelector:\n    matchLabels: {app: web}\n  publication:\n    repositoryRef: {name: platform}\n    revision: static\n    pathPrefix: static\n  releaseInputs:\n    web/web:\n      image: 'registry.example.com/web@sha256:feed'\n      databaseHost: db.static.internal\n";
     harness.world.commit_files(
         "main",
         "A target without orchestration",
@@ -547,7 +547,7 @@ fn test_the_same_release_renders_with_static_inputs_outside_orchestration() {
     let refused = render("dev", "refused");
     assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("fromUnit needs orchestrated execution"),
+        String::from_utf8_lossy(&refused.stderr).contains("$unit needs orchestrated execution"),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );

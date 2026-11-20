@@ -257,10 +257,11 @@ fn test_a_leaving_unit_requires_every_other_environment() {
     let (_, state) = broken_states(nowhere.path()).into_iter().next().unwrap();
     let cross = Cross::new();
     // dev's `lb` leaves the source; prod's `dns` no longer reads it.
-    let dns_only = scenario::cross::CROSS_UNITS.split("---\n").nth(1).unwrap().replace(
-        "fromUnit: {environment: dev, unit: lb, observation: ip}",
-        "value: static",
-    );
+    let dns_only = scenario::cross::CROSS_UNITS
+        .split("---\n")
+        .nth(1)
+        .unwrap()
+        .replace("$unit: {environment: dev, unit: lb, observation: ip}", "value: static");
     cross.shell.world.commit_files(
         "main",
         "drop lb and its consumer's reference",
@@ -292,10 +293,11 @@ spec:
 /// `dev`'s `lb` leaves the source, and `prod`'s `dns` is reconciled so that it
 /// no longer reads it.
 fn retire_lb(cross: &Cross) {
-    let dns_only = scenario::cross::CROSS_UNITS.split("---\n").nth(1).unwrap().replace(
-        "fromUnit: {environment: dev, unit: lb, observation: ip}",
-        "value: static",
-    );
+    let dns_only = scenario::cross::CROSS_UNITS
+        .split("---\n")
+        .nth(1)
+        .unwrap()
+        .replace("$unit: {environment: dev, unit: lb, observation: ip}", "value: static");
     cross.shell.world.commit_files(
         "main",
         "drop lb and its consumer's reference",

@@ -1,6 +1,6 @@
 //! Asking the units' drivers what the PromotionPath checks `nyl validate`
 //! and `nyl plan` share need from them: what the units a path's `coverage`
-//! names run as, and the declared types of the fields `fromPromotion`
+//! names run as, and the declared types of the fields `$promotion`
 //! bindings fill that the units' kinds' schemas cannot type.
 //!
 //! Contract: [PromotionPath](../../../../design/promotion.md#promotionpath),

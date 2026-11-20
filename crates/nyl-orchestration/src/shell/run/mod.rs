@@ -146,7 +146,7 @@ pub struct RunContext<'a> {
     /// confirms the removal.
     pub prompt: Option<&'a dyn OperatorPrompt>,
     /// Verifies the signature of a `record: source` block whose Environment
-    /// sets `fromPromotion.verify`; without it such a block is refused.
+    /// sets `promotion.verify`; without it such a block is refused.
     pub promotion_blocks: Option<&'a dyn nyl_core::orchestration::ports::PromotionBlockVerifier>,
 }
 
@@ -506,7 +506,7 @@ struct Prepared {
     rendered: RenderedSource,
     desired: Desired,
     order: Vec<UnitName>,
-    /// The PromotionRecords the environment's source and `fromPromotion`
+    /// The PromotionRecords the environment's source and `$promotion`
     /// bindings read: its state's, or with `record: source` the block in
     /// its source ([`crate::rules::sources::promotion_records`]).
     promotions: BTreeMap<PromotionPathName, PromotionRecord>,
@@ -535,7 +535,7 @@ struct Evidence<'e> {
     run: Option<&'e RunId>,
     produced_in_run: &'e BTreeSet<UnitName>,
     previous: &'e BTreeMap<UnitName, DesiredUnit>,
-    /// The PromotionRecords `fromPromotion` bindings read.
+    /// The PromotionRecords `$promotion` bindings read.
     promotions: &'e BTreeMap<
         nyl_core::orchestration::ids::PromotionPathName,
         nyl_core::orchestration::promotion::PromotionRecord,
@@ -620,14 +620,25 @@ impl<'r, 'a> Session<'r, 'a> {
             let environments = self.environments.borrow();
             for (consumer, unit) in &environments[environment].desired {
                 let mut referenced = BTreeSet::new();
-                if let Ok(references) =
-                    nyl_core::bindings::unit_references("", &unit.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS)
-                {
-                    for reference in references {
-                        if reference.source.environment.as_deref() == Some(self.environment().as_str()) {
-                            if let Ok(name) = UnitName::new(reference.source.unit) {
-                                referenced.insert(name);
-                            }
+                // A stored reference that does not parse could hide a
+                // consumer, so nothing leaves until it is fixed.
+                let stored = nyl_core::bindings::unit_references("", &unit.spec).map_err(|issues| {
+                    Finding::new(
+                        Code::ReferenceInvalid,
+                        format!(
+                            "the stored spec of unit {consumer} of {environment} holds references that do not parse, so its producers in {} are unknown: {}",
+                            self.environment(),
+                            issues.join("; ")
+                        ),
+                        format!(
+                            "fix the references in source and run `nyl reconcile -e {environment}`; state written by Nyl 0.7 is re-created with `nyl state init --fresh`"
+                        ),
+                    )
+                })?;
+                for reference in stored {
+                    if reference.source.environment.as_deref() == Some(self.environment().as_str()) {
+                        if let Ok(name) = UnitName::new(reference.source.unit) {
+                            referenced.insert(name);
                         }
                     }
                 }

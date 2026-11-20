@@ -107,8 +107,8 @@ spec:
   - `x-nyl-reference: {kind}`. The string must name an existing resource of
     that kind in the project catalog. This is referential integrity checked
     in stage 2, not a dependency edge.
-  - `x-nyl-accepts-references: true`. The field may hold a `fromUnit` or
-    `fromPromotion` reference object (see [stage 4](#stage-4-resolution)).
+  - `x-nyl-accepts-references: true`. The field may hold a `$unit` or
+    `$promotion` reference object (see [stage 4](#stage-4-resolution)).
     Any other field that holds a reference object is a schema error.
   - `x-nyl-validations`: CEL rules on any schema node, including
     [transition rules](#transition-rules) that compare a resource with its
@@ -454,7 +454,7 @@ spec:
   account: payments-prod                         # x-nyl-reference: {kind: AwsAccount}
   permissionSet: AdministratorAccess
   principalGroupId:
-    fromUnit: {unit: identity, output: groupIds, pointer: /payments-admins}
+    $unit: {unit: identity, output: groupIds, pointer: /payments-admins}
 ```
 
 - References in members resolve in the consuming unit's environment, through
@@ -716,7 +716,7 @@ tofu -chdir=platform/aws-accounts plan -var-file=../../out/native/variables.tfva
 - Without `-e`, `prepare` renders the unit as `nyl build` does, with no
   environment values and no state, from the worktree unless `--source`
   names a commit. A spec that uses
-  `values`, `environment`, or a `fromUnit` reference, directly or inside a
+  `values`, `environment`, or a `$unit` reference, directly or inside a
   member, fails and names `-e`.
 - Stages 0–6 are the same code as under orchestration, so the native inputs
   are byte-identical to what an orchestrated run of the same unit would pass.
@@ -963,7 +963,7 @@ instantiating it differently in some environments.
 Contract walkthroughs become scenarios under
 `nyl/tests/scenarios/walkthroughs/`. These include a member added, a member
 removed and approved, a file moved without re-execution, a blocked
-`fromUnit` inside a member, an admission failure that blocks only its
+`$unit` inside a member, an admission failure that blocks only its
 consumer, and two owners rejected.
 
 ## Rollout
@@ -1014,7 +1014,7 @@ teams/
    another folder that the collection's `paths` still match and re-run: same
    bundle digest, same execution key. Change a budget: new key.
 5. **Reference another unit.** Add `AwsAccessGrant` with a
-   `principalGroupId` that accepts references, set it with `fromUnit` to the
+   `principalGroupId` that accepts references, set it with `$unit` to the
    identity unit's output, and watch `prepare` exit 2 with the blocked
    pointer until `identity` has a current receipt.
 6. **Test.** Fixture tests run `nyl prepare --fixture-outputs` and assert on

@@ -104,7 +104,7 @@
             "null"
           ]
         },
-        "fromPromotion": {
+        "promotion": {
           "anyOf": [
             {
               "$ref": "#/$defs/PromotedSource"
@@ -667,7 +667,7 @@
     },
     "PromotionRecord": {
       "additionalProperties": false,
-      "description": "What `nyl promote` records about one promotion on one path.\n\nEach promotion replaces the path's record; Git history keeps earlier ones.\nIn an Environment's `source.fromPromotion.promoted` block it stands alone;\nin state it is a [`PromotionRecordDocument`].",
+      "description": "What `nyl promote` records about one promotion on one path.\n\nEach promotion replaces the path's record; Git history keeps earlier ones.\nIn an Environment's `source.promotion.promoted` block it stands alone;\nin state it is a [`PromotionRecordDocument`].",
       "properties": {
         "artifactsVerified": {
           "description": "Whether the artifact check ran.",
@@ -793,7 +793,7 @@
     },
     "PromotionSelect": {
       "additionalProperties": false,
-      "description": "Which field of the source a promoted value reads: the same selectors, with\nthe same JSON Pointer semantics and resolver, as `fromUnit` references and\n`nyl get`.\n\nSet exactly one of the four forms:\n`{unit, input}` reads the source unit's resolved spec;\n`{unit, output, pointer?}` a declared, non-sensitive output of its receipt;\n`{unit, artifact, kind?, pointer}` a field of an artifact its receipt lists,\nrelative to the artifact's `spec`; and `{input}` (a target source, M11)\na Release input of the target.",
+      "description": "Which field of the source a promoted value reads: the same selectors, with\nthe same JSON Pointer semantics and resolver, as `$unit` references and\n`nyl get`.\n\nSet exactly one of the four forms:\n`{unit, input}` reads the source unit's resolved spec;\n`{unit, output, pointer?}` a declared, non-sensitive output of its receipt;\n`{unit, artifact, kind?, pointer}` a field of an artifact its receipt lists,\nrelative to the artifact's `spec`; and `{input}` (a target source, M11)\na Release input of the target.",
       "properties": {
         "artifact": {
           "description": "An artifact the unit's receipt lists.",

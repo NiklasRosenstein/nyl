@@ -932,7 +932,7 @@ pub enum RecordWriteError {
     /// The Environment's file has uncommitted changes.
     Dirty { file: String },
     /// The block cannot be placed in the Environment's document, such as a
-    /// `fromPromotion` in flow style or one the Environment inherits.
+    /// `promotion` in flow style or one the Environment inherits.
     Unplaceable(String),
     /// The Environment is not declared in a file of the project, such as an
     /// instance of an EnvironmentTemplate.
@@ -1001,7 +1001,7 @@ impl std::fmt::Display for RecordWriteError {
 }
 
 /// Writes the PromotionRecord of an Environment with `record: source` into
-/// its `source.fromPromotion.promoted` block: one commit on the branch the
+/// its `source.promotion.promoted` block: one commit on the branch the
 /// entry worktree has checked out, pushed to that branch's upstream
 /// fast-forward only, never forced (decision D3 of the M6 plan).
 pub trait PromotionRecordWriter: Send + Sync {
@@ -1042,7 +1042,7 @@ impl std::fmt::Display for BlockSignatureError {
 }
 
 /// Checks who changed an Environment's `record: source` block last, for
-/// `source.fromPromotion.verify` (Contract: [Promoting an environment's
+/// `source.promotion.verify` (Contract: [Promoting an environment's
 /// source](../../../../design/promotion.md#promoting-an-environments-source)):
 /// the commit of the entry clone that last changed the block, as the entry
 /// worktree declares it, must carry a signature `git verify-commit` accepts

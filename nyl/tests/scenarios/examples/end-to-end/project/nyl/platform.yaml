@@ -53,9 +53,9 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
-      namespace: {value: web}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+      namespace: web
 ---
 # The same web Release with static inputs, in a target that no environment
 # uses: `nyl publish-tree --target static` renders it without orchestration.
@@ -86,9 +86,9 @@ spec:
     pathPrefix: static
   releaseInputs:
     web/web:
-      image: {value: 'registry.example.com/web@sha256:0000000000000000000000000000000000000000000000000000000000000000'}
-      databaseHost: {value: shop.db.internal}
-      namespace: {value: web}
+      image: 'registry.example.com/web@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+      databaseHost: shop.db.internal
+      namespace: web
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment

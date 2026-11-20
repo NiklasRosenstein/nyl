@@ -6,8 +6,8 @@
 //!   type set, optional `default` and scalar `enum`, and input names usable as
 //!   `inputs.<name>`.
 //! - [Bindings](../../../../design/release-inputs.md#bindings): keyed by
-//!   `<applicationGroup>/<release>`, each setting exactly one source. A binding
-//!   replaces the Release default whole.
+//!   `<applicationGroup>/<release>`, each a literal or a value source. A
+//!   binding replaces the Release default whole.
 //!
 //! Precedence, type checks, and aggregated issues are the shared resolver
 //! [`nyl_core::bindings`]; reading the sources, which touches files and Git, is
@@ -61,29 +61,28 @@ pub type ReleaseInputBindings = BTreeMap<String, BTreeMap<String, InputBinding>>
 pub fn validate_bindings(bindings: &ReleaseInputBindings) -> Result<()> {
     // A state path is either committed by another tool or carried by Nyl from
     // one working-tree file, so every binding naming it must agree on `carryFileFromWorktree`.
-    let mut state_paths = BTreeMap::<&str, (String, Option<&str>)>::new();
+    let mut state_paths = BTreeMap::<String, (String, Option<String>)>::new();
     for (key, inputs) in bindings {
         ReleaseKey::parse(key)?;
         for (name, binding) in inputs {
             let field = format!("spec.releaseInputs.{key:?}.{name}");
             validate_input_name(&field, name)?;
             binding.validate(&field)?;
-            let Some(source) = &binding.from_publication else {
-                continue;
-            };
-            let carry = source.carry_file_from_worktree.as_deref();
-            match state_paths.get(source.path.as_str()) {
-                Some((previous, previous_carry)) if *previous_carry != carry => {
-                    return Err(CoreError::config(format!(
-                        "{previous} and {field} both name fromPublication path {:?} but disagree on carryFileFromWorktree ({} and {}); bindings of one state path must all carry the same file or none",
+            for source in binding.publications() {
+                let carry = source.carry_file_from_worktree.clone();
+                match state_paths.get(source.path.as_str()) {
+                    Some((previous, previous_carry)) if *previous_carry != carry => {
+                        return Err(CoreError::config(format!(
+                        "{previous} and {field} both name $publication path {:?} but disagree on carryFileFromWorktree ({} and {}); bindings of one state path must all carry the same file or none",
                         source.path,
-                        previous_carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
-                        carry.map_or("none".to_owned(), |carry| format!("{carry:?}")),
+                        previous_carry.as_ref().map_or("none".to_owned(), |carry| format!("{carry:?}")),
+                        carry.as_ref().map_or("none".to_owned(), |carry| format!("{carry:?}")),
                     )));
-                }
-                Some(_) => {}
-                None => {
-                    state_paths.insert(source.path.as_str(), (field, carry));
+                    }
+                    Some(_) => {}
+                    None => {
+                        state_paths.insert(source.path.clone(), (field.clone(), carry));
+                    }
                 }
             }
         }
@@ -100,22 +99,22 @@ mod tests {
     #[test]
     fn test_validate_bindings_checks_keys_names_paths_and_pointers() {
         let cases = [
-            (json!({"web": {"image": {"value": 1}}}), "<applicationGroup>/<release>"),
-            (json!({"g/r": {"Image": {"value": 1}}}), "^[a-z][a-zA-Z0-9]*$"),
+            (json!({"web": {"image": 1}}), "<applicationGroup>/<release>"),
+            (json!({"g/r": {"Image": 1}}), "^[a-z][a-zA-Z0-9]*$"),
             (
-                json!({"g/r": {"image": {"fromFile": {"path": "../x/./y.yaml"}}}}),
+                json!({"g/r": {"image": {"$file": {"path": "../x/./y.yaml"}}}}),
                 "normalized path",
             ),
             (
-                json!({"g/r": {"image": {"fromFile": {"path": "x.yaml", "pointer": "image"}}}}),
+                json!({"g/r": {"image": {"$file": {"path": "x.yaml", "pointer": "image"}}}}),
                 "JSON Pointer",
             ),
             (
-                json!({"g/r": {"image": {"fromUnit": {"unit": "db"}}}}),
+                json!({"g/r": {"image": {"$unit": {"unit": "db"}}}}),
                 "exactly one of output, artifact, and observation",
             ),
             (
-                json!({"g/r": {"image": {"fromUnit": {"unit": "db", "output": "a", "artifact": "b"}}}}),
+                json!({"g/r": {"image": {"$unit": {"unit": "db", "output": "a", "artifact": "b"}}}}),
                 "exactly one of output, artifact, and observation",
             ),
         ];
@@ -129,8 +128,8 @@ mod tests {
     #[test]
     fn test_state_paths_agree_on_carry() {
         let agree: ReleaseInputBindings = serde_json::from_value(json!({
-            "g/a": {"image": {"fromPublication": {"path": "state.json", "pointer": "/a", "carryFileFromWorktree": "build/state.json"}}},
-            "g/b": {"image": {"fromPublication": {"path": "state.json", "pointer": "/b", "carryFileFromWorktree": "build/state.json"}}},
+            "g/a": {"image": {"$publication": {"path": "state.json", "pointer": "/a", "carryFileFromWorktree": "build/state.json"}}},
+            "g/b": {"image": {"$publication": {"path": "state.json", "pointer": "/b", "carryFileFromWorktree": "build/state.json"}}},
         }))
         .unwrap();
         validate_bindings(&agree).unwrap();
@@ -139,8 +138,8 @@ mod tests {
             json!({"path": "state.json", "carryFileFromWorktree": "other.json"}),
         ] {
             let bindings: ReleaseInputBindings = serde_json::from_value(json!({
-                "g/a": {"image": {"fromPublication": {"path": "state.json", "carryFileFromWorktree": "build/state.json"}}},
-                "g/b": {"image": {"fromPublication": other.clone()}},
+                "g/a": {"image": {"$publication": {"path": "state.json", "carryFileFromWorktree": "build/state.json"}}},
+                "g/b": {"image": {"$publication": other.clone()}},
             }))
             .unwrap();
             let error = validate_bindings(&bindings).unwrap_err().to_string();
@@ -156,7 +155,7 @@ mod tests {
         assert!(ReleaseKey::parse("platform/web/x").is_err());
     }
     #[test]
-    fn test_from_git_requires_a_repository_revision_and_full_commit() {
+    fn test_git_requires_a_repository_revision_and_full_commit() {
         let commit = "3f1c9a0000000000000000000000000000000000";
         let cases = [
             (
@@ -177,28 +176,28 @@ mod tests {
             ),
             (
                 json!({"repositoryRef": {"name": "state"}, "revision": "main", "commit": commit, "path": "../a.json"}),
-                "fromGit.path",
+                "$git.path",
             ),
         ];
         for (source, expected) in cases {
             let bindings: ReleaseInputBindings =
-                serde_json::from_value(json!({"g/r": {"image": {"fromGit": source.clone()}}})).unwrap();
+                serde_json::from_value(json!({"g/r": {"image": {"$git": source.clone()}}})).unwrap();
             let error = validate_bindings(&bindings).unwrap_err().to_string();
             assert!(error.contains(expected), "{source}: {error}");
         }
     }
     #[test]
-    fn test_from_publication_paths_stay_inside_the_prefix() {
+    fn test_publication_paths_stay_inside_the_prefix() {
         for (source, expected) in [
-            (json!({"path": "../other/state.json"}), "fromPublication.path"),
-            (json!({"path": "/state.json"}), "fromPublication.path"),
+            (json!({"path": "../other/state.json"}), "$publication.path"),
+            (json!({"path": "/state.json"}), "$publication.path"),
             (
                 json!({"path": "state.json", "carryFileFromWorktree": "build/./images.json"}),
-                "fromPublication.carryFileFromWorktree",
+                "$publication.carryFileFromWorktree",
             ),
         ] {
             let bindings: ReleaseInputBindings =
-                serde_json::from_value(json!({"g/r": {"image": {"fromPublication": source.clone()}}})).unwrap();
+                serde_json::from_value(json!({"g/r": {"image": {"$publication": source.clone()}}})).unwrap();
             let error = validate_bindings(&bindings).unwrap_err().to_string();
             assert!(error.contains(expected), "{source}: {error}");
         }

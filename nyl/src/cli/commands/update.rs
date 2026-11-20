@@ -15,7 +15,7 @@ pub struct UpdateArgs {
 #[derive(Subcommand, Debug)]
 enum UpdateCommand {
     /// Resolve mutable revisions and update the commit locks of remote
-    /// ApplicationGroup sources and `fromGit` Release input bindings.
+    /// ApplicationGroup sources and `$git` Release input bindings.
     SourceLocks(SourceLockArgs),
 }
 
@@ -23,7 +23,7 @@ enum UpdateCommand {
 struct SourceLockArgs {
     /// ApplicationGroup name. Without it and without `--target`, every lock is updated.
     group: Option<String>,
-    /// Update the `fromGit` locks of this DeploymentTarget's Release input bindings.
+    /// Update the `$git` locks of this DeploymentTarget's Release input bindings.
     #[arg(long)]
     target: Option<String>,
     /// Project directory or a path beneath it.

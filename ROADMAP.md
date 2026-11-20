@@ -240,16 +240,16 @@ Group-level defaults can be added later if repetition across targets proves to
 be a problem. Bindings are keyed by the Release's rendered
 identity, `<applicationGroup>/<release>`, because one Release name can appear in
 several groups on one target. Unknown keys, unknown input names, and duplicate
-bindings are errors. Each binding selects exactly one source:
+bindings are errors. Each binding is a literal or one value source:
 
 | Binding | Resolves from | Needs orchestration |
 | --- | --- | --- |
-| `value` | Inline static value | No |
-| `fromFile` | Project file plus JSON Pointer | No |
-| `fromGit` | GitRepository, human `revision`, locked `commit`, path, JSON Pointer | No |
-| `fromPublication` | State file in the target's own publication branch at the publication base commit | No |
-| `fromUnit` | Recorded public output, observed value, or published artifact field of a unit in the same environment | Yes (M5) |
-| `fromPromotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
+| literal | Inline static value | No |
+| `$file` | Project file plus JSON Pointer | No |
+| `$git` | GitRepository, human `revision`, locked `commit`, path, JSON Pointer | No |
+| `$publication` | State file in the target's own publication branch at the publication base commit | No |
+| `$unit` | Recorded public output, observed value, or published artifact field of a unit in the same environment | Yes (M5) |
+| `$promotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
 
 ```yaml
 apiVersion: k8s.gitops.nyl/v1
@@ -260,10 +260,9 @@ spec:
   # existing fields unchanged
   releaseInputs:
     platform/web:
-      image:
-        value: registry.example.com/web@sha256:…
+      image: registry.example.com/web@sha256:…
       databaseHost:
-        fromGit:
+        $git:
           repositoryRef: {name: platform-state}
           revision: main
           commit: 3f1c…            # refreshed by a lock-update command
@@ -271,11 +270,11 @@ spec:
           pointer: /host
 ```
 
-- `fromGit` follows the ApplicationGroup source-lock pattern: rendering reads
+- `$git` follows the ApplicationGroup source-lock pattern: rendering reads
   only the locked commit, and `nyl update source-locks` refreshes these locks
   together with ApplicationGroup locks. Every lock follows the head of its
   revision; moving a lock to what another target runs belongs to promotion.
-- `fromPublication` supports write-back workflows where an external tool commits
+- `$publication` supports write-back workflows where an external tool commits
   state to the deploy branch. `publish-tree` reads the file at the branch head it
   builds on and pushes with a compare-and-swap, so the published commit holds
   the state and the manifests rendered from it, and the index records the state
@@ -299,7 +298,7 @@ spec:
   The rendered ownership index records a digest and provenance per input in its
   existing `inputs` map, not raw values, and without a format version change;
   published trees remain reconcilable across the upgrade.
-- `fromUnit` and `fromPromotion` bindings are rejected by ordinary
+- `$unit` and `$promotion` bindings are rejected by ordinary
   `render-tree`. Only orchestrated execution may resolve them, and it passes
   them to rendering as an explicit, pinned input snapshot. Ordinary rendering
   never reads receipts implicitly, and runtime dependencies never hide inside
@@ -328,7 +327,7 @@ spec:
   source: {path: infra/database}
   backend: {key: '{{ values.stateKey }}'}
   variables:
-    vpcId: {fromUnit: {unit: network, output: vpcId}}
+    vpcId: {$unit: {unit: network, output: vpcId}}
   outputs:
     host: {type: string}
     port: {type: integer}
@@ -337,17 +336,17 @@ apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
 metadata: {name: kubernetes, labels: {tier: platform}}
 spec:
-  target: '{{ values.target }}'   # DeploymentTarget whose Release inputs use fromUnit
+  target: '{{ values.target }}'   # DeploymentTarget whose Release inputs use $unit
 ```
 
 A Kubernetes publication unit places its target into the unit's environment,
-and that target's `fromUnit` and `fromPromotion` bindings resolve there.
+and that target's `$unit` and `$promotion` bindings resolve there.
 DeploymentTarget itself stays unchanged. A target that no publication unit
 references rejects those bindings; a target referenced from two environments is
 an error. Several targets, and therefore several environments, may share one
 Cluster.
 
-- A `fromUnit` reference is a dependency edge. It resolves against the
+- A `$unit` reference is a dependency edge. It resolves against the
   producer's current receipt: the receipt must match the producer's current
   desired unit. Missing or stale evidence blocks the consumer; invalid evidence
   fails validation. Freshness is decided by the execution key alone: a
@@ -360,7 +359,7 @@ Cluster.
   desired state, receipts, public artifacts, or diagnostic transcripts.
 - Observed values are values a driver reads from the system a unit manages,
   such as a load balancer address in a published Service's status, declared
-  under `observations` and referenced with `fromUnit: {unit, observation}`.
+  under `observations` and referenced with `$unit: {unit, observation}`.
   Executing the unit does not produce them and they can change while its
   execution key stays the same, so they are observations of the current
   receipt in observed state, not receipt outputs. `reconcile` and
@@ -378,12 +377,12 @@ Cluster.
   defines how desired revisions advance within that run.
 - Artifacts are typed documents in `artifacts.gitops.nyl/v1`, such as
   `ContainerImage` and `PublishedTree`, checked against digests recorded in the
-  receipt and referenced with `fromUnit: {unit, artifact, pointer}`; large
+  receipt and referenced with `$unit: {unit, artifact, pointer}`; large
   payloads stay outside Git.
 - The Kubernetes publication unit wraps `render-tree` and `publish-tree` for one
   DeploymentTarget, because one target owns one publication tree and ownership
   index. Its desired unit contains the Release inputs only orchestration can
-  resolve (`fromUnit`, and later `fromPromotion`) as the pinned input snapshot,
+  resolve (`$unit`, and later `$promotion`) as the pinned input snapshot,
   keyed by `<applicationGroup>/<release>`, and the target's effective teardown
   settings, which the driver records when it resolves the unit; the other
   bindings resolve inside the render and enter its execution key. Its recorded
@@ -418,7 +417,7 @@ kind: Command
 metadata: {name: seed}
 spec:
   files: ["scripts/seed/**"]
-  values: {bucket: {fromUnit: {unit: storage, output: bucket}}}
+  values: {bucket: {$unit: {unit: storage, output: bucket}}}
   command: ["./scripts/seed/run.sh"]
   env:
     passthrough: [AWS_REGION]
@@ -514,7 +513,7 @@ spec:
 ```
 
 - Target consumers name the value and, optionally, the path, never the source
-  unit: `image: {fromPromotion: {value: webImage}}`.
+  unit: `image: {$promotion: {value: webImage}}`.
 - The unit of promotion is one recorded state of the source: a transition
   commit pair that ties together the source commit, the desired documents, and
   the receipts with their artifacts. Evidence covers the whole source, not
@@ -525,7 +524,7 @@ spec:
 - Evidence levels are `published` (receipts or publication commits) and
   `attested` (every required attestation passes for that state). `nyl promote`
   reads only evidence recorded beforehand, so it needs no cluster credentials.
-- An environment whose `source` is `fromPromotion` runs only source commits its
+- An environment whose `source` is `$promotion` runs only source commits its
   path's source proved; values then carry only results that must not be
   rebuilt, such as image digests. Rollback is promoting an older state.
 - Several paths may feed one environment. A supersede check refuses a
@@ -534,7 +533,7 @@ spec:
 - From M11, a DeploymentTarget can be a promotion source without being
   orchestrated, and a target outside every environment can receive
   promotions, recorded in its own source; it can also follow another target
-  through locked `fromGit` bindings, without promotion.
+  through locked `$git` bindings, without promotion.
 - Native state is never promoted; each environment keeps its own Terraform
   backend and lock.
 
@@ -556,7 +555,7 @@ and an observation that cannot establish a result records nothing rather than
 a failure. A target that declares the direct reconciler is read the same way
 through Nyl's own release state in its Cluster (M10). Attestations are recorded where the credentials exist, typically in
 CI, and decisions read the recorded evidence. Attestations are evidence for promotion
-and dependents: a `dependsOn` entry or `fromUnit` requires them with
+and dependents: a `dependsOn` entry or `$unit` requires them with
 `evidence: attested` or named `attestations`, and its consumer stays blocked
 until the producer's current receipt has them passing, with no age limit
 (`maxAttestationAge` belongs to promotion paths); drift, which `nyl detect-drift` records, is separate: it is a
@@ -674,7 +673,7 @@ coverage need an explicit caller contract before it adopts selection.
 
 `nyl.toml` may sit at the repository root or beside the configuration in
 `nyl/`, where Nyl finds it from the root. Local paths, such as ApplicationGroup
-sources, unit sources, and `fromFile`, share one resolver: relative to the
+sources, unit sources, and `$file`, share one resolver: relative to the
 `nyl.toml` directory or `/`-rooted at the Git worktree, so Releases can live
 beside `nyl/` as well as beneath it.
 
@@ -787,7 +786,7 @@ nyl delete unit web-image            # removes the declaration from source
 
 `nyl get` reads source without `-e` and an environment's state with it; `-o
 yaml` returns exact persisted documents, and `get output` and `get artifact
---pointer` return single values that resolve exactly like `fromUnit`
+--pointer` return single values that resolve exactly like `$unit`
 references, failing when those would.
 
 `nyl release` (Kubernetes release history) and `nyl delete` (source editing)

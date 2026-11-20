@@ -433,11 +433,7 @@ fn read_environment(
     // A promoted source takes its commit from the environment's records: in
     // its state, or with `record: source` the block in its source, read and
     // checked as a run reads them.
-    let promoted = entry
-        .spec
-        .source
-        .as_ref()
-        .and_then(|source| source.from_promotion.as_ref());
+    let promoted = entry.spec.source.as_ref().and_then(|source| source.promotion.as_ref());
     let promotions = if promoted.is_some() {
         let store = super::project::open_store_mode(inventory, &resolved, None, request.offline)?;
         let snapshot = store.snapshot(&resolved.location).map_err(|error| {

@@ -28,7 +28,7 @@ use publication_world::{context, context_with, deleting, desired, git, spec, Inc
 fn catalogue() -> nyl_render::config::ResourceCatalogue {
     let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
     descriptors.extend_from_slice(nyl_units::catalog::RESOURCES);
-    nyl_render::config::ResourceCatalogue::new(descriptors)
+    nyl_render::config::ResourceCatalogue(descriptors)
 }
 
 fn identity() -> CommitIdentity {

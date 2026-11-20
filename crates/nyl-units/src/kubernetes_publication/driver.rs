@@ -306,7 +306,6 @@ impl Driver for KubernetesPublicationDriver {
         if let Some(definitions) = definitions {
             root["$defs"] = definitions;
         }
-        mark_resolvable(&mut root, &["target", "teardownWait"]);
         schemars::Schema::try_from(root).expect("an object schema")
     }
 
@@ -559,19 +558,6 @@ impl Driver for KubernetesPublicationDriver {
 /// The schema of an inline target, a DeploymentTarget spec, so editors complete
 /// it, and the definitions it references, which belong at the document root
 /// where its `#/$defs/...` references resolve.
-/// Mark the spec `fields` of the schema `root` as accepting `fromValues`,
-/// which environment unit rendering resolves before the driver sees the spec.
-fn mark_resolvable(root: &mut Value, fields: &[&str]) {
-    let mut generator = schemars::generate::SchemaSettings::draft2020_12()
-        .with(|settings| settings.inline_subschemas = true)
-        .into_generator();
-    for field in fields {
-        let literal = schemars::Schema::try_from(root["properties"][*field].take()).expect("an object schema");
-        root["properties"][*field] =
-            nyl_core::bindings::resolvable_schema::<nyl_core::bindings::FromValues>(&mut generator, literal).into();
-    }
-}
-
 fn inline_target_schema() -> (Value, Option<Value>) {
     let mut inline = serde_json::to_value(schemars::schema_for!(nyl_render::resources::DeploymentTargetSpec))
         .expect("a schema serializes");

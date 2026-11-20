@@ -144,7 +144,7 @@ and a non-zero `CLICOLOR_FORCE` enable it explicitly.
 Projects can commit every remote renderer input needed by one or more targets.
 This includes RemoteManifest response bytes, packaged Helm repository and OCI
 charts, deterministic Git snapshots used by Git charts and remote
-ApplicationGroups, and the files `fromGit` Release input bindings lock.
+ApplicationGroups, and the files `$git` Release input bindings lock.
 Configure the project-wide
 policy in [`nyl.toml`](/nyl/reference/configuration/#remote-artifact-vendoring), then run:
 
@@ -161,7 +161,7 @@ contains the exact chart, Nyl can package and import it before contacting the
 origin.
 
 `nyl vendor --check` performs no network access except refreshing the
-publication branch of targets with `fromPublication` inputs, which falls back
+publication branch of targets with `$publication` inputs, which falls back
 to the cached head offline. It compiles the selected targets
 through the normal rendering pipeline, verifies every required coordinate and
 digest, reports unreferenced lock entries, and verifies the managed

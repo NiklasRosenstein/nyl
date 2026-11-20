@@ -3,7 +3,7 @@
 //! A chart with lookup enabled reads the objects of its Release as the
 //! target last published them: the files the ownership index
 //! (`<prefix>/_nyl/index.json`) lists beneath `<group output>/<release>/` at the
-//! publication base commit, the same commit `fromPublication` reads. Every
+//! publication base commit, the same commit `$publication` reads. Every
 //! command that renders the target builds its lookups here, so `render`, `diff`,
 //! `apply`, `render-tree`, and `publish-tree` agree.
 //!
@@ -75,7 +75,7 @@ impl PublicationLookup {
         let git = CachedGitBlobSource::new(None, &inventory.project_root, &inventory.project_config, cache.cloned());
         let lookup = Self::new(git, url, branch, prefix, read, cluster.spec.kubernetes.clone());
         // A base the caller already resolved for this publication is the one
-        // everything reads, so the state `fromPublication` read is the state
+        // everything reads, so the state `$publication` read is the state
         // the lookups read.
         if let Some(base) = base.filter(|base| base.is_for(url, branch, prefix)) {
             *lookup.inner.base.lock().expect("the base is not poisoned") = Some(Ok(base.clone()));
@@ -108,7 +108,7 @@ impl PublicationLookup {
 
     /// Read the publication at `base`, when it is this publication's and no lookup
     /// resolved one yet. The state a render reads from the publication, through
-    /// `fromPublication` or a lookup, is then read at one commit.
+    /// `$publication` or a lookup, is then read at one commit.
     pub fn adopt_base(&self, base: Option<&PublicationBase>) {
         let Some(base) = base.filter(|base| base.is_for(&self.inner.url, &self.inner.branch, &self.inner.prefix))
         else {
@@ -416,7 +416,7 @@ pub struct DirectLookup {
 /// the one `--application-group` names, which is decided the first time a
 /// chart's lookup needs it, never for a file that declares none. A render
 /// outside every group (`--defaults-only`) has no published Release and finds
-/// nothing. `base` is the publication base the command's `fromPublication`
+/// nothing. `base` is the publication base the command's `$publication`
 /// inputs already read, which the lookups then read too: one commit, one fetch.
 #[allow(clippy::too_many_arguments)]
 pub fn direct_lookup(

@@ -88,7 +88,7 @@ metadata:
   namespace: web
 spec:
   chart: {name: ./chart}
-  includeCrds: {fromInput: {name: crds}}
+  includeCrds: {$input: crds}
   valuesFrom:
     - file: values-base.yaml
     - input: chartValues
@@ -97,8 +97,8 @@ spec:
 ```
 
 The target's `chartValues` binding merges over `values-base.yaml`, and
-`values` merges last. See [HelmChart `valuesFrom`](/nyl/reference/value-sources/#helmchart-values-valuesfrom)
-and [HelmChart fields: `fromInput`](/nyl/reference/value-sources/#helmchart-fields-frominput)
+`values` merges last. See [HelmChart `valuesFrom`](/nyl/reference/value-sources/#helmchart-valuesfrom)
+and [`$input`](/nyl/reference/value-sources/#input)
 for the rules.
 
 ## Binding inputs on a target
@@ -117,32 +117,32 @@ spec:
   publication: {repositoryRef: {name: deploy}, revision: deploy, pathPrefix: staging}
   releaseInputs:
     platform/web:
-      image:
-        value: registry.example.com/web@sha256:4f0c…
+      image: registry.example.com/web@sha256:4f0c…
       database:
-        fromFile:
+        $file:
           path: environments/staging/database.yaml
           pointer: /database
 ```
 
-Each binding sets exactly one source:
+A binding is the input's value: a literal, such as `image` above, or a value
+source. Targets are static, so a literal is never templated; wrap a literal
+that looks like a source in `{$literal: …}`.
 
 | Source | Resolves from |
 | --- | --- |
-| `value` | An inline literal. Targets are static, so it is never templated. |
-| `fromFile` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/reference/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. The file must be visible to Git, like discovered resources: not ignored, and outside the output and vendor subtrees. |
-| `fromGit` | A YAML or JSON file of a Git repository at a locked commit, selected with `repositoryRef` or an inline `repository`. `path` is repository-relative. |
-| `fromPublication` | A state file in this target's own publication branch, relative to its path prefix, read at the commit publication builds on. With `carryFileFromWorktree`, a working-tree file of this run is rendered from and written into the publication. |
-| `fromUnit`, `fromPromotion` | Reserved for orchestration. Ordinary rendering rejects them. An environment's [`KubernetesPublication`](/nyl/orchestration/resource-guides/kubernetes-publication/) resolves `fromUnit` and renders the target with the values pinned. |
+| `$file` | A YAML or JSON file of this repository holding one document. `path` follows the [local path rule](/nyl/reference/configuration/#local-paths); `pointer` is a JSON Pointer, the whole document by default. The file must be visible to Git, like discovered resources: not ignored, and outside the output and vendor subtrees. |
+| `$git` | A YAML or JSON file of a Git repository at a locked commit, selected with `repositoryRef` or an inline `repository`. `path` is repository-relative. |
+| `$publication` | A state file in this target's own publication branch, relative to its path prefix, read at the commit publication builds on. With `carryFileFromWorktree`, a working-tree file of this run is rendered from and written into the publication. |
+| `$unit`, `$promotion` | Resolved by orchestration. Ordinary rendering rejects them. An environment's [`KubernetesPublication`](/nyl/orchestration/resource-guides/kubernetes-publication/) resolves `$unit` and renders the target with the values pinned. |
 
 [Value sources](/nyl/reference/value-sources/#release-input-bindings) lists
 each source with when it resolves and what it does when it finds no value.
 
 An inline target written in an EnvironmentTemplate's `values` can bind an input
-to a template parameter with `{value: {fromParameter: {name: crds}}}`: the
-instance's values resolve the clause first, so the binding holds the
+to a template parameter with `{$parameter: crds}`: the
+instance's values resolve the source first, so the binding holds the
 parameter's typed value, such as a boolean. See
-[`fromParameter`](/nyl/reference/value-sources/#template-parameters-fromparameter).
+[`$parameter`](/nyl/reference/value-sources/#parameter).
 
 The effective value is the target binding if there is one, otherwise the
 Release default. A binding replaces the value whole; unlike `values`, inputs
@@ -165,7 +165,7 @@ file paths.
 
 ## Locked Git state
 
-`fromGit` follows the ApplicationGroup source-lock pattern. `revision` is the
+`$git` follows the ApplicationGroup source-lock pattern. `revision` is the
 human-readable branch or tag; `commit` is the full 40-character lowercase
 commit ID rendering reads. Rendering never resolves `revision`. A commit missing from the local Git cache
 is fetched by ID; offline rendering fails with a message naming the lock.
@@ -177,7 +177,7 @@ snapshot.
 releaseInputs:
   platform/web:
     tier:
-      fromGit:
+      $git:
         repositoryRef: {name: platform-state}
         revision: main
         commit: 3f1c9a…        # moved by nyl update source-locks
@@ -190,13 +190,13 @@ source locks, so CI has one `--check` gate for every Git lock. `--target
 production` selects one target's locks; filters choose which locks move,
 never where. Every lock moves to the head of its revision.
 
-A target should not `fromGit`-lock a file in its own publication: each of its
+A target should not `$git`-lock a file in its own publication: each of its
 publications moves the branch head, so the lock is stale again right after.
-Read the target's own state with `fromPublication` instead.
+Read the target's own state with `$publication` instead.
 
 ## Publication state
 
-`fromPublication` serves write-back workflows: a tool such as an image build
+`$publication` serves write-back workflows: a tool such as an image build
 commits a state file to the deploy branch, and Nyl renders manifests from it
 into the same branch.
 
@@ -204,7 +204,7 @@ into the same branch.
 releaseInputs:
   platform/web:
     image:
-      fromPublication:
+      $publication:
         path: state/images.json    # relative to the target's pathPrefix
         pointer: /web
 ```
@@ -224,7 +224,7 @@ releaseInputs:
 With `carryFileFromWorktree`, the state file comes from this run's working tree instead:
 
 ```yaml
-      fromPublication:
+      $publication:
         path: state/images.json
         pointer: /web
         carryFileFromWorktree: build/images.json   # untracked output of this CI run
@@ -284,9 +284,9 @@ settles it alone instead of taking it from the compiled target; see
 ## Provenance
 
 Resolved inputs are part of the render-cache key. The ownership index records
-each `fromFile` file under its path, each effective input as
+each `$file` file under its path, each effective input as
 `@input/<group>/<release>/<input>` with the SHA-256 digest of its canonical
-JSON value (RFC 8785, with exact digits for integers beyond ±(2^53 - 1)), each `fromGit` file as `@git/<url>@<commit>/<path>` with the
+JSON value (RFC 8785, with exact digits for integers beyond ±(2^53 - 1)), each `$git` file as `@git/<url>@<commit>/<path>` with the
 digest of its bytes, and each publication state file as `@publication/<path>`
 (read from the base commit) or `@carried/<path>` (from a carry file). Keys under `@input/` and `@git/` are reserved for these
 entries; a project file whose key equals one fails the render instead of being

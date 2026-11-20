@@ -20,7 +20,7 @@ spec:
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
     # dev's own network, or the one networkFrom names (a preview reads dev's)
-    vpc_id: {fromUnit: {unit: network, output: vpcId, environment: {fromValues: {pointer: /networkFrom, optional: true}}}}
+    vpc_id: {$unit: {unit: network, output: vpcId, environment: {$environment: {pointer: /networkFrom, optional: true}}}}
   outputs:
     connection: {type: object}
   timeout: 60m
@@ -44,8 +44,8 @@ metadata:
   name: kubernetes
   labels: {dev: 'true', preview: 'true'}
 spec:
-  target: {fromValues: {pointer: /target}}   # dev, or the preview template's inline target
-  teardownWait: {fromValues: {pointer: /teardownWait, default: {strategy: manual}}}
+  target: {$environment: /target}   # dev, or the preview template's inline target
+  teardownWait: {$environment: {pointer: /teardownWait, default: {strategy: manual}}}
   timeout: 10m
 ---
 apiVersion: units.gitops.nyl/v1

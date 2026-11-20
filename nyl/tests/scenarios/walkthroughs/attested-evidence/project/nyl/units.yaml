@@ -1,7 +1,7 @@
 # `service` attests `healthy` when `nyl attest` runs its `attest` step, which
 # reads the result from outside the project. `smoke` runs only against a
 # healthy service (dependsOn), and `dashboard` reads its endpoint only from an
-# attested one (fromUnit).
+# attested one ($unit).
 apiVersion: units.gitops.nyl/v1
 kind: Command
 metadata:
@@ -34,4 +34,4 @@ metadata:
 spec:
   command: [sh, -c, 'true']
   values:
-    endpoint: {fromUnit: {unit: service, output: endpoint, evidence: attested}}
+    endpoint: {$unit: {unit: service, output: endpoint, evidence: attested}}

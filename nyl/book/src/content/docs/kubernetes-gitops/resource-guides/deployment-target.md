@@ -84,9 +84,9 @@ published trees and their ownership are checked against the new declaration firs
 ## Release inputs
 
 `spec.releaseInputs` binds the typed inputs of the Releases the target renders,
-keyed by `<applicationGroup>/<release>`. Every binding sets exactly one source:
-`value`, `fromFile`, `fromGit`, or `fromPublication`; `fromUnit` and
-`fromPromotion` are reserved for orchestration and rejected here. Nyl resolves
+keyed by `<applicationGroup>/<release>`. Every binding is a literal, or a value source:
+`$file`, `$git`, or `$publication`; `$unit` and
+`$promotion` are resolved by orchestration and rejected here. Nyl resolves
 and checks every binding of the target before rendering, and reports all
 problems together; bindings of a selected but disabled ApplicationGroup are
 ignored. `target.spec.releaseInputs` is not part of the template context. See

@@ -1,7 +1,7 @@
 //! The real `KubernetesPublication` driver against the shared publication
 //! world: the behaviors every publication kind has (`conformance`), and what
 //! only the real driver does: record the target's effective teardown
-//! settings at resolution, pin resolved `fromUnit` Release inputs into the
+//! settings at resolution, pin resolved `$unit` Release inputs into the
 //! render and the ownership index, detect drift, and reject what it cannot
 //! do yet.
 //!
@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 fn catalogue() -> nyl_render::config::ResourceCatalogue {
     let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
     descriptors.extend_from_slice(nyl_units::catalog::RESOURCES);
-    nyl_render::config::ResourceCatalogue::new(descriptors)
+    nyl_render::config::ResourceCatalogue(descriptors)
 }
 
 fn real() -> KubernetesPublicationDriver {
@@ -214,7 +214,7 @@ fn test_recorded_teardown_settings_follow_the_target_and_its_key() {
     assert_ne!(before.execution_key, after.execution_key);
 }
 
-/// The resolved `fromUnit` bindings: an artifact value (`image`, from a
+/// The resolved `$unit` bindings: an artifact value (`image`, from a
 /// `ContainerImage`) and an output value (`databaseHost`).
 fn inputs_digest(world: &World) -> BTreeMap<String, String> {
     let index = git(&world.bare(), &["show", "deploy:dev/_nyl/index.json"]);
@@ -227,7 +227,7 @@ fn inputs_digest(world: &World) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Catches a resolved `fromUnit` value (artifact or output form) missing
+/// Catches a resolved `$unit` value (artifact or output form) missing
 /// from the render, or from the published ownership index's provenance,
 /// where `@input/<group>/<release>/<input>` records the digest of each
 /// canonical value.
@@ -652,7 +652,7 @@ fn inline_spec() -> Value {
             "applicationGroupSelector": {"matchLabels": {"app": "web"}},
             "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "preview"},
             "values": {"hostname": "preview.example.com"},
-            // What resolving the unit leaves of the `fromUnit` bindings: their values.
+            // What resolving the unit leaves of the `$unit` bindings: their values.
             "releaseInputs": {"web/web": {
                 "image": "registry.invalid:5000/web@sha256:0123",
                 "databaseHost": "db.vpc-walkthrough.internal",
@@ -1296,23 +1296,13 @@ fn test_units_claim_their_target_as_an_ownership_scope() {
 #[test]
 fn test_the_unit_schema_types_an_inline_target_as_a_deployment_target_spec() {
     let schema = serde_json::to_value(KubernetesPublicationDriver::new(catalogue()).spec_schema()).unwrap();
-    let inline = &schema["properties"]["target"]["anyOf"][0]["oneOf"][1]["properties"]["inline"];
+    let inline = &schema["properties"]["target"]["oneOf"][1]["properties"]["inline"];
     assert!(inline["properties"]["reconciler"].is_object(), "{inline}");
     assert!(
         inline["required"].as_array().unwrap().contains(&json!("reconciler")),
         "{inline}"
     );
     assert!(schema["$defs"]["TargetReconciler"].is_object(), "{schema}");
-    // `target` and `teardownWait` accept `fromValues`, and nothing else does.
-    let resolvable =
-        nyl_core::bindings::resolvable_fields(&KubernetesPublicationDriver::new(catalogue()).spec_schema());
-    assert_eq!(
-        resolvable
-            .iter()
-            .map(|field| (field.pointer.as_str(), field.kind.as_str()))
-            .collect::<Vec<_>>(),
-        [("/target", "fromValues"), ("/teardownWait", "fromValues")]
-    );
 }
 
 /// The deployments a PromotionPath's `coverage` may name for the unit: each
@@ -1341,8 +1331,8 @@ fn test_deployments_are_the_targets_expected_deployments() {
         "target": "dev",
         "observe": {},
         "releases": {"web/web": {
-            "image": {"fromUnit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
-            "databaseHost": {"fromUnit": {"unit": "database", "output": "host"}},
+            "image": {"$unit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
+            "databaseHost": {"$unit": {"unit": "database", "output": "host"}},
         }},
     });
     let listed = driver.deployments(&ctx, &rendered).unwrap().unwrap();
@@ -1393,8 +1383,8 @@ fn test_bound_field_types_are_the_declared_release_input_types() {
     let rendered = json!({
         "target": "dev",
         "releases": {"web/web": {
-            "image": {"fromPromotion": {"value": "webImage"}},
-            "ghost": {"fromPromotion": {"value": "ghost"}},
+            "image": {"$promotion": {"value": "webImage"}},
+            "ghost": {"$promotion": {"value": "ghost"}},
         }},
     });
     let pointers = [

@@ -21,7 +21,7 @@ pub struct CommandSpec {
     /// Files, as local-path globs, whose content enters the execution key. Other files may be read but never trigger re-execution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
-    /// Values the command reads from `NYL_INPUTS`; references such as `fromUnit` may appear at any depth.
+    /// Values the command reads from `NYL_INPUTS`; references such as `$unit` may appear at any depth.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub values: serde_json::Value,
     /// Argument vector of the reconcile step, executed without a shell. A relative first element is resolved against `workingDir`.
@@ -127,7 +127,7 @@ mod tests {
     fn test_command_accepts_the_contract_example() {
         let spec = command(json!({
             "files": ["../scripts/seed/**"],
-            "values": {"bucket": {"fromUnit": {"unit": "storage", "output": "bucket"}}},
+            "values": {"bucket": {"$unit": {"unit": "storage", "output": "bucket"}}},
             "command": ["./run.sh"],
             "detectDrift": ["./drift.sh"],
             "attest": ["./smoke.sh"],

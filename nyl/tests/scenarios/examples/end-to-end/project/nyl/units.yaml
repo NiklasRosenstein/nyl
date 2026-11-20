@@ -28,8 +28,8 @@ metadata:
   name: kubernetes
   labels: {stage: dev, preview: 'true'}
 spec:
-  target: {fromValues: {pointer: /target}}   # dev, or the preview template's inline target
+  target: {$environment: /target}   # dev, or the preview template's inline target
   observe: {}
-  teardownWait: {fromValues: {pointer: /teardownWait}}
+  teardownWait: {$environment: /teardownWait}
   env: {passthrough: [KUBECONFIG]}
   timeout: 10m

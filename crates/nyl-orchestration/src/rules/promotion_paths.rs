@@ -20,7 +20,7 @@
 //!   output the unit does not declare or marks `sensitive`.
 //! - [`Code::PromoteValueType`]: the type a selector reads does not fit a
 //!   binding that reads the value.
-//! - [`Code::PromoteBindingUnknown`]: a `fromPromotion` binding names a path or
+//! - [`Code::PromoteBindingUnknown`]: a `$promotion` binding names a path or
 //!   a value no PromotionPath declares.
 //! - [`Code::AttestationUndeclared`]: the path requires an attestation its scope
 //!   does not declare.
@@ -51,7 +51,7 @@
 //! rendered literal, a declared output's type, the kind's schema at the
 //! pointer, or the schema the producing kind declares for an artifact,
 //! [`Driver::artifact_schema`]) against what the reading place accepts (the
-//! kind's schema at the field a unit's `fromPromotion` binding replaces, or,
+//! kind's schema at the field a unit's `$promotion` binding replaces, or,
 //! where the schema cannot type it, the type the unit's driver reads from
 //! what declares the field, [`Driver::bound_field_types`], such as a Release
 //! input's declaration). An unknown side fits anything.
@@ -126,10 +126,15 @@ impl From<nyl_core::bindings::InputType> for ValueType {
 }
 
 fn is_reference(fields: &serde_json::Map<String, Value>) -> bool {
-    fields.len() == 1 && (fields.contains_key("fromUnit") || fields.contains_key("fromPromotion"))
+    matches!(
+        nyl_core::bindings::clause_key(fields),
+        Ok(Some(
+            nyl_core::bindings::Source::Unit | nyl_core::bindings::Source::Promotion
+        ))
+    )
 }
 
-/// A place that reads a promoted value with `fromPromotion`.
+/// A place that reads a promoted value with `$promotion`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueReader {
     /// Where the binding is, for messages.
@@ -652,10 +657,10 @@ fn check_coverage(
             findings.push(Finding::new(
                 Code::PromoteCoverageIneffective,
                 format!(
-                    "PromotionPath {name} sets coverage.{unit}.groups, but Environment {to} does not take its source from the path (its `source.fromPromotion` does not name {name}), so the path promotes only values, and each value is judged for the deployment that consumes it, whatever its group"
+                    "PromotionPath {name} sets coverage.{unit}.groups, but Environment {to} does not take its source from the path (its `source.promotion` does not name {name}), so the path promotes only values, and each value is judged for the deployment that consumes it, whatever its group"
                 ),
                 format!(
-                    "remove coverage.{unit}.groups and list a deployment to leave out of a value's judgement in coverage.{unit}.exclude, or make the path promote {to}'s source with `source: {{fromPromotion: {{path: {name}}}}}` on Environment {to}"
+                    "remove coverage.{unit}.groups and list a deployment to leave out of a value's judgement in coverage.{unit}.exclude, or make the path promote {to}'s source with `source: {{promotion: {{path: {name}}}}}` on Environment {to}"
                 ),
             ));
         }
@@ -862,13 +867,13 @@ fn check_reader(
     )]
 }
 
-/// The paths an environment's `source.fromPromotion` names, if its source is promoted.
+/// The paths an environment's `source.promotion` names, if its source is promoted.
 fn source_paths(source: &RenderedSource) -> Option<Vec<String>> {
-    let promoted = source.environment.spec.source.as_ref()?.from_promotion.as_ref()?;
+    let promoted = source.environment.spec.source.as_ref()?.promotion.as_ref()?;
     Some(promoted.path.iter().chain(&promoted.paths).cloned().collect())
 }
 
-/// Whether every `fromPromotion` binding can be supplied: Contract:
+/// Whether every `$promotion` binding can be supplied: Contract:
 /// [Several paths into one environment](../../../../design/promotion.md#several-paths-into-one-environment).
 ///
 /// - A binding that names a `path` reads only that path, which must exist,
@@ -958,7 +963,7 @@ pub fn check_bindings(
     findings
 }
 
-/// The paths a promoted `source.fromPromotion` names: each must exist and
+/// The paths a promoted `source.promotion` names: each must exist and
 /// promote into the environment whose source it is.
 pub fn check_sources(
     paths: &[PromotionPath],
@@ -984,9 +989,7 @@ pub fn check_sources(
             findings.push(Finding::new(
                 Code::PromoteBindingUnknown,
                 message,
-                format!(
-                    "name PromotionPaths whose `to` is {environment} in `source.fromPromotion`, or declare the path"
-                ),
+                format!("name PromotionPaths whose `to` is {environment} in `source.promotion`, or declare the path"),
             ));
         }
     }
@@ -1001,7 +1004,7 @@ pub fn check_sources(
 /// recorded state ([`super::promotion::supersede::value_commits`]), over the
 /// source environment's rendered units: an artifact or output has the
 /// producing unit's Git source fields, an input the field that holds it or
-/// the producer a `fromUnit` reference at or above it names. A value only one
+/// the producer a `$unit` reference at or above it names. A value only one
 /// path carries is never compared, so it is not listed.
 pub fn unchecked(
     paths: &[PromotionPath],
@@ -1105,7 +1108,7 @@ fn cited_producer(spec: Option<&Value>, pointer: &str) -> Option<Cited> {
             continue;
         };
         if is_reference(fields) {
-            let reference = fields.get("fromUnit");
+            let reference = fields.get(nyl_core::bindings::Source::Unit.key());
             cited = Some(
                 reference
                     .filter(|reference| reference.get("environment").is_none())
@@ -1119,7 +1122,7 @@ fn cited_producer(spec: Option<&Value>, pointer: &str) -> Option<Cited> {
     cited
 }
 
-/// The `fromPromotion` bindings in the specs of each environment's selected
+/// The `$promotion` bindings in the specs of each environment's selected
 /// units, with the type each place accepts where the unit's kind schema says.
 pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers: &DriverSet) -> Vec<ValueReader> {
     let mut readers = Vec::new();
@@ -1145,7 +1148,7 @@ pub fn unit_readers(sources: &BTreeMap<EnvironmentName, RenderedSource>, drivers
     readers
 }
 
-/// The `fromPromotion` bindings of a unit's spec, by JSON Pointer, as
+/// The `$promotion` bindings of a unit's spec, by JSON Pointer, as
 /// readers find them: `nyl get promotions` lists the record each reads.
 pub fn bindings_in(spec: &Value) -> Vec<(String, PromotionInputSource)> {
     let mut found = Vec::new();
@@ -1155,25 +1158,21 @@ pub fn bindings_in(spec: &Value) -> Vec<(String, PromotionInputSource)> {
     found
 }
 
-/// Every object of `value` whose only field is a valid `fromPromotion`.
+/// Every `$promotion` source of a rendered unit spec, through the one walker.
+/// A spec whose sources do not parse yields none here: the dependency graph
+/// reports it ([`super::graph`]), and the unit does not run.
 fn walk(value: &Value, pointer: &str, found: &mut dyn FnMut(&str, PromotionInputSource)) {
-    match value {
-        Value::Object(fields) if fields.len() == 1 && fields.contains_key("fromPromotion") => {
-            if let Ok(binding) = serde_json::from_value::<PromotionInputSource>(fields["fromPromotion"].clone()) {
-                found(pointer, binding);
-            }
+    let clauses = nyl_core::bindings::find_clauses(
+        "spec",
+        pointer,
+        value,
+        nyl_core::bindings::Context::UnitExecution.into(),
+    )
+    .unwrap_or_default();
+    for clause in clauses {
+        if let nyl_core::bindings::Clause::Promotion(binding) = clause.clause {
+            found(&clause.pointer, binding);
         }
-        Value::Object(fields) => {
-            for (key, child) in fields {
-                walk(child, &nyl_core::json_pointer::child(pointer, key), found);
-            }
-        }
-        Value::Array(items) => {
-            for (index, child) in items.iter().enumerate() {
-                walk(child, &format!("{pointer}/{index}"), found);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -1313,7 +1312,7 @@ fn types_of(root: &Value, node: &Value) -> Vec<ValueType> {
         let is_reference_object = branch
             .get("properties")
             .and_then(Value::as_object)
-            .is_some_and(|properties| properties.contains_key("fromUnit") || properties.contains_key("fromPromotion"));
+            .is_some_and(|properties| properties.contains_key("$unit") || properties.contains_key("$promotion"));
         if is_reference_object {
             continue;
         }

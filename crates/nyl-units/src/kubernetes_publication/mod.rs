@@ -19,7 +19,7 @@
 //!   server). [`observe`] is the driver's use of them, for `nyl attest` and
 //!   the `observe` teardown wait. [`running`] says, for promotion, what
 //!   those attestations show each deployment runs, and [`bound_types`] the
-//!   declared types of the Release inputs its `fromPromotion` bindings fill.
+//!   declared types of the Release inputs its `$promotion` bindings fill.
 //! - [`observed_values`] reads a field of a rendered resource from the
 //!   workload Cluster for the unit's observed values, once the Application
 //!   that owns the resource runs the current publication ([`workload`] reads

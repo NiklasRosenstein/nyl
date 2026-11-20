@@ -5,7 +5,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use nyl_core::bindings::{FromInput, Resolvable};
 use nyl_core::constants::API_VERSION;
 
 /// Reference to a Helm chart
@@ -189,10 +188,9 @@ pub struct HelmChartSpec {
     pub values: serde_json::Value,
 
     /// Whether to include CRDs from the chart's crds/ directory in the rendered output.
-    /// Defaults to true when unset. In a Release bundle, accepts `fromInput` to read a
-    /// boolean Release input.
+    /// Defaults to true when unset. In a Release bundle, `{$input: name}` reads it from a
+    /// Release input.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "includeCrds")]
-    #[schemars(with = "Resolvable<Option<bool>, FromInput>")]
     pub include_crds: Option<bool>,
 
     /// Lets the chart's Helm `lookup` read the objects of the Release it belongs
@@ -212,9 +210,8 @@ pub struct HelmChartSpec {
     /// version and API versions describe that API, plus the API versions of
     /// CustomResourceDefinitions the chart ships in `crds/`.
     ///
-    /// In a Release bundle, accepts `fromInput` to read a boolean Release input.
+    /// In a Release bundle, `{$input: name}` reads it from a Release input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Resolvable<Option<LookupSetting>, FromInput>")]
     pub lookup: Option<LookupSetting>,
 }
 

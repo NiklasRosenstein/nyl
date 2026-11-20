@@ -20,7 +20,7 @@ pub struct ValidateArgs {
     #[arg(short, long)]
     pub strict: bool,
 
-    /// Resolve Git sources from cached refs and read fromPublication state at the cached publication branch head; never use the network.
+    /// Resolve Git sources from cached refs and read $publication state at the cached publication branch head; never use the network.
     #[arg(long)]
     pub offline: bool,
 }
@@ -271,7 +271,7 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory, o
 /// Argo CD names across them.
 ///
 /// A target an environment's publication unit places compiles with
-/// placeholders for the bindings orchestration resolves, and its `fromUnit`
+/// placeholders for the bindings orchestration resolves, and its `$unit`
 /// references are checked against that environment's units instead. Other
 /// targets compile as `render-tree` does, so those bindings stay rejected.
 /// `offline` compiles as `render-tree --offline` does.
@@ -286,7 +286,7 @@ async fn validate_targets(declared: &nyl_render::gitops::GitOpsInventory, offlin
         .filter(|resource| resource.identity.kind == nyl_render::resources::GitOpsResourceKind::DeploymentTarget)
         .map(|resource| resource.identity.name.clone())
         .collect::<Vec<_>>();
-    // Like `vendor --check`, validation reads fromPublication state at
+    // Like `vendor --check`, validation reads $publication state at
     // the refreshed branch head and falls back to the cached head, so
     // it also works without a network; `--offline` never refreshes.
     let options = nyl_render::gitops::TreeRenderOptions {

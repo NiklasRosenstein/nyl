@@ -1,6 +1,6 @@
 # Release inputs and bindings
 
-**Status:** implemented in M2; `fromUnit` joined in M5, and `fromPromotion` follows in M6. See [ROADMAP.md](../ROADMAP.md).
+**Status:** implemented in M2; `$unit` joined in M5, and `$promotion` follows in M6. See [ROADMAP.md](../ROADMAP.md).
 
 This contract lets a Release declare typed inputs and a DeploymentTarget bind
 them. Bindings in M2 resolve without orchestration: from inline values, from
@@ -8,8 +8,8 @@ project files, from locked Git state, or from state files in the target's own
 publication branch, either committed by another tool or carried from the
 working tree by `publish-tree`. The orchestration-only binding kinds
 were reserved here so that M5 and M6 could add them without changing the schema
-shape: `fromUnit` resolves in orchestrated environments since M5, and
-`fromPromotion` is reserved for M6.
+shape: `$unit` resolves in orchestrated environments since M5, and
+`$promotion` is reserved for M6.
 
 ## Compatibility
 
@@ -134,13 +134,12 @@ spec:
   publication: {…}
   releaseInputs:
     platform/web:                    # <ApplicationGroup>/<Release>
-      image:
-        value: registry.example.com/web@sha256:4f0c…
+      image: registry.example.com/web@sha256:4f0c…
       database:
-        fromFile:
+        $file:
           path: environments/staging/database.yaml
       tier:
-        fromGit:
+        $git:
           repositoryRef: {name: platform-state}
           revision: main
           commit: 3f1c9a…            # 40-hex lock
@@ -171,18 +170,19 @@ so every effective value comes from exactly one traceable source.
 
 ### Binding kinds
 
-Each binding sets exactly one of these fields:
+A binding is a literal or one value source (an object whose only key is the
+source, see [Declarative value sources](declarative-value-sources.md)):
 
-| Field | M2 | Resolves from |
+| Binding | M2 | Resolves from |
 | --- | --- | --- |
-| `value` | Yes | Inline literal. DeploymentTargets are static, so this is never templated; the inline targets of orchestration's `KubernetesPublication` units are the one exception, rendered per environment |
-| `fromFile` | Yes | YAML or JSON file of this repository under the local path rule; `pointer` defaults to `""` |
-| `fromGit` | Yes | A file at a locked commit; `pointer` defaults to `""` |
-| `fromPublication` | Yes | A file in the target's publication branch at the publication base commit; `pointer` defaults to `""` |
-| `fromUnit` | Orchestration (M5) | A recorded unit output, artifact field, or observed value in an orchestrated environment |
-| `fromPromotion` | Reserved | A value recorded through a PromotionPath (M6) |
+| a literal | Yes | Inline literal. DeploymentTargets are static, so this is never templated; the inline targets of orchestration's `KubernetesPublication` units are the one exception, rendered per environment |
+| `$file` | Yes | YAML or JSON file of this repository under the local path rule; `pointer` defaults to `""` |
+| `$git` | Yes | A file at a locked commit; `pointer` defaults to `""` |
+| `$publication` | Yes | A file in the target's publication branch at the publication base commit; `pointer` defaults to `""` |
+| `$unit` | Orchestration (M5) | A recorded unit output, artifact field, or observed value in an orchestrated environment |
+| `$promotion` | Reserved | A value recorded through a PromotionPath (M6) |
 
-`fromFile`:
+`$file`:
 
 - The path follows the local path rule of the
   [configuration](../nyl/book/src/content/docs/reference/configuration.md#local-paths):
@@ -196,7 +196,7 @@ Each binding sets exactly one of these fields:
   recorder and the ownership index under its path.
 - A file containing several YAML documents is rejected.
 
-`fromGit`:
+`$git`:
 
 - Selects a repository with `repositoryRef` (a `gitops.nyl/v1` GitRepository)
   or inline `repository`, the same pair ApplicationGroup sources accept.
@@ -210,13 +210,13 @@ Each binding sets exactly one of these fields:
   locked `(repository, commit, path)` as one `git-blob` artifact, `nyl vendor
   --check` reports a lock without one, and mode `required` never reads the file
   from the network. After `nyl update source-locks` moves a lock, `nyl vendor`
-  captures the new commit and `--prune` removes the old file. `fromPublication`
+  captures the new commit and `--prune` removes the old file. `$publication`
   state is never vendored; see its Vendoring rule.
-- `nyl update source-locks` refreshes `fromGit` locks together with
+- `nyl update source-locks` refreshes `$git` locks together with
   ApplicationGroup source locks, so CI has one `--check` gate for every Git
   lock. A new `--target` filter selects one DeploymentTarget, alongside the
   existing ApplicationGroup name argument.
-- One target can hold many `fromGit` locks, and several bindings often lock the
+- One target can hold many `$git` locks, and several bindings often lock the
   same repository at the same commit. Every lock moves to the head of its
   revision, so the result never depends on which other locks exist or are
   selected. The updater fetches each repository once and resolves each
@@ -234,9 +234,9 @@ Each binding sets exactly one of these fields:
   target runs, or only once it is healthy, is promotion (see
   [Promoting into a target](promotion.md#promoting-into-a-target)). A target that locks a
   file in its own publication finds the lock stale after each of its
-  publications; it reads its own state with `fromPublication`.
+  publications; it reads its own state with `$publication`.
 
-`fromPublication`:
+`$publication`:
 
 This binding covers write-back workflows: a tool outside Nyl, such as an image
 build job, commits a state file to the deploy branch, and Nyl renders manifests
@@ -246,7 +246,7 @@ from it into the same branch.
 releaseInputs:
   platform/web:
     image:
-      fromPublication:
+      $publication:
         path: state/web.json
         pointer: /image
 ```
@@ -297,9 +297,9 @@ releaseInputs:
   the publication branch, and Argo CD must be pointed at the new prefix.
 - **Scope.** Only the target's own prefix on its own publication branch can be
   read. Another target's prefix or branch, or another repository, uses
-  `fromGit`.
+  `$git`.
 - **Review.** State changes arrive without a source-repository review. Use
-  `fromGit` locks or promotion where review is required.
+  `$git` locks or promotion where review is required.
 - **Concurrent writers.** Other writers must also push with a compare-and-swap.
   Nyl preserves unowned files but cannot merge a concurrent state change into
   its own commit.
@@ -325,7 +325,7 @@ derived from it:
 releaseInputs:
   platform/web:
     image:
-      fromPublication:
+      $publication:
         path: state/web.json       # location in the publication branch
         pointer: /image
         carryFileFromWorktree: build/web.json      # optional working-tree file from this run
@@ -356,7 +356,7 @@ releaseInputs:
   Kubernetes resources. The placement rule otherwise applies unchanged: the
   path lies outside every Argo CD-synced directory.
 - **Working-tree rules.** `carryFileFromWorktree` is a normalized project-relative path that must
-  not be tracked by Git; a tracked file is source and uses `fromFile`. It
+  not be tracked by Git; a tracked file is source and uses `$file`. It
   should normally be ignored through `.gitignore`. Declared `carryFileFromWorktree` paths are
   excluded from the source dirty check, and the clean-`HEAD` verification
   render receives the same carried bytes, so a carried file never forces
@@ -372,12 +372,12 @@ releaseInputs:
 **Promoting published state.** A carried or committed state file in one
 target's publication branch can feed another target:
 
-- Without orchestration, the other target can bind it with `fromGit`, locked
+- Without orchestration, the other target can bind it with `$git`, locked
   to a commit of that branch. `nyl update source-locks --target <name>` moves
   the lock to the branch head, and the pull request that commits it is the
   review. The targets may share a publication branch under different prefixes
   or publish to different branches. A shared branch cannot be followed with
-  `fromPublication`, because the state path lies in the source target's
+  `$publication`, because the state path lies in the source target's
   prefix. The lock follows the branch, not what the source target runs or
   whether it is healthy.
 - Promoting what the source target runs, gated on its health, is a
@@ -394,7 +394,7 @@ by lock.
 releaseInputs:
   platform/web:
     image:
-      fromPublication:
+      $publication:
         path: state/images.json    # relative to the prefix: dev/state/images.json
         pointer: /web
         carryFileFromWorktree: build/images.json
@@ -403,21 +403,21 @@ releaseInputs:
 releaseInputs:
   platform/web:
     image:
-      fromGit:
+      $git:
         repository: {repoURL: https://git.example.com/deploy.git}
         revision: deploy/dev
         commit: 9c1e…              # moved by `nyl update source-locks --target production`
-        path: dev/state/images.json  # fromGit paths are repository-relative
+        path: dev/state/images.json  # $git paths are repository-relative
         pointer: /web
 ```
 
-`fromUnit` and `fromPromotion`:
+`$unit` and `$promotion`:
 
 - Their shapes are defined with the orchestration contract.
 - `render-tree`, `publish-tree`, `diff-tree`, and direct commands reject
-  `fromUnit`, and `fromPromotion` on a target inside an environment, with a
+  `$unit`, and `$promotion` on a target inside an environment, with a
   message naming the binding and saying it needs orchestrated execution. A
-  target outside every environment resolves `fromPromotion` from its own
+  target outside every environment resolves `$promotion` from its own
   `spec.promotions` (M6; see
   [Promoting into a target](promotion.md#promoting-into-a-target)).
 - Orchestrated execution passes their resolved values to rendering as an
@@ -446,7 +446,7 @@ effective input = --input / --inputs override, if present
 - `--input <name>=<json>` sets one input; `--inputs <file>` reads a YAML or JSON
   object of inputs. Individual `--input` flags win over `--inputs`. Overrides
   are validated like bindings and recorded as provenance.
-- `fromGit` resolves at its lock. `fromPublication` fetches the publication
+- `$git` resolves at its lock. `$publication` fetches the publication
   branch, reads its head (or the carried file when present), and reports the
   commit it used; `nyl render --offline` reads the cached head, as
   `render-tree --offline` does.
@@ -466,7 +466,7 @@ the same way as a local group: no opt-in field exists.
 
 - The binding key is the admission. Values reach a remote Release only because
   the platform names that `<group>/<release>` and input on its own target.
-- `fromFile`, `fromGit`, and `fromPublication` resolve centrally. The remote
+- `$file`, `$git`, and `$publication` resolve centrally. The remote
   session receives only the resolved values for its own Releases, never binding
   definitions, file paths, or repository credentials.
 - Remote code can declare inputs but cannot choose where their values come
@@ -480,10 +480,10 @@ the same way as a local group: no opt-in field exists.
   digests like its existing entries:
   - `@input/<group>/<release>/<input>` → digest of the canonical JSON value
   - `@git/<credential-free-url>@<commit>/<path>` → blob digest for each
-    `fromGit` source
-  - `@publication/<path>` → blob digest for each `fromPublication` value read
+    `$git` source
+  - `@publication/<path>` → blob digest for each `$publication` value read
     from the base commit, which is the published commit's parent
-  - `@carried/<path>` → blob digest for each `fromPublication` value taken
+  - `@carried/<path>` → blob digest for each `$publication` value taken
     from a `carryFileFromWorktree` file in this run
   - Both publication forms use the prefix-relative path, like the index's
     `files` entries.
@@ -524,7 +524,7 @@ A target joins an environment when a Kubernetes publication unit in that
 environment references it. The unit also carries the execution mode (publish
 or observe), and DeploymentTarget itself stays unchanged. A target
 referenced by no publication unit belongs to no environment, rejects
-`fromUnit` bindings, and reads `fromPromotion` from its own `spec.promotions`
+`$unit` bindings, and reads `$promotion` from its own `spec.promotions`
 (see [Promoting into a target](promotion.md#promoting-into-a-target)); a target referenced by publication
 units in two environments is an error.
 
@@ -550,5 +550,5 @@ targets on that Cluster.
 
 ## Remaining questions
 
-None for M2. Orchestration binding shapes (`fromUnit`, `fromPromotion`) are
+None for M2. Orchestration binding shapes (`$unit`, `$promotion`) are
 settled with the M1 unit and promotion contract.

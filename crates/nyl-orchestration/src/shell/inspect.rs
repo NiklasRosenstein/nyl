@@ -3,7 +3,7 @@
 //! Contract: [Inspection](../../../../design/orchestration-core.md#inspection).
 //! Both read one snapshot of the state refs (and, for status, the lease and
 //! run refs) and never write. `get output` and `get artifact` resolve
-//! exactly like `fromUnit`, through `rules::references::resolve_reference`.
+//! exactly like `$unit`, through `rules::references::resolve_reference`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,7 +41,7 @@ pub fn producer_snapshots(
     peers: &Peers,
 ) -> Result<BTreeMap<EnvironmentName, EnvironmentSnapshot>, Finding> {
     let mut producers = BTreeMap::new();
-    for producer in crate::rules::observed_values::observed_producer_environments(environment, desired) {
+    for producer in crate::rules::observed_values::observed_producer_environments(environment, desired)? {
         let snapshot = peers
             .read(store, &producer, Need::Required)
             .map_err(Problem::into_finding)?;
@@ -58,7 +58,7 @@ pub fn producer_snapshots(
 /// resolved value differs from the producer's current one as `ready`. A
 /// producer that cannot be read is an error of the status
 /// ([`producer_snapshots`]). `promoted` is the Environment's
-/// `source.fromPromotion` as the entry worktree declares it: with `record:
+/// `source.promotion` as the entry worktree declares it: with `record:
 /// source` its block, when newer than what the last run applied, is the
 /// lineage's pending record ([`crate::rules::promotion::lineage_with`]).
 pub fn status_with(
@@ -227,7 +227,7 @@ pub enum GetValue {
 }
 
 /// `nyl get output u/o`, `nyl get artifact u/n`, and `nyl get observation u/o`: resolve `source` like a
-/// `fromUnit` reference against `snapshot`. Unresolvable is
+/// `$unit` reference against `snapshot`. Unresolvable is
 /// [`Code::ReferenceUnresolved`](nyl_core::orchestration::codes::Code::ReferenceUnresolved),
 /// unless `allow_stale` finds an older value.
 ///
@@ -393,7 +393,7 @@ mod tests {
         EnvironmentName::new("dev").unwrap()
     }
 
-    /// Catches `get output` printing a value no `fromUnit` would resolve,
+    /// Catches `get output` printing a value no `$unit` would resolve,
     /// or failing for a current receipt.
     #[test]
     fn test_get_value_resolves_like_a_reference() {

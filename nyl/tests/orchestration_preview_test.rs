@@ -51,7 +51,7 @@ fn preview_project() -> tempfile::TempDir {
     edit(
         "nyl/units.yaml",
         "spec:\n  target: '{{ values.target }}'",
-        "spec:\n  target: {fromValues: {pointer: /target}}",
+        "spec:\n  target: {$environment: /target}",
     );
     edit(
         "nyl/platform.yaml",
@@ -91,8 +91,8 @@ spec:
         publication: {repositoryRef: {name: platform}, revision: previews, pathPrefix: '{{ environment.name }}'}
         releaseInputs:
           web/web:
-            image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-            databaseHost: {fromUnit: {unit: database, output: host}}
+            image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+            databaseHost: {$unit: {unit: database, output: host}}
   state:
     repositoryRef: {name: platform}
     desiredRef: nyl/previews
@@ -351,22 +351,25 @@ fn test_validate_checks_the_names_every_instance_would_generate() {
 
     // A value only dev declares fails for the template's sample instances,
     // before any instance exists.
-    let unsourced =
-        validate(&|root| {
-            for (path, from, to) in [
+    let unsourced = validate(&|root| {
+        for (path, from, to) in [
             (
                 "nyl/units.yaml",
-                "  target: {fromValues: {pointer: /target}}\n  timeout: 10m",
-                "  target: {fromValues: {pointer: /target}}\n  timeout: {fromValues: {pointer: /publicationTimeout}}",
+                "  target: {$environment: /target}\n  timeout: 10m",
+                "  target: {$environment: /target}\n  timeout: {$environment: /publicationTimeout}",
             ),
-            ("nyl/platform.yaml", "    target: dev\n", "    target: dev\n    publicationTimeout: 10m\n"),
+            (
+                "nyl/platform.yaml",
+                "    target: dev\n",
+                "    target: dev\n    publicationTimeout: 10m\n",
+            ),
         ] {
             let file = root.join(path);
             let text = std::fs::read_to_string(&file).unwrap();
             assert!(text.contains(from), "{path} holds {from:?}");
             std::fs::write(file, text.replace(from, to)).unwrap();
         }
-        });
+    });
     let output = format!(
         "{}{}",
         String::from_utf8_lossy(&unsourced.stdout),
@@ -375,7 +378,7 @@ fn test_validate_checks_the_names_every_instance_would_generate() {
     assert!(!unsourced.status.success(), "{output}");
     assert!(
         output.contains(
-            "spec.timeout.fromValues reads /publicationTimeout, which is not in the values of Environment preview-sample-1 (an instance of EnvironmentTemplate preview)"
+            "spec.timeout.$environment reads /publicationTimeout, which is not in the values of Environment preview-sample-1 (an instance of EnvironmentTemplate preview)"
         ),
         "{output}"
     );
@@ -389,7 +392,7 @@ fn test_validate_checks_the_names_every_instance_would_generate() {
         assert!(text.contains(from), "the template holds {from:?}");
         std::fs::write(
             file,
-            text.replace(from, &format!("{from}    crds: {{fromParameter: {{name: crd}}}}\n")),
+            text.replace(from, &format!("{from}    crds: {{$parameter: crd}}\n")),
         )
         .unwrap();
     });
@@ -401,14 +404,14 @@ fn test_validate_checks_the_names_every_instance_would_generate() {
     assert!(!undeclared.status.success(), "{output}");
     assert!(
         output.contains(
-            "NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.crds.fromParameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: pr)"
+            "NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render to a valid environment preview-sample-1: spec.values.crds.$parameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: pr)"
         ),
         "{output}"
     );
 }
 
 /// A boolean template parameter bound into the inline target's Release
-/// input with `{value: {fromParameter: {name: crds}}}`, the case that needed
+/// input with `{$parameter: crds}`, the case that needed
 /// `| tojson`: the instance's values resolve the clause first, so the binding
 /// holds a literal boolean that the Release's `boolean` input accepts, with
 /// `--param crds=true` and with the declared default. Catches the parameter
@@ -429,8 +432,8 @@ fn test_a_template_parameter_reaches_a_release_input_with_its_type() {
     );
     edit(
         "nyl/preview.yaml",
-        "            databaseHost: {fromUnit: {unit: database, output: host}}\n",
-        "            databaseHost: {fromUnit: {unit: database, output: host}}\n            clusterWide: {value: {fromParameter: {name: crds}}}\n",
+        "            databaseHost: {$unit: {unit: database, output: host}}\n",
+        "            databaseHost: {$unit: {unit: database, output: host}}\n            clusterWide: {$parameter: crds}\n",
     );
     edit(
         "applications/web/release.yaml",
@@ -623,8 +626,8 @@ fn test_state_init_warns_what_an_unattended_removal_would_wait_for() {
     let units = project.path().join("nyl/units.yaml");
     let text = std::fs::read_to_string(&units).unwrap().replace("\r\n", "\n");
     let declared = text.replace(
-        "  target: {fromValues: {pointer: /target}}\n",
-        "  target: {fromValues: {pointer: /target}}\n  teardownSettings: {catalogPrunes: false}\n",
+        "  target: {$environment: /target}\n",
+        "  target: {$environment: /target}\n  teardownSettings: {catalogPrunes: false}\n",
     );
     assert_ne!(text, declared);
     std::fs::write(&units, declared).unwrap();

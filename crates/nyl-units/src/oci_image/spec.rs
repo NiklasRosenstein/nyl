@@ -110,11 +110,11 @@ pub enum ImageContext {
     Image(ImageReference),
     Directory(GitSource),
 }
-/// An image context. Its reference can be supplied by a `fromUnit` artifact binding.
+/// An image context. Its reference can be supplied by a `$unit` artifact binding.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageReference {
-    /// A digest-pinned image reference or a `fromUnit` artifact binding.
+    /// A digest-pinned image reference or a `$unit` artifact binding.
     pub image: Value,
 }
 /// Buildx cache specifications.
@@ -205,9 +205,7 @@ impl OciImageSpec {
                 ImageContext::Directory(source) => source_path(source, &format!("spec.contexts.{name}"))?,
                 ImageContext::Image(reference)
                     if reference.image.as_str().is_some_and(clean_value)
-                        || reference.image.as_object().is_some_and(|object| {
-                            object.contains_key("fromUnit") || object.contains_key("fromPromotion")
-                        }) => {}
+                        || reference.image.as_object().is_some_and(is_run_reference) => {}
                 ImageContext::Image(_) => {
                     return Err(invalid(format!(
                         "spec.contexts.{name}.image must be a reference or binding"
@@ -242,9 +240,7 @@ impl OciImageSpec {
             if !(value.is_string()
                 || value.is_number()
                 || value.is_boolean()
-                || value
-                    .as_object()
-                    .is_some_and(|object| object.contains_key("fromUnit") || object.contains_key("fromPromotion")))
+                || value.as_object().is_some_and(is_run_reference))
             {
                 return Err(invalid(
                     "spec.buildArgs values must be scalars or unit/promotion bindings",
@@ -271,6 +267,17 @@ impl OciImageSpec {
         }
         Ok(())
     }
+}
+
+/// Whether `object` is a `$unit` or `$promotion` source, which the run
+/// resolves before the driver executes.
+fn is_run_reference(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    matches!(
+        nyl_core::bindings::clause_key(object),
+        Ok(Some(
+            nyl_core::bindings::Source::Unit | nyl_core::bindings::Source::Promotion
+        ))
+    )
 }
 
 #[cfg(test)]

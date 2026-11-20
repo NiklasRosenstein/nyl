@@ -1,5 +1,5 @@
 //! The declared types of the Release inputs a publication unit's
-//! `fromPromotion` bindings fill, for promotion validation
+//! `$promotion` bindings fill, for promotion validation
 //! ([`Driver::bound_field_types`](nyl_core::orchestration::driver::Driver::bound_field_types)).
 //!
 //! The renderer copies the target's `releaseInputs` into the unit's spec

@@ -1073,7 +1073,7 @@ pub trait Driver: Send + Sync {
         Ok(None)
     }
     /// The declared type of each field of `spec` at `pointers` (JSON
-    /// Pointers into the spec, each holding a `fromPromotion` binding) that
+    /// Pointers into the spec, each holding a `$promotion` binding) that
     /// the kind types beyond its schema, such as a field whose type a file
     /// the spec names declares. A pointer missing from the answer is one the
     /// kind does not type, which fits any value; the default answers none,
@@ -1278,16 +1278,6 @@ impl DriverSet {
         self.drivers
             .get(&(api_version.to_owned(), kind.to_owned()))
             .map(std::convert::AsRef::as_ref)
-    }
-
-    /// The fields each registered kind's spec schema marks resolvable, for
-    /// unit rendering, which substitutes source clauses only there.
-    pub fn resolvable_unit_fields(&self) -> crate::resources::units::ResolvableUnitFields {
-        let mut fields = crate::resources::units::ResolvableUnitFields::default();
-        for ((api_version, kind), driver) in &self.drivers {
-            fields.declare(api_version, kind, &driver.spec_schema());
-        }
-        fields
     }
 }
 

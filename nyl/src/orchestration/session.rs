@@ -325,7 +325,7 @@ impl Session {
     }
 
     /// The verifier of `record: source` blocks whose Environment sets
-    /// `fromPromotion.verify`, in the entry clone.
+    /// `promotion.verify`, in the entry clone.
     pub fn block_verifier(&self) -> crate::orchestration::record_source::GitBlockVerifier<'_> {
         crate::orchestration::record_source::GitBlockVerifier {
             inventory: &self.inventory,

@@ -295,10 +295,10 @@
     },
     "ImageReference": {
       "additionalProperties": false,
-      "description": "An image context. Its reference can be supplied by a `fromUnit` artifact binding.",
+      "description": "An image context. Its reference can be supplied by a `$unit` artifact binding.",
       "properties": {
         "image": {
-          "description": "A digest-pinned image reference or a `fromUnit` artifact binding."
+          "description": "A digest-pinned image reference or a `$unit` artifact binding."
         }
       },
       "required": [
@@ -388,25 +388,8 @@
       "description": "Docker Buildx inputs. Every directory context is a separately pinned Git source.",
       "properties": {
         "approval": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ApprovalPolicy"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "fromValues": {
-                  "$ref": "#/$defs/ValuesSource"
-                }
-              },
-              "required": [
-                "fromValues"
-              ],
-              "type": "object"
-            }
-          ],
-          "description": "Whether executions need an invocation's approval. Accepts `fromValues`.",
-          "x-nyl-resolvable": "fromValues"
+          "$ref": "#/$defs/ApprovalPolicy",
+          "description": "Whether executions need an invocation's approval."
         },
         "attestations": {
           "description": "Attestations of the unit's receipts: names its kind produces itself, or entries with `from: external` that only `nyl attest` supplies.",
@@ -495,7 +478,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/ObservationDeclaration"
           },
-          "description": "Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `fromUnit: {unit, observation}`.",
+          "description": "Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `$unit: {unit, observation}`.",
           "type": "object"
         },
         "outputs": {
@@ -540,30 +523,13 @@
         "timeout": {
           "anyOf": [
             {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Duration"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "$ref": "#/$defs/Duration"
             },
             {
-              "additionalProperties": false,
-              "properties": {
-                "fromValues": {
-                  "$ref": "#/$defs/ValuesSource"
-                }
-              },
-              "required": [
-                "fromValues"
-              ],
-              "type": "object"
+              "type": "null"
             }
           ],
-          "description": "Deadline for one execution, teardown, or verification, at most `7d`. Default per kind. Accepts `fromValues`.",
-          "x-nyl-resolvable": "fromValues"
+          "description": "Deadline for one execution, teardown, or verification, at most `7d`. Default per kind."
         }
       },
       "required": [
@@ -627,27 +593,6 @@
       "required": [
         "usernameSecret",
         "passwordSecret"
-      ],
-      "type": "object"
-    },
-    "ValuesSource": {
-      "additionalProperties": false,
-      "description": "Reads a value from the environment's effective `values`.\n\nWhen nothing is at `pointer`, or the value there is `null`, `default`\napplies; with `optional: true` the field is removed instead, as if it were\nomitted; otherwise it is an error.",
-      "properties": {
-        "default": {
-          "description": "Value used when nothing is at `pointer` or the value there is `null`. Must not be `null`; use `optional` to leave the field out instead. Exclusive with `optional`."
-        },
-        "optional": {
-          "description": "Remove the field when nothing is at `pointer` or the value there is `null`, as if it were omitted. Exclusive with `default`.",
-          "type": "boolean"
-        },
-        "pointer": {
-          "description": "JSON Pointer into the environment's effective values, such as `/target`.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "pointer"
       ],
       "type": "object"
     }

@@ -91,7 +91,7 @@ pub fn history(form: HistoryForm, args: &GetHistoryArgs) -> Result<CommandOutcom
             let promoted = session
                 .entry()
                 .ok()
-                .and_then(|entry| entry.spec.source.and_then(|source| source.from_promotion));
+                .and_then(|entry| entry.spec.source.and_then(|source| source.promotion));
             let report = promotion_inspect::promotions(&store, location, environment, promoted.as_ref());
             let names = report.promotions.iter().map(|record| record.path.to_string());
             rendered(&report, report.exit, &report.errors, report.table(), names, args.output)?

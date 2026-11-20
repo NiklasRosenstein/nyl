@@ -263,7 +263,7 @@ mod tests {
 
     use super::*;
 
-    /// Group sources and fromGit locks share one commit rule.
+    /// Group sources and $git locks share one commit rule.
     #[test]
     fn test_immutable_git_commit_is_the_full_lowercase_form() {
         let commit = "3f1c9a0000000000000000000000000000000000";

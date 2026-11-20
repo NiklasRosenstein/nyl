@@ -76,7 +76,7 @@ fn world() -> World {
         unit(
             "Typed",
             true,
-            json!({"replicas": 2, "source": {"path": "/app"}, "image": {"fromUnit": {"unit": "x", "artifact": "image"}}, "runs": ["accepted"]}),
+            json!({"replicas": 2, "source": {"path": "/app"}, "image": {"$unit": {"unit": "x", "artifact": "image"}}, "runs": ["accepted"]}),
         )
     };
     let db = || {
@@ -517,7 +517,7 @@ fn test_attestation_scopes_must_be_declared() {
     );
 }
 
-/// A `fromPromotion` binding names a path and a value that exist.
+/// A `$promotion` binding names a path and a value that exist.
 #[test]
 fn test_bindings_name_declared_paths_and_values() {
     let paths = [path(base(
@@ -556,8 +556,8 @@ fn test_bindings_name_declared_paths_and_values() {
 #[test]
 fn test_unit_readers_find_bindings_with_the_type_their_field_accepts() {
     let spec = json!({
-        "replicas": {"fromPromotion": {"value": "replicas", "path": "dev-to-prod"}},
-        "extra": {"list": [{"fromPromotion": {"value": "other"}}]}
+        "replicas": {"$promotion": {"value": "replicas", "path": "dev-to-prod"}},
+        "extra": {"list": [{"$promotion": {"value": "other"}}]}
     });
     let sources = BTreeMap::from([(
         environment("prod"),
@@ -658,7 +658,7 @@ fn test_every_source_path_defines_what_path_less_bindings_read() {
     let mut prod = world.sources[&environment("prod")].clone();
     prod.environment = serde_json::from_value(json!({
         "apiVersion": "gitops.nyl/v1", "kind": "Environment", "metadata": {"name": "prod"},
-        "spec": {"source": {"fromPromotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}}
+        "spec": {"source": {"promotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}}
     }))
     .unwrap();
     world.sources.insert(environment("prod"), prod);
@@ -697,14 +697,14 @@ fn test_every_source_path_defines_what_path_less_bindings_read() {
     assert_eq!(codes(&findings), [Code::PromoteBindingUnknown], "{findings:?}");
 }
 
-/// `source.fromPromotion` names declared paths that promote into the environment.
+/// `source.promotion` names declared paths that promote into the environment.
 #[test]
 fn test_a_promoted_source_names_paths_into_its_environment() {
     let mut world = world();
     let mut prod = world.sources[&environment("prod")].clone();
     prod.environment = serde_json::from_value(json!({
         "apiVersion": "gitops.nyl/v1", "kind": "Environment", "metadata": {"name": "prod"},
-        "spec": {"source": {"fromPromotion": {"paths": ["dev-to-prod", "ghost", "prod-to-dev"]}}}
+        "spec": {"source": {"promotion": {"paths": ["dev-to-prod", "ghost", "prod-to-dev"]}}}
     }))
     .unwrap();
     world.sources.insert(environment("prod"), prod);
@@ -783,7 +783,7 @@ fn test_only_checks_the_bindings_of_one_environment() {
 /// `plan` lists the values two paths into one environment promote that the
 /// supersede check cannot check, because nothing names their source
 /// commit: a command output, or a Release input written as a literal. An
-/// artifact of a unit built from Git, and a Release input a `fromUnit`
+/// artifact of a unit built from Git, and a Release input a `$unit`
 /// reference fills from one, are checked; a value only one path carries is
 /// never compared. Catches a plan that stays silent about a value whose
 /// supersede check `nyl promote` will skip.
@@ -806,7 +806,7 @@ fn test_unchecked_lists_values_without_a_source_commit() {
                     "Test",
                     true,
                     json!({"releases": {
-                        "web/web": {"image": {"fromUnit": {"unit": "image", "artifact": "image", "pointer": "/reference"}}},
+                        "web/web": {"image": {"$unit": {"unit": "image", "artifact": "image", "pointer": "/reference"}}},
                         "web/api": {"image": "registry.example/api:1"}
                     }}),
                 ),
@@ -884,7 +884,7 @@ fn source_world() -> World {
     let prod = world.sources.get_mut(&environment("prod")).unwrap();
     prod.environment = serde_json::from_value(json!({
         "apiVersion": "gitops.nyl/v1", "kind": "Environment", "metadata": {"name": "prod"},
-        "spec": {"source": {"fromPromotion": {"path": "dev-to-prod"}}}
+        "spec": {"source": {"promotion": {"path": "dev-to-prod"}}}
     }))
     .unwrap();
     world
@@ -1043,7 +1043,7 @@ fn test_groups_on_a_value_only_path_are_refused() {
         findings[0]
     );
     assert!(
-        findings[0].fix.contains("fromPromotion: {path: dev-to-prod}"),
+        findings[0].fix.contains("source: {promotion: {path: dev-to-prod}}"),
         "{}",
         findings[0].fix
     );

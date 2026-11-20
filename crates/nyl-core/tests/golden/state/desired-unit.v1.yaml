@@ -15,7 +15,7 @@ spec:
     path: infra/database
   variables:
     vpc_id:
-      fromUnit:
+      $unit:
         output: vpcId
         unit: network
 resolvedSpec:

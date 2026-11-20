@@ -10,7 +10,7 @@ instead of rebuilding or retyping it. The link is a
 reads it when it reconciles.
 
 :::note[Status]
-M6 delivers promotion in steps. `nyl promote`, `fromPromotion` sources and
+M6 delivers promotion in steps. `nyl promote`, `promotion` sources and `$promotion`
 bindings, artifact verification, `nyl get states`, `promotion-candidates`,
 and `promotions`, `status` lineage, `record: source`, several paths into
 one environment with the supersede check and hotfixes, value-only paths
@@ -46,13 +46,13 @@ that reads it, before any promotion runs. A value's type comes from what its
 selector reads: a rendered literal, a declared output, the kind's schema, or
 an artifact's schema. A place is a field of a unit's spec, typed by its
 kind's schema, or a Release input a DeploymentTarget's `releaseInputs` fills
-with `fromPromotion`, typed by the Release's `spec.inputs.<name>.type`. A
+with `$promotion`, typed by the Release's `spec.inputs.<name>.type`. A
 mismatch is `NYL-PROMOTE-VALUE-TYPE`:
 
 ```yaml
 releaseInputs:
   web/web:
-    image: {fromPromotion: {value: webImage}}   # Release web declares image: {type: string}
+    image: {$promotion: {value: webImage}}   # Release web declares image: {type: string}
 ```
 
 The Release's declaration is read from the ApplicationGroups the target
@@ -182,14 +182,14 @@ its Release. The catalog Application belongs to no group.
 ## Reading what was promoted
 
 - **A promoted source.** An Environment with
-  `source: {fromPromotion: {path: dev-to-prod}}` runs its units at the source
+  `source: {promotion: {path: dev-to-prod}}` runs its units at the source
   commit of the newest record on its path (or `paths`). The record's path and
   sequence are written to the environment record as `sourceChosenBy` and
   `appliedPromotionSequence`. Before the first promotion `reconcile` and `plan`
   exit 2 with `NYL-PROMOTION-MISSING`; its fix names `nyl promote <path>`.
   With `record: source` the record lives in the Environment itself, as
   described [below](#keeping-the-record-in-source).
-- **Bindings.** `{fromPromotion: {value: webImage}}` in a unit's spec, or in a
+- **Bindings.** `{$promotion: {value: webImage}}` in a unit's spec, or in a
   DeploymentTarget's `releaseInputs`, resolves through the one binding
   resolver. With `path` it reads that path's record; without it, the newest
   record carrying the value. In an environment whose source is promoted, a
@@ -209,7 +209,7 @@ whichever record supplied the source:
 # prod
 spec:
   source:
-    fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}
+    promotion: {paths: [dev-to-prod, hotfix-to-prod]}
   protectedRefs: [main, 'release/*']
 ---
 apiVersion: gitops.nyl/v1
@@ -324,7 +324,7 @@ metadata:
   name: prod
 spec:
   source:
-    fromPromotion:
+    promotion:
       path: dev-to-prod
       record: source
       promoted: # written by nyl promote, never by hand
@@ -364,7 +364,7 @@ spec:
   is not ahead of its upstream and the Environment's file is unchanged, so
   the block is the one the upstream carries
   (`NYL-PROMOTE-SOURCE-UNWRITABLE` otherwise). Write
-  `fromPromotion` in the Environment itself, in block style, one key per
+  `promotion` in the Environment itself, in block style, one key per
   line; the rest of the file stays as written. A detached HEAD, a branch
   ahead of its upstream, uncommitted changes to the Environment's file, a
   push the remote refuses for branch protection, or a push that never
@@ -413,7 +413,7 @@ wrote the block, name a Git `allowed_signers` file:
 
 ```yaml
 source:
-  fromPromotion:
+  promotion:
     path: dev-to-prod
     record: source
     verify:

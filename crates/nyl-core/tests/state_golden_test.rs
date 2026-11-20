@@ -117,7 +117,7 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("database", "OpenTofu"),
                 "lifecycle": {"state": "active"}, "sourceCommit": COMMIT, "sourceRevision": COMMIT,
-                "spec": {"source": {"path": "infra/database"}, "variables": {"vpc_id": {"fromUnit": {"unit": "network", "output": "vpcId"}}}},
+                "spec": {"source": {"path": "infra/database"}, "variables": {"vpc_id": {"$unit": {"unit": "network", "output": "vpcId"}}}},
                 "resolvedSpec": {"source": {"path": "/infra/database", "commit": COMMIT}, "variables": {"vpc_id": "vpc-0abc123"}},
                 "provenance": {"/variables/vpc_id": {"unit": "network", "uid": UID, "executionKey": KEY, "run": RUN}},
                 "executionKey": KEY, "readiness": {"state": "ready"}
@@ -145,7 +145,7 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("app", "Command"),
                 "lifecycle": {"state": "active"}, "sourceCommit": COMMIT, "sourceRevision": COMMIT,
-                "spec": {"values": {"host": {"fromUnit": {"unit": "network", "output": "host"}}}},
+                "spec": {"values": {"host": {"$unit": {"unit": "network", "output": "host"}}}},
                 "readiness": {"state": "blocked", "reasons": [
                     {"pointer": "/values/host", "blocker": {"type": "no-current-receipt", "producer": {"unit": "network"}}},
                     {"pointer": "/dependsOn/0", "blocker": {"type": "no-current-receipt", "producer": {"environment": "infra", "unit": "network"}}},
@@ -248,7 +248,7 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({
                 "apiVersion": "gitops.nyl/v1", "kind": "DesiredUnit", "unit": identity("dns", "Command"),
                 "lifecycle": {"state": "active"}, "sourceCommit": COMMIT, "sourceRevision": COMMIT,
-                "spec": {"values": {"address": {"fromUnit": {"unit": "kubernetes", "observation": "ingressIp"}}}},
+                "spec": {"values": {"address": {"$unit": {"unit": "kubernetes", "observation": "ingressIp"}}}},
                 "resolvedSpec": {"values": {"address": "203.0.113.10"}},
                 "provenance": {"/values/address": {"unit": "kubernetes", "uid": UID, "executionKey": KEY,
                                                     "observedCommit": COMMIT, "observation": "ingressIp",

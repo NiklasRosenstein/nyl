@@ -6,7 +6,7 @@ metadata:
 spec:
   files: ['../scripts/resource.sh']
   values:
-    cache: {fromUnit: {unit: cache, output: endpoint}}
+    cache: {$unit: {unit: cache, output: endpoint}}
   workingDir: ../scripts
   env:
     passthrough: [SCENARIO_TMP]

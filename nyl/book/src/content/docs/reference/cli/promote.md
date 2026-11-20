@@ -38,7 +38,7 @@ running reconcile; a lease that stays held is exit 2.
 
 When the path promotes the source of a target whose Environment says
 `record: source`, the record is written into that Environment's
-`source.fromPromotion.promoted` block instead, as one commit on the branch
+`source.promotion.promoted` block instead, as one commit on the branch
 the entry worktree has checked out, with the same message a state commit
 would carry (kept verbatim) and `--author` as its author and committer. Your
 Git configuration otherwise applies, so a configured commit signature signs
@@ -59,7 +59,7 @@ it is `unchanged` and only the marker is written, under the re-runner's
 promotes that instead). A marker is written for an existing block only
 when the branch is not ahead of its upstream and the Environment's file is
 unchanged; otherwise `NYL-PROMOTE-SOURCE-UNWRITABLE`. With
-`source.fromPromotion.verify`, the commit must be signed with SSH by a key
+`source.promotion.verify`, the commit must be signed with SSH by a key
 the allowed signers file lists: `nyl promote` (and `--dry-run`) checks that
 commit signing is configured, and verifies the new commit before the push,
 undoing it with `NYL-PROMOTE-SOURCE-UNWRITABLE` when a run would not trust
@@ -81,7 +81,7 @@ except a moved branch:
 - a branch with commits its upstream lacks, which the push would publish
   with the record: push or drop them first;
 - an untracked Environment file, or uncommitted changes to it;
-- a `fromPromotion` the Environment inherits (such as from its group), or
+- a `$promotion` the Environment inherits (such as from its group), or
   one not in block style: declare it in the Environment, one key per line;
 - an Environment no file declares, such as a template's instance;
 - a push the remote refuses for another reason, such as branch protection or
@@ -171,7 +171,7 @@ a promotion like any other and takes the next sequence.
 ## Superseding
 
 An environment can take its source, and values, from several paths
-(`source.fromPromotion.paths`), such as `dev-to-prod` and a hotfix path.
+(`source.promotion.paths`), such as `dev-to-prod` and a hotfix path.
 Before it writes, `nyl promote` checks that what it promotes keeps what the
 other paths promoted: for the source commit and each value, every record
 another path wrote into the target since this path last promoted it must be

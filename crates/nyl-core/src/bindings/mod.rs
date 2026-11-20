@@ -1,62 +1,59 @@
-//! One resolver for typed value bindings and references.
+//! One resolver for value sources, typed bindings, and references.
 //!
-//! Contract: [Bindings](../../../../design/release-inputs.md#bindings) and the
+//! Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
+//! [Bindings](../../../../design/release-inputs.md#bindings) and the
 //! effective-value rule, and the orchestration core contract's References.
-//! Release inputs are its first user; unit `values` and `variables`,
-//! PromotionPath selectors, and `nyl get` value forms reuse it, so they cannot
-//! disagree on precedence, type checks, selection, or digests.
+//! Unit documents, EnvironmentTemplate values, Release bundles, Release-input
+//! bindings, PromotionPath selectors, and `nyl get` value forms share it, so
+//! they cannot disagree on parsing, precedence, missing values, type checks,
+//! selection, or digests.
 //!
-//! - A declaration is typed ([`InputDeclaration`]); a binding sets exactly one
-//!   source ([`InputBinding::kind`]).
-//! - [`resolve`] fills declared slots: the effective value is the override,
-//!   otherwise the binding, otherwise the declared default. A source that holds
-//!   no value yet leaves the slot unbound, so the default applies.
-//! - [`resolve_document`] replaces reference objects at any depth of a
-//!   free-form document and records provenance per JSON Pointer. The caller
-//!   names the reference kinds the document accepts, such as
-//!   [`UNIT_REFERENCE_KINDS`], or [`TEMPLATE_VALUE_KINDS`] for an
-//!   EnvironmentTemplate's `values`.
-//! - [`resolve_declared`] substitutes typed source clauses ([`SourceKind`])
-//!   only at the fields a schema marks with [`Resolvable`], and
-//!   [`resolve_in_references`] does so inside each reference object of a
-//!   free-form document, such as `fromValues` in `fromUnit.environment`;
-//!   [`reject_surviving_clauses`] makes an unresolved clause an error.
-//! - A provider may report a reference as [`Provision::Blocked`], such as a
+//! - A value source is an object whose only key is a known `$` source
+//!   ([`Source`], parsed by [`Clause::parse`]). Its [`Context`] decides
+//!   whether it resolves, is carried to where the document lands, or is an
+//!   error that teaches the fix.
+//! - [`resolve_document`] replaces the sources of a document at any depth and
+//!   records provenance per JSON Pointer; [`find_clauses`] lists them without
+//!   reading any, such as the unit references of a stored spec.
+//! - A declaration is typed ([`InputDeclaration`]); [`resolve`] fills declared
+//!   slots: the effective value is the override, otherwise the binding,
+//!   otherwise the declared default. A source that holds no value yet leaves
+//!   the slot unbound, so the default applies.
+//! - A provider may report a source as [`Provision::Blocked`], such as a
 //!   producer without a current receipt; blocked values are listed with their
 //!   location instead of failing resolution.
 //! - Every problem is collected as a [`BindingIssue`], so a caller reports
 //!   them together; a provider's code and fix reach the caller unchanged.
 //!
-//! Each binding kind is one [`Providers`] method. The resolver itself performs
-//! no effects: providers read what their caller gathered, whether files and
-//! Git for rendering or a state snapshot for orchestration.
+//! Each source is one [`Providers`] method. The resolver itself performs no
+//! effects: providers read what their caller gathered, whether files and Git
+//! for rendering, the environment's values, or a state snapshot for
+//! orchestration.
 
 mod binding;
+mod clauses;
 mod declaration;
-mod declared;
 mod issue;
 mod references;
-mod sources;
+mod walk;
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::orchestration::blocked::Blocker;
 
 pub use binding::{
-    BindingKind, FileInputSource, GitInputSource, InputBinding, PromotionInputSource, PublicationInputSource,
-    UnitInputSource,
+    FileInputSource, GitInputSource, InputBinding, PromotionInputSource, PublicationInputSource, UnitInputSource,
+};
+pub use clauses::{
+    clause_key, holds_dollar_key, literal_field_issues, Clause, Context, InputSource, Namespace, ParameterSource,
+    Source, Treatment, ValuesSource, LITERAL_ONLY_FIELDS, SLIPS, VALUE_SOURCES_DOCS,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
-pub use declared::{reject_surviving_clauses, resolve_declared, resolve_in_references, SourceProvider};
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
-pub use sources::{
-    resolvable_fields, resolvable_schema, without_clauses, FromInput, FromParameter, FromValues, InputSource,
-    ParameterSource, Resolvable, ResolvableField, SourceClause, SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
-};
+pub use walk::{find_clauses, provide, resolve_document, FoundClause, Scope};
 
 /// An effective value and where it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,75 +97,104 @@ pub trait Origin {
     fn from_default() -> Self;
     /// A caller-supplied override, such as a direct command's `--input`.
     fn from_override() -> Self;
-    /// An inline `value` binding.
+    /// A literal binding, or a `$literal` source.
     fn from_value() -> Self;
     /// Names the value's source in messages about `field`.
     fn describe(&self, field: &str) -> String;
 }
 
-/// Reads the source of each binding kind. A kind a caller does not accept keeps
-/// the default method, which rejects it.
+/// Reads each value source. A source a caller does not read keeps the
+/// default method, which rejects it; the walker rejects sources the context
+/// does not resolve before any provider is asked.
 pub trait Providers {
     type Origin: Origin;
 
+    fn environment(&self, field: &str, _source: &ValuesSource) -> Provided<Self::Origin> {
+        Err(unsupported(field, Source::Environment))
+    }
+
+    fn input(&self, field: &str, _source: &InputSource) -> Provided<Self::Origin> {
+        Err(unsupported(field, Source::Input))
+    }
+
+    fn parameter(&self, field: &str, _source: &ParameterSource) -> Provided<Self::Origin> {
+        Err(unsupported(field, Source::Parameter))
+    }
+
     fn file(&self, field: &str, _source: &FileInputSource) -> Provided<Self::Origin> {
-        Err(unsupported(field, BindingKind::FromFile))
+        Err(unsupported(field, Source::File))
     }
 
     fn git(&self, field: &str, _source: &GitInputSource) -> Provided<Self::Origin> {
-        Err(unsupported(field, BindingKind::FromGit))
+        Err(unsupported(field, Source::Git))
     }
 
     fn publication(&self, field: &str, _source: &PublicationInputSource) -> Provided<Self::Origin> {
-        Err(unsupported(field, BindingKind::FromPublication))
+        Err(unsupported(field, Source::Publication))
     }
 
     fn unit(&self, field: &str, _source: &UnitInputSource) -> Provided<Self::Origin> {
-        Err(unsupported(field, BindingKind::FromUnit))
+        Err(unsupported(field, Source::Unit))
     }
 
     fn promotion(&self, field: &str, _source: &PromotionInputSource) -> Provided<Self::Origin> {
-        Err(unsupported(field, BindingKind::FromPromotion))
+        Err(unsupported(field, Source::Promotion))
     }
 
-    /// A `fromParameter` reference, which only an EnvironmentTemplate's
-    /// `values` accept ([`TEMPLATE_VALUE_KINDS`]).
-    fn parameter(&self, field: &str, _source: &ParameterSource) -> Provided<Self::Origin> {
-        Err(BindingIssue::new(format!(
-            "{field}.{} is not supported here",
-            <FromParameter as SourceKind>::FIELD
-        )))
+    /// The issue for a source at `field` that holds no value and has no
+    /// `default` or `optional`, when the provider can say more than the
+    /// generic message, such as the keys that do exist.
+    fn missing(&self, _field: &str, _clause: &Clause) -> Option<BindingIssue> {
+        None
     }
 
     /// Why a required slot whose binding left it unbound is missing, when the
     /// provider knows more than the generic message. `requirement` reads like
     /// "Release platform/web requires input \"image\"".
-    fn unbound(&self, _field: &str, _binding: &InputBinding, _requirement: &str) -> Option<String> {
+    fn unbound(&self, _field: &str, _clause: &Clause, _requirement: &str) -> Option<String> {
         None
     }
 }
 
-fn unsupported(field: &str, kind: BindingKind) -> BindingIssue {
-    BindingIssue::new(format!("{field}.{} is not supported here", kind.field()))
+fn unsupported(field: &str, source: Source) -> BindingIssue {
+    BindingIssue::new(format!("{field}.{} is not supported here", source.key()))
 }
 
-/// Resolve one binding through the provider for its kind.
+/// Resolve one Release-input binding at `field`. A binding that is one source
+/// reads it through its provider, so a source that holds no value leaves the
+/// slot unbound; a literal is the value, with any sources inside it resolved.
 pub fn resolve_binding<P: Providers>(field: &str, binding: &InputBinding, providers: &P) -> Provided<P::Origin> {
-    let set = "kind agrees with the set field";
-    match binding
-        .kind(field)
-        .map_err(|error| BindingIssue::new(error.to_string()))?
-    {
-        BindingKind::Value => Ok(Provision::Value(Resolved {
-            value: binding.value.clone().expect(set),
-            origin: P::Origin::from_value(),
-        })),
-        BindingKind::FromFile => providers.file(field, binding.from_file.as_ref().expect(set)),
-        BindingKind::FromGit => providers.git(field, binding.from_git.as_ref().expect(set)),
-        BindingKind::FromPublication => providers.publication(field, binding.from_publication.as_ref().expect(set)),
-        BindingKind::FromUnit => providers.unit(field, binding.from_unit.as_ref().expect(set)),
-        BindingKind::FromPromotion => providers.promotion(field, binding.from_promotion.as_ref().expect(set)),
+    if let Some(fields) = binding.value().as_object() {
+        if let Ok(Some(source)) = clause_key(fields) {
+            let clause = Clause::parse(field, source, &fields[source.key()]).map_err(BindingIssue::new)?;
+            return provide(field, &clause, providers);
+        }
     }
+    let mut issues = Vec::new();
+    let resolved = resolve_document(
+        field,
+        "",
+        binding.value(),
+        Context::ReleaseInputs.into(),
+        providers,
+        &mut issues,
+    );
+    if let Some(first) = issues.first() {
+        let mut issue = first.clone();
+        issue.message = issues
+            .iter()
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(issue);
+    }
+    if let Some(blocked) = resolved.blocked.into_iter().next() {
+        return Ok(Provision::Blocked(blocked.reason));
+    }
+    Ok(Provision::Value(Resolved {
+        value: resolved.value,
+        origin: P::Origin::from_value(),
+    }))
 }
 
 /// Resolved declared slots.
@@ -232,7 +258,8 @@ pub fn resolve<P: Providers>(
                     let requirement = format!("{subject} requires input {name:?}{description}");
                     issues.push(BindingIssue::new(
                         binding
-                            .and_then(|binding| providers.unbound(&field, binding, &requirement))
+                            .and_then(InputBinding::clause)
+                            .and_then(|clause| providers.unbound(&field, &clause, &requirement))
                             .unwrap_or_else(|| {
                                 format!(
                                     "{requirement}, but it has no binding and no default; bind it in {field_prefix}"
@@ -297,198 +324,6 @@ pub struct ResolvedDocument<O> {
     pub blocked: Vec<Blocked>,
 }
 
-/// Replace every reference object in `document`, at any depth of its objects
-/// and arrays, by the value it stands for.
-///
-/// Contract: orchestration core, References. A reference object has exactly
-/// one field, one of `kinds` (unit `values` and `variables` accept
-/// [`UNIT_REFERENCE_KINDS`]; each is a source field of [`InputBinding`]),
-/// and replaces the whole value it stands for; every other object is data.
-/// `field` and `pointer` locate `document` itself, such as `spec.variables`
-/// and `/variables`. A reference that resolves to no value is an issue,
-/// because a document declares no defaults.
-pub fn resolve_document<P: Providers>(
-    field: &str,
-    pointer: &str,
-    document: &Value,
-    kinds: &[&str],
-    providers: &P,
-    issues: &mut Vec<BindingIssue>,
-) -> ResolvedDocument<P::Origin> {
-    let mut value = document.clone();
-    let mut found = Found {
-        provenance: BTreeMap::new(),
-        blocked: Vec::new(),
-    };
-    walk(field, pointer, &mut value, kinds, providers, &mut found, issues);
-    ResolvedDocument {
-        value,
-        provenance: found.provenance,
-        blocked: found.blocked,
-    }
-}
-
-struct Found<O> {
-    provenance: BTreeMap<String, O>,
-    blocked: Vec<Blocked>,
-}
-
-/// The reference kinds of unit `values` and `variables`: a recorded unit
-/// value, and a value recorded through a PromotionPath.
-pub const UNIT_REFERENCE_KINDS: &[&str] = &["fromUnit", "fromPromotion"];
-
-/// The reference kinds of an EnvironmentTemplate's `values`: a parameter
-/// bound for the instance ([`Providers::parameter`]).
-pub const TEMPLATE_VALUE_KINDS: &[&str] = &[<FromParameter as SourceKind>::FIELD];
-
-/// The fields of an object that are one of `kinds`, in key order: none for
-/// data, one without any other field for a reference object; anything else
-/// mixes a reference with other fields.
-fn reference_kinds(fields: &serde_json::Map<String, Value>, kinds: &[&str]) -> Vec<String> {
-    fields
-        .keys()
-        .filter(|key| kinds.contains(&key.as_str()))
-        .cloned()
-        .collect()
-}
-
-/// Parse and validate the reference object at `field` whose only field is
-/// `kind`; `kind_label` names that field in the issue for a non-object.
-fn parse_reference(field: &str, kind_label: &str, kind: &str, reference: &Value) -> Result<InputBinding, String> {
-    if !reference[kind].is_object() {
-        return Err(format!("{kind_label} must be an object"));
-    }
-    let binding =
-        InputBinding::deserialize(reference).map_err(|error| format!("{field} is not a valid reference: {error}"))?;
-    binding.validate(field).map_err(|error| error.to_string())?;
-    Ok(binding)
-}
-
-/// Parse and validate the `S` clause of the reference object at `field`.
-fn parse_clause_reference<S: SourceKind>(field: &str, reference: &Value) -> Result<S::Clause, String> {
-    let kind_field = format!("{field}.{}", S::FIELD);
-    let clause = &reference[S::FIELD];
-    if !clause.is_object() {
-        return Err(format!("{kind_field} must be an object"));
-    }
-    let clause =
-        S::Clause::deserialize(clause).map_err(|error| format!("{kind_field} is not a valid reference: {error}"))?;
-    clause.validate(&kind_field).map_err(|error| error.to_string())?;
-    Ok(clause)
-}
-
-fn walk<P: Providers>(
-    field: &str,
-    pointer: &str,
-    value: &mut Value,
-    kinds: &[&str],
-    providers: &P,
-    found: &mut Found<P::Origin>,
-    issues: &mut Vec<BindingIssue>,
-) {
-    match value {
-        Value::Object(fields) => {
-            let references = reference_kinds(fields, kinds);
-            match references.as_slice() {
-                [] => {
-                    for (key, child) in fields.iter_mut() {
-                        walk(
-                            &format!("{field}.{key}"),
-                            &crate::json_pointer::child(pointer, key),
-                            child,
-                            kinds,
-                            providers,
-                            found,
-                            issues,
-                        );
-                    }
-                }
-                [kind] if fields.len() == 1 => {
-                    let kind = kind.clone();
-                    if let Some(input) = resolve_reference(field, pointer, &kind, value, providers, found, issues) {
-                        *value = input;
-                    }
-                }
-                _ => issues.push(BindingIssue::new(format!(
-                    "{field} mixes {} with other fields; a reference object holds only its reference, and replaces the whole value",
-                    references.join(" and ")
-                ))),
-            }
-        }
-        Value::Array(items) => {
-            for (index, child) in items.iter_mut().enumerate() {
-                walk(
-                    &format!("{field}[{index}]"),
-                    &format!("{pointer}/{index}"),
-                    child,
-                    kinds,
-                    providers,
-                    found,
-                    issues,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Resolve one reference object; `Some` is the value that replaces it.
-fn resolve_reference<P: Providers>(
-    field: &str,
-    pointer: &str,
-    kind: &str,
-    reference: &Value,
-    providers: &P,
-    found: &mut Found<P::Origin>,
-    issues: &mut Vec<BindingIssue>,
-) -> Option<Value> {
-    // A source clause is no binding: it parses as its own clause type.
-    let (provision, binding) = if kind == <FromParameter as SourceKind>::FIELD {
-        match parse_clause_reference::<FromParameter>(field, reference) {
-            Ok(clause) => (providers.parameter(field, &clause), None),
-            Err(issue) => {
-                issues.push(BindingIssue::new(issue));
-                return None;
-            }
-        }
-    } else {
-        match parse_reference(field, &format!("{field}.{kind}"), kind, reference) {
-            Ok(binding) => (resolve_binding(field, &binding, providers), Some(binding)),
-            Err(issue) => {
-                issues.push(BindingIssue::new(issue));
-                return None;
-            }
-        }
-    };
-    match provision {
-        Ok(Provision::Value(input)) => {
-            found.provenance.insert(pointer.to_owned(), input.origin);
-            Some(input.value)
-        }
-        Ok(Provision::Unbound) => {
-            let requirement = format!("{field} needs a value");
-            issues.push(BindingIssue::new(
-                binding
-                    .and_then(|binding| providers.unbound(field, &binding, &requirement))
-                    .unwrap_or_else(|| format!("{requirement}, but its {kind} reference has none yet")),
-            ));
-            None
-        }
-        Ok(Provision::Blocked(reason)) => {
-            found.blocked.push(Blocked {
-                field: field.to_owned(),
-                pointer: pointer.to_owned(),
-                reason,
-            });
-            None
-        }
-        Err(issue) => {
-            issues.push(issue);
-            None
-        }
-    }
-}
-
 /// Select `pointer` inside `document`.
 pub fn select(document: &Value, pointer: &str) -> std::result::Result<Value, String> {
     crate::json_pointer::resolve(document, pointer)
@@ -511,12 +346,13 @@ mod tests {
     use crate::orchestration::ids::UnitName;
 
     #[derive(Debug, Clone, PartialEq)]
-    enum TestOrigin {
+    pub(super) enum TestOrigin {
         Default,
         Override,
         Value,
         File(String),
         Unit(String),
+        Values(String),
     }
 
     impl Origin for TestOrigin {
@@ -536,16 +372,28 @@ mod tests {
 
     /// Files map a path to its document; a missing path holds no value yet.
     /// Units map a name to its output; a missing unit has no current receipt.
+    /// `values` are the environment's values.
     #[derive(Default)]
-    struct TestProviders {
-        files: BTreeMap<&'static str, Value>,
-        units: BTreeMap<&'static str, Value>,
+    pub(super) struct TestProviders {
+        pub files: BTreeMap<&'static str, Value>,
+        pub units: BTreeMap<&'static str, Value>,
         /// Units whose reference the provider rejects with its own code and fix.
-        rejected: BTreeMap<&'static str, BindingIssue>,
+        pub rejected: BTreeMap<&'static str, BindingIssue>,
+        pub values: Value,
     }
 
     impl Providers for TestProviders {
         type Origin = TestOrigin;
+
+        fn environment(&self, _field: &str, source: &ValuesSource) -> Provided<TestOrigin> {
+            Ok(match self.values.pointer(&source.pointer) {
+                Some(value) => Provision::Value(Resolved {
+                    value: value.clone(),
+                    origin: TestOrigin::Values(source.pointer.clone()),
+                }),
+                None => Provision::Unbound,
+            })
+        }
 
         fn file(&self, _field: &str, source: &FileInputSource) -> Provided<TestOrigin> {
             Ok(match self.files.get(source.path.as_str()) {
@@ -572,11 +420,14 @@ mod tests {
             })
         }
 
-        fn unbound(&self, field: &str, binding: &InputBinding, requirement: &str) -> Option<String> {
-            binding
-                .from_file
-                .as_ref()
-                .map(|source| format!("{requirement}, but {field} file {} does not exist yet", source.path))
+        fn unbound(&self, field: &str, clause: &Clause, requirement: &str) -> Option<String> {
+            match clause {
+                Clause::File(source) => Some(format!(
+                    "{requirement}, but {field} file {} does not exist yet",
+                    source.path
+                )),
+                _ => None,
+            }
         }
     }
 
@@ -618,14 +469,37 @@ mod tests {
             "b": {"type": "integer", "default": 1},
             "c": {"type": "integer", "default": 1},
         }));
-        let bound = bindings(json!({"a": {"value": 2}, "b": {"value": 2}}));
+        let bound = bindings(json!({"a": 2, "b": 2}));
         let overrides = BTreeMap::from([("a".to_owned(), json!(3))]);
         let (slots, issues) = resolve_all(&declared, Some(&bound), &overrides, &TestProviders::default());
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(slots.values["a"].value, json!(3));
         assert_eq!(slots.values["a"].origin, TestOrigin::Override);
+        assert_eq!(slots.values["b"].value, json!(2));
         assert_eq!(slots.values["b"].origin, TestOrigin::Value);
         assert_eq!(slots.values["c"].origin, TestOrigin::Default);
+    }
+
+    /// A bare literal is the value, sources inside it resolve, and `$literal`
+    /// keeps a literal that looks like a source.
+    #[test]
+    fn test_resolve_reads_literals_and_sources_inside_them() {
+        let declared = declarations(json!({
+            "settings": {"type": "object"},
+            "shaped": {"type": "object"},
+        }));
+        let bound = bindings(json!({
+            "settings": {"port": {"$file": {"path": "ports.json", "pointer": "/web"}}, "tls": true},
+            "shaped": {"$literal": {"$file": "not a source"}},
+        }));
+        let providers = TestProviders {
+            files: BTreeMap::from([("ports.json", json!({"web": 8080}))]),
+            ..TestProviders::default()
+        };
+        let (slots, issues) = resolve_all(&declared, Some(&bound), &BTreeMap::new(), &providers);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(slots.values["settings"].value, json!({"port": 8080, "tls": true}));
+        assert_eq!(slots.values["shaped"].value, json!({"$file": "not a source"}));
     }
 
     #[test]
@@ -635,8 +509,8 @@ mod tests {
             "image": {"type": "string"},
         }));
         let bound = bindings(json!({
-            "tag": {"fromFile": {"path": "missing.json"}},
-            "image": {"fromFile": {"path": "missing.json"}},
+            "tag": {"$file": {"path": "missing.json"}},
+            "image": {"$file": {"path": "missing.json"}},
         }));
         let (slots, issues) = resolve_all(&declared, Some(&bound), &BTreeMap::new(), &TestProviders::default());
         assert_eq!(slots.values["tag"].origin, TestOrigin::Default);
@@ -656,10 +530,10 @@ mod tests {
             "vpc": {"type": "string"},
         }));
         let bound = bindings(json!({
-            "port": {"fromFile": {"path": "ports.json", "pointer": "/web"}},
-            "sha": {"fromGit": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
-            "tier": {"value": "large"},
-            "vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}},
+            "port": {"$file": {"path": "ports.json", "pointer": "/web"}},
+            "sha": {"$git": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
+            "tier": "large",
+            "vpc": {"$unit": {"unit": "network", "output": "vpcId"}},
         }));
         let providers = TestProviders {
             files: BTreeMap::from([("ports.json", json!({"web": "8080"}))]),
@@ -672,7 +546,7 @@ mod tests {
             [
                 r#"Subject s requires input "name" (Service name), but it has no binding and no default; bind it in bindings"#,
                 r#"bindings.port (File("ports.json")) for input "port" of Subject s is invalid: expected integer, got string"#,
-                "bindings.sha.fromGit is not supported here",
+                "bindings.sha.$git is not supported here",
                 r#"bindings.tier (Value) for input "tier" of Subject s is invalid: "large" is not one of the allowed values ["small"]"#,
             ]
         );
@@ -689,116 +563,11 @@ mod tests {
     #[test]
     fn test_undeclared_binding_issues_name_the_declared_slots() {
         let declared = declarations(json!({"image": {"type": "string"}}));
-        let bound = bindings(json!({"imgae": {"value": "x"}}));
+        let bound = bindings(json!({"imgae": "x"}));
         assert_eq!(
             undeclared_binding_issues("bindings", "Subject s", &bound, &declared),
             ["bindings.imgae binds an input Subject s does not declare; declared inputs: image"]
         );
-    }
-
-    #[test]
-    fn test_resolve_document_replaces_references_at_any_depth() {
-        let providers = TestProviders {
-            units: BTreeMap::from([("network", json!("vpc-0abc123"))]),
-            ..TestProviders::default()
-        };
-        let document = json!({
-            "vpc_id": {"fromUnit": {"unit": "network", "output": "vpcId"}},
-            "db": {"hosts": [{"fromUnit": {"unit": "database", "output": "host"}}, "static"]},
-            "literal": {"fromGit": "main"},
-        });
-        let mut issues = Vec::new();
-        let resolved = resolve_document(
-            "spec.variables",
-            "/variables",
-            &document,
-            UNIT_REFERENCE_KINDS,
-            &providers,
-            &mut issues,
-        );
-        assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(resolved.value["vpc_id"], json!("vpc-0abc123"));
-        // Only fromUnit and fromPromotion are references in a document.
-        assert_eq!(resolved.value["literal"], json!({"fromGit": "main"}));
-        assert_eq!(
-            resolved.provenance,
-            BTreeMap::from([("/variables/vpc_id".to_owned(), TestOrigin::Unit("network".to_owned()))])
-        );
-        // The blocked reference stays in place, and is named by its location.
-        assert_eq!(resolved.value["db"]["hosts"][0], document["db"]["hosts"][0]);
-        assert_eq!(
-            resolved.blocked,
-            [Blocked {
-                field: "spec.variables.db.hosts[0]".to_owned(),
-                pointer: "/variables/db/hosts/0".to_owned(),
-                reason: Blocker::no_current_receipt(ProducerRef::local(UnitName::new("database").unwrap())),
-            }]
-        );
-    }
-
-    /// Catches a document resolving a clause kind its caller did not name:
-    /// `fromParameter` is data where only unit references resolve, and a
-    /// provider that reads no parameters refuses it.
-    #[test]
-    fn test_resolve_document_resolves_only_the_kinds_it_is_given() {
-        let document = json!({"crds": {"fromParameter": {"name": "crds"}}});
-        let mut issues = Vec::new();
-        let resolved = resolve_document(
-            "spec.values",
-            "",
-            &document,
-            UNIT_REFERENCE_KINDS,
-            &TestProviders::default(),
-            &mut issues,
-        );
-        assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(resolved.value, document);
-
-        resolve_document(
-            "spec.values",
-            "",
-            &document,
-            TEMPLATE_VALUE_KINDS,
-            &TestProviders::default(),
-            &mut issues,
-        );
-        assert_eq!(
-            messages(&issues),
-            ["spec.values.crds.fromParameter is not supported here"]
-        );
-    }
-
-    #[test]
-    fn test_resolve_document_reports_invalid_references() {
-        let document = json!({
-            "a": {"fromUnit": {"unit": "network"}},
-            "b": {"fromUnit": {"unit": "network", "output": "vpcId"}, "pointer": "/id"},
-            "c": {"fromUnit": {"unit": "network", "output": "vpcId", "extra": 1}},
-            "d": {"fromUnit": null},
-            "e": {"fromPromotion": {"value": "image"}},
-        });
-        let mut issues = Vec::new();
-        resolve_document(
-            "values",
-            "",
-            &document,
-            UNIT_REFERENCE_KINDS,
-            &TestProviders::default(),
-            &mut issues,
-        );
-        let issues = messages(&issues);
-        assert_eq!(issues.len(), 5, "{issues:?}");
-        assert_eq!(
-            issues[0],
-            "values.a.fromUnit must set exactly one of output, artifact, and observation"
-        );
-        assert!(
-            issues[1].starts_with("values.b mixes fromUnit with other fields"),
-            "{issues:?}"
-        );
-        assert!(issues[2].starts_with("values.c is not a valid reference"), "{issues:?}");
-        assert_eq!(issues[3], "values.d.fromUnit must be an object");
-        assert_eq!(issues[4], "values.e.fromPromotion is not supported here");
     }
 
     /// Catches a provider's stable code and fix being dropped on the way to
@@ -820,8 +589,8 @@ mod tests {
 
         let declared = declarations(json!({"vpc": {"type": "string"}, "port": {"type": "integer"}}));
         let bound = bindings(json!({
-            "vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}},
-            "port": {"fromGit": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
+            "vpc": {"$unit": {"unit": "network", "output": "vpcId"}},
+            "port": {"$git": {"repository": {"repoURL": "https://git.example.com/x.git"}, "revision": "main", "commit": "a".repeat(40), "path": "x.json"}},
         }));
         let mut issues = Vec::new();
         resolve(
@@ -836,23 +605,30 @@ mod tests {
         assert_eq!(
             issues,
             [
-                BindingIssue::new("bindings.port.fromGit is not supported here"),
+                BindingIssue::new("bindings.port.$git is not supported here"),
                 rejected.clone()
             ]
         );
 
         let document = json!({
-            "a": {"fromUnit": {"unit": "network", "output": "vpcId"}},
-            "b": {"fromUnit": {"unit": "other", "output": "x"}, "pointer": "/id"},
+            "a": {"$unit": {"unit": "network", "output": "vpcId"}},
+            "b": {"$unit": {"unit": "other", "output": "x"}, "pointer": "/id"},
         });
         let mut issues = Vec::new();
-        resolve_document("spec", "", &document, UNIT_REFERENCE_KINDS, &providers, &mut issues);
+        resolve_document(
+            "spec",
+            "",
+            &document,
+            Context::UnitExecution.into(),
+            &providers,
+            &mut issues,
+        );
         assert_eq!(
             issues,
             [
                 rejected,
                 BindingIssue::new(
-                    "spec.b mixes fromUnit with other fields; a reference object holds only its reference, and replaces the whole value"
+                    "spec.b holds $unit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data)"
                 )
             ]
         );

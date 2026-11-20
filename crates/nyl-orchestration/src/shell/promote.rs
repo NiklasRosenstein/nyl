@@ -28,7 +28,7 @@
 //!   its lease never taken. `--dry-run` takes no lease and writes nothing.
 //! - **`record: source`.** A path that promotes the source of a target with
 //!   `record: source` writes the record as the target Environment's
-//!   `source.fromPromotion.promoted` block, one commit on the branch the
+//!   `source.promotion.promoted` block, one commit on the branch the
 //!   entry worktree has checked out with the same message a transition
 //!   commit would carry, pushed fast-forward only through a
 //!   [`PromotionRecordWriter`] (decision D3 of the M6 plan). Then, under the
@@ -107,9 +107,9 @@ pub struct PromoteOptions {
     /// the path selects its units as each candidate's source commit says
     /// ([`target_units`]).
     pub entry_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
-    /// Whether the target's source is `fromPromotion` naming this path.
+    /// Whether the target's source is `promotion` naming this path.
     pub promotes_source: bool,
-    /// The target's `source.fromPromotion` as the entry worktree declares
+    /// The target's `source.promotion` as the entry worktree declares
     /// it: with `record: source`, its block is the path's current record.
     pub promoted: Option<PromotedSource>,
     /// Who asks and why, recorded like an approval.
@@ -1018,7 +1018,7 @@ pub fn writer_finding(
         ),
         RecordWriteError::Unplaceable(_) => (
             Code::PromoteSourceUnwritable,
-            format!("declare `spec.source.fromPromotion` on the Environment itself, in block style with one key per line, and {again}"),
+            format!("declare `spec.source.promotion` on the Environment itself, in block style with one key per line, and {again}"),
         ),
         RecordWriteError::Undeclared(_) => (
             Code::PromoteSourceUnwritable,
@@ -1091,11 +1091,7 @@ pub fn environment_promotions(
 ) -> Result<BTreeMap<nyl_core::orchestration::ids::PromotionPathName, PromotionRecord>, Finding> {
     use crate::rules::sources::{invalid_block, promotion_records, Applied};
     let environment = entry.metadata.name.as_str();
-    let promoted = entry
-        .spec
-        .source
-        .as_ref()
-        .and_then(|source| source.from_promotion.as_ref());
+    let promoted = entry.spec.source.as_ref().and_then(|source| source.promotion.as_ref());
     let read = promotion_records(environment, promoted, &snapshot.promotions, &Applied::of(snapshot))?;
     let Some(block) = &read.check else {
         return Ok(read.records);

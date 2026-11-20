@@ -69,8 +69,8 @@ nyl get units -e dev                          # NAME KIND STATE RECEIPT LAST RUN
 nyl get units -e dev -o wide                  # ... and TEARDOWN READINESS
 nyl get unit migrate -e dev -o yaml           # the persisted desired and observed documents
 nyl get unit migrate -e dev -o json --observed
-nyl get output database/host -e dev           # resolves like {fromUnit: {unit: database, output: host}}
-nyl get observation kubernetes/ingressIp -e dev  # an observed value, as {fromUnit: {unit: kubernetes, observation: ingressIp}}
+nyl get output database/host -e dev           # resolves like {$unit: {unit: database, output: host}}
+nyl get observation kubernetes/ingressIp -e dev  # an observed value, as {$unit: {unit: kubernetes, observation: ingressIp}}
 nyl get artifacts -e dev                      # UNIT NAME KIND SUMMARY
 nyl get artifact web/image -e dev --pointer /reference
 nyl get units -e dev --state-revision 41f0c2e
@@ -103,7 +103,7 @@ described on [their own page](/nyl/reference/cli/get-promotions/).
   `--observed` prints only one of them.
 - `get output <unit>/<output>`, `get artifact <unit>/<name> --pointer …`, and
   `get observation <unit>/<name>` print one value for scripts and resolve
-  exactly like the matching `fromUnit` reference: the pointer is relative to
+  exactly like the matching `$unit` reference: the pointer is relative to
   the artifact's `spec`, and only a current receipt counts. An observed value
   must also be recorded for that receipt and not older than its `maxAge`. When the reference would not resolve, they
   print nothing and exit 1. `--allow-stale` prints the latest receipt's value
@@ -133,7 +133,7 @@ file. `--check` reports drift without writing.
 
 ## Update source locks
 
-Resolve remote ApplicationGroup sources, `fromGit` Release inputs, Environment
+Resolve remote ApplicationGroup sources, `$git` Release inputs, Environment
 sources, and native unit sources (including named image contexts), and update
 their full commit locks:
 
@@ -145,12 +145,12 @@ nyl update source-locks --check
 ```
 
 A group name selects that ApplicationGroup and `--target` selects one
-DeploymentTarget's `fromGit` locks; without either, every lock is updated. The
+DeploymentTarget's `$git` locks; without either, every lock is updated. The
 filters choose which locks move, never where: each lock's destination depends
 only on the lock, so a filtered update agrees with an unfiltered `--check`.
 Every lock moves to the head of its revision. Each repository is fetched once
 per run. Locks are edited in place by their
-position, so write source locks and `fromGit` bindings in block style. Unit
+position, so write source locks and `$git` bindings in block style. Unit
 source locks require literal repository coordinates, revisions, and commits.
 Nyl discovers source fields through each registered driver and warns when a unit
 cannot render without an environment; its locks are skipped. Unfiltered updates

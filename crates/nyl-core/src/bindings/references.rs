@@ -2,16 +2,16 @@
 //!
 //! Contract: [References](../../../../design/orchestration-core.md#references):
 //! "References add edges implicitly", and the edge is known after rendering.
-//! The dependency graph needs every `fromUnit` reference of a rendered spec
-//! before any producer has a value, so this walk shares the reference-object
-//! rule of [`super::resolve_document`] (an object whose only field is
-//! `fromUnit` or `fromPromotion`, at any depth) but reads no provider.
+//! The dependency graph needs every `$unit` reference of a rendered or stored
+//! spec before any producer has a value, so this walk shares the walker of
+//! [`super::resolve_document`] ([`super::find_clauses`]) but reads no
+//! provider.
 
 use serde_json::Value;
 
-use super::{parse_reference, reference_kinds, BindingKind, UnitInputSource};
+use super::{find_clauses, Clause, Context, UnitInputSource};
 
-/// One `fromUnit` reference object of a document.
+/// One `$unit` reference of a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitReference {
     /// JSON Pointer of the reference object, below the pointer the caller
@@ -20,71 +20,21 @@ pub struct UnitReference {
     pub source: UnitInputSource,
 }
 
-/// Every `fromUnit` reference object in `document`, at any depth of its
-/// objects and arrays, with `pointer` locating `document` itself. `kinds`
-/// are the reference kinds the document accepts, as for
-/// [`super::resolve_document`], such as [`super::UNIT_REFERENCE_KINDS`]. A
-/// malformed reference object (unknown fields, both `output` and `artifact`)
-/// is an issue naming its pointer; references of other kinds are skipped.
-pub fn unit_references(pointer: &str, document: &Value, kinds: &[&str]) -> Result<Vec<UnitReference>, Vec<String>> {
-    let mut references = Vec::new();
-    let mut issues = Vec::new();
-    walk(pointer, document, kinds, &mut references, &mut issues);
-    if issues.is_empty() {
-        Ok(references)
-    } else {
-        Err(issues)
-    }
-}
-
-fn walk(pointer: &str, value: &Value, kinds: &[&str], references: &mut Vec<UnitReference>, issues: &mut Vec<String>) {
-    match value {
-        Value::Object(fields) => {
-            let found = reference_kinds(fields, kinds);
-            match found.as_slice() {
-                [] => {
-                    for (key, child) in fields {
-                        walk(&crate::json_pointer::child(pointer, key), child, kinds, references, issues);
-                    }
-                }
-                [kind] if fields.len() == 1 => {
-                    if let Some(reference) = read_reference(pointer, kind, value, issues) {
-                        references.push(reference);
-                    }
-                }
-                _ => issues.push(format!(
-                    "the reference at {pointer:?} mixes {} with other fields; a reference object holds only its reference",
-                    found.join(" and ")
-                )),
-            }
-        }
-        Value::Array(items) => {
-            for (index, child) in items.iter().enumerate() {
-                walk(&format!("{pointer}/{index}"), child, kinds, references, issues);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Read one reference object whose only field is `kind`; `None` for a
-/// `fromPromotion` reference or a malformed one, which adds an issue.
-fn read_reference(pointer: &str, kind: &str, reference: &Value, issues: &mut Vec<String>) -> Option<UnitReference> {
-    let field = format!("the reference at {pointer:?}");
-    let binding = match parse_reference(&field, &format!("{field}: {kind}"), kind, reference) {
-        Ok(binding) => binding,
-        Err(issue) => {
-            issues.push(issue);
-            return None;
-        }
-    };
-    match binding.kind(&field) {
-        Ok(BindingKind::FromUnit) => Some(UnitReference {
-            pointer: pointer.to_owned(),
-            source: binding.from_unit.expect("kind agrees with the set field"),
-        }),
-        _ => None,
-    }
+/// Every `$unit` reference in a rendered unit spec `document`, at any depth
+/// of its objects and arrays, with `pointer` locating `document` itself. A
+/// malformed or misplaced source (unknown fields, both `output` and
+/// `artifact`) is an issue naming its location, never a dropped reference.
+pub fn unit_references(pointer: &str, document: &Value) -> Result<Vec<UnitReference>, Vec<String>> {
+    Ok(find_clauses("spec", pointer, document, Context::UnitExecution.into())?
+        .into_iter()
+        .filter_map(|found| match found.clause {
+            Clause::Unit(source) => Some(UnitReference {
+                pointer: found.pointer,
+                source,
+            }),
+            _ => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -92,7 +42,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::bindings::UNIT_REFERENCE_KINDS;
 
     fn source(unit: &str, output: Option<&str>, artifact: Option<&str>) -> UnitInputSource {
         UnitInputSource {
@@ -111,12 +60,12 @@ mod tests {
     #[test]
     fn test_unit_references_finds_nested_and_array_references() {
         let document = json!({
-            "variables": {"vpc_id": {"fromUnit": {"unit": "network", "output": "vpcId"}}},
-            "hosts": ["static", {"fromUnit": {"unit": "database", "artifact": "endpoint"}}],
-            "promoted": {"fromPromotion": {"value": "image"}},
-            "literal": {"fromGit": "main"},
+            "variables": {"vpc_id": {"$unit": {"unit": "network", "output": "vpcId"}}},
+            "hosts": ["static", {"$unit": {"unit": "database", "artifact": "endpoint"}}],
+            "promoted": {"$promotion": {"value": "image"}},
+            "literal": {"$literal": {"$unit": {"unit": "data"}}},
         });
-        let references = unit_references("", &document, UNIT_REFERENCE_KINDS).unwrap();
+        let references = unit_references("", &document).unwrap();
         assert_eq!(
             references,
             [
@@ -134,28 +83,29 @@ mod tests {
 
     #[test]
     fn test_unit_references_escapes_tokens_below_the_given_pointer() {
-        let document = json!({"platform/web": {"image": {"fromUnit": {"unit": "web-image", "artifact": "image"}}}});
-        let references = unit_references("/releases", &document, UNIT_REFERENCE_KINDS).unwrap();
+        let document = json!({"platform/web": {"image": {"$unit": {"unit": "web-image", "artifact": "image"}}}});
+        let references = unit_references("/releases", &document).unwrap();
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].pointer, "/releases/platform~1web/image");
     }
 
     #[test]
-    fn test_unit_references_names_the_pointer_of_malformed_references() {
+    fn test_unit_references_names_the_location_of_malformed_references() {
         let document = json!({
-            "both": {"fromUnit": {"unit": "a", "output": "x", "artifact": "y"}},
-            "neither": {"fromUnit": {"unit": "a"}},
-            "unknown": {"fromUnit": {"unit": "a", "output": "x", "extra": 1}},
-            "mixed": {"fromUnit": {"unit": "a", "output": "x"}, "other": 1},
-            "scalar": {"fromUnit": "a"},
+            "both": {"$unit": {"unit": "a", "output": "x", "artifact": "y"}},
+            "neither": {"$unit": {"unit": "a"}},
+            "unknown": {"$unit": {"unit": "a", "output": "x", "extra": 1}},
+            "mixed": {"$unit": {"unit": "a", "output": "x"}, "other": 1},
+            "scalar": {"$unit": "a"},
         });
-        let issues = unit_references("", &document, UNIT_REFERENCE_KINDS).unwrap_err();
+        let issues = unit_references("", &document).unwrap_err();
         assert_eq!(issues.len(), 5, "{issues:?}");
-        for (issue, pointer) in issues
-            .iter()
-            .zip(["/both", "/mixed", "/neither", "/scalar", "/unknown"])
+        for (issue, field) in
+            issues
+                .iter()
+                .zip(["spec.both", "spec.mixed", "spec.neither", "spec.scalar", "spec.unknown"])
         {
-            assert!(issue.contains(&format!("{pointer:?}")), "{issue} names {pointer}");
+            assert!(issue.starts_with(field), "{issue} names {field}");
         }
         assert!(
             issues[0].ends_with("must set exactly one of output, artifact, and observation"),

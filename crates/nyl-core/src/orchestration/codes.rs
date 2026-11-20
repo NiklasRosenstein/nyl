@@ -197,7 +197,7 @@ codes! {
     PromoteSelectorInvalid => "NYL-PROMOTE-SELECTOR-INVALID",
     /// A promoted value's type does not fit a binding that reads it.
     PromoteValueType => "NYL-PROMOTE-VALUE-TYPE",
-    /// A `fromPromotion` binding names a path or a value no PromotionPath declares.
+    /// A `$promotion` binding names a path or a value no PromotionPath declares.
     PromoteBindingUnknown => "NYL-PROMOTE-BINDING-UNKNOWN",
     /// A PromotionPath's `coverage` names a unit the source environment does not select, a unit whose kind runs no deployments, or a group or deployment the unit's driver does not list for it.
     PromoteCoverageUnknown => "NYL-PROMOTE-COVERAGE-UNKNOWN",
@@ -205,7 +205,7 @@ codes! {
     PromoteCoverageIneffective => "NYL-PROMOTE-COVERAGE-INEFFECTIVE",
     /// The deployments of a unit a PromotionPath's `coverage` names could not be listed, such as when what the unit's declaration renders from cannot be read, so its names are not checked. An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`, which judge the source by what they need. A promotion still refuses a name no attestation lists.
     PromoteCoverageUnchecked => "NYL-PROMOTE-COVERAGE-UNCHECKED",
-    /// The declared type of a field a `fromPromotion` binding fills could not be read, so the promoted value's type is not compared with it: the unit's driver could not read what declares the type, such as a remote source that is neither fetched nor cached (`nyl validate --offline`, a `--local` run). An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`. Resolution still checks the value against the declaration.
+    /// The declared type of a field a `$promotion` binding fills could not be read, so the promoted value's type is not compared with it: the unit's driver could not read what declares the type, such as a remote source that is neither fetched nor cached (`nyl validate --offline`, a `--local` run). An error in `nyl validate`; a warning in `plan`, `reconcile`, `promote`, and `get promotion-candidates`. Resolution still checks the value against the declaration.
     PromoteValueTypeUnchecked => "NYL-PROMOTE-VALUE-TYPE-UNCHECKED",
     /// `nyl promote` found no recorded state of the source whose evidence reaches the path's level: no state, a unit without a current receipt, a required attestation that is pending, aged past `maxAttestationAge`, or failing, or a publication's running-scoped attestation that no longer describes what runs (only its current receipt's counts; `--state-revision` judges an older state on its own). Nothing was written. Exit 2.
     PromoteNoEvidence => "NYL-PROMOTE-NO-EVIDENCE",
@@ -215,15 +215,15 @@ codes! {
     PromoteArtifactMissing => "NYL-PROMOTE-ARTIFACT-MISSING",
     /// A promoted artifact's kind cannot verify artifacts, so the record says `artifactsVerified: false`. A warning.
     PromoteArtifactUnverified => "NYL-PROMOTE-ARTIFACT-UNVERIFIED",
-    /// An environment's `fromPromotion` source, or a `fromPromotion` binding, names a path with no record yet. Exit 2.
+    /// An environment's `promotion` source, or a `$promotion` binding, names a path with no record yet. Exit 2.
     PromotionMissing => "NYL-PROMOTION-MISSING",
     /// The `record: source` block in an Environment's source has a lower `sequence` than the one a run applied, such as an older checkout or a reverted promotion commit. Rolling back is a new promotion. Exit 1.
     PromotionSequenceOlder => "NYL-PROMOTION-SEQUENCE-OLDER",
     /// The `record: source` block in an Environment's source does not match the source state it names, or names a path the Environment does not promote along. Exit 1.
     PromotionRecordInvalid => "NYL-PROMOTION-RECORD-INVALID",
-    /// The `record: source` block of an Environment whose `fromPromotion.verify` names an allowed signers file was last changed by a commit `git verify-commit` does not accept against it (unsigned, or signed by a key the file does not list), or its provenance cannot be read (an untracked or changed Environment file, a missing allowed signers file, a shallow history). Nothing ran. Exit 1.
+    /// The `record: source` block of an Environment whose `promotion.verify` names an allowed signers file was last changed by a commit `git verify-commit` does not accept against it (unsigned, or signed by a key the file does not list), or its provenance cannot be read (an untracked or changed Environment file, a missing allowed signers file, a shallow history). Nothing ran. Exit 1.
     PromotionRecordUnsigned => "NYL-PROMOTION-RECORD-UNSIGNED",
-    /// `nyl promote` cannot commit or push a `record: source` block: the entry worktree has no branch checked out (detached HEAD), the branch has no upstream or commits its upstream lacks, the Environment's file is untracked or has uncommitted changes, the block cannot be placed in the Environment's own document, the Environment is not declared in a file (a template's instance), with `fromPromotion.verify` the commit would not be signed as a run requires (it is undone before the push), the remote refused the push for another reason than a moved branch (branch protection, a hook), or the push never started because a configured Git credential cannot be used or `git` cannot run (the commit is undone). The message says whether anything was written; the fix is the cause's. Exit 1.
+    /// `nyl promote` cannot commit or push a `record: source` block: the entry worktree has no branch checked out (detached HEAD), the branch has no upstream or commits its upstream lacks, the Environment's file is untracked or has uncommitted changes, the block cannot be placed in the Environment's own document, the Environment is not declared in a file (a template's instance), with `promotion.verify` the commit would not be signed as a run requires (it is undone before the push), the remote refused the push for another reason than a moved branch (branch protection, a hook), or the push never started because a configured Git credential cannot be used or `git` cannot run (the commit is undone). The message says whether anything was written; the fix is the cause's. Exit 1.
     PromoteSourceUnwritable => "NYL-PROMOTE-SOURCE-UNWRITABLE",
     /// The push of a `record: source` commit failed without the remote refusing it, such as a network error after the upload, so it may or may not have reached the remote. The commit is kept on the local branch, and no marker was written into the target's state. Nothing is known to have failed: fetch the branch, check whether the commit reached the remote, and run `nyl promote` again, which writes only the marker when the pushed block is current, or promotes again. Exit 2.
     PromoteSourceUncertain => "NYL-PROMOTE-SOURCE-UNCERTAIN",

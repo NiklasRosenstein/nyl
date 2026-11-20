@@ -97,7 +97,7 @@ pub struct RenderArgs {
     #[command(flatten)]
     pub common: RenderOptions,
 
-    /// Resolve Git charts from cached refs and read `fromPublication` Release inputs at the cached publication branch head
+    /// Resolve Git charts from cached refs and read `$publication` Release inputs at the cached publication branch head
     #[arg(long)]
     pub offline: bool,
 

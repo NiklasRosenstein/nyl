@@ -189,7 +189,7 @@ one values key. Files follow the path and Git-visibility rules of Cluster
 `valuesFrom`; an `input` entry is valid only in the bundle of a Release that
 declares the input. Nyl passes the merged values to Helm as data and never
 templates or resolves anything in them. See
-[Value sources](/nyl/reference/value-sources/#helmchart-values-valuesfrom) for
+[Value sources](/nyl/reference/value-sources/#helmchart-valuesfrom) for
 every rule.
 
 ### Cluster and target values
@@ -328,10 +328,10 @@ spec:
   lookup: true
 ```
 
-In a Release bundle, `lookup` and `includeCrds` can also read a boolean
-Release input, so targets decide them without templating:
-`lookup: {fromInput: {name: lookup}}`. See
-[HelmChart fields: `fromInput`](/nyl/reference/value-sources/#helmchart-fields-frominput).
+In a Release bundle, `lookup`, `includeCrds`, and the HelmChart's other fields
+can also read a Release input, so targets decide them without templating:
+`lookup: {$input: lookup}`. See
+[`$input`](/nyl/reference/value-sources/#input).
 
 `lookup` is opt-in. A chart without it renders exactly as before. `spec.lookup: false` is the
 explicit opt-out: it renders the same way, and tells Nyl you know the chart calls `lookup`
@@ -367,7 +367,7 @@ chart and resource per run.
 ### What `lookup` sees
 
 - Only the objects of the Release being rendered, as the target's last publication
-  holds them. That is the commit `fromPublication` inputs read. Other Releases and
+  holds them. That is the commit `$publication` inputs read. Other Releases and
   the cluster are invisible.
 - Before the Release is first published, or without a target, nothing is found and the
   chart generates. After `publish-tree`, later renders read back what was published.

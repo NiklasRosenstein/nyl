@@ -5,7 +5,7 @@
 //! [References](../../../../design/orchestration-core.md#references)
 //! ("References add edges implicitly"), and the
 //! [Kubernetes publication unit](../../../../design/orchestration-core.md#kubernetes-publication-unit)
-//! (its dependencies are its target's `fromUnit` bindings, which the renderer
+//! (its dependencies are its target's `$unit` bindings, which the renderer
 //! places under `spec.releases`).
 //!
 //! Edges come from rendered specs, so they exist before any value does. A
@@ -73,7 +73,7 @@ pub fn extract(
                     "units of environment {environment} depend on each other in a cycle: {}",
                     cycle.iter().map(UnitName::as_str).collect::<Vec<_>>().join(" -> ")
                 ),
-                "remove one dependsOn entry or fromUnit reference of the cycle",
+                "remove one dependsOn entry or $unit reference of the cycle",
             ));
         }
     }
@@ -149,14 +149,14 @@ fn reference_edges(
     edges: &mut Vec<GraphEdge>,
     findings: &mut Vec<Finding>,
 ) {
-    let references = match unit_references("", &unit.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
+    let references = match unit_references("", &unit.spec) {
         Ok(references) => references,
         Err(issues) => {
             for issue in issues {
                 findings.push(Finding::new(
                     Code::ReferenceInvalid,
                     format!("unit {consumer}: {issue}"),
-                    "write a reference as {fromUnit: {unit, output | artifact | observation, kind?, pointer?}} alone in its object",
+                    "write a reference as {$unit: {unit, output | artifact | observation, kind?, pointer?}} alone in its object",
                 ));
             }
             return;
@@ -383,7 +383,7 @@ mod tests {
                 "database",
                 "Command",
                 json!({
-                    "values": {"vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}}},
+                    "values": {"vpc": {"$unit": {"unit": "network", "output": "vpcId"}}},
                     "outputs": {"host": {"type": "string"}},
                 }),
             ),
@@ -394,8 +394,8 @@ mod tests {
                     "target": "dev",
                     "releases": {
                         "platform/web": {
-                            "image": {"fromUnit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
-                            "dbHost": {"fromUnit": {"unit": "database", "output": "host"}},
+                            "image": {"$unit": {"unit": "web-image", "artifact": "image", "pointer": "/reference"}},
+                            "dbHost": {"$unit": {"unit": "database", "output": "host"}},
                         },
                     },
                     "dependsOn": ["database"],
@@ -444,7 +444,8 @@ mod tests {
     #[test]
     fn test_extract_adds_an_edge_for_an_observation_and_checks_its_declaration() {
         let producer = json!({"observations": {"ip": {"type": "string", "from": {}}}});
-        let consumer = |observation: &str| json!({"values": {"address": {"fromUnit": {"unit": "lb", "observation": observation}}}});
+        let consumer =
+            |observation: &str| json!({"values": {"address": {"$unit": {"unit": "lb", "observation": observation}}}});
         let graph = graph(&[("lb", "Command", producer.clone()), ("dns", "Command", consumer("ip"))]).unwrap();
         assert_eq!(
             graph.edges.iter().map(|edge| edge.source.clone()).collect::<Vec<_>>(),
@@ -489,7 +490,7 @@ mod tests {
                 "Command",
                 json!({"dependsOn": ["a"], "outputs": {"y": {"type": "string"}}}),
             ),
-            ("c", "Command", json!({"x": {"fromUnit": {"unit": "b", "output": "y"}}})),
+            ("c", "Command", json!({"x": {"$unit": {"unit": "b", "output": "y"}}})),
             ("d", "Command", json!({"dependsOn": ["a"]})),
         ])
         .unwrap_err();
@@ -516,15 +517,15 @@ mod tests {
             "Command",
             json!({
                 "dependsOn": ["missing", {"environment": "infra", "unit": "network"}],
-                "x": {"fromUnit": {"unit": "gone", "output": "y"}},
-                "y": {"fromUnit": {"unit": "gone"}},
+                "x": {"$unit": {"unit": "gone", "output": "y"}},
+                "y": {"$unit": {"unit": "gone"}},
             }),
         )])
         .unwrap_err();
         let codes = findings.iter().map(|finding| finding.code).collect::<Vec<_>>();
         assert_eq!(codes, [Code::DependencyUnknown, Code::ReferenceInvalid], "{findings:?}");
         assert!(findings[0].message.contains("\"missing\""));
-        assert!(findings[1].message.contains("\"/y\""), "{}", findings[2].message);
+        assert!(findings[1].message.contains("spec.y"), "{}", findings[1].message);
     }
 
     /// Catches a reference to an output its producer does not declare, or
@@ -542,10 +543,10 @@ mod tests {
                 "app",
                 "Command",
                 json!({
-                    "a": {"fromUnit": {"unit": "db", "output": "port"}},
-                    "b": {"fromUnit": {"unit": "db", "output": "password"}},
-                    "c": {"fromUnit": {"unit": "db", "output": "host"}},
-                    "d": {"fromUnit": {"unit": "db", "artifact": "anything"}},
+                    "a": {"$unit": {"unit": "db", "output": "port"}},
+                    "b": {"$unit": {"unit": "db", "output": "password"}},
+                    "c": {"$unit": {"unit": "db", "output": "host"}},
+                    "d": {"$unit": {"unit": "db", "artifact": "anything"}},
                 }),
             ),
         ])
@@ -575,7 +576,7 @@ mod tests {
                 "Command",
                 json!({
                     "dependsOn": [{"unit": "db", "attestations": ["smoke"]}, {"unit": "plain", "evidence": "attested"}],
-                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["smoke"]}},
+                    "x": {"$unit": {"unit": "db", "output": "host", "attestations": ["smoke"]}},
                 }),
             ),
         ])
@@ -589,7 +590,7 @@ mod tests {
                 "Command",
                 json!({
                     "dependsOn": [{"unit": "db", "attestations": ["healthy"]}],
-                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["nope"]}},
+                    "x": {"$unit": {"unit": "db", "output": "host", "attestations": ["nope"]}},
                 }),
             ),
         ])
@@ -611,7 +612,7 @@ mod tests {
 
     /// Catches an external attestation refused as a requirement: its
     /// producer declares `qa` with `from: external`, which `nyl attest
-    /// --name` records, so `dependsOn` and `fromUnit` entries naming it, or
+    /// --name` records, so `dependsOn` and `$unit` entries naming it, or
     /// requiring `evidence: attested`, extract into edges like any other.
     #[test]
     fn test_extract_accepts_requirements_an_external_source_meets() {
@@ -623,8 +624,8 @@ mod tests {
                 "Command",
                 json!({
                     "dependsOn": [{"unit": "db", "attestations": ["qa"]}, {"unit": "db", "evidence": "attested"}],
-                    "x": {"fromUnit": {"unit": "db", "output": "host", "attestations": ["smoke", "qa"]}},
-                    "y": {"fromUnit": {"unit": "db", "output": "host", "evidence": "attested"}},
+                    "x": {"$unit": {"unit": "db", "output": "host", "attestations": ["smoke", "qa"]}},
+                    "y": {"$unit": {"unit": "db", "output": "host", "evidence": "attested"}},
                 }),
             ),
         ])
