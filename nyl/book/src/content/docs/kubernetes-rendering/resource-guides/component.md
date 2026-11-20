@@ -6,6 +6,24 @@ See the [Component resource reference](/nyl/reference/resources/components.k8s.n
 
 Generated resources inherit a Component's Argo CD sync wave and phase; see [Argo CD sync waves and phases](/nyl/kubernetes-rendering/pipeline/#argo-cd-sync-waves-and-phases).
 
+## Release inputs
+
+In the bundle of a Release that declares inputs, a Component's `spec` reads
+one with `{$input: name}` at any depth, with the input's type, before value
+imports apply; other `$` keys, such as `$ref`, are chart data. What the
+Component's chart generates takes no value sources. See
+[`$input`](/nyl/reference/value-sources/#input).
+
+```yaml
+apiVersion: components.k8s.nyl/v1
+kind: example/v1/Nginx
+metadata:
+  name: web
+  namespace: {$input: namespace}
+spec:
+  image: {tag: {$input: tag}}
+```
+
 ## Local Resolution
 
 With:

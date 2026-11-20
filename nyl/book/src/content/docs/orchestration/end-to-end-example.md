@@ -217,8 +217,9 @@ spec:
 ```
 
 The Release in `applications/web/release.yaml` is a plain Deployment whose image
-is `{{ inputs.image }}` and whose `DATABASE_HOST` is `{{ inputs.databaseHost }}`.
-Nothing in it knows about orchestration.
+is `{$input: image}`, whose `DATABASE_HOST` is `{$input: databaseHost}`, and
+whose namespace, like the Release's, is `{$input: namespace}`. Nothing in it
+knows about orchestration.
 
 ## Run it locally
 

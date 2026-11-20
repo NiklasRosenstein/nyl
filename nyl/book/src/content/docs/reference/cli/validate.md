@@ -44,6 +44,10 @@ nyl validate [path] [--strict] [--offline]
     run before reading state: specs, overlapping resources,
     `dependsOn` and references to unknown units, cycles, references to
     undeclared or sensitive outputs, and evidence requirements
+11. The value sources each Environment's and each sample instance's values
+    carry: each is checked where a unit reads it with `$environment`, and one
+    that no unit reads warns with `NYL-VALUES-SOURCE-UNREAD` (see
+    [Carried sources](/nyl/reference/value-sources/#carried-sources-and-nyl-validate))
 
 ## Examples
 

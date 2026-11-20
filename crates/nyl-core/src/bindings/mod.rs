@@ -35,6 +35,7 @@ mod clauses;
 mod declaration;
 mod issue;
 mod references;
+mod schema;
 mod walk;
 
 use std::collections::BTreeMap;
@@ -47,12 +48,15 @@ pub use binding::{
     FileInputSource, GitInputSource, InputBinding, PromotionInputSource, PublicationInputSource, UnitInputSource,
 };
 pub use clauses::{
-    clause_key, holds_dollar_key, literal_field_issues, Clause, Context, InputSource, Namespace, ParameterSource,
-    Source, Treatment, ValuesSource, LITERAL_ONLY_FIELDS, SLIPS, VALUE_SOURCES_DOCS,
+    clause_key, holds_dollar_key, literal_field_issues, sources_in, Clause, Context, InputSource, Namespace,
+    ParameterSource, Source, Treatment, ValuesSource, LITERAL_ONLY_FIELDS, SLIPS, VALUE_SOURCES_DOCS,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
+pub use schema::{
+    offer_sources, reserved_key_issues, schema_alternatives, schema_resolve, schema_step, source_variants, SchemaStep,
+};
 pub use walk::{find_clauses, provide, resolve_document, FoundClause, Scope};
 
 /// An effective value and where it came from.

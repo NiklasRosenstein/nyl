@@ -136,7 +136,13 @@ impl<'s> At<'s> {
                 self.field
             );
         }
-        self.context.misplaced(&self.field, source)
+        let message = self.context.misplaced(&self.field, source);
+        if self.environment_value {
+            // A source the environment's values carried here: checked where it lands.
+            format!("{message}; it came with the environment's values that $environment read here")
+        } else {
+            message
+        }
     }
 }
 
@@ -716,6 +722,32 @@ mod tests {
         );
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(resolved.value["image"], json!({"$unit": "data"}));
+    }
+
+    /// Catches a source the values carry being checked against the values'
+    /// context instead of the one it lands in: `$file` in a target's
+    /// `values` is valid in template values, but not in a unit document.
+    #[test]
+    fn test_carried_sources_are_checked_where_they_land() {
+        let providers = values(json!({"target": {"inline": {
+            "values": {"config": {"$file": {"path": "config.yaml"}}},
+            "releaseInputs": {"g/r": {"config": {"$file": {"path": "config.yaml"}}}},
+        }}}));
+        let within = [("/target/inline/releaseInputs", Context::UnitTargetInputs)];
+        let scope = Scope {
+            context: Context::UnitRender,
+            within: &within,
+        };
+        let (_, issues) = resolve(json!({"target": {"$environment": "/target"}}), scope, &providers);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].starts_with("spec.target.inline.values.config holds a $file source"),
+            "{issues:?}"
+        );
+        assert!(
+            issues[0].ends_with("it came with the environment's values that $environment read here"),
+            "{issues:?}"
+        );
     }
 
     #[test]

@@ -1754,6 +1754,62 @@ spec:
         );
     }
 
+    /// Catches a cached Release reused after a Release input changed that a
+    /// manifest reads with `$input`: the inputs are part of the Release's
+    /// cache key, so the next render reads the new value.
+    #[tokio::test]
+    async fn changing_an_input_a_manifest_reads_invalidates_the_cached_release() {
+        let temp = TempDir::new().unwrap();
+        git2::Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("nyl.toml"), "").unwrap();
+        fs::write(
+            temp.path().join("app.yaml"),
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata:\n  name: web\n  namespace: apps\nspec:\n  inputs:\n    image: {type: string}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\ndata:\n  image: {$input: image}\n",
+        )
+        .unwrap();
+        let config = ProjectConfig::load_from_dir(None, Some(temp.path()), crate::config::test_catalogue()).unwrap();
+        let mut session = RenderSession::for_target(temp.path(), &config, &target(), &cluster()).unwrap();
+        session.set_cache(Some(
+            RenderCache::with_root(temp.path().join(".nyl/cache"), CacheMode::Default).unwrap(),
+        ));
+        let render = |image: &str| {
+            let inputs = serde_json::json!({"image": image}).as_object().unwrap().clone();
+            let session = &session;
+            let root = temp.path().to_path_buf();
+            async move {
+                session
+                    .render_release_file_with_inputs(
+                        Path::new("app.yaml"),
+                        &root,
+                        None,
+                        Some(&inputs),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let image = |bundle: &RenderedBundle| {
+            bundle
+                .manifests
+                .iter()
+                .find(|manifest| manifest["kind"] == "ConfigMap")
+                .unwrap()["data"]["image"]
+                .clone()
+        };
+        let first = render("web:1").await;
+        assert!(first.cacheable);
+        assert_eq!(image(&first), "web:1");
+        assert_eq!(image(&render("web:1").await), "web:1");
+        assert_eq!(
+            image(&render("web:2").await),
+            "web:2",
+            "a changed input invalidates the cached Release"
+        );
+    }
+
     /// Catches a render that read the live cluster being cached: what the
     /// cluster holds changes without Nyl observing it, so every render looks it up again.
     #[tokio::test]

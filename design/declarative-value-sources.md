@@ -1,10 +1,8 @@
 # Declarative value sources
 
-**Status:** implemented for unit documents, EnvironmentTemplate values,
-DeploymentTarget Release-input bindings, and HelmChart fields in Release
-bundles. `$input` in HelmChart `spec.values`, a Component's `spec`, a
-RemoteManifest, and plain Kubernetes manifests of a Release bundle is the
-next step (see [Open](#open)).
+**Status:** implemented for unit documents, EnvironmentTemplate and
+environment values, DeploymentTarget Release-input bindings, and every
+resource of a Release bundle.
 
 *Structural* templating is Jinja that makes a document invalid YAML before it
 renders, or that decides a value's shape or type (`{{ x | tojson }}`,
@@ -82,18 +80,25 @@ only the context decides which sources are allowed. The rules:
   foreign keys such as `$ref` or `$schema` stay data, but a fixed list of
   likely slips (`$value`, `$values`, `$env`, `$inputs`, `$param`, `$params`,
   `$parameters`, `$units`, `$output`, `$artifact`) is an error with a
-  suggestion.
+  suggestion. In a unit document the kind's `spec_schema` says which fields
+  are typed: where the schema has no place for a `$` key that is no source,
+  the key is an unknown source, reported with the nearest one; where it leaves
+  an object open, the key is data. The check reads only the schema, so it is
+  the same for every driver and runs before the driver's own validation.
 
 ### Contexts
 
 | Context | Resolves | Carries |
 | --- | --- | --- |
-| Release bundle: the fields of a HelmChart | `$input`, `$literal` | — |
+| Release bundle, typed fields: a HelmChart's, a RemoteManifest's, a Release's, a Component's envelope (`$` keys reserved) | `$input`, `$literal` | — |
+| Release bundle, free-form data: a HelmChart's `spec.values`, a Component's `spec`, plain Kubernetes manifests (foreign `$` keys are data) | `$input`, `$literal` | — |
+| A Release's `spec.inputs` declarations | — | — |
 | Unit document, when the unit renders | `$environment` | `$unit`, `$promotion` to the run; in an inline target's `releaseInputs` also `$file`, `$git`, `$publication` to the target's rendering |
 | Unit document, when a run resolves it | `$unit`, `$promotion`, `$literal` | — |
 | EnvironmentTemplate `spec.values` | `$parameter` | `$unit`, `$promotion`, `$file`, `$git`, `$publication`, `$literal`, checked where the values land |
 | Declared Environment and EnvironmentGroup `values` | — | as template values |
 | DeploymentTarget `releaseInputs`, declared or inline | `$file`, `$git`, `$publication`, `$unit`, `$promotion` (the last two only through orchestration), `$literal` | — |
+| Output of recursive expansion: a chart's or a Component's output, a remote manifest, a HelmChart either generates | — (any source is an error naming the expanding resource) | — |
 | Anything else, such as a target's other fields or a template's parameter declarations | — | — |
 
 A source a context rejects is an error that teaches the fix, such as `$unit`
@@ -115,9 +120,22 @@ in a Release: "declare a Release input and bind it on the target with
   and the rendered spec is stored. `$literal` unwraps when the unit renders,
   unless its content holds `$` keys; then it unwraps when the run resolves the
   unit, so its content never reads as a reference.
+- **Data that must hold no source.** A known source in a `valuesFrom` file is
+  an error with the hint to move it to the inline values, and a known source
+  in the output of recursive expansion is an error naming the resource that
+  generated it: both are data, where a source would silently reach the chart
+  or the cluster as an object. Foreign `$` keys there stay data.
+- **Carried sources.** Template and environment values carry sources to the
+  unit documents that read them with `$environment`, whose context at that
+  place checks them, so a source that lands where it is not valid fails the
+  unit's render with a note that the values carried it. `nyl validate`
+  renders every environment and sample instances of every template, so these
+  checks run before an instance exists; a carried source that no selected
+  unit's rendered spec holds landed nowhere, and validate warns about it
+  (`NYL-VALUES-SOURCE-UNREAD`).
 - **HelmChart `valuesFrom`** stays for whole-object merges and files:
-  `[{file | input, pointer?, key?}]`, merged in order, inline `values` last.
-  Its merged values are data.
+  `[{file | input, pointer?, key?}]`, merged in order, inline `values` (with
+  their `$input` sources resolved) last. Its merged values are data.
 - **Component value imports** stay as they are: target values reach nested
   invocations without sources.
 
@@ -152,22 +170,22 @@ authored YAML → Jinja (strings only) → Value
   filled by a source hashes exactly like the same literal.
 - **No schema-driven machinery.** The walker needs no per-field markers, so
   the earlier `Resolvable<T, S>` schema type, the `x-nyl-resolvable` pointer
-  lists, and the catalogue's per-kind field lists are gone. Editor schemas
-  offer the sources of a Release-input binding; unit fields show only their
-  literal type, so an editor may flag a source there that Nyl accepts.
+  lists, and the catalogue's per-kind field lists are gone.
+- **Editor schemas** are generated from the context table
+  (`bindings::source_variants`, `bindings::offer_sources`): a Release-input
+  binding offers its sources, and the top-level `spec` fields of the unit
+  kinds, HelmChart, and RemoteManifest offer theirs as `anyOf` alternatives.
+  Deeper fields, free-form data, and `metadata.namespace` show only their
+  literal type, so an editor may flag a source there that Nyl accepts; that
+  keeps the schemas small and every offered source correct.
+- **Release bundles** resolve each resource right after its file is parsed
+  (`render::sources`), before anything reads it, so `lookup` detection, cache
+  decisions, and namespace defaults see resolved values. The Release's inputs
+  are part of the Release and target cache keys, and the resolved documents
+  are what the Helm and remote manifest caches key on.
 - **Stored specs.** A unit's desired document stores its rendered spec with
   its `$unit` and `$promotion` references. Every reader of stored specs parses
   them with the walker, and a reference that does not parse is an error, never
   a dropped dependency edge. This changed the stored form in place: state
   written by Nyl 0.7 is not readable as is and is re-created with
   `nyl state init --fresh`.
-
-## Open
-
-- `$input` in HelmChart `spec.values`, a Component's `spec`, a RemoteManifest,
-  and plain Kubernetes manifests of a Release bundle, and `metadata.namespace`
-  sources there.
-- An error for any `$` source in the output of recursive expansion (chart
-  output, remote manifests), and a hint for one in a `valuesFrom` file.
-- `nyl validate` checking the sources a template's values carry against the
-  context they land in, per sample instance.

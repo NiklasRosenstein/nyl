@@ -216,7 +216,7 @@ fn test_an_unrenderable_coverage_unit_fails_validate_and_warns_plan() {
     let text = std::fs::read_to_string(&release).unwrap();
     std::fs::write(
         &release,
-        text.replace("{{ inputs.databaseHost }}", "{{ inputs.databaseHost | nope }}"),
+        text.replace("{$input: databaseHost}", "'{{ inputs.databaseHost | nope }}'"),
     )
     .unwrap();
     nyl(&world, &checkout, &["validate"]).assert().failure().stderr(

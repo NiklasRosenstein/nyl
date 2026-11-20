@@ -1,6 +1,7 @@
 //! Pure decisions over snapshots. Each module owns one rule of the
 //! contracts, links its section, and has its tests.
 
+pub mod carried_sources;
 pub mod checks;
 pub mod desired;
 pub mod drift;

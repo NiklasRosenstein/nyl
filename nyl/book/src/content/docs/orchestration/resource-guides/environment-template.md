@@ -127,9 +127,12 @@ A `$parameter` that names a parameter the template does not declare fails with
 resolve `$parameter`; anywhere else it is an error that says so.
 
 [`nyl validate`](/nyl/reference/cli/validate/) renders the units of sample
-instances of every template, so a pointer the template's values lack, or a
-`$parameter` that names an undeclared parameter, fails before any instance
-exists.
+instances of every template, so a pointer the template's values lack, a
+`$parameter` that names an undeclared parameter, a source the values may not
+hold (such as `$input`), and a carried source that lands where it is not
+valid fail before any instance exists. A carried source that no unit reads
+warns with `NYL-VALUES-SOURCE-UNREAD`; see
+[Carried sources](/nyl/reference/value-sources/#carried-sources-and-nyl-validate).
 
 `state` is different: it locates the `state.yaml` that holds the parameters,
 so it renders with `environment.name` alone. With `path: '{{ environment.name }}'`

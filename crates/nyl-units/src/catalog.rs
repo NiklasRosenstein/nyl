@@ -11,6 +11,9 @@ fn schema(name: &str, mut schema: Value, spec: &Value) -> Value {
         schema["examples"] =
             json!([{ "apiVersion": API_VERSION_UNITS, "kind": name, "metadata": {"name": "workloads"}, "spec": spec }]);
     }
+    // Editors offer the sources of a unit document next to each top-level
+    // spec field, from the context table.
+    nyl_core::bindings::offer_sources(&mut schema, nyl_core::bindings::Context::UnitRender);
     schema
 }
 fn image() -> Value {

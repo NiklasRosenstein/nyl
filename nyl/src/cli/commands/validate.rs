@@ -181,8 +181,10 @@ async fn collect(project_dir: &Path, offline: bool, report: &mut ValidationRepor
         validate_targets(&inventory, offline).await,
         validate_environment_units(&inventory, offline),
     ) {
-        (Ok(()), Ok(())) => {}
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+        (Ok(()), Ok(warnings)) => report
+            .warnings
+            .extend(warnings.into_iter().map(ValidationWarning::Environment)),
+        (Err(error), Ok(_)) | (Ok(()), Err(error)) => return Err(error),
         (Err(targets), Err(units)) => return Err(NylError::config(format!("{targets}\n{units}"))),
     }
     report.gitops = Some(GitOpsSummary {
@@ -215,7 +217,13 @@ fn slash_path(path: &Path) -> String {
 /// PromotionPaths are checked against the same rendered units
 /// ([`crate::orchestration::promotion`]); `offline` reads the remote sources
 /// that declare the types of promoted values' places from the caches only.
-fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory, offline: bool) -> Result<()> {
+/// The value sources each environment's values carry land in its units,
+/// whose render checks them; one that lands in no unit is a warning
+/// ([`nyl_orchestration::rules::carried_sources`]), which is returned.
+fn validate_environment_units(
+    inventory: &nyl_render::gitops::GitOpsInventory,
+    offline: bool,
+) -> Result<Vec<nyl_core::orchestration::codes::Finding>> {
     use nyl_core::orchestration::ids::{CommitId, EnvironmentName};
     use nyl_core::orchestration::ports::SourceRenderer;
 
@@ -229,11 +237,13 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory, o
     let commit = CommitId::new("0".repeat(40)).expect("a commit ID");
     let names: Vec<EnvironmentName> = nyl_render::gitops::instances::environment_names(inventory)?;
     let mut issues = Vec::new();
+    let mut warnings = Vec::new();
     let mut rendered_sources = std::collections::BTreeMap::new();
     for name in names {
         let source = renderer
             .render(&inventory.worktree_root, &name, &commit)
             .map_err(|error| NylError::config(error.to_string()))?;
+        warnings.extend(nyl_orchestration::rules::carried_sources::unread_sources(&source));
         rendered_sources.insert(name.clone(), source.clone());
         for finding in nyl_orchestration::rules::desired::check_units(&source, &wiring.drivers) {
             issues.push(format!("{name}: {finding}"));
@@ -254,7 +264,7 @@ fn validate_environment_units(inventory: &nyl_render::gitops::GitOpsInventory, o
             .map(ToString::to_string),
     );
     if issues.is_empty() {
-        Ok(())
+        Ok(warnings)
     } else {
         Err(NylError::config(format!(
             "units are invalid:\n{}",

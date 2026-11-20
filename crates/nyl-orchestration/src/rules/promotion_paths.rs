@@ -59,6 +59,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nyl_core::bindings::PromotionInputSource;
+use nyl_core::bindings::{schema_alternatives, schema_step, SchemaStep};
 use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::driver::{ArtifactSchema, BoundFieldType, Deployment, Driver, DriverSet};
 use nyl_core::orchestration::ids::{EnvironmentName, UnitName};
@@ -1176,14 +1177,6 @@ fn walk(value: &Value, pointer: &str, found: &mut dyn FnMut(&str, PromotionInput
     }
 }
 
-/// What a walk of a kind's schema along a pointer found.
-enum Walked {
-    Node(Value),
-    /// The schema says nothing about the member: any value may be there.
-    Free,
-    Missing,
-}
-
 /// What a kind's schema says about the field a pointer names.
 enum SchemaType {
     /// The schema has no such field.
@@ -1221,10 +1214,10 @@ fn schema_type_in(root: &Value, pointer: &str) -> SchemaType {
         let mut next = Vec::new();
         let mut free = false;
         for node in &nodes {
-            match step(&root, node, segment) {
-                Walked::Node(found) => next.push(found),
-                Walked::Free => free = true,
-                Walked::Missing => {}
+            match schema_step(&root, node, segment) {
+                SchemaStep::Node(found) => next.push(found),
+                SchemaStep::Free => free = true,
+                SchemaStep::Missing => {}
             }
         }
         if next.is_empty() {
@@ -1243,72 +1236,10 @@ fn schema_type_in(root: &Value, pointer: &str) -> SchemaType {
     }
 }
 
-/// The alternatives of a node: itself, or its `anyOf`, `oneOf`, and `allOf` branches.
-fn alternatives(root: &Value, node: &Value) -> Vec<Value> {
-    let node = resolve(root, node);
-    let mut branches = Vec::new();
-    for key in ["anyOf", "oneOf", "allOf"] {
-        if let Some(Value::Array(items)) = node.get(key) {
-            for item in items {
-                branches.extend(alternatives(root, item));
-            }
-        }
-    }
-    if branches.is_empty() {
-        vec![node]
-    } else {
-        branches
-    }
-}
-
-fn resolve(root: &Value, node: &Value) -> Value {
-    let Some(reference) = node.get("$ref").and_then(Value::as_str) else {
-        return node.clone();
-    };
-    reference
-        .strip_prefix('#')
-        .and_then(|pointer| root.pointer(pointer))
-        .map_or_else(|| node.clone(), |found| resolve(root, found))
-}
-
-fn step(root: &Value, node: &Value, segment: &str) -> Walked {
-    let mut free = false;
-    for branch in alternatives(root, node) {
-        let branch = &branch;
-        if let Some(property) = branch.get("properties").and_then(|properties| properties.get(segment)) {
-            return Walked::Node(property.clone());
-        }
-        match branch.get("additionalProperties") {
-            Some(Value::Object(_)) => return Walked::Node(branch["additionalProperties"].clone()),
-            Some(Value::Bool(false)) => continue,
-            _ => {}
-        }
-        if let Some(items) = branch.get("items") {
-            if segment.parse::<usize>().is_ok() {
-                return Walked::Node(items.clone());
-            }
-            continue;
-        }
-        let scalar = branch
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| !matches!(kind, "object" | "array"));
-        // An object that does not close itself accepts other members.
-        if !scalar {
-            free = true;
-        }
-    }
-    if free {
-        Walked::Free
-    } else {
-        Walked::Missing
-    }
-}
-
 /// The value types a schema node allows, leaving out reference objects and `null`.
 fn types_of(root: &Value, node: &Value) -> Vec<ValueType> {
     let mut found = Vec::new();
-    for branch in alternatives(root, node) {
+    for branch in schema_alternatives(root, node) {
         let is_reference_object = branch
             .get("properties")
             .and_then(Value::as_object)

@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: '{{ inputs.image }}'
+          image: {$input: image}
           env:
             - name: DATABASE_HOST
-              value: '{{ inputs.databaseHost }}'
+              value: {$input: databaseHost}
