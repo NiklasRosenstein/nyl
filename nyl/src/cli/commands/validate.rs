@@ -196,14 +196,15 @@ async fn collect(project_dir: &Path, offline: bool, report: &mut ValidationRepor
 }
 
 /// The error when both the target and the unit checks fail, reported once
-/// each. A cause both reach is reported once, by the target check: an
-/// EnvironmentTemplate whose sample instance does not render fails its inline
-/// target, and the units of the instance, which render the same template,
-/// fail with the same error inside theirs.
+/// each. A cause both reach is reported once: an EnvironmentTemplate whose
+/// sample instance does not render fails its inline target, and the units of
+/// the instance, which render the same template, fail with the same error
+/// inside theirs. The units' error then holds the target's and may say more,
+/// such as promotion findings, so it is the one reported.
 fn both_failed(targets: NylError, units: NylError) -> NylError {
     let (targets_message, units_message) = (message(&targets), message(&units));
     if units_message.contains(&targets_message) {
-        return targets;
+        return units;
     }
     NylError::config(format!("{targets_message}\n{units_message}"))
 }
@@ -388,6 +389,10 @@ mod tests {
         ));
         let reported = both_failed(NylError::config(cause), units).to_string();
         assert_eq!(reported.matches(cause).count(), 1, "{reported}");
+        assert!(
+            reported.contains("Rendering the units of Environment preview-sample-1"),
+            "{reported}"
+        );
 
         let reported = both_failed(NylError::config("target broken"), NylError::config("unit broken")).to_string();
         assert!(
