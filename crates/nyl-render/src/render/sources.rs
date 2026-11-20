@@ -54,6 +54,12 @@ use crate::gitops::values::{load_chart_values_file, ValuesFileRoot};
 use crate::resources::{merge_chart_values, HelmValuesOrigin, HelmValuesSource, Release, RemoteManifest};
 use crate::{NylError, Result};
 
+/// `path` as a message shows it: its provenance path with `/` separators on
+/// every platform, as recorded paths are.
+fn shown_path(path: &std::path::Path, roots: ProvenanceRoots<'_>) -> String {
+    provenance_path(path, roots).to_string_lossy().replace('\\', "/")
+}
+
 /// Where the files of a Release bundle come from, for `valuesFrom` files.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BundleFiles<'a> {
@@ -117,7 +123,7 @@ pub(crate) fn resolve_bundle_resource(
     Err(NylError::value_source(format!(
         "{} in {}: {}",
         describe(resource),
-        provenance_path(file, roots).display(),
+        shown_path(file, roots),
         messages.join("; ")
     )))
 }
@@ -220,7 +226,7 @@ fn merge_values_from(
                 let directory = file.parent().filter(|parent| !parent.as_os_str().is_empty());
                 match load_chart_values_file(files.root(), directory.unwrap_or_else(|| Path::new(".")), path) {
                     Ok((path, document)) => {
-                        let what = format!("values file {}", provenance_path(&path, roots).display());
+                        let what = format!("values file {}", shown_path(&path, roots));
                         read.push(path);
                         match sources_in("", &document).first() {
                             Some((at, source)) => Err(format!(
