@@ -76,7 +76,7 @@ export const domainModelingRoadmap = {
       id: 'R2',
       title: 'Collections and the bundle',
       summary: 'Units collect declarations and receive them as one tool-neutral bundle.',
-      needs: ['M3', 'R12'],
+      needs: ['M3', 'R12', 'R13'],
       items: [
         { text: 'The `collections` unit field with `allowEmpty`, assembled by the code of R12', done: false },
         { text: 'Ownership claims with `access: own` and `access: read`, with removal and transition guards only for owners', done: false },

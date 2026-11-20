@@ -242,8 +242,11 @@ spec:
   content never reads as a source, as in a unit document.
 - **The `$` namespace** follows the definition's schema as it follows a unit
   kind's `spec_schema`: where the schema has no place for a `$` key that is no
-  source, the key is an unknown source, reported with the typo suggestion;
-  where it leaves an object open, the key is data.
+  source, the key is an unknown source, reported with the typo suggestion.
+  An object whose schema names its members (`properties` or `required`) is
+  typed even when it does not close itself; only a free-form object (no
+  named members, or explicit `additionalProperties`) keeps other `$` keys as
+  data.
 - **Data, not configuration.** A value a source reads, such as a unit's
   output, is data and is never walked for further sources.
 - **Editor schemas.** `nyl schema resources` offers `$fromUnit`,
@@ -1782,7 +1785,7 @@ consumer, and two owners rejected.
 | R1 | Definitions, discovery, schema and referential admission, the domain-resource context in the value-source table (sources carried, rejected with their fixes, and skipped by schema checks), `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
 | R12 | The standalone export: `nyl-collections` membership, the reference closure, and bundle assembly; the `ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` formats with golden files and published schemas; `nyl get resources -o yaml\|json`; field selection (`matchFields`, `--field`); `nyl bundle` with and without `-e` | R1, M6 |
 | R13 | Environment scoping: `resourceSelector` on Environments and EnvironmentTemplates, membership within the active set in `nyl-collections`, `nyl get resources -e` and `nyl bundle -e` over the active set, and the `nyl validate` warnings for an empty selector and an unselected resource | R12 |
-| R2 | `collections`, ownership, the bundle in state files and the execution key, sources in members resolved by runs, `$fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3, R12 |
+| R2 | `collections`, ownership, the bundle in state files and the execution key, sources in members resolved by runs, `$fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3, R12, R13 |
 | R14 | Resource status: the status schema, projection by owning collections, `nyl resources status set` and `unset` with the `ResourceStatusRecord`, freshness with `x-nyl-max-age`, `$fromResource`, and status in `nyl get resources -e` and `nyl bundle -e` | R13, R2 |
 | R3 | Kyverno admission with trusted context and the declaration's `referenced` closure as the only lookup | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4 |
@@ -2055,7 +2058,9 @@ def load(doc):                                         # name -> {spec, status?}
                            if r["kind"] == kind and r["admission"]["admitted"]}
         return of("Team"), of("Service")
     c = doc["collections"]                              # a bundle, or a Command unit's NYL_INPUTS
-    return c["teams"]["items"], c["services"]["items"]
+    teams = c["teams"]["items"] if "teams" in c else \
+        doc["referenced"]["domain.acme.example/v1/Team"]  # nyl bundle --kind Service: owners are referenced
+    return teams, c["services"]["items"]
 
 def link(name, svc):                                    # status exists only with -e (R14)
     url = svc.get("status", {}).get("url")
