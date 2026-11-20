@@ -1260,6 +1260,9 @@ nyl resources status unset -e <env> <kind>/<name> <field>... [<options>]
         reason: null
   ```
 
+  `by` and `identity` come from the lookup that `nyl attest` uses for
+  external attestations; `run` is `--url`, or the CI provider's run URL.
+
   `ResourceStatusRecord` is a member of state format `v1`, added in place:
   no version bump and no migration. Every Nyl that shares an environment's
   state must support it before any status is written there.
@@ -1267,9 +1270,6 @@ nyl resources status unset -e <env> <kind>/<name> <field>... [<options>]
   any number of resources in one transition commit, so a pipeline that gathers
   values from several jobs merges them and calls `nyl resources status set`
   once. There is no staged-change file; see the open decision on staging.
-
-  `by` and `identity` come from the lookup that `nyl attest` uses for
-  external attestations; `run` is `--url`, or the CI provider's run URL.
 - **Refreshing.** A write that changes no value writes nothing, unless the
   field declares `x-nyl-max-age` and its recorded value is older than half
   of it; the value is then written again with its new time, so a job that
