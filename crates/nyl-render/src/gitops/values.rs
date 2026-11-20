@@ -43,11 +43,13 @@ pub(super) fn resolve_resource_values(
             discovered.identity.name,
             source.file,
         );
+        let shown = |path: &Path| shown_key(paths, path);
         let (path, imported) = load(
             paths,
             &source_paths,
             &|relative| visible_files.contains(relative),
             source,
+            &shown,
         )
         .map_err(|error| NylError::config(format!("{context}: {}", NylError::from(error))))?;
         discovered
@@ -71,6 +73,17 @@ pub(crate) enum ValuesFileRoot<'a> {
     /// A checkout of one commit: `/` starts here, and every regular file in
     /// it is visible.
     Checkout(&'a Path),
+}
+
+/// `path` as messages about a values file show it: its portable key,
+/// relative to the project or `/` plus its worktree-relative path, with `/`
+/// separators, never the absolute location of a temporary checkout.
+fn shown_key(paths: &ProjectPaths, path: &Path) -> String {
+    paths
+        .key(path)
+        .unwrap_or_else(|| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 /// Why a values file was not read.
@@ -110,15 +123,17 @@ impl From<std::io::Error> for ValuesFileError {
 /// DeploymentTarget `valuesFrom`: `file` is relative to `directory`, the
 /// directory of the file declaring the HelmChart, or starts at the root with
 /// `/`; it must be a Git-visible regular YAML mapping file. Returns the
-/// absolute path read, and the mapping without `key` mounting.
+/// absolute path read, and the mapping without `key` mounting. Messages show
+/// paths with `shown`, as the caller's provenance records them.
 pub(crate) fn load_chart_values_file(
     root: ValuesFileRoot<'_>,
     directory: &Path,
     file: &str,
+    shown: &dyn Fn(&Path) -> String,
 ) -> std::result::Result<(PathBuf, serde_json::Value), ValuesFileError> {
     let directory = directory
         .canonicalize()
-        .map_err(|error| NylError::config(format!("Cannot resolve directory {}: {error}", directory.display())))?;
+        .map_err(|error| NylError::config(format!("Cannot resolve directory {}: {error}", shown(directory))))?;
     let source = ValuesFromFile {
         file: file.to_owned(),
         key: None,
@@ -127,13 +142,19 @@ pub(crate) fn load_chart_values_file(
         ValuesFileRoot::Checkout(checkout) => {
             let checkout = checkout.canonicalize()?;
             let paths = ProjectPaths::new(checkout.clone(), checkout.clone());
-            load(&paths, &ProjectPaths::new(directory, checkout), &|_| true, &source)
+            load(
+                &paths,
+                &ProjectPaths::new(directory, checkout),
+                &|_| true,
+                &source,
+                shown,
+            )
         }
         ValuesFileRoot::Worktree { project_root } => {
             let repository = git2::Repository::discover(&directory).map_err(|error| {
                 NylError::config(format!(
                     "spec.valuesFrom[].file {file:?} reads a file of the Git worktree, but {} is in none: {error}; keep the Release in a Git repository, or pass the values inline",
-                    directory.display()
+                    shown(&directory)
                 ))
             })?;
             let worktree = repository
@@ -149,7 +170,13 @@ pub(crate) fn load_chart_values_file(
                     !status.intersects(git2::Status::IGNORED | git2::Status::WT_DELETED | git2::Status::INDEX_DELETED)
                 })
             };
-            load(&paths, &ProjectPaths::new(directory, worktree), &visible, &source)
+            load(
+                &paths,
+                &ProjectPaths::new(directory, worktree),
+                &visible,
+                &source,
+                shown,
+            )
         }
     }
 }
@@ -159,6 +186,7 @@ fn load(
     source_paths: &ProjectPaths,
     visible: &dyn Fn(&Path) -> bool,
     source: &ValuesFromFile,
+    shown: &dyn Fn(&Path) -> String,
 ) -> std::result::Result<(PathBuf, serde_json::Value), ValuesFileError> {
     // A path that is malformed, leaves the worktree, or traverses a symbolic
     // link is the configuration's; only reading the file system fails otherwise.
@@ -174,13 +202,13 @@ fn load(
     if !visible(relative) || !path.is_file() || path.starts_with(paths.project_root.join(".nyl/cache")) {
         return Err(ValuesFileError::Invalid(NylError::config(format!(
             "Values file {} is missing or is not an eligible Git-visible regular file; add the file to Git or remove its ignore rule, and keep it outside submodules and the project's .nyl/cache directory",
-            path.display()
+            shown(&path)
         ))));
     }
     let content = std::fs::read_to_string(&path).map_err(|error| {
         NylError::config(format!(
             "Cannot read values file {}: {error}; provide a readable YAML mapping file",
-            path.display()
+            shown(&path)
         ))
     })?;
     // Parse exactly one document, without resource API canonicalization or templating.
@@ -330,6 +358,10 @@ mod tests {
                 assert!(error.contains(part), "{contents:?}: expected {part:?} in {error}");
             }
         }
+        // A missing file shows as its portable key, never its absolute path.
+        std::fs::remove_file(temp.path().join("shared/data.yaml")).unwrap();
+        let error = discover(&temp, false).unwrap_err().to_string();
+        assert!(error.contains("Values file /shared/data.yaml is missing"), "{error}");
     }
 
     #[test]

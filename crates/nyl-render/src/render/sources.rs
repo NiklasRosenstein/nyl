@@ -49,16 +49,10 @@ use nyl_core::bindings::{
 use nyl_core::constants::API_VERSION;
 use serde_json::Value;
 
-use super::bundle::{provenance_path, ProvenanceRoots};
+use super::bundle::{shown_path, ProvenanceRoots};
 use crate::gitops::values::{load_chart_values_file, ValuesFileError, ValuesFileRoot};
 use crate::resources::{merge_chart_values, HelmValuesOrigin, HelmValuesSource, Release, RemoteManifest};
 use crate::{NylError, Result};
-
-/// `path` as a message shows it: its provenance path with `/` separators on
-/// every platform, as recorded paths are.
-fn shown_path(path: &std::path::Path, roots: ProvenanceRoots<'_>) -> String {
-    provenance_path(path, roots).to_string_lossy().replace('\\', "/")
-}
 
 /// Where the files of a Release bundle come from, for `valuesFrom` files.
 #[derive(Debug, Clone, Copy)]
@@ -226,7 +220,8 @@ fn merge_values_from(
         let source = match origin {
             HelmValuesOrigin::File(path) => {
                 let directory = file.parent().filter(|parent| !parent.as_os_str().is_empty());
-                match load_chart_values_file(files.root(), directory.unwrap_or_else(|| Path::new(".")), path) {
+                let shown = |path: &Path| shown_path(path, roots);
+                match load_chart_values_file(files.root(), directory.unwrap_or_else(|| Path::new(".")), path, &shown) {
                     Ok((path, document)) => {
                         let what = format!("values file {}", shown_path(&path, roots));
                         read.push(path);
@@ -819,6 +814,25 @@ mod tests {
             message.contains("HelmChart \"web\" in app.yaml: spec.valuesFrom[0]: values file base.yaml holds")
                 && message.contains("spec.valuesFrom[1]: values file /shared/values.yaml holds"),
             "{message}"
+        );
+        // Files that are missing show the same way.
+        let load_with_roots = |path: &Path| {
+            crate::render::bundle::load_release_bundle_with_root(path, &context(None), roots, files)
+                .unwrap_err()
+                .to_string()
+        };
+        let absent = load_with_roots(&temp.path().join("apps/absent.yaml"));
+        assert!(absent.contains("File not found: absent.yaml"), "{absent}");
+        fs::write(
+            temp.path().join("apps/app.yaml"),
+            "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata: {name: web}\nspec:\n  chart: {name: ./chart}\n  valuesFrom: [{file: missing.yaml}, {file: /shared/missing.yaml}]\n",
+        )
+        .unwrap();
+        let missing = load_with_roots(&temp.path().join("apps/app.yaml"));
+        assert!(
+            missing.contains("spec.valuesFrom[0]: Values file missing.yaml is missing")
+                && missing.contains("spec.valuesFrom[1]: Values file /shared/missing.yaml is missing"),
+            "{missing}"
         );
     }
 

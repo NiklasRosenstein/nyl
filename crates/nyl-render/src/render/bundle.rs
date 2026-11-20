@@ -260,7 +260,10 @@ fn load_resource_file(
 ) -> Result<Vec<RenderResource>> {
     // Validate that path is a file, not a directory
     if !path.exists() {
-        return Err(NylError::Config(format!("File not found: {}", path.display())));
+        return Err(NylError::Config(format!(
+            "File not found: {}",
+            shown_path(path, provenance_root)
+        )));
     }
     if !path.is_file() {
         return Err(NylError::Config(format!(
@@ -321,6 +324,12 @@ pub(crate) fn provenance_path(path: &Path, roots: ProvenanceRoots<'_>) -> PathBu
         return Path::new("/").join(relative);
     }
     crate::util::path_for_display(path)
+}
+
+/// `path` as a message shows it: its provenance path with `/` separators on
+/// every platform, as recorded paths are.
+pub(crate) fn shown_path(path: &Path, roots: ProvenanceRoots<'_>) -> String {
+    provenance_path(path, roots).to_string_lossy().replace('\\', "/")
 }
 
 fn relative_to(path: &Path, root: &Path) -> Option<PathBuf> {
