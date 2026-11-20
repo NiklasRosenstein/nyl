@@ -1,0 +1,282 @@
+{
+  "$defs": {
+    "ChartRef": {
+      "additionalProperties": false,
+      "description": "Reference to a Helm chart\n\nSupports Git, OCI, traditional Helm repositories, and local filesystem paths",
+      "properties": {
+        "name": {
+          "description": "Universal name field with context-dependent meaning\n\nWhen `repository` is set:\n- For Helm/OCI repositories: Specifies the chart name (required)\n- For Git repositories: Specifies subdirectory path within repo (optional)\n\nWhen `repository` is NOT set:\n- Treated as local filesystem path (absolute or relative)\n\nExamples:\n- Local filesystem: \"./charts/mychart\", \"/opt/charts/app\"\n- Git subpath: \"charts/mychart\", \"deploy/helm/app\"\n- Helm/OCI chart: \"nginx\", \"prometheus\"",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "description": "Repository URL for Git, OCI, or traditional Helm repositories\n\nProtocol prefixes indicate the repository type:\n- `git+https://` or `git+git@` - Git repository\n- `oci://` - OCI registry\n- `https://` or no prefix - Traditional Helm repository\n\nExamples:\n- Git: \"git+https://github.com/user/repo.git\"\n- Git SSH: \"git+git@github.com:user/repo.git\"\n- OCI: \"oci://ghcr.io/owner/chart\"\n- Helm: \"https://charts.example.com\"",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "Chart version or Git reference\n\nFor Helm repositories: Specifies the chart version (required)\nFor Git repositories: Specifies the Git reference - branch, tag, or commit\n                      (optional, defaults to HEAD)\n\nExamples:\n- Branch: \"main\", \"develop\"\n- Tag: \"v1.0.0\", \"1.2.3\"\n- Commit: \"abc123...\" (full or short hash)",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "HelmChartSpec": {
+      "additionalProperties": false,
+      "description": "HelmChart specification",
+      "properties": {
+        "chart": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChartRef"
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "Reference to the chart"
+        },
+        "includeCrds": {
+          "anyOf": [
+            {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "Whether to include CRDs from the chart's crds/ directory in the rendered output.\nDefaults to true when unset. In a Release bundle, `{$input: name}` reads it from a\nRelease input."
+        },
+        "lookup": {
+          "anyOf": [
+            {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "Lets the chart's Helm `lookup` read the objects of the Release it belongs\nto, so a chart that reuses what it generated earlier, such as a Secret\nholding a CA, finds it when it renders again.\n\nDeclare it as `lookup: true`, or `lookup: false` to state that the chart must not use it\n(which silences `NYL-HELM-LOOKUP-UNDECLARED`).\n`lookup` then reads the Release's objects from the\ntarget's last publication (or, with `--lookup=live`, from the cluster) and sees\nnothing else: any other object is absent. Without a target, or before the\nRelease is published, nothing is found and the chart generates.\n\nCharts that declare it render through Helm's server-side dry run against a\nread-only API that Nyl serves on 127.0.0.1 for the duration of the render;\nHelm never gets a cluster or credentials. The Cluster's declared Kubernetes\nversion and API versions describe that API, plus the API versions of\nCustomResourceDefinitions the chart ships in `crds/`.\n\nIn a Release bundle, `{$input: name}` reads it from a Release input."
+        },
+        "values": {
+          "anyOf": [
+            true,
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "default": null,
+          "description": "Values to pass to the chart, merged over `valuesFrom`. In a Release bundle,\n`{$input: name}` reads a Release input at any depth, before `valuesFrom` merges;\nother `$` keys, such as `$ref`, are chart data."
+        },
+        "valuesFrom": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/HelmValuesSource"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/ReleaseBundleValueSource"
+            }
+          ],
+          "description": "Values files and object-typed Release inputs, merged in order before `values`.\n\nEach entry sets exactly one of `file` and `input`. Maps merge key by key and\nevery other value replaces, which is Helm's own rule for `-f`; inline `values`\nmerge last. The merged values are data: Nyl never resolves value sources in them,\nand a values file that holds one is an error."
+        }
+      },
+      "required": [
+        "chart"
+      ],
+      "type": "object"
+    },
+    "HelmValuesSource": {
+      "additionalProperties": false,
+      "description": "One source of chart values in `spec.valuesFrom`: exactly one of `file` and\n`input`, optionally narrowed by `pointer` and mounted under `key`.",
+      "properties": {
+        "file": {
+          "description": "Static, normalized path to exactly one YAML mapping document in a Git-visible regular file, read without templating. Relative paths start at the directory of the file that declares the HelmChart; `/` starts at the Git worktree root (for a remote ApplicationGroup source, its checkout). Leading `..` segments may reach outside the Nyl project, but never outside its worktree or through symlinks. Ignored untracked files, submodules, and the project's `.nyl/cache` directory are excluded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "description": "Name of an `object`-typed input that the Release of this bundle declares in `spec.inputs`. Valid only in a Release bundle; its effective value is the target's binding or the declared default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Mount the selected value under this literal values key. Omit to merge a mapping at the values root. Dots are literal characters, not path separators.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pointer": {
+          "description": "JSON Pointer that selects a value inside the file or input, such as `/web`; the whole value when omitted. Without `key`, the selected value must be a mapping.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InputSource": {
+      "additionalProperties": false,
+      "description": "`$input`: a Release input. Its declared default applies when the target\nbinds none. Shorthand: `{$input: name}`.",
+      "properties": {
+        "name": {
+          "description": "Name of an input the Release declares.",
+          "type": "string"
+        },
+        "pointer": {
+          "description": "JSON Pointer inside the input's value; the whole value when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ObjectMetadata": {
+      "additionalProperties": false,
+      "description": "Kubernetes object metadata",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations",
+          "type": "object"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace (optional)",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ReleaseBundleValueSource": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Reads an input the Release declares.",
+          "properties": {
+            "$input": {
+              "anyOf": [
+                {
+                  "description": "Shorthand: the input's name.",
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/InputSource"
+                }
+              ]
+            }
+          },
+          "required": [
+            "$input"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The content, verbatim, even when it looks like a value source.",
+          "properties": {
+            "$literal": true
+          },
+          "required": [
+            "$literal"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A value source this field accepts instead of a literal. See https://niklasrosenstein.github.io/nyl/reference/value-sources/."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Expands a local or remote Helm chart into Kubernetes manifests.\n\nNyl renders the chart and recursively processes its output. Cluster and target values are template inputs; pass values to the chart explicitly through `spec.values`.\n\n## When needed\n\nUse this optional resource to render a Helm chart with explicit chart coordinates and values. Declare `spec.lookup` for a chart that reuses objects it generated earlier through Helm's `lookup`, such as a CA Secret.\n\n## If omitted\n\nNyl does not discover and render charts automatically. Invoke charts through a HelmChart or a component resource; projects containing only authored Kubernetes manifests need neither. Without `spec.lookup`, the chart renders offline and `lookup` finds nothing.",
+  "examples": [
+    {
+      "apiVersion": "k8s.nyl/v1",
+      "kind": "HelmChart",
+      "metadata": {
+        "name": "workloads",
+        "namespace": "workloads"
+      },
+      "spec": {
+        "chart": {
+          "name": "./charts/app"
+        },
+        "values": {
+          "replicaCount": 2
+        }
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "k8s.nyl/v1",
+      "description": "API version (e.g., \"k8s.nyl/v1\")",
+      "type": "string"
+    },
+    "kind": {
+      "const": "HelmChart",
+      "description": "Resource kind (always \"HelmChart\")",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ObjectMetadata",
+      "description": "Kubernetes metadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/HelmChartSpec",
+      "description": "Chart specification"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "HelmChart",
+  "type": "object"
+}
