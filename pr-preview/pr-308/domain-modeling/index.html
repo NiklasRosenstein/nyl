@@ -142,6 +142,16 @@ is part of the unit’s execution key.</li>
 <li>The unit’s driver turns the bundle into native input, such as a Terraform
 variable that <code dir="auto">for_each</code> iterates over.</li>
 </ol>
+<p>An Environment decides which declarations are active in it, by labels, kinds,
+and paths, so a preview environment can hold only test services while
+production holds all of them. An environment may hold declarations and no
+units at all.</p>
+<p>A definition can also declare a status: facts that exist per environment,
+such as a service’s URL, kept in the environment’s state rather than in Git.
+The unit that owns a declaration fills its status from its outputs; without
+such a unit, a deploy job writes it with <code dir="auto">nyl resources status set</code>, for one
+declaration or for many from one document. Units and Kubernetes publications
+read it with <code dir="auto">$fromResource</code>, without naming the unit that produced it.</p>
 <p>A unit can also declare <code dir="auto">forEach</code> and be instantiated once per declaration,
 for example one OpenTofu configuration per team, each with its own state.</p>
 <p>Kubernetes Releases are planned to read collections too, without
@@ -169,7 +179,12 @@ and bundling declarations needs no unit, driver, Release, or cluster.
 <code dir="auto">nyl get resources -o yaml</code> exports the admitted catalog, and <code dir="auto">nyl bundle</code>
 exports a versioned bundle for any selection of declarations, so other
 tools can read them. Values that come from other units’ outputs are listed
-as unresolved, or resolved read-only with <code dir="auto">-e</code>.</li>
+as unresolved, or resolved read-only with <code dir="auto">-e</code>, which also adds each
+declaration’s status in that environment.</li>
+<li><strong>Each status field has one writer.</strong> In an environment where the owning
+unit fills a field, nothing else can write it. A value written from
+outside can expire, so consumers wait for a fresh one instead of using an
+old one.</li>
 <li><strong>Orchestration is optional.</strong> In an existing Terraform or OpenTofu
 pipeline, <code dir="auto">nyl exec</code> runs the tool with the collected inputs, or Nyl
 writes the inputs for the pipeline’s own commands. Either way they are the
