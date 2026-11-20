@@ -1,0 +1,394 @@
+{
+  "$defs": {
+    "ChangeGate": {
+      "description": "Whether a promotion is recorded directly or through a reviewable change.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "`nyl promote` writes the record.",
+          "type": "string"
+        },
+        {
+          "const": "pullRequest",
+          "description": "`nyl promote` opens a pull request instead (M11).",
+          "type": "string"
+        }
+      ]
+    },
+    "Duration": {
+      "description": "A duration such as `90s`, `30m`, `1h30m`, or `7d`.",
+      "examples": [
+        "30m"
+      ],
+      "pattern": "^(?=.)([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?$",
+      "type": "string"
+    },
+    "GitOpsResourceMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata shared by local GitOps compiler resources.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Literal labels used for organization and target selection.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Project-local identity, validated by the resource kind; remains static during discovery.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "PathAttestations": {
+      "additionalProperties": false,
+      "description": "The attestations a path requires, per scope.",
+      "properties": {
+        "environment": {
+          "description": "The environment-wide attestations required; omitted, every one the source environment declares.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "units": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Per covered unit, the attestation names required of it; an empty list asks for its receipt only.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "PathEvidence": {
+      "description": "Evidence level of a path.",
+      "oneOf": [
+        {
+          "const": "published",
+          "description": "The source produced the value: a current receipt.",
+          "type": "string"
+        },
+        {
+          "const": "attested",
+          "description": "Published, and every required attestation passes for that state.",
+          "type": "string"
+        }
+      ]
+    },
+    "PromotionEndpoint": {
+      "additionalProperties": false,
+      "description": "One end of a path. Set exactly one of `environment` and `target`.",
+      "oneOf": [
+        {
+          "description": "A declared Environment.",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "target": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "target"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "environment": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "environment"
+          ],
+          "title": "environment"
+        },
+        {
+          "description": "A DeploymentTarget (M11).",
+          "not": {
+            "anyOf": [
+              {
+                "properties": {
+                  "environment": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "environment"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "target": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "title": "target"
+        }
+      ],
+      "properties": {
+        "environment": {
+          "description": "A declared Environment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "A DeploymentTarget outside every environment (M11). Validation rejects it with `NYL-PROMOTE-UNSUPPORTED` until then.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PromotionPathSpec": {
+      "additionalProperties": false,
+      "description": "The spec of a [`PromotionPath`].",
+      "properties": {
+        "attestations": {
+          "$ref": "#/$defs/PathAttestations",
+          "description": "Replaces the attestations required per scope, for `attested`, or adds requirements, for `published`. A scope the path does not name keeps the level's default."
+        },
+        "changeGate": {
+          "$ref": "#/$defs/ChangeGate",
+          "default": "none",
+          "description": "`none` writes the record directly. `pullRequest` opens a reviewable change instead; it needs M11, and validation rejects it with `NYL-PROMOTE-UNSUPPORTED` until then."
+        },
+        "coverage": {
+          "additionalProperties": {
+            "$ref": "#/$defs/UnitCoverage"
+          },
+          "description": "Per unit that runs as several deployments, such as a KubernetesPublication, which of them count toward its running-scoped attestations for this path: keyed by the unit's name in the source environment. `nyl validate` and `nyl plan` check every unit, group, and deployment named here against what the unit's kind lists for it. Omitted, every deployment of every unit counts.",
+          "type": "object"
+        },
+        "evidence": {
+          "$ref": "#/$defs/PathEvidence",
+          "default": "published",
+          "description": "The level every covered unit and the source must reach: `published` (the source produced the value, as a receipt) or `attested` (published, and every attestation the covered units and the source environment declare passes for that state). Default `published`."
+        },
+        "from": {
+          "$ref": "#/$defs/PromotionEndpoint",
+          "description": "The source: a declared Environment, never a template instance."
+        },
+        "maxAttestationAge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Attestations older than this, such as `1h`, do not count. Omitted, attestations never age."
+        },
+        "to": {
+          "$ref": "#/$defs/PromotionEndpoint",
+          "description": "The target environment, whose desired state holds the records."
+        },
+        "values": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PromotionValue"
+          },
+          "description": "The promoted values by name; the names are what `$promotion` bindings read.",
+          "type": "object"
+        },
+        "verifyArtifacts": {
+          "default": true,
+          "description": "Check that every promoted artifact still exists before recording. Default `true`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "PromotionSelect": {
+      "additionalProperties": false,
+      "description": "Which field of the source a promoted value reads: the same selectors, with\nthe same JSON Pointer semantics and resolver, as `$unit` references and\n`nyl get`.\n\nSet exactly one of the four forms:\n`{unit, input}` reads the source unit's resolved spec;\n`{unit, output, pointer?}` a declared, non-sensitive output of its receipt;\n`{unit, artifact, kind?, pointer}` a field of an artifact its receipt lists,\nrelative to the artifact's `spec`; and `{input}` (a target source, M11)\na Release input of the target.",
+      "properties": {
+        "artifact": {
+          "description": "An artifact the unit's receipt lists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "description": "JSON Pointer into the source unit's resolved spec, such as `/source` or `/releases/platform~1web/image`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The artifact kind the artifact must have.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "A declared, non-sensitive output of the unit's receipt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pointer": {
+          "description": "JSON Pointer inside the output, or inside the artifact's `spec`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnitName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The source unit's name."
+        }
+      },
+      "type": "object"
+    },
+    "PromotionValue": {
+      "additionalProperties": false,
+      "description": "A promoted value: which source field it reads.",
+      "properties": {
+        "select": {
+          "$ref": "#/$defs/PromotionSelect",
+          "description": "The one source field the value reads: `{unit, input: <pointer>}`, `{unit, output, pointer?}`, or `{unit, artifact, kind?, pointer}`."
+        }
+      },
+      "required": [
+        "select"
+      ],
+      "type": "object"
+    },
+    "UnitCoverage": {
+      "additionalProperties": false,
+      "description": "Which deployments of one unit a path counts, by the names the unit's kind\nlists for them (for a KubernetesPublication, a deployment is an Argo CD\nApplication, or a Release on a direct target, and a group is an\nApplicationGroup).",
+      "properties": {
+        "exclude": {
+          "description": "Deployments knowingly accepted as falling short: they leave the unit's aggregate for this path, and each record lists them. A value consumed by an excluded deployment must still come from a publication it runs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "description": "Narrows the deployments that count toward a source promotion to those of these groups; it never narrows what moves, and a deployment in no group (such as a catalog) then does not count. Omitted, every group. A path that promotes only values judges each value for its own consumer, so validation refuses `groups` there.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "require": {
+          "description": "Deployments that must meet the path's required attestations at whatever they run, without contributing values.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "UnitName": {
+      "description": "A unit's literal `metadata.name`, unique per environment across all\nunit kinds. A Kubernetes DNS label.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The explicit link between source selectors and target bindings, along\nwhich `nyl promote` moves a proven source commit and selected values from\none environment's recorded state into another environment's desired state.\n\nA path says which environment is the source and which the target, how\nstrong the evidence must be, and which source fields become named values\nthat `$promotion` bindings read. Source and target may differ in unit\nnames, input names, and document shape; the path states the mapping.\n\n## When needed\n\nTo promote what one environment proved into another: a source commit, an\nimage digest, or any value a unit's input or a Release input should take\nfrom another environment instead of rebuilding or retyping it.\n\n## If omitted\n\nNothing is promoted between environments, and no environment may use a\n`promotion` source or `$promotion` binding.",
+  "examples": [
+    {
+      "apiVersion": "gitops.nyl/v1",
+      "kind": "PromotionPath",
+      "metadata": {
+        "name": "dev-to-prod"
+      },
+      "spec": {
+        "evidence": "attested",
+        "from": {
+          "environment": "dev"
+        },
+        "maxAttestationAge": "1h",
+        "to": {
+          "environment": "prod"
+        },
+        "values": {
+          "webImage": {
+            "select": {
+              "artifact": "image",
+              "pointer": "/reference",
+              "unit": "web-image"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "gitops.nyl/v1",
+      "description": "API group and version defining this resource.",
+      "type": "string"
+    },
+    "kind": {
+      "const": "PromotionPath",
+      "description": "Resource kind within the API group.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/GitOpsResourceMetadata",
+      "description": "Resource identity and metadata. The name is a DNS label and names the record file."
+    },
+    "spec": {
+      "$ref": "#/$defs/PromotionPathSpec",
+      "description": "Configuration for this resource."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "PromotionPath",
+  "type": "object"
+}
