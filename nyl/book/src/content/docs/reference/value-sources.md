@@ -382,6 +382,15 @@ keys, and the resolved chart values are part of the Helm cache key, so a
 changed binding renders again. What a chart or a remote manifest generates
 takes no `$fromInput`: see [Data and configuration](#data-and-configuration).
 
+In a run, a mistake with value sources in what a KubernetesPublication's
+target renders fails the unit with `NYL-UNIT-INVALID` (detail
+`value-source-invalid`) and the fix the message names: in its Release
+bundles, in what they generate, and in its `releaseInputs`, such as a binding
+of an input the Release does not declare or a value of the wrong type.
+Messages name files relative to the project, never the run's temporary
+checkout. A source that cannot be read, such as a `valuesFrom` or `$fromFile`
+file or a Git object, keeps its own error and fails the driver call.
+
 ```console
 $ nyl render apps/web/web.yaml
 2026-11-20T08:07:09.027321Z ERROR nyl: Configuration error: Deployment "web" in apps/web/web.yaml: spec.template.spec.containers[0].env[0].value holds a $fromUnit source, which is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs; declare a Release input and bind it on the target with $fromUnit (see https://niklasrosenstein.github.io/nyl/reference/value-sources/); spec.template.spec.containers[0].image.$inputs is not a value source; did you mean $fromInput? (write {$literal: …} to keep the key as data)

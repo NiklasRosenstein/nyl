@@ -111,12 +111,14 @@ EnvironmentTemplate's values that declares parameter `crds` says to write
 `{$fromParameter: crds}`. A bare literal binding is the input's value.
 
 A configuration mistake with value sources in what a unit renders, such as a
-Release bundle of a KubernetesPublication's target, fails the unit with
+Release bundle of a KubernetesPublication's target, what it generates, or a
+binding of the target's `releaseInputs` that does not fit its Release, fails the unit with
 `NYL-UNIT-INVALID` and the fix the message names, in a run as in `nyl
 validate`; messages name files as provenance records them, relative to the
 project, never a run's temporary checkout. A failure outside the
-configuration, such as a `valuesFrom` file that cannot be read or a Release
-outside a Git worktree, keeps its own error and fails the driver call.
+configuration, such as a `valuesFrom` or `$fromFile` file or a Git object
+that cannot be read, or a Release outside a Git worktree, keeps its own error
+and fails the driver call.
 
 `nyl validate` compiles a target an environment places with a placeholder of
 the declared type for each Release input bound with `$fromUnit` or

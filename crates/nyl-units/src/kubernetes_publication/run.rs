@@ -1393,6 +1393,48 @@ mod tests {
         assert_eq!(other.code(), None);
     }
 
+    /// Catches a Release input binding that does not fit its Release, such as
+    /// one naming an input the Release does not declare, reported as the
+    /// driver's own failure (`NYL-DRIVER-ERROR`): the value-source docs
+    /// promise the unit's invalid configuration.
+    #[test]
+    fn test_a_binding_of_an_undeclared_input_is_the_units_invalid_configuration() {
+        let world = world::World::new();
+        let spec = json!({
+            // Next to the static target "dev", reconciled directly so that
+            // the two generate no common Argo CD resource.
+            "target": {"name": "dev-inline", "sourceFile": "nyl/units.yaml", "inline": {
+                "reconciler": {"direct": {}},
+                "clusterRef": {"name": "dev"},
+                "applicationGroupSelector": {"matchLabels": {"app": "web"}},
+                "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "inline"},
+                "releaseInputs": {"web/web": {"image": "web:1", "databaseHost": "db", "port": 5432}},
+            }},
+            "releases": {},
+        });
+        let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
+        descriptors.extend_from_slice(crate::catalog::RESOURCES);
+        let error = render(
+            &nyl_render::config::ResourceCatalogue(descriptors),
+            &world.work(),
+            &world.work().join("nyl"),
+            &world.root.path().join("cache"),
+            &nyl_core::orchestration::instance::NO_INSTANCES,
+            &spec,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("spec.releaseInputs.\"web/web\".port binds an input Release web/web does not declare"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(error.code(), Some(Code::UnitInvalid), "{}", error.message());
+        assert_eq!(error.detail(), Some(VALUE_SOURCE_INVALID));
+    }
+
     /// Catches a value source in what rendering generated reaching the unit
     /// as the driver's own failure: the expansion wraps the error with the
     /// generating resource's provenance, and the unit still reports its
@@ -1423,10 +1465,10 @@ mod tests {
         )
         .unwrap();
         let release = world.work().join("applications/web/release.yaml");
-        let mut text = std::fs::read_to_string(&release).unwrap();
-        text.push_str(&format!(
-            "---\napiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {{name: generated, namespace: web}}\nspec: {{url: '{url}'}}\n"
-        ));
+        let text = format!(
+            "{}---\napiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {{name: generated, namespace: web}}\nspec: {{url: '{url}'}}\n",
+            std::fs::read_to_string(&release).unwrap()
+        );
         std::fs::write(&release, text).unwrap();
         let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
         descriptors.extend_from_slice(crate::catalog::RESOURCES);
