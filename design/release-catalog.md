@@ -426,7 +426,7 @@ nyl-orchestration ─┘
 | `nyl-core` | The types: `ResourceDefinition`, the domain envelope, `collections`, `ResourceBundle`, its provenance, golden files; the reference resolver; the `RuleEvaluator` port for CEL rules |
 | `nyl-collections` | Schema validation and defaulting (the JSON Schema dependency), identity and duplicates, membership and ordering, ownership claims, the reference closure, bundle assembly and its digest, removal detection, transition-rule decisions over results the `RuleEvaluator` returns |
 | `nyl-render` | Discovery of the domain and Release catalogs, Kyverno admission, Release `collections` and `forEach` |
-| `nyl-orchestration` | Resolving references inside a bundle and checking resolved values against their field schema, through `nyl-collections` |
+| `nyl-orchestration` | The providers that resolve sources inside a bundle, a run's and the read-only ones of `nyl get output` and `nyl bundle -e`; the resolved values are checked against their field's subschema through `nyl-collections` |
 
 `nyl-collections` is pure like `nyl-core`: no Git, processes, network, clock,
 or environment. CEL evaluation sits behind the `RuleEvaluator` port, so the
@@ -442,13 +442,14 @@ of `nyl-core`.
 | --- | --- | --- |
 | R8 | Release labels and the static envelope with verification, `spec.manifests`, the `spec.include` deprecation, shared files, the Release catalog, `nyl get releases`, source `selector` with the AppProject guard, and `--release` for direct commands | M2 |
 | R9 | Release admission over Releases and their rendered manifests, with trusted annotations, as the second guard for `selector` | R3, R8 |
-| R10 | `nyl-collections`, Release `collections`, referenced resources, YAML-safe output, bundle provenance in the ownership index | R1, R3, R8 |
+| R10 | Release `collections` on the `nyl-collections` assembly of R12, referenced resources, YAML-safe output, bundle provenance in the ownership index | R1, R3, R8, R12 |
 | R11 | `forEach` on Releases, instance names, instance bindings | R10 |
 
-R8 is useful without domain resources. R10 builds the parts of R2 that need
-no orchestration: membership, the bundle, and referenced resources move into
-`nyl-collections` there, and R2 adds ownership claims, state files, and the
-execution key on top.
+R8 is useful without domain resources. Membership, the bundle, and referenced
+resources need no orchestration and live in `nyl-collections` from R12, the
+[standalone export](domain-resources.md#standalone-export-nyl-bundle). R10
+builds Release collections on that code, and R2 adds ownership claims, state
+files, and the execution key on top for units.
 
 ## Open decisions
 

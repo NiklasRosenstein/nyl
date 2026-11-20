@@ -503,12 +503,40 @@ sources.
 
 Teams declare typed resources, such as AWS accounts or GitHub teams, in
 paths they own, and explicitly registered units consume them as a tool-neutral
-bundle: a unit reads a collection with `$fromCollection`, and a declaration
-field that accepts references holds `$fromUnit` or `$fromPromotion`. This is
-the fourth layer of Nyl, above orchestration. Its direction is
+bundle: a unit reads a collection with `$fromCollection`. This is the fourth
+layer of Nyl, above orchestration. Its direction is
 the [domain modeling design](design/domain-resources.md), and its slices and
 progress are on the
 [Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
+
+A domain resource is one more context of the
+[value-source model](design/declarative-value-sources.md#contexts), read by
+the same walker as every other document. Its `spec` may hold `$fromUnit` and
+`$fromPromotion` at any depth, which resolve in the consuming unit's
+environment when its run resolves the bundle; any other source is an error
+that names the fix, and the envelope and `x-nyl-reference` fields stay
+literal. The definition's schema describes resolved values: admission treats a
+position that holds a source as not yet known, and resolution validates the
+value against the field's subschema. No schema keyword marks which fields take
+sources, so every definition follows the one context table.
+
+Domain modeling also stands on its own. Definition, discovery, admission,
+collection, resolution, and bundling need no unit, driver, Release, or
+cluster; only adapting a bundle to a native tool needs a driver. `nyl get
+resources -o yaml|json` exports the admitted catalog, and `nyl bundle` exports
+a `ResourceBundle` for a selection made like a collection (a kind, labels,
+paths, or a unit's named collection) with its referenced resources and
+provenance. Without `-e` the bundle lists its sources as unresolved and
+exits 0; with `-e` they resolve read-only against current receipts, as `nyl
+get output` resolves them. Neither command writes state or loads a driver, and
+both run the code `reconcile` runs, so an export and a unit's bundle are the
+same bytes. The bundle is a versioned contract with published schemas, which
+lets other tools consume team declarations without adopting orchestration.
+
+The slices ship in this order: R1, definitions and the catalog with the
+value-source context; R12, the standalone export, on which every later
+consumer builds; then R2 onward. Slice identifiers stay stable, so the export
+takes the next free number.
 
 Kubernetes Releases consume collections too, without orchestration, as
 described in the [Release catalog design](design/release-catalog.md). The
