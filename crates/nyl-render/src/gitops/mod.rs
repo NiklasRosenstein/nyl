@@ -19,7 +19,7 @@ pub mod shared_catalog;
 pub mod source_locks;
 pub mod tree;
 pub mod units;
-mod values;
+pub(crate) mod values;
 
 pub use crate::render::cache::{CacheMode, RenderCache as GitOpsCache, RenderCacheArgs as TreeCacheArgs};
 pub use crate::render::{RenderSession, RenderedBundle};

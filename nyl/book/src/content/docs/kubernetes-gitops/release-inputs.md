@@ -55,9 +55,51 @@ spec:
 
 `inputs` is visible in the Release entry file and in every file attached
 through `spec.include`. Components, HelmCharts, and RemoteManifests receive
-inputs only through explicit templating in the Release bundle, as with target
-`values`. `target.spec.releaseInputs` is not part of the `target` template
-context.
+inputs only explicitly, as with target `values`: through templating in the
+Release bundle, or, for a HelmChart, through the value sources below.
+`target.spec.releaseInputs` is not part of the `target` template context.
+
+### Passing inputs to a chart
+
+Write `'{{ inputs.image }}'` to place a string input in a chart value. For an
+`object` input that holds chart values, or a boolean that switches a HelmChart
+field, use a [value source](/nyl/reference/value-sources/) instead of
+`{{ inputs.x | tojson }}`:
+
+```yaml
+apiVersion: k8s.nyl/v1
+kind: Release
+metadata:
+  name: web
+  namespace: web
+spec:
+  inputs:
+    chartValues:
+      type: object
+      default: {}
+    crds:
+      type: boolean
+      default: true
+---
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata:
+  name: web
+  namespace: web
+spec:
+  chart: {name: ./chart}
+  includeCrds: {fromInput: {name: crds}}
+  valuesFrom:
+    - file: values-base.yaml
+    - input: chartValues
+  values:
+    fullnameOverride: web
+```
+
+The target's `chartValues` binding merges over `values-base.yaml`, and
+`values` merges last. See [HelmChart `valuesFrom`](/nyl/reference/value-sources/#helmchart-values-valuesfrom)
+and [HelmChart fields: `fromInput`](/nyl/reference/value-sources/#helmchart-fields-frominput)
+for the rules.
 
 ## Binding inputs on a target
 

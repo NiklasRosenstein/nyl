@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use glob::Pattern;
 
+use super::sources::{resolve_bundle_resource, BundleFiles};
 use super::{best_effort_parse_yaml_documents, RenderProvenance, RenderResource};
 use crate::resources::{extract_release, Release};
 use crate::template::{TemplateContext, TemplateEngine};
@@ -15,6 +16,8 @@ use nyl_core::template_syntax::has_template_syntax;
 #[derive(Debug)]
 pub(crate) struct LoadedReleaseBundle {
     pub resources: Vec<RenderResource>,
+    /// Every file the bundle read: its entry file, its includes, and the
+    /// `valuesFrom` files of its HelmCharts.
     pub inputs: Vec<PathBuf>,
     pub dependency_directories: Vec<PathBuf>,
 }
@@ -22,7 +25,12 @@ pub(crate) struct LoadedReleaseBundle {
 /// Load one manifest entrypoint and any files selected by its Release.
 #[cfg(test)]
 pub(crate) fn load_release_bundle(path: &Path, context: &TemplateContext) -> Result<LoadedReleaseBundle> {
-    load_release_bundle_with_root(path, context, ProvenanceRoots::default())
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let files = BundleFiles {
+        project_root: directory,
+        checkout: None,
+    };
+    load_release_bundle_with_root(path, context, ProvenanceRoots::default(), files)
 }
 
 /// Roots that source provenance paths are recorded relative to.
@@ -40,8 +48,10 @@ pub(crate) fn load_release_bundle_with_root(
     path: &Path,
     context: &TemplateContext,
     provenance_root: ProvenanceRoots<'_>,
+    files: BundleFiles<'_>,
 ) -> Result<LoadedReleaseBundle> {
-    let mut resources = load_resource_file(path, context, provenance_root)?;
+    let mut values_files = Vec::new();
+    let mut resources = load_resource_file(path, context, provenance_root, files, &mut values_files)?;
     let values = resources
         .iter()
         .map(|resource| resource.value.clone())
@@ -49,6 +59,7 @@ pub(crate) fn load_release_bundle_with_root(
     let (release, _) = extract_release(&values)?;
     let mut inputs = vec![path.to_path_buf()];
     let Some(release) = release else {
+        inputs.extend(values_files);
         return Ok(LoadedReleaseBundle {
             resources,
             inputs,
@@ -67,7 +78,7 @@ pub(crate) fn load_release_bundle_with_root(
     };
     let include_paths = resolve_release_includes(path, &release)?;
     for include_path in &include_paths {
-        let included = load_resource_file(include_path, context, provenance_root)?;
+        let included = load_resource_file(include_path, context, provenance_root, files, &mut values_files)?;
         let included_values = included
             .iter()
             .map(|resource| resource.value.clone())
@@ -83,6 +94,11 @@ pub(crate) fn load_release_bundle_with_root(
         resources.extend(included);
     }
     inputs.extend(include_paths);
+    for values_file in values_files {
+        if !inputs.contains(&values_file) {
+            inputs.push(values_file);
+        }
+    }
     Ok(LoadedReleaseBundle {
         resources,
         inputs,
@@ -239,6 +255,8 @@ fn load_resource_file(
     path: &Path,
     context: &TemplateContext,
     provenance_root: ProvenanceRoots<'_>,
+    files: BundleFiles<'_>,
+    values_files: &mut Vec<PathBuf>,
 ) -> Result<Vec<RenderResource>> {
     // Validate that path is a file, not a directory
     if !path.exists() {
@@ -272,16 +290,13 @@ fn load_resource_file(
     let rendered = engine.render_named(&path.display().to_string(), &raw, &ctx_json)?;
     let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
     let source_path = provenance_path(path, provenance_root);
-    resources.extend(
-        source_ctx
-            .parse_yaml_documents(&rendered)?
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| RenderResource {
-                value,
-                provenance: RenderProvenance::source(source_path.clone(), index + 1),
-            }),
-    );
+    for (index, mut value) in source_ctx.parse_yaml_documents(&rendered)?.into_iter().enumerate() {
+        resolve_bundle_resource(&mut value, path, files, context.inputs.as_ref(), values_files)?;
+        resources.push(RenderResource {
+            value,
+            provenance: RenderProvenance::source(source_path.clone(), index + 1),
+        });
+    }
 
     Ok(resources)
 }

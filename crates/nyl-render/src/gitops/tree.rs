@@ -979,6 +979,7 @@ async fn compile_target_tree_recording(
                     resolved_inputs.as_ref(),
                     Some(lookup_scope.clone()),
                     group.spec.destination_namespace.as_deref(),
+                    source.remote.then_some(provenance_root.as_path()),
                 )
                 .await?;
             if let (Some(repository), Some(revision)) = (

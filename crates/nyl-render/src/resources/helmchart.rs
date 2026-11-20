@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use nyl_core::bindings::{FromInput, Resolvable};
 use nyl_core::constants::API_VERSION;
 
 /// Reference to a Helm chart
@@ -175,13 +176,23 @@ pub struct HelmChartSpec {
     /// Reference to the chart
     pub chart: ChartRef,
 
-    /// Values to pass to the chart
+    /// Values files and object-typed Release inputs, merged in order before `values`.
+    ///
+    /// Each entry sets exactly one of `file` and `input`. Maps merge key by key and
+    /// every other value replaces, which is Helm's own rule for `-f`; inline `values`
+    /// merge last. The merged values are data: Nyl never resolves source clauses in them.
+    #[serde(default, rename = "valuesFrom", skip_serializing_if = "Vec::is_empty")]
+    pub values_from: Vec<HelmValuesSource>,
+
+    /// Values to pass to the chart, merged over `valuesFrom`
     #[serde(default)]
     pub values: serde_json::Value,
 
     /// Whether to include CRDs from the chart's crds/ directory in the rendered output.
-    /// Defaults to true when unset.
+    /// Defaults to true when unset. In a Release bundle, accepts `fromInput` to read a
+    /// boolean Release input.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "includeCrds")]
+    #[schemars(with = "Resolvable<Option<bool>, FromInput>")]
     pub include_crds: Option<bool>,
 
     /// Lets the chart's Helm `lookup` read the objects of the Release it belongs
@@ -200,14 +211,127 @@ pub struct HelmChartSpec {
     /// Helm never gets a cluster or credentials. The Cluster's declared Kubernetes
     /// version and API versions describe that API, plus the API versions of
     /// CustomResourceDefinitions the chart ships in `crds/`.
+    ///
+    /// In a Release bundle, accepts `fromInput` to read a boolean Release input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Resolvable<Option<LookupSetting>, FromInput>")]
     pub lookup: Option<LookupSetting>,
+}
+
+/// One source of chart values in `spec.valuesFrom`: exactly one of `file` and
+/// `input`, optionally narrowed by `pointer` and mounted under `key`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HelmValuesSource {
+    /// Static, normalized path to exactly one YAML mapping document in a Git-visible regular file, read without templating. Relative paths start at the directory of the file that declares the HelmChart; `/` starts at the Git worktree root (for a remote ApplicationGroup source, its checkout). Leading `..` segments may reach outside the Nyl project, but never outside its worktree or through symlinks. Ignored untracked files, submodules, and the project's `.nyl/cache` directory are excluded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Name of an `object`-typed input that the Release of this bundle declares in `spec.inputs`. Valid only in a Release bundle; its effective value is the target's binding or the declared default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    /// JSON Pointer that selects a value inside the file or input, such as `/web`; the whole value when omitted. Without `key`, the selected value must be a mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer: Option<String>,
+    /// Mount the selected value under this literal values key. Omit to merge a mapping at the values root. Dots are literal characters, not path separators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// Where one `spec.valuesFrom` entry reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelmValuesOrigin<'a> {
+    /// `file`
+    File(&'a str),
+    /// `input`
+    Input(&'a str),
+}
+
+impl HelmValuesSource {
+    /// Check the static form of the entry at `field`, such as `spec.valuesFrom[0]`,
+    /// and say where it reads.
+    pub fn origin(&self, field: &str) -> nyl_core::Result<HelmValuesOrigin<'_>> {
+        let origin = match (&self.file, &self.input) {
+            (Some(file), None) => {
+                super::ValuesFromFile {
+                    file: file.clone(),
+                    key: None,
+                }
+                .validate()?;
+                HelmValuesOrigin::File(file)
+            }
+            (None, Some(input)) => {
+                nyl_core::bindings::validate_input_name(&format!("{field}.input"), input)?;
+                HelmValuesOrigin::Input(input)
+            }
+            _ => {
+                return Err(nyl_core::CoreError::config(format!(
+                    "{field} must set exactly one of file and input"
+                )))
+            }
+        };
+        if let Some(pointer) = &self.pointer {
+            nyl_core::json_pointer::validate(&format!("{field}.pointer"), pointer)?;
+        }
+        if let Some(key) = &self.key {
+            nyl_core::resources::validate_static_required(&format!("{field}.key"), key)?;
+        }
+        Ok(origin)
+    }
+
+    /// The values this entry contributes, from `document`, the whole file or
+    /// input it reads: the value at `pointer`, mounted under `key`, or else a
+    /// mapping merged at the root. `what`
+    /// names the source in messages, such as `values file a.yaml`.
+    pub fn select(&self, document: &serde_json::Value, what: &str) -> std::result::Result<serde_json::Value, String> {
+        let pointer = self.pointer.as_deref().unwrap_or_default();
+        let selected = document
+            .pointer(pointer)
+            .ok_or_else(|| format!("pointer {pointer:?} selects nothing in {what}"))?;
+        if self.key.is_none() && !selected.is_object() {
+            let at = if pointer.is_empty() {
+                String::new()
+            } else {
+                format!(" at {pointer:?}")
+            };
+            return Err(format!(
+                "{what}{at} has type {}, not a mapping; chart values are a mapping, so select one with pointer, or mount it with key",
+                nyl_core::bindings::json_type_name(selected)
+            ));
+        }
+        Ok(match &self.key {
+            Some(key) => serde_json::Value::Object(serde_json::Map::from_iter([(key.clone(), selected.clone())])),
+            None => selected.clone(),
+        })
+    }
+}
+
+/// The chart values of a HelmChart whose `valuesFrom` entries contributed
+/// `sources`, in order: each merged over the previous with
+/// [`crate::util::deep_merge_value`], then the inline `values`. Omitted inline
+/// values add nothing.
+pub fn merge_chart_values(
+    sources: impl IntoIterator<Item = serde_json::Value>,
+    inline: serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let mut merged = serde_json::json!({});
+    for source in sources {
+        merged = crate::util::deep_merge_value(Some(merged), source);
+    }
+    match inline {
+        serde_json::Value::Null => Ok(merged),
+        inline @ serde_json::Value::Object(_) => Ok(crate::util::deep_merge_value(Some(merged), inline)),
+        other => Err(format!(
+            "spec.values is {}; with valuesFrom, values must be a mapping",
+            nyl_core::bindings::json_type_name(&other)
+        )),
+    }
 }
 
 impl Default for HelmChartSpec {
     fn default() -> Self {
         Self {
             chart: ChartRef::default(),
+            values_from: Vec::new(),
             values: serde_json::Value::Object(serde_json::Map::new()),
             include_crds: None,
             lookup: None,
@@ -496,6 +620,89 @@ spec:
         for invalid in ["\"yes\"", "1", "[]"] {
             assert!(chart_with_lookup(invalid).is_err(), "{invalid}");
         }
+    }
+
+    fn values_source(value: serde_json::Value) -> HelmValuesSource {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// Catches `valuesFrom` entries contributing anything but the selected
+    /// value at the root, or under `key`.
+    #[test]
+    fn test_values_source_selects_and_mounts() {
+        let document = serde_json::json!({"web": {"replicas": 2}, "tags": ["a"]});
+        let whole = values_source(serde_json::json!({"file": "a.yaml"}));
+        assert_eq!(whole.select(&document, "f").unwrap(), document);
+        let pointed = values_source(serde_json::json!({"file": "a.yaml", "pointer": "/web"}));
+        assert_eq!(
+            pointed.select(&document, "f").unwrap(),
+            serde_json::json!({"replicas": 2})
+        );
+        let mounted = values_source(serde_json::json!({"input": "v", "pointer": "/tags", "key": "my.tags"}));
+        assert_eq!(
+            mounted.select(&document, "f").unwrap(),
+            serde_json::json!({"my.tags": ["a"]})
+        );
+        let list = values_source(serde_json::json!({"file": "a.yaml", "pointer": "/tags"}));
+        assert_eq!(
+            list.select(&document, "values file a.yaml").unwrap_err(),
+            "values file a.yaml at \"/tags\" has type array, not a mapping; chart values are a mapping, so select one with pointer, or mount it with key"
+        );
+        let missing = values_source(serde_json::json!({"file": "a.yaml", "pointer": "/db"}));
+        assert!(missing.select(&document, "f").unwrap_err().contains("selects nothing"));
+    }
+
+    /// Catches an entry that reads from both sources, or none, or carries an
+    /// invalid pointer, file, or input name.
+    #[test]
+    fn test_values_source_reads_exactly_one_source() {
+        let origin = |value| {
+            values_source(value)
+                .origin("spec.valuesFrom[0]")
+                .map(|origin| format!("{origin:?}"))
+                .map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            origin(serde_json::json!({"file": "a.yaml"})).unwrap(),
+            "File(\"a.yaml\")"
+        );
+        assert_eq!(
+            origin(serde_json::json!({"input": "chartValues"})).unwrap(),
+            "Input(\"chartValues\")"
+        );
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"file": "a.yaml", "input": "v"}),
+            serde_json::json!({"file": "../.git/config"}),
+            serde_json::json!({"input": "Bad-Name"}),
+            serde_json::json!({"input": "v", "pointer": "web"}),
+            serde_json::json!({"input": "v", "key": ""}),
+        ] {
+            assert!(origin(invalid.clone()).is_err(), "{invalid}");
+        }
+        assert!(
+            serde_json::from_value::<HelmValuesSource>(serde_json::json!({"file": "a", "optional": true})).is_err()
+        );
+    }
+
+    /// Catches a merge order other than the entries in order, then the
+    /// inline values: maps merge, everything else replaces.
+    #[test]
+    fn test_merge_chart_values_order() {
+        let merged = merge_chart_values(
+            [
+                serde_json::json!({"a": {"x": 1, "list": [1]}, "b": 1}),
+                serde_json::json!({"a": {"y": 2, "list": []}, "b": 2}),
+            ],
+            serde_json::json!({"b": 3}),
+        )
+        .unwrap();
+        assert_eq!(merged, serde_json::json!({"a": {"x": 1, "y": 2, "list": []}, "b": 3}));
+        assert_eq!(
+            merge_chart_values([serde_json::json!({"a": 1})], serde_json::Value::Null).unwrap(),
+            serde_json::json!({"a": 1})
+        );
+        assert!(merge_chart_values([], serde_json::json!([1])).is_err());
     }
 
     #[test]

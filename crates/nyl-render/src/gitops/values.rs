@@ -1,4 +1,4 @@
-//! File-backed Cluster and DeploymentTarget values, resolved once during inventory discovery.
+//! File-backed values: Cluster and DeploymentTarget values, resolved once during inventory discovery, and the files of HelmChart `valuesFrom`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -43,8 +43,13 @@ pub(super) fn resolve_resource_values(
             discovered.identity.name,
             source.file,
         );
-        let (path, imported) = load(paths, &source_paths, visible_files, source)
-            .map_err(|error| NylError::config(format!("{context}: {error}")))?;
+        let (path, imported) = load(
+            paths,
+            &source_paths,
+            &|relative| visible_files.contains(relative),
+            source,
+        )
+        .map_err(|error| NylError::config(format!("{context}: {error}")))?;
         discovered
             .values_inputs
             .insert(paths.key(&path).expect("import is inside the worktree"));
@@ -55,17 +60,78 @@ pub(super) fn resolve_resource_values(
     Ok(())
 }
 
+/// Where a HelmChart's `valuesFrom` files are read: the Git worktree that
+/// holds the declaring file, or a pinned checkout such as a remote
+/// ApplicationGroup source.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ValuesFileRoot<'a> {
+    /// The Git worktree containing the declaring file; the project's
+    /// `.nyl/cache` directory is excluded.
+    Worktree { project_root: &'a Path },
+    /// A checkout of one commit: `/` starts here, and every regular file in
+    /// it is visible.
+    Checkout(&'a Path),
+}
+
+/// Read one HelmChart `valuesFrom` file under the rules of Cluster and
+/// DeploymentTarget `valuesFrom`: `file` is relative to `directory`, the
+/// directory of the file declaring the HelmChart, or starts at the root with
+/// `/`; it must be a Git-visible regular YAML mapping file. Returns the
+/// absolute path read, and the mapping without `key` mounting.
+pub(crate) fn load_chart_values_file(
+    root: ValuesFileRoot<'_>,
+    directory: &Path,
+    file: &str,
+) -> Result<(PathBuf, serde_json::Value)> {
+    let directory = directory
+        .canonicalize()
+        .map_err(|error| NylError::config(format!("Cannot resolve directory {}: {error}", directory.display())))?;
+    let source = ValuesFromFile {
+        file: file.to_owned(),
+        key: None,
+    };
+    match root {
+        ValuesFileRoot::Checkout(checkout) => {
+            let checkout = checkout.canonicalize()?;
+            let paths = ProjectPaths::new(checkout.clone(), checkout.clone());
+            load(&paths, &ProjectPaths::new(directory, checkout), &|_| true, &source)
+        }
+        ValuesFileRoot::Worktree { project_root } => {
+            let repository = git2::Repository::discover(&directory).map_err(|error| {
+                NylError::config(format!(
+                    "spec.valuesFrom[].file {file:?} reads a file of the Git worktree, but {} is in none: {error}; keep the Release in a Git repository, or pass the values inline",
+                    directory.display()
+                ))
+            })?;
+            let worktree = repository
+                .workdir()
+                .ok_or_else(|| NylError::config("spec.valuesFrom[].file needs a non-bare Git worktree"))?
+                .canonicalize()?;
+            let project_root = project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.to_path_buf());
+            let paths = ProjectPaths::new(project_root, worktree.clone());
+            let visible = |relative: &Path| {
+                repository.status_file(relative).is_ok_and(|status| {
+                    !status.intersects(git2::Status::IGNORED | git2::Status::WT_DELETED | git2::Status::INDEX_DELETED)
+                })
+            };
+            load(&paths, &ProjectPaths::new(directory, worktree), &visible, &source)
+        }
+    }
+}
+
 fn load(
     paths: &ProjectPaths,
     source_paths: &ProjectPaths,
-    visible_files: &BTreeSet<PathBuf>,
+    visible: &dyn Fn(&Path) -> bool,
     source: &ValuesFromFile,
 ) -> Result<(PathBuf, serde_json::Value)> {
     let path = source_paths.resolve("spec.valuesFrom[].file", &source.file)?;
     let relative = path
         .strip_prefix(&paths.worktree_root)
         .expect("import is inside the worktree");
-    if !visible_files.contains(relative) || !path.is_file() || path.starts_with(paths.project_root.join(".nyl/cache")) {
+    if !visible(relative) || !path.is_file() || path.starts_with(paths.project_root.join(".nyl/cache")) {
         return Err(NylError::config(format!(
             "Values file {} is missing or is not an eligible Git-visible regular file; add the file to Git or remove its ignore rule, and keep it outside submodules and the project's .nyl/cache directory",
             path.display()

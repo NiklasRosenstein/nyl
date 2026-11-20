@@ -465,7 +465,7 @@ pub struct ValuesFromFile {
 }
 
 impl ValuesFromFile {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         validate_static_required("spec.valuesFrom[].file", &self.file)?;
         nyl_core::local_path::validate_local_path("spec.valuesFrom[].file", &self.file).map_err(|_| {
             CoreError::config(format!(
@@ -1127,7 +1127,18 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         GitOpsResourceKind::GitRepository => serde_json::to_value(schema_for!(GitRepository)),
         GitOpsResourceKind::Cluster => serde_json::to_value(schema_for!(Cluster)),
         GitOpsResourceKind::ArgoCDInstance => serde_json::to_value(schema_for!(ArgoCDInstance)),
-        GitOpsResourceKind::DeploymentTarget => serde_json::to_value(schema_for!(DeploymentTarget)),
+        GitOpsResourceKind::DeploymentTarget => {
+            serde_json::to_value(schema_for!(DeploymentTarget)).map(|mut schema| {
+                // Bindings share `fromUnit` with unit documents, where an inline
+                // target's `environment` accepts `fromValues`; a declared target
+                // is no unit document, so it takes only the literal.
+                nyl_core::bindings::without_clauses(
+                    &mut schema,
+                    <nyl_core::bindings::FromValues as nyl_core::bindings::SourceKind>::FIELD,
+                );
+                schema
+            })
+        }
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
         GitOpsResourceKind::Environment => {
@@ -2679,6 +2690,34 @@ mod tests {
         assert!(parse_gitops_resource(&repository).is_ok());
         let schema = schemars::schema_for!(DeploymentTarget);
         assert!(serde_json::to_value(schema).unwrap().is_object());
+    }
+
+    /// Catches a declared DeploymentTarget accepting, or its schema offering,
+    /// `fromValues` in a `fromUnit` binding's `environment`: only unit
+    /// documents resolve it, so the declared target fails with where it works,
+    /// and only a literal name is offered to editors.
+    #[test]
+    fn declared_targets_take_a_literal_from_unit_environment() {
+        let binding = |environment: serde_json::Value| {
+            target_with(json!({
+                "reconciler": {"argocd": {}},
+                "releaseInputs": {"apps/web": {"image": {"fromUnit": {"unit": "image", "output": "ref", "environment": environment}}}}
+            }))
+        };
+        assert!(parse_gitops_resource(&binding(json!("dev"))).is_ok());
+        let error = parse_gitops_resource(&binding(json!({"fromValues": {"pointer": "/imageFrom"}})))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("fromValues clause, which resolves only in unit documents"),
+            "{error}"
+        );
+        assert!(error.contains("/nyl/reference/value-sources/"), "{error}");
+
+        let schema = generate_gitops_resource_schema(GitOpsResourceKind::DeploymentTarget);
+        let environment = &schema["$defs"]["UnitInputSource"]["properties"]["environment"];
+        assert_eq!(environment["type"], json!(["string", "null"]), "{environment}");
+        assert!(!schema.to_string().contains(nyl_core::bindings::RESOLVABLE_EXTENSION));
     }
 
     #[test]

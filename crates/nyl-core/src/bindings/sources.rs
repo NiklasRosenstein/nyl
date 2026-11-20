@@ -222,6 +222,40 @@ pub fn resolvable_schema<S: SourceKind>(generator: &mut SchemaGenerator, literal
     schema
 }
 
+/// Replace every field `schema` marks resolvable from `kind` by its literal
+/// form, at any depth and in its `$defs`: for a document whose fields are
+/// shared with documents that resolve `kind`, but that does not, such as a
+/// declared DeploymentTarget, whose bindings a unit document's inline target
+/// shares. A field keeps its description.
+pub fn without_clauses(schema: &mut Value, kind: &str) {
+    match schema {
+        Value::Object(object) => {
+            if object.get(RESOLVABLE_EXTENSION).and_then(Value::as_str) == Some(kind) {
+                let literal = object
+                    .get("anyOf")
+                    .and_then(Value::as_array)
+                    .and_then(|branches| branches.first())
+                    .cloned();
+                if let Some(Value::Object(mut literal)) = literal {
+                    if let Some(description) = object.get("description") {
+                        literal.insert("description".to_owned(), description.clone());
+                    }
+                    *object = literal;
+                }
+            }
+            for child in object.values_mut() {
+                without_clauses(child, kind);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                without_clauses(item, kind);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A field a schema marks resolvable.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResolvableField {
@@ -390,6 +424,19 @@ mod tests {
         assert_eq!(schema["description"], json!("When phase 1 ends."));
         assert_eq!(schema["anyOf"][0], json!({"type": "object"}));
         assert_eq!(schema[RESOLVABLE_EXTENSION], json!("fromValues"));
+    }
+
+    #[test]
+    fn test_without_clauses_keeps_the_literal_and_the_description() {
+        let mut schema = schemars::schema_for!(Spec).to_value();
+        without_clauses(&mut schema, "fromValues");
+        assert_eq!(
+            schema["properties"]["target"],
+            json!({"type": "string", "description": "The target."})
+        );
+        assert!(resolvable_fields(&serde_json::from_value(schema).unwrap())
+            .iter()
+            .all(|field| field.kind == "fromInput"));
     }
 
     #[test]

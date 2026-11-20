@@ -8,6 +8,7 @@ mod pod_checksum;
 mod postprocess;
 mod provenance;
 mod session;
+mod sources;
 mod sync_order;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ pub(crate) use postprocess::*;
 pub use provenance::{Provenance, ProvenanceFrame};
 pub(crate) use provenance::{RenderProvenance, RenderResource};
 pub use session::{RenderPathMode, RenderRequest, RenderSession, RenderedBundle};
+pub(crate) use sources::BundleFiles;
 
 #[cfg(test)]
 mod tests {
@@ -954,6 +956,10 @@ spec:
             ProvenanceRoots {
                 root: Some(temporary.path()),
                 worktree: None,
+            },
+            BundleFiles {
+                project_root: temporary.path(),
+                checkout: None,
             },
         )
         .unwrap();
