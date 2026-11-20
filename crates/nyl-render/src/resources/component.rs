@@ -39,7 +39,9 @@ pub struct NylComponent {
     /// Helm release name, namespace, labels, and annotations.
     pub metadata: ObjectMetadata,
 
-    /// Helm values — defaults to an empty object when omitted
+    /// Helm values — defaults to an empty object when omitted. In a Release bundle,
+    /// `{$input: name}` reads a Release input at any depth; other `$` keys, such as
+    /// `$ref`, are chart data.
     #[serde(default = "default_spec")]
     pub spec: serde_json::Value,
 

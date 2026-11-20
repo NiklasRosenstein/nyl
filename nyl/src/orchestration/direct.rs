@@ -120,7 +120,7 @@ pub fn prepare(
         .drivers
         .get(&envelope.api_version, &envelope.kind)
         .ok_or_else(|| config(format!("no driver serves {} {}", envelope.api_version, envelope.kind)))?;
-    driver.validate_spec(&spec).map_err(config)?;
+    nyl_core::orchestration::driver::validate_unit_spec(driver, &spec).map_err(config)?;
     let mut snapshot = EnvironmentSnapshot::default();
     let mut promotions = BTreeMap::new();
     let mut environments = BTreeMap::new();

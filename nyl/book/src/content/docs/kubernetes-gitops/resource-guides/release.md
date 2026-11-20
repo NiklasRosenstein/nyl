@@ -108,8 +108,10 @@ defaults.
 
 ## Inputs
 
-A Release may declare typed `spec.inputs` that templates read as
-`inputs.<name>`, next to `values`. A DeploymentTarget binds them for its
+A Release may declare typed `spec.inputs` that the resources of its bundle read
+with `{$input: name}`, at any depth and with the input's type, and templates
+read as `inputs.<name>` for string interpolation. The Release's own
+`metadata.namespace` may be one: `namespace: {$input: namespace}`. A DeploymentTarget binds them for its
 environment, from an inline value, a project file, locked Git state, or a state
 file in its own publication branch; an unbound input takes its declared
 default. A Release that declares inputs needs a literal `metadata.name` and a

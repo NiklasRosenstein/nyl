@@ -767,7 +767,7 @@ fn validate_unit(driver: &dyn Driver, spec: &Value) -> Result<(), UnitError> {
     {
         return Err(UnitError::ObservationsUnsupported(driver.kind().to_owned()));
     }
-    driver.validate_spec(spec).map_err(UnitError::Invalid)?;
+    nyl_core::orchestration::driver::validate_unit_spec(driver, spec).map_err(UnitError::Invalid)?;
     let common: CommonUnitFields = serde_json::from_value(spec.clone()).map_err(|error| invalid(&error))?;
     if common.approval.bind == nyl_core::resources::units::ApprovalBind::Plan
         && !driver.capabilities(spec).change_digest
@@ -1565,6 +1565,36 @@ mod tests {
             .iter()
             .any(|error| error.message.contains("/nyl/units.yaml")));
         assert!(desired.units.is_empty());
+    }
+
+    /// Catches an unknown `$` key in a kind's typed field left to the
+    /// driver's generic deserialization error, and a foreign `$` key in a
+    /// field the kind's schema leaves open reported at all: the reserved
+    /// namespace is read from the driver's schema, never from its kind.
+    #[test]
+    fn test_unknown_dollar_keys_in_typed_fields_are_unknown_sources() {
+        let mut drivers = drivers();
+        drivers.register(Arc::new(TestDriver { kind: "Typed" }));
+        let source = source(vec![
+            (
+                "typed",
+                rendered("Typed", true, Some(json!({"replicas": {"$enviroment": "/replicas"}}))),
+            ),
+            (
+                "open",
+                rendered(TEST_KIND, true, Some(json!({"variables": {"$ref": "#/x"}}))),
+            ),
+        ]);
+        let findings = check_units(&source, &drivers);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].code, Code::UnitInvalid);
+        assert!(
+            findings[0]
+                .message
+                .contains("spec.replicas.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $environment?"),
+            "{}",
+            findings[0].message
+        );
     }
 
     /// Catches observations accepted for a kind that reads none (the

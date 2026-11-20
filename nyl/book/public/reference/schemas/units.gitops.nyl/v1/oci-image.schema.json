@@ -388,145 +388,292 @@
       "description": "Docker Buildx inputs. Every directory context is a separately pinned Git source.",
       "properties": {
         "approval": {
-          "$ref": "#/$defs/ApprovalPolicy",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalPolicy"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
           "description": "Whether executions need an invocation's approval."
         },
         "attestations": {
-          "description": "Attestations of the unit's receipts: names its kind produces itself, or entries with `from: external` that only `nyl attest` supplies.",
-          "items": {
-            "$ref": "#/$defs/AttestationDeclaration"
-          },
-          "type": "array"
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/AttestationDeclaration"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Attestations of the unit's receipts: names its kind produces itself, or entries with `from: external` that only `nyl attest` supplies."
         },
         "buildArgs": {
-          "additionalProperties": true,
-          "description": "Build arguments, with references resolved before execution. Values must resolve to scalars.",
-          "type": "object"
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Build arguments, with references resolved before execution. Values must resolve to scalars."
         },
         "builder": {
-          "description": "Runner's Buildx builder; excluded from the execution key.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Runner's Buildx builder; excluded from the execution key."
         },
         "cache": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ImageCache"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ImageCache"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             {
-              "type": "null"
+              "$ref": "#/$defs/UnitDocumentValueSource"
             }
           ],
           "description": "Buildx cache imports and exports; excluded from the execution key."
         },
         "context": {
-          "$ref": "#/$defs/GitSource",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitSource"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
           "description": "Main build context, following the common Git source and local path rules."
         },
         "contexts": {
-          "additionalProperties": {
-            "$ref": "#/$defs/ImageContext"
-          },
-          "description": "Named directories or digest-pinned image references, passed with `--build-context`.",
-          "type": "object"
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ImageContext"
+              },
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Named directories or digest-pinned image references, passed with `--build-context`."
         },
         "deletionPolicy": {
           "anyOf": [
             {
-              "$ref": "#/$defs/DeletionPolicy"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeletionPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             {
-              "type": "null"
+              "$ref": "#/$defs/UnitDocumentValueSource"
             }
           ],
           "description": "What happens to the unit's resources when it leaves the ownership set. Default `Teardown` where the kind supports teardown, else `Retain`."
         },
         "dependsOn": {
-          "description": "Units that must have a current receipt first, for ordering without a data reference.",
-          "items": {
-            "$ref": "#/$defs/DependsOn"
-          },
-          "type": "array"
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/DependsOn"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Units that must have a current receipt first, for ordering without a data reference."
         },
         "dockerfile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
           "default": "Dockerfile",
-          "description": "Dockerfile relative to the main context, default `Dockerfile`; cannot leave the context.",
-          "type": "string"
+          "description": "Dockerfile relative to the main context, default `Dockerfile`; cannot leave the context."
         },
         "enabled": {
-          "description": "Evaluated after rendering; `false` leaves the environment's ownership set, which deletes the unit under its `deletionPolicy`.",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Evaluated after rendering; `false` leaves the environment's ownership set, which deletes the unit under its `deletionPolicy`."
         },
         "env": {
-          "$ref": "#/$defs/EnvAdmission",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvAdmission"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
           "description": "Variables and secrets admitted into the unit's otherwise empty tool environment."
         },
         "observationWait": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Duration"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Duration"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             {
-              "type": "null"
+              "$ref": "#/$defs/UnitDocumentValueSource"
             }
           ],
           "description": "How long a run that executed the unit waits for its `pending` observations, within `timeout`. Default `0s`: one attempt, then later runs."
         },
         "observations": {
-          "additionalProperties": {
-            "$ref": "#/$defs/ObservationDeclaration"
-          },
-          "description": "Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `$unit: {unit, observation}`.",
-          "type": "object"
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ObservationDeclaration"
+              },
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Observed values, for kinds that read them: values the unit's driver reads from the system the unit manages, which appear after an execution and can change while its execution key stays the same. Consumers reference one with `$unit: {unit, observation}`."
         },
         "outputs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/OutputDeclaration"
-          },
-          "description": "Declared outputs, for kinds that let units declare them. Only declared outputs are recorded.",
-          "type": "object"
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/OutputDeclaration"
+              },
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Declared outputs, for kinds that let units declare them. Only declared outputs are recorded."
         },
         "platforms": {
-          "description": "Target platforms, such as `linux/amd64`. Omitted uses the builder's platform.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Target platforms, such as `linux/amd64`. Omitted uses the builder's platform."
         },
         "registryAuth": {
-          "additionalProperties": {
-            "$ref": "#/$defs/RegistryAuth"
-          },
-          "description": "Registry host to username/password secret keys. Values never enter state or execution keys.",
-          "type": "object"
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/RegistryAuth"
+              },
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Registry host to username/password secret keys. Values never enter state or execution keys."
         },
         "repository": {
-          "description": "Registry repository without a tag or digest, such as `registry.example.com/team/web`.",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Registry repository without a tag or digest, such as `registry.example.com/team/web`."
         },
         "tags": {
-          "description": "Extra moving tags in this repository. Consumers use the immutable artifact reference.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Extra moving tags in this repository. Consumers use the immutable artifact reference."
         },
         "target": {
-          "description": "Optional Dockerfile build stage.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/UnitDocumentValueSource"
+            }
+          ],
+          "description": "Optional Dockerfile build stage."
         },
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Duration"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Duration"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             {
-              "type": "null"
+              "$ref": "#/$defs/UnitDocumentValueSource"
             }
           ],
           "description": "Deadline for one execution, teardown, or verification, at most `7d`. Default per kind."
@@ -563,6 +710,27 @@
       ],
       "type": "object"
     },
+    "PromotionInputSource": {
+      "additionalProperties": false,
+      "description": "`$promotion`: a value recorded through a PromotionPath, which\norchestration resolves.",
+      "properties": {
+        "path": {
+          "description": "PromotionPath the value must come from.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "Promoted value name, as declared by a PromotionPath.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
     "ReadGitRepository": {
       "additionalProperties": false,
       "description": "Credential-free coordinates for a repository that is only read.",
@@ -593,6 +761,164 @@
       "required": [
         "usernameSecret",
         "passwordSecret"
+      ],
+      "type": "object"
+    },
+    "UnitDocumentValueSource": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Reads the environment's effective values at a JSON Pointer; resolved when the unit renders.",
+          "properties": {
+            "$environment": {
+              "anyOf": [
+                {
+                  "description": "Shorthand: a JSON Pointer into the values, such as /target.",
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/ValuesSource"
+                }
+              ]
+            }
+          },
+          "required": [
+            "$environment"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reads a unit's output, artifact, or observed value; resolved by orchestration.",
+          "properties": {
+            "$unit": {
+              "$ref": "#/$defs/UnitInputSource"
+            }
+          },
+          "required": [
+            "$unit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reads a value recorded through a PromotionPath; resolved by orchestration.",
+          "properties": {
+            "$promotion": {
+              "$ref": "#/$defs/PromotionInputSource"
+            }
+          },
+          "required": [
+            "$promotion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The content, verbatim, even when it looks like a value source.",
+          "properties": {
+            "$literal": true
+          },
+          "required": [
+            "$literal"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A value source this field accepts instead of a literal. See https://niklasrosenstein.github.io/nyl/reference/value-sources/."
+    },
+    "UnitInputSource": {
+      "additionalProperties": false,
+      "description": "`$unit`: a unit's output, artifact, or observed value, which orchestration\nresolves from the producer's current receipt.",
+      "properties": {
+        "artifact": {
+          "description": "Published artifact name. Set exactly one of `output`, `artifact`, and `observation`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attestations": {
+          "description": "The producer's attestations to require, instead of all it declares; each must pass for the producer's current receipt.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "description": "Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$environment`, resolved when the unit renders.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required evidence level: `published` (a current receipt, the default) or `attested` (every attestation the producer declares passes)."
+        },
+        "kind": {
+          "description": "Expected artifact kind.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observation": {
+          "description": "Declared observed value name: a value the unit's driver reads from the system the unit manages. Set exactly one of `output`, `artifact`, and `observation`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "Declared output name. Set exactly one of `output`, `artifact`, and `observation`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pointer": {
+          "description": "JSON Pointer inside the output, artifact, or observed value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "description": "Producing unit name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit"
+      ],
+      "type": "object"
+    },
+    "ValuesSource": {
+      "additionalProperties": false,
+      "description": "`$environment`: a value of the environment's effective `values`.\n\nWhen nothing is at `pointer`, or the value there is `null`, `default`\napplies; with `optional: true` the field is removed instead, as if it were\nomitted; otherwise it is an error. Shorthand: `{$environment: /pointer}`.",
+      "properties": {
+        "default": {
+          "description": "Value used when nothing is at `pointer` or the value there is `null`. Must not be `null`; use `optional` to leave the field out instead. Exclusive with `optional`."
+        },
+        "optional": {
+          "description": "Remove the field when nothing is at `pointer` or the value there is `null`, as if it were omitted. Exclusive with `default`.",
+          "type": "boolean"
+        },
+        "pointer": {
+          "description": "JSON Pointer into the environment's effective values, such as `/target`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pointer"
       ],
       "type": "object"
     }

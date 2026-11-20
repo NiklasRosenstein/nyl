@@ -32,26 +32,11 @@ impl JsonSchema for InputBinding {
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let source = |key: &str, description: &str, body: schemars::Schema| {
-            schemars::json_schema!({
-                "type": "object",
-                "description": description,
-                "properties": {key: body},
-                "required": [key],
-                "additionalProperties": false,
-            })
-        };
+        let mut variants = super::source_variants(super::Context::ReleaseInputs, generator);
+        variants.push(schemars::json_schema!({"description": "A literal value."}));
         schemars::json_schema!({
             "description": "The input's value: a literal, or a value source that reads it. See https://niklasrosenstein.github.io/nyl/reference/value-sources/.",
-            "anyOf": [
-                source("$file", "Reads the value from a YAML or JSON file of this repository.", generator.subschema_for::<FileInputSource>()),
-                source("$git", "Reads the value from a file of a Git repository at a locked commit.", generator.subschema_for::<GitInputSource>()),
-                source("$publication", "Reads the value from a state file in this target's publication branch.", generator.subschema_for::<PublicationInputSource>()),
-                source("$unit", "Reads a unit's output, artifact, or observed value; resolved by orchestration.", generator.subschema_for::<UnitInputSource>()),
-                source("$promotion", "Reads a value recorded through a PromotionPath; resolved by orchestration.", generator.subschema_for::<PromotionInputSource>()),
-                source("$literal", "The content, verbatim, even when it looks like a value source.", schemars::json_schema!(true)),
-                {"description": "A literal value."},
-            ],
+            "anyOf": variants,
         })
     }
 }

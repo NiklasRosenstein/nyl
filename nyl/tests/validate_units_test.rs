@@ -127,3 +127,28 @@ fn test_validate_accepts_dependents_of_external_attestations() {
     std::fs::write(&units, contents).unwrap();
     nyl_validate(&world, &checkout).assert().success();
 }
+
+/// Catches a value source an environment's values carry that no unit reads
+/// passing silently: it never resolves, so validate warns, and `--strict`
+/// fails.
+#[test]
+fn test_validate_warns_about_a_carried_source_no_unit_reads() {
+    let world = World::new(&project());
+    let checkout = world.fresh_clone("main");
+    let platform = checkout.join("nyl/platform.yaml");
+    let contents = std::fs::read_to_string(&platform).unwrap().replace("\r\n", "\n");
+    let changed = contents.replace(
+        "  values:\n    target: dev\n",
+        "  values:\n    target: dev\n    unused: {$promotion: {value: image}}\n",
+    );
+    assert_ne!(changed, contents, "the shared project's Environment declares values");
+    std::fs::write(&platform, changed).unwrap();
+
+    nyl_validate(&world, &checkout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "NYL-VALUES-SOURCE-UNREAD: spec.values.unused of Environment dev holds a $promotion source that no unit of the environment reads",
+        ));
+    nyl_validate(&world, &checkout).arg("--strict").assert().failure();
+}

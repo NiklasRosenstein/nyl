@@ -1,35 +1,43 @@
-//! Value sources of the Nyl resources in a Release bundle: HelmChart
-//! `valuesFrom`, and `$input` in a HelmChart's fields.
+//! Value sources of a Release bundle: `$input` in every resource of the
+//! bundle, and HelmChart `valuesFrom`.
 //!
 //! Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
 //! the Release bundle context. Each resource is resolved on its [`Value`]
 //! right after its file is parsed, before anything deserializes or inspects
 //! it, so every reader (expansion, `lookup` detection, cache bypass
-//! decisions) sees the resolved document:
+//! decisions, namespace defaults) sees the resolved document:
 //!
 //! - The literal-only fields (`apiVersion`, `kind`, `metadata.name`,
-//!   `metadata.labels`) hold no source ([`literal_field_issues`]).
-//! - `$input` sources in a HelmChart's fields, outside its chart `values`,
-//!   resolve against the Release's resolved inputs ([`resolve_document`] in
-//!   the [`Context::ReleaseBundle`]); the resolved document is then
+//!   `metadata.labels`) hold no source ([`literal_field_issues`]);
+//!   `metadata.namespace` may.
+//! - `$input` and `$literal` resolve at any depth ([`resolve_document`]):
+//!   in the typed fields of a HelmChart, a RemoteManifest, a Release, and a
+//!   Component's envelope ([`Context::ReleaseBundle`], every `$` key
+//!   reserved), and in free-form data: a HelmChart's `spec.values`, a
+//!   Component's `spec`, and plain Kubernetes manifests
+//!   ([`Context::ReleaseData`], foreign `$` keys such as `$ref` are data). A
+//!   Release's input declarations are literal. The resolved document is then
 //!   deserialized, which checks each value's type as a literal's.
-//! - `valuesFrom` entries merge in order, then the inline `values`
-//!   ([`merge_chart_values`]); the result replaces `spec.values` and the
-//!   entries are removed. The merged values are data and are never walked.
-//! - The other Nyl resources of a bundle hold no source outside their
-//!   free-form data.
+//! - `valuesFrom` entries merge in order after the inline `values` resolved,
+//!   then the inline `values` ([`merge_chart_values`]); the result replaces
+//!   `spec.values` and the entries are removed. The merged values are data
+//!   and are never walked; a values file that holds a source is an error
+//!   with the fix.
+//! - What rendering generates (a chart's output, a Component's, a remote
+//!   manifest) holds no source ([`reject_sources_in_output`]).
 //!
 //! Every value read enters the dependency recorder at the layer that consumes
 //! it: a values file is returned to the caller as a bundle input (the Release
-//! and target cache keys, and the ownership index), Release inputs are part of
-//! the template context the Release cache records, and the merged values are
-//! a parameter of the Helm cache key.
+//! and target cache keys, and the ownership index); Release inputs are part
+//! of the template context the Release cache records and of the target cache
+//! key; and the resolved documents are what the Helm cache key (chart values)
+//! and the remote manifest cache (URLs) read.
 
 use std::path::{Path, PathBuf};
 
 use nyl_core::bindings::{
-    find_clauses, literal_field_issues, resolve_document, BindingIssue, Clause, Context, InputSource, Origin, Provided,
-    Providers, Provision, Resolved,
+    literal_field_issues, resolve_document, sources_in, BindingIssue, Clause, Context, InputSource, Origin, Provided,
+    Providers, Provision, Resolved, Scope, VALUE_SOURCES_DOCS,
 };
 use nyl_core::constants::API_VERSION;
 use serde_json::Value;
@@ -70,18 +78,24 @@ pub(crate) fn resolve_bundle_resource(
     inputs: Option<&Value>,
     read: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let Some(subject) = BundleResource::of(resource) else {
-        return Ok(());
-    };
+    let subject = BundleResource::of(resource);
     let mut issues = literal_field_issues(resource)
         .into_iter()
         .map(BindingIssue::new)
         .collect::<Vec<_>>();
     if issues.is_empty() {
-        if subject == BundleResource::HelmChart {
-            resolve_chart(resource, file, files, inputs, read, &mut issues);
-        } else {
-            reject_sources(resource, subject, &mut issues);
+        let provider = ReleaseInputs { inputs };
+        let resolved = resolve_document("", "", resource, subject.scope(), &provider, &mut issues);
+        for issue in &mut issues {
+            if let Some(field) = issue.message.strip_prefix('.') {
+                issue.message = field.to_owned();
+            }
+        }
+        if issues.is_empty() {
+            *resource = resolved.value;
+            if subject == BundleResource::HelmChart {
+                merge_values_from(resource, file, files, &provider, read, &mut issues);
+            }
         }
     }
     if issues.is_empty() {
@@ -96,40 +110,50 @@ pub(crate) fn resolve_bundle_resource(
     )))
 }
 
-/// The Nyl resources of a bundle whose typed fields are checked for sources.
+/// The resources of a bundle, by how their fields take sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BundleResource {
     HelmChart,
     RemoteManifest,
     Release,
     Component,
+    /// A plain Kubernetes manifest: free-form data.
+    Manifest,
 }
 
 impl BundleResource {
-    fn of(resource: &Value) -> Option<Self> {
+    fn of(resource: &Value) -> Self {
         let kind = resource.get("kind").and_then(Value::as_str);
         let api_version = resource.get("apiVersion").and_then(Value::as_str);
         if api_version == Some(API_VERSION) && kind == Some("HelmChart") {
-            Some(Self::HelmChart)
+            Self::HelmChart
         } else if RemoteManifest::is_remote_manifest(resource) {
-            Some(Self::RemoteManifest)
+            Self::RemoteManifest
         } else if Release::is_release(resource) {
-            Some(Self::Release)
+            Self::Release
         } else if crate::resources::is_nyl_component(resource) {
-            Some(Self::Component)
+            Self::Component
         } else {
-            None
+            Self::Manifest
         }
     }
 
-    /// The free-form subtree that is data, never resolved or checked.
-    fn data_pointer(self) -> Option<&'static str> {
-        match self {
-            Self::HelmChart => Some("/spec/values"),
-            Self::Component => Some("/spec"),
-            Self::Release => Some("/spec/inputs"),
-            Self::RemoteManifest => None,
-        }
+    /// The contexts of the resource's parts: the typed fields of a Nyl
+    /// resource reserve every `$` key, its free-form data (chart values, a
+    /// Component's spec) and a plain manifest keep foreign `$` keys as data,
+    /// and a Release's input declarations are literal.
+    fn scope(self) -> Scope<'static> {
+        const CHART: &[(&str, Context)] = &[("/spec/values", Context::ReleaseData)];
+        const COMPONENT: &[(&str, Context)] = &[("/spec", Context::ReleaseData)];
+        const RELEASE: &[(&str, Context)] = &[("/spec/inputs", Context::Literal)];
+        let (context, within) = match self {
+            Self::HelmChart => (Context::ReleaseBundle, CHART),
+            Self::Component => (Context::ReleaseBundle, COMPONENT),
+            Self::Release => (Context::ReleaseBundle, RELEASE),
+            Self::RemoteManifest => (Context::ReleaseBundle, &[][..]),
+            Self::Manifest => (Context::ReleaseData, &[][..]),
+        };
+        Scope { context, within }
     }
 }
 
@@ -143,60 +167,21 @@ fn describe(resource: &Value) -> String {
     format!("{kind} {name:?}")
 }
 
-/// `resource` without its free-form data.
-fn typed_part(resource: &Value, subject: BundleResource) -> Value {
-    let mut typed = resource.clone();
-    if let Some(pointer) = subject.data_pointer() {
-        let (parent, key) = pointer.rsplit_once('/').expect("a data pointer names a field");
-        if let Some(Value::Object(parent)) = typed.pointer_mut(parent) {
-            parent.remove(key);
-        }
-    }
-    typed
-}
-
-/// Report every value source in a resource that resolves none, outside its
-/// free-form data.
-fn reject_sources(resource: &Value, subject: BundleResource, issues: &mut Vec<BindingIssue>) {
-    if let Err(found) = find_clauses("", "", &typed_part(resource, subject), Context::Literal.into()) {
-        issues.extend(
-            found
-                .into_iter()
-                .map(|message| BindingIssue::new(message.strip_prefix('.').map(str::to_owned).unwrap_or(message))),
-        );
-    }
-}
-
-fn resolve_chart(
+/// Merge a resolved HelmChart's `valuesFrom` entries in order, then its
+/// inline `values`; the result replaces `spec.values` and the entries are
+/// removed. The merged values are data and are never walked, and a values
+/// file that holds a source is an error: it would read as data.
+fn merge_values_from(
     resource: &mut Value,
     file: &Path,
     files: BundleFiles<'_>,
-    inputs: Option<&Value>,
+    provider: &ReleaseInputs<'_>,
     read: &mut Vec<PathBuf>,
     issues: &mut Vec<BindingIssue>,
 ) {
-    let provider = ReleaseInputs { inputs };
-    // The chart values are data: they leave the walk and come back after it.
-    let values = resource
-        .get_mut("spec")
-        .and_then(Value::as_object_mut)
-        .and_then(|spec| spec.remove("values"));
-    let resolved = resolve_document("", "", resource, Context::ReleaseBundle.into(), &provider, issues);
-    for issue in issues.iter_mut() {
-        if let Some(field) = issue.message.strip_prefix('.') {
-            issue.message = field.to_owned();
-        }
-    }
-    *resource = resolved.value;
     let Some(spec) = resource.get_mut("spec").and_then(Value::as_object_mut) else {
         return;
     };
-    if let Some(values) = values {
-        spec.insert("values".to_owned(), values);
-    }
-    if !issues.is_empty() {
-        return;
-    }
     let Some(entries) = spec.remove("valuesFrom") else {
         return;
     };
@@ -224,7 +209,14 @@ fn resolve_chart(
                     Ok((path, document)) => {
                         let what = format!("values file {}", crate::util::path_for_display(&path).display());
                         read.push(path);
-                        entry.select(&document, &what)
+                        match sources_in("", &document).first() {
+                            Some((at, source)) => Err(format!(
+                                "{what} holds a {} source at {}; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values (see {VALUE_SOURCES_DOCS})",
+                                source.key(),
+                                if at.is_empty() { "its root" } else { at }
+                            )),
+                            None => entry.select(&document, &what),
+                        }
                     }
                     Err(NylError::Config(message)) => Err(message),
                     Err(error) => Err(error.to_string()),
@@ -339,23 +331,45 @@ impl Providers for ReleaseInputs<'_> {
     }
 }
 
-/// Refuse value sources in a HelmChart that rendering generated, such as one
-/// a chart's output holds: sources resolve only in the files of a Release
-/// bundle, so chart output never reads a file or an input.
-pub(crate) fn reject_generated_sources(resource: &Value) -> Result<()> {
-    let mut issues = Vec::new();
-    if resource.pointer("/spec/valuesFrom").is_some() {
-        issues.push(BindingIssue::new("spec.valuesFrom is set"));
+/// Refuse `valuesFrom` in a HelmChart that rendering generated, such as one
+/// a chart's output holds: it reads files and inputs only in the files of a
+/// Release bundle. A value source in generated output is refused where it is
+/// generated ([`reject_sources_in_output`]).
+pub(crate) fn reject_generated_values_from(resource: &Value) -> Result<()> {
+    if resource.pointer("/spec/valuesFrom").is_none() {
+        return Ok(());
     }
-    reject_sources(resource, BundleResource::HelmChart, &mut issues);
+    Err(NylError::config(format!(
+        "{} was generated while rendering, and spec.valuesFrom is read only in the files of a Release bundle",
+        describe(resource)
+    )))
+}
+
+/// Refuse a value source in what `expanding` generated: a chart's output, a
+/// Component's, or a remote manifest. Sources resolve only in the files of a
+/// Release bundle, so the output of recursive expansion never reads one;
+/// foreign `$` keys such as `$ref` stay data.
+pub(crate) fn reject_sources_in_output(expanding: &str, generated: &[Value]) -> Result<()> {
+    let mut issues = Vec::new();
+    for resource in generated {
+        for (field, source) in sources_in("", resource) {
+            issues.push(format!(
+                "{} {}",
+                describe(resource),
+                if field.is_empty() {
+                    format!("is a {} source", source.key())
+                } else {
+                    format!("holds a {} source at {field}", source.key())
+                }
+            ));
+        }
+    }
     if issues.is_empty() {
         return Ok(());
     }
-    let messages = issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>();
     Err(NylError::config(format!(
-        "{} was generated while rendering, and value sources resolve only in the files of a Release bundle: {}",
-        describe(resource),
-        messages.join("; ")
+        "{expanding} generated value sources, which resolve only in the files of a Release bundle, never in what rendering generates: {}; write the value in the bundle's own files, such as the chart's values (see {VALUE_SOURCES_DOCS})",
+        issues.join("; ")
     )))
 }
 
@@ -572,17 +586,148 @@ mod tests {
         );
     }
 
-    /// Catches a chart that rendering generated reading files or inputs.
+    /// Catches a chart that rendering generated reading files, and a value
+    /// source in generated output passing as data.
     #[test]
-    fn test_generated_charts_take_no_sources() {
+    fn test_generated_output_takes_no_sources() {
         let chart = json!({"apiVersion": API_VERSION, "kind": "HelmChart", "metadata": {"name": "nested"},
-            "spec": {"chart": {"name": "c"}, "valuesFrom": [{"file": "a.yaml"}], "includeCrds": {"$input": "crds"}}});
-        let error = reject_generated_sources(&chart).unwrap_err().to_string();
+            "spec": {"chart": {"name": "c"}, "valuesFrom": [{"file": "a.yaml"}]}});
+        let error = reject_generated_values_from(&chart).unwrap_err().to_string();
         assert!(
-            error.contains("HelmChart \"nested\" was generated while rendering"),
+            error.contains("HelmChart \"nested\" was generated while rendering, and spec.valuesFrom"),
             "{error}"
         );
-        assert!(error.contains("spec.valuesFrom is set"), "{error}");
-        assert!(error.contains("spec.includeCrds holds a $input source"), "{error}");
+
+        let output = [
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}, "data": {"schema": {"$ref": "#/x"}}}),
+            json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"},
+                "spec": {"template": {"spec": {"containers": [{"image": {"$input": "image"}}]}}}}),
+        ];
+        let error = reject_sources_in_output("k8s.nyl/v1 HelmChart web (chart: ./chart)", &output)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("k8s.nyl/v1 HelmChart web (chart: ./chart) generated value sources"),
+            "{error}"
+        );
+        assert!(
+            error.contains("Deployment \"web\" holds a $input source at spec.template.spec.containers[0].image"),
+            "{error}"
+        );
+        assert!(!error.contains("ConfigMap"), "{error}");
+        assert!(reject_sources_in_output("x", &output[..1]).is_ok());
+    }
+
+    /// Catches `$input` in chart values resolved after `valuesFrom` merged
+    /// (a file would then override the input), a foreign `$` key in chart
+    /// values refused, or a likely slip there passing as data.
+    #[test]
+    fn test_input_resolves_in_chart_values_before_values_from_merges() {
+        let temp = project(
+            "  valuesFrom: [{file: base.yaml}]\n  values:\n    image: {$input: image}\n    nested: {replicas: {$input: {name: sizes, pointer: /web}}}\n    schema: {$ref: '#/x'}\n    escaped: {$literal: {$input: kept}}\n",
+            &[("apps/base.yaml", "image: from-file\nnested: {replicas: 1, other: true}\n")],
+        );
+        let (chart, _) = load(&temp, Some(json!({"image": "web:1", "sizes": {"web": 3}}))).unwrap();
+        assert_eq!(
+            chart["spec"]["values"],
+            json!({
+                "image": "web:1",
+                "nested": {"replicas": 3, "other": true},
+                "schema": {"$ref": "#/x"},
+                "escaped": {"$input": "kept"},
+            })
+        );
+
+        let slip = project("  values: {image: {$inputs: image}}\n", &[]);
+        let slip = error(&slip, Some(json!({"image": "web:1"})));
+        assert!(
+            slip.contains("spec.values.image.$inputs is not a value source; did you mean $input?"),
+            "{slip}"
+        );
+    }
+
+    /// Catches a source in a valuesFrom file read as data, where it would
+    /// silently reach the chart as an object.
+    #[test]
+    fn test_a_source_in_a_values_from_file_is_an_error_with_the_fix() {
+        let temp = project(
+            "  valuesFrom: [{file: base.yaml}]\n",
+            &[("apps/base.yaml", "web: {image: {$input: image}}\n")],
+        );
+        let message = error(&temp, Some(json!({"image": "web:1"})));
+        assert!(
+            message.contains("spec.valuesFrom[0]: values file") && message.contains("holds a $input source at web.image; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values"),
+            "{message}"
+        );
+    }
+
+    fn bundle(contents: &str, inputs: Option<Value>) -> Result<Vec<Value>> {
+        let temp = TempDir::new().unwrap();
+        git2::Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("app.yaml"), contents).unwrap();
+        let bundle = load_release_bundle(&temp.path().join("app.yaml"), &context(inputs))?;
+        Ok(bundle.resources.into_iter().map(|resource| resource.value).collect())
+    }
+
+    /// Catches `$input` left unresolved in a Component's spec, a
+    /// RemoteManifest, a plain manifest, or a `metadata.namespace`, and a
+    /// source in a Release's input declarations read as a default.
+    #[test]
+    fn test_input_resolves_in_every_resource_of_a_bundle() {
+        let resources = bundle(
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: {$input: namespace}}\n---\napiVersion: components.k8s.nyl/v1\nkind: web\nmetadata: {name: web}\nspec: {image: {$input: image}, schema: {$ref: '#/x'}}\n---\napiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {name: crds}\nspec: {url: {$input: crds}}\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web, namespace: {$input: namespace}}\nspec:\n  replicas: {$input: {name: sizes, pointer: /web}}\n  template: {spec: {containers: [{name: web, image: {$input: image}}]}}\n",
+            Some(json!({"namespace": "apps", "image": "web:1", "crds": "https://example.com/crds.yaml", "sizes": {"web": 2}})),
+        )
+        .unwrap();
+        assert_eq!(resources[0]["metadata"]["namespace"], "apps");
+        assert_eq!(
+            resources[1]["spec"],
+            json!({"image": "web:1", "schema": {"$ref": "#/x"}})
+        );
+        assert_eq!(resources[2]["spec"]["url"], "https://example.com/crds.yaml");
+        assert_eq!(resources[3]["metadata"]["namespace"], "apps");
+        assert_eq!(resources[3]["spec"]["replicas"], 2);
+        assert_eq!(
+            resources[3]["spec"]["template"]["spec"]["containers"][0]["image"],
+            "web:1"
+        );
+
+        let labels = bundle(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a, labels: {tier: {$input: tier}}}\n",
+            Some(json!({"tier": "web"})),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            labels.contains("metadata.labels.tier holds a $input source, but metadata.labels.tier must be literal"),
+            "{labels}"
+        );
+        let reserved = bundle(
+            "apiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {name: crds}\nspec: {url: {$ref: x}}\n",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(reserved.contains("spec.url.$ref is not a value source"), "{reserved}");
+        let declaration = bundle(
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\nspec:\n  inputs:\n    image: {type: string, default: {$input: other}}\n",
+            Some(json!({"image": "x", "other": "y"})),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            declaration.contains("spec.inputs.image.default holds a $input source"),
+            "{declaration}"
+        );
+        let outside = bundle(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a}\ndata: {image: {$input: image}}\n",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            outside.contains("ConfigMap \"a\" in ") && outside.contains("data.image.$input reads Release input \"image\", but this resource is not rendered as part of a Release that declares inputs"),
+            "{outside}"
+        );
     }
 }

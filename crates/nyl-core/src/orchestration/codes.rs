@@ -341,6 +341,11 @@ codes! {
     InstanceAmbiguous => "NYL-INSTANCE-AMBIGUOUS",
     /// An EnvironmentTemplate does not render to a valid Environment for an instance.
     TemplateInvalid => "NYL-TEMPLATE-INVALID",
+    /// A value source in an environment's or a template instance's values
+    /// that no unit of the environment reads: sources in values resolve only
+    /// where a unit reads them with `$environment`, so this one never
+    /// resolves. A warning of `nyl validate`.
+    ValuesSourceUnread => "NYL-VALUES-SOURCE-UNREAD",
     /// `--renew` or `--no-extend` where it does not apply: for a declared
     /// Environment, which has no expiry, or for the fleet reconcile.
     InstanceOptionInvalid => "NYL-INSTANCE-OPTION-INVALID",

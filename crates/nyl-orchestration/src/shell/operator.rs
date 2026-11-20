@@ -137,7 +137,7 @@ pub fn exec(context: &RunContext<'_>, request: &RunRequest, options: &ExecOption
                     )
                 })?;
             let spec = unit.resolved_spec.as_ref().unwrap_or(&unit.spec);
-            driver.validate_spec(spec).map_err(invalid)?;
+            nyl_core::orchestration::driver::validate_unit_spec(driver, spec).map_err(invalid)?;
             let (env, secrets) = execution_credentials(context, driver, spec).map_err(invalid)?;
             // The claims of every other environment decide whether the scope is
             // free, so each is required: one that cannot be used or read is an

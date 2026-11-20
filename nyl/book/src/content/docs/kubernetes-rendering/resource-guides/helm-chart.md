@@ -166,6 +166,25 @@ spec:
       type: LoadBalancer
 ```
 
+### Release inputs in values
+
+In the bundle of a Release that declares inputs, `{$input: name}` reads one at
+any depth of `values`, with the input's type. It resolves before `valuesFrom`
+merges, so the inline value still merges last. Other `$` keys, such as `$ref`,
+are chart data:
+
+```yaml
+spec:
+  chart: {name: ./charts/web}
+  values:
+    image:
+      repository: registry.example.com/web
+      tag: {$input: tag}
+    replicas: {$input: {name: sizes, pointer: /web/replicas}}
+```
+
+See [`$input`](/nyl/reference/value-sources/#input).
+
 ### Values files and Release inputs
 
 `spec.valuesFrom` reads chart values from YAML files of this repository and
@@ -188,7 +207,10 @@ spec:
 one values key. Files follow the path and Git-visibility rules of Cluster
 `valuesFrom`; an `input` entry is valid only in the bundle of a Release that
 declares the input. Nyl passes the merged values to Helm as data and never
-templates or resolves anything in them. See
+templates or resolves anything in them; a values file that holds a value
+source, such as `{$input: tag}`, is an error that says to move it to the
+inline `values`. Anything a chart outputs is data as well: a value source in
+the rendered output is an error that names the HelmChart. See
 [Value sources](/nyl/reference/value-sources/#helmchart-valuesfrom) for
 every rule.
 

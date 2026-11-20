@@ -179,11 +179,14 @@ pub struct HelmChartSpec {
     ///
     /// Each entry sets exactly one of `file` and `input`. Maps merge key by key and
     /// every other value replaces, which is Helm's own rule for `-f`; inline `values`
-    /// merge last. The merged values are data: Nyl never resolves source clauses in them.
+    /// merge last. The merged values are data: Nyl never resolves value sources in them,
+    /// and a values file that holds one is an error.
     #[serde(default, rename = "valuesFrom", skip_serializing_if = "Vec::is_empty")]
     pub values_from: Vec<HelmValuesSource>,
 
-    /// Values to pass to the chart, merged over `valuesFrom`
+    /// Values to pass to the chart, merged over `valuesFrom`. In a Release bundle,
+    /// `{$input: name}` reads a Release input at any depth, before `valuesFrom` merges;
+    /// other `$` keys, such as `$ref`, are chart data.
     #[serde(default)]
     pub values: serde_json::Value,
 

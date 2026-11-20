@@ -972,6 +972,25 @@ pub enum ArtifactSchema {
     Described(schemars::Schema),
 }
 
+/// Validate a rendered unit spec for `driver`: the `$` keys of its typed
+/// fields, then the driver's own validation ([`Driver::validate_spec`]).
+///
+/// Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
+/// "The `$` namespace". Inside the fields the kind's [`Driver::spec_schema`]
+/// types, every `$` key is reserved, so one that is not a known source is
+/// reported as an unknown source with the one it probably meant, instead of
+/// the driver's generic deserialization error; where the schema leaves an
+/// object open, such as a Terraform unit's `variables`, it is data. Every
+/// caller that validates a spec goes through here.
+pub fn validate_unit_spec(driver: &dyn Driver, spec: &Value) -> std::result::Result<(), String> {
+    let schema = serde_json::to_value(driver.spec_schema()).unwrap_or(Value::Bool(true));
+    let issues = crate::bindings::reserved_key_issues("spec", spec, &schema);
+    if !issues.is_empty() {
+        return Err(issues.join("; "));
+    }
+    driver.validate_spec(spec)
+}
+
 /// One unit kind. Built-in drivers implement it in Rust; methods for
 /// capabilities a kind lacks return [`Supported::Unsupported`].
 pub trait Driver: Send + Sync {

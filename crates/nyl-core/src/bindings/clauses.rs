@@ -84,9 +84,7 @@ impl Source {
     fn valid_where(self) -> &'static str {
         match self {
             Self::Environment => "reads the environment's values and resolves only in unit documents",
-            Self::Input => {
-                "reads a Release input and resolves only in the fields of a HelmChart in a Release bundle"
-            }
+            Self::Input => "reads a Release input and resolves only in the resources of a Release bundle",
             Self::Parameter => "reads a template parameter and resolves only in an EnvironmentTemplate's spec.values",
             Self::Unit | Self::Promotion => {
                 "is resolved by orchestration and is valid only in unit documents and in a DeploymentTarget's releaseInputs"
@@ -416,8 +414,14 @@ pub enum Context {
     /// `$literal` resolve; `$file`, `$git`, and `$publication` were placed in
     /// a target's bindings when the unit rendered, and are carried.
     UnitExecution,
-    /// The Nyl resources of a Release bundle: `$input` resolves.
+    /// The typed fields of the Nyl resources of a Release bundle (a
+    /// HelmChart's, a RemoteManifest's, a Release's, and a Component's
+    /// envelope): `$input` resolves; every `$` key is reserved.
     ReleaseBundle,
+    /// The free-form data of a Release bundle: a HelmChart's `spec.values`, a
+    /// Component's `spec`, and plain Kubernetes manifests. `$input` resolves;
+    /// foreign `$` keys are data.
+    ReleaseData,
     /// An EnvironmentTemplate's `spec.values`: `$parameter` resolves; the
     /// sources of the documents the values land in are carried.
     TemplateValues,
@@ -459,7 +463,7 @@ impl Context {
         let resolves = match self {
             Self::UnitRender | Self::UnitTargetInputs => matches!(source, Environment),
             Self::UnitExecution => matches!(source, Unit | Promotion | Literal),
-            Self::ReleaseBundle => matches!(source, Input | Literal),
+            Self::ReleaseBundle | Self::ReleaseData => matches!(source, Input | Literal),
             Self::TemplateValues => matches!(source, Parameter),
             Self::ReleaseInputs => matches!(source, Unit | Promotion | File | Git | Publication | Literal),
             Self::EnvironmentValues | Self::Literal => false,
@@ -471,7 +475,7 @@ impl Context {
             Self::TemplateValues | Self::EnvironmentValues => {
                 matches!(source, Unit | Promotion | File | Git | Publication | Literal)
             }
-            Self::ReleaseBundle | Self::ReleaseInputs | Self::Literal => false,
+            Self::ReleaseBundle | Self::ReleaseData | Self::ReleaseInputs | Self::Literal => false,
         };
         if resolves {
             Treatment::Resolve
@@ -495,7 +499,7 @@ impl Context {
     pub fn misplaced(self, field: &str, source: Source) -> String {
         let key = source.key();
         let fix = match (self, source) {
-            (Self::ReleaseBundle, _) => {
+            (Self::ReleaseBundle | Self::ReleaseData, _) => {
                 format!("declare a Release input and bind it on the target{}", match source {
                     Source::Unit | Source::Promotion | Source::File | Source::Git | Source::Publication => {
                         format!(" with {key}")
@@ -556,28 +560,46 @@ pub fn literal_field_issues(document: &Value) -> Vec<String> {
     for pointer in LITERAL_ONLY_FIELDS {
         if let Some(value) = document.pointer(pointer) {
             let field = pointer.trim_start_matches('/').replace('/', ".");
-            find_any(&field, value, &mut issues);
+            issues.extend(sources_in(&field, value).into_iter().map(|(field, source)| {
+                format!(
+                    "{field} holds a {} source, but {field} must be literal, because discovery and selection read it before anything resolves (see {VALUE_SOURCES_DOCS})",
+                    source.key()
+                )
+            }));
         }
     }
     issues
 }
 
-fn find_any(field: &str, value: &Value, issues: &mut Vec<String>) {
+/// Every value source in `value`, at any depth, by its location below
+/// `field`, without entering one: an object that holds a known source key is
+/// reported once, whatever its other keys. For documents where no source may
+/// be at all, such as the output of rendering or a file read as data.
+pub fn sources_in(field: &str, value: &Value) -> Vec<(String, Source)> {
+    let mut found = Vec::new();
+    find_any(field, value, &mut found);
+    found
+}
+
+fn find_any(field: &str, value: &Value, found: &mut Vec<(String, Source)>) {
     match value {
         Value::Object(fields) => {
-            if let Some(key) = fields.keys().find(|key| Source::from_key(key).is_some()) {
-                issues.push(format!(
-                    "{field} holds a {key} source, but {field} must be literal, because discovery and selection read it before anything resolves (see {VALUE_SOURCES_DOCS})"
-                ));
+            if let Some(source) = fields.keys().find_map(|key| Source::from_key(key)) {
+                found.push((field.to_owned(), source));
                 return;
             }
             for (key, child) in fields {
-                find_any(&format!("{field}.{key}"), child, issues);
+                let child_field = if field.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{field}.{key}")
+                };
+                find_any(&child_field, child, found);
             }
         }
         Value::Array(items) => {
             for (index, child) in items.iter().enumerate() {
-                find_any(&format!("{field}[{index}]"), child, issues);
+                find_any(&format!("{field}[{index}]"), child, found);
             }
         }
         _ => {}

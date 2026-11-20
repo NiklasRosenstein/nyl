@@ -2,8 +2,11 @@
 title: 'Release Inputs'
 ---
 
-A Release may declare typed inputs that each DeploymentTarget binds. Templates
-read them as `inputs.<name>`, next to `values`. Inputs suit values that differ
+A Release may declare typed inputs that each DeploymentTarget binds. The
+resources of the Release read them with
+[`{$input: name}`](/nyl/reference/value-sources/#input), which keeps the
+input's type, and templates read them as `inputs.<name>` for string
+interpolation. Inputs suit values that differ
 per environment and need one traceable source, such as an immutable image
 reference or connection facts produced by another tool. A Release without
 `spec.inputs` renders exactly as before.
@@ -37,8 +40,13 @@ metadata:
   name: web
   namespace: web
 spec:
-  replicas: {{ inputs.replicas }}
-  # …
+  replicas: {$input: replicas}
+  template:
+    spec:
+      containers:
+        - name: web
+          image: {$input: image}
+          args: ['--tier={{ inputs.tier }}']   # string interpolation: Jinja is fine
 ```
 
 - `type` is one of `string`, `integer`, `number`, `boolean`, `object`, and
@@ -53,18 +61,22 @@ spec:
   `spec.inputs` block, so Nyl knows the declarations before rendering.
   Templating cannot add, remove, or change them.
 
-`inputs` is visible in the Release entry file and in every file attached
-through `spec.include`. Components, HelmCharts, and RemoteManifests receive
-inputs only explicitly, as with target `values`: through templating in the
-Release bundle, or, for a HelmChart, through the value sources below.
+`$input` and `inputs` work in the Release entry file and in every file
+attached through `spec.include`: in plain Kubernetes manifests, a HelmChart's
+fields and chart `values`, a Component's `spec`, a RemoteManifest, and the
+`metadata.namespace` of any of them and of the Release itself. `apiVersion`,
+`kind`, `metadata.name`, and `metadata.labels` stay literal. What a chart or
+a remote manifest generates takes no `$input`: inputs reach it only through
+what the bundle passes in, as with target `values`.
 `target.spec.releaseInputs` is not part of the `target` template context.
 
 ### Passing inputs to a chart
 
-Write `'{{ inputs.image }}'` to place a string input in a chart value. For an
-`object` input that holds chart values, or a boolean that switches a HelmChart
-field, use a [value source](/nyl/reference/value-sources/) instead of
-`{{ inputs.x | tojson }}`:
+Write `{$input: image}` to place an input in a chart value, at any depth of
+`values`, and `{$input: crds}` for a HelmChart field such as `includeCrds`.
+For an `object` input that holds a whole block of chart values, merge it with
+`valuesFrom`. Never write `{{ inputs.x | tojson }}`: a source keeps the type
+without templating the document's structure.
 
 ```yaml
 apiVersion: k8s.nyl/v1
@@ -80,6 +92,8 @@ spec:
     crds:
       type: boolean
       default: true
+    tag:
+      type: string
 ---
 apiVersion: k8s.nyl/v1
 kind: HelmChart
@@ -94,10 +108,11 @@ spec:
     - input: chartValues
   values:
     fullnameOverride: web
+    image: {repository: registry.example.com/web, tag: {$input: tag}}
 ```
 
 The target's `chartValues` binding merges over `values-base.yaml`, and
-`values` merges last. See [HelmChart `valuesFrom`](/nyl/reference/value-sources/#helmchart-valuesfrom)
+`values` merges last, with its `$input` sources already resolved. See [HelmChart `valuesFrom`](/nyl/reference/value-sources/#helmchart-valuesfrom)
 and [`$input`](/nyl/reference/value-sources/#input)
 for the rules.
 
