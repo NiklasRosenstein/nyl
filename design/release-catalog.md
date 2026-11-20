@@ -316,11 +316,20 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
   failing resource fails the render of every target whose Release selects
   it, with the resource's error. A target's tree is all or nothing, unlike a
   unit graph, where only the consumers stop.
-- **References in members.** A member field holding `$fromUnit` or
-  `$fromPromotion` cannot resolve in `render-tree`, `diff-tree`,
-  `publish-tree`, or the direct commands. They reject it with the binding
-  rule's message, naming the member and the pointer. Orchestrated execution
-  passes the resolved bundle in the pinned input snapshot (M5).
+- **Sources in members: unknown values.** A `$fromUnit` or `$fromPromotion`
+  in a member or a referenced resource resolves only inside an orchestrated
+  `KubernetesPublication`. Everywhere else (`render`, `render-tree`,
+  `diff-tree`, `publish-tree`, and the other direct commands) there is no
+  environment state to resolve it from, so it reaches the template as an
+  **unknown value**. A Release fails to render only when a template reads
+  one, and otherwise renders normally. See
+  [Unknown values](#unknown-values).
+- **Orchestrated.** Inside an orchestrated `KubernetesPublication`, the
+  sources resolve in the publication's environment by the rules of
+  [stage 4](domain-resources.md#stage-4-resolution), and the resolved bundle
+  is passed in the pinned input snapshot (M5). Each source adds a dependency
+  edge from the publication to its producer at S, whether or not a template
+  reads it, as it does for a unit. A blocked source blocks the publication.
 - **Remote sources.** A Release from a remote ApplicationGroup source that
   declares `collections` or `forEach` fails discovery
   (`NYL-RELEASE-COLLECTION-REMOTE`). Admitting collections across the remote
@@ -333,6 +342,40 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
   The domain catalog and its admission depend on the Git-visible worktree
   contents, the policy files, and the Kyverno CLI version, and are computed
   once per invocation for every target.
+
+### Unknown values
+
+Outside orchestration, the template sees each carried source as a sentinel
+in its place, the unknown value. Every use that reads it is an error, and an
+unknown value that would reach rendered output is an error as well:
+
+- **Reads.** Printing it with `{{ … }}`, converting it to a string,
+  comparing it, testing its truthiness, using it in arithmetic, iterating
+  over it, accessing an attribute or index of it, passing it to a filter or
+  function, and serializing any value that contains it, such as
+  `svc.spec | tojson` or `collections.services | tojson`, all read it. The
+  sentinel is a template object whose operations fail, so the check holds
+  whatever filters, macros, or concatenation the template uses.
+- **Not reads.** Assigning it with `{% set %}`, passing the containing object
+  around, iterating over the keys of the object that holds it, and
+  `is defined`, which is true, do not read it. A template that never touches
+  the field renders the same bytes as an orchestrated publication of the
+  same inputs would.
+- **The error.** A read fails the render with `NYL-RELEASE-VALUE-UNKNOWN`. It
+  names the resource (`Service/checkout`), its source path, the pointer
+  (`/spec/database/host`), the source (`$fromUnit` of `database`), the
+  template file and line, and says that the value resolves only in an
+  orchestrated `KubernetesPublication`.
+- **Backstop.** The sentinel serializes to a reserved marker, which
+  discovery rejects in any declaration, and the render checks its output for the marker
+  before parsing the YAML. A marker that reached the output through a path
+  the template object did not guard also fails with
+  `NYL-RELEASE-VALUE-UNKNOWN`. So an unknown value never ends up in a
+  rendered manifest, a published tree, or a diff.
+- **Caching.** The unresolved bundle's digest, sources as written, is what
+  the dependency recorder sees outside orchestration. A render that
+  succeeds does not depend on any source's value, so it is the same in
+  every environment.
 
 ## One Release per resource: `forEach`
 
@@ -442,7 +485,7 @@ of `nyl-core`.
 | --- | --- | --- |
 | R8 | Release labels and the static envelope with verification, `spec.manifests`, the `spec.include` deprecation, shared files, the Release catalog, `nyl get releases`, source `selector` with the AppProject guard, and `--release` for direct commands | M2 |
 | R9 | Release admission over Releases and their rendered manifests, with trusted annotations, as the second guard for `selector` | R3, R8 |
-| R10 | Release `collections` on the `nyl-collections` assembly of R12, referenced resources, YAML-safe output, bundle provenance in the ownership index | R1, R3, R8, R12 |
+| R10 | Release `collections` on the `nyl-collections` assembly of R12, referenced resources, YAML-safe output, unknown values for carried sources outside orchestration, bundle provenance in the ownership index | R1, R3, R8, R12 |
 | R11 | `forEach` on Releases, instance names, instance bindings | R10 |
 
 R8 is useful without domain resources. Membership, the bundle, and referenced
