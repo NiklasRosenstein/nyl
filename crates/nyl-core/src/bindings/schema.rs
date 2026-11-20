@@ -332,25 +332,25 @@ mod tests {
     #[test]
     fn test_unknown_dollar_keys_in_typed_fields_are_unknown_sources() {
         let document = json!({
-            "source": {"$enviroment": "/source"},
-            "name": {"$env": "/name"},
+            "source": {"$fromEnviroment": "/source"},
+            "name": {"$fromEnv": "/name"},
             "variables": {"schema": {"$ref": "#/x"}},
-            "tags": [{"path": "a", "$values": "/x"}],
+            "tags": [{"path": "a", "$fromEnvironments": "/x"}],
             "carried": {"$fromUnit": {"unit": "a", "output": "b"}},
         });
         let issues = reserved_key_issues("spec", &document, &schema());
         assert_eq!(issues.len(), 3, "{issues:?}");
         assert!(
-            issues[0].starts_with("spec.name.$env is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
+            issues[0].starts_with("spec.name.$fromEnv is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
             "{issues:?}"
         );
         let issues = &issues[1..];
         assert!(
-            issues[0].contains("spec.source.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
+            issues[0].contains("spec.source.$fromEnviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment?"),
             "{issues:?}"
         );
         assert!(
-            issues[1].starts_with("spec.tags[0].$values is not a value source;")
+            issues[1].starts_with("spec.tags[0].$fromEnvironments is not a value source;")
                 && issues[1].ends_with(
                     "did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/)"
                 ),

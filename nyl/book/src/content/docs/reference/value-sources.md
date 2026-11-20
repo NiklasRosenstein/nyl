@@ -87,38 +87,37 @@ In a unit document, `$literal` unwraps when the unit renders, unless its
 content holds `$` keys: then it unwraps when a run resolves the unit, so its
 content never reads as a reference.
 
-### Reserved keys and likely slips
+### Reserved keys and common typos
 
 In the typed fields of a Nyl resource every `$` key is reserved, so an unknown
 one, such as `$ref` in a HelmChart's `chart`, is an error. In free-form data
 (chart values, a Component's `spec`, plain Kubernetes manifests, a unit's
 `variables` and `values`, environment values, a binding's literal) other `$`
-keys such as `$ref` and `$schema` are data, except these likely slips, which
+keys such as `$ref` and `$schema` are data, except these common typos of a source's name, which
 are errors that name the source you probably meant:
 
-| Slip | Meant |
-| --- | --- |
-| `$environment`, `$input`, `$parameter`, `$unit`, `$promotion`, `$file`, `$git`, `$publication` | the same source with `$from`, such as `$fromInput` |
-| `$value`, `$values`, `$env`, `$fromEnv`, `$fromValue`, `$fromValues`, `$valueFrom`, `$valuesFrom` | `$fromEnvironment` |
-| `$inputs`, `$fromInputs`, `$inputFrom` | `$fromInput` |
-| `$param`, `$params`, `$parameters`, `$fromParam`, `$fromParams`, `$fromParameters` | `$fromParameter` |
-| `$units`, `$output`, `$artifact`, `$fromUnits`, `$fromOutput`, `$fromArtifact` | `$fromUnit` |
-| `$from` | lists every source |
+| Typo | Example | Meant |
+| --- | --- | --- |
+| Another case or separator | `$frominput`, `$from_input`, `$FromInput` | `$fromInput` |
+| The noun alone | `$input`, `$unit`, `$environment` | `$fromInput`, `$fromUnit`, `$fromEnvironment` |
+| A plural | `$fromInputs`, `$fromUnits`, `$fromParameters` | `$fromInput`, `$fromUnit`, `$fromParameter` |
+| An abbreviation | `$fromEnv`, `$fromParam`, `$fromParams` | `$fromEnvironment`, `$fromParameter` |
+| What a unit reference reads | `$fromOutput`, `$fromArtifact` | `$fromUnit` |
+| A `…From` suffix | `$inputFrom`, `$environmentFrom`, `$unitFrom` | `$fromInput`, `$fromEnvironment`, `$fromUnit` |
+| `$from` alone | `$from` | lists every source |
 
-Slips match ignoring case, `_`, and `-`, so `$frominput`, `$from_input`, and
-`$FromInput` are slips for `$fromInput`. Wrap the object in `$literal` to keep
-one of them as data.
+Wrap the object in `$literal` to keep one of them as data.
 
 In a unit document, the kind's schema says which fields are typed: where it
 has no place for a `$` key that is no source, the key is an unknown source,
-reported with the slip's suggestion or else the source it is closest to,
+reported with the typo's suggestion or else the source it is closest to,
 compared the same way; where it leaves an object open,
 such as a Terraform unit's `variables`, the key is data:
 
 ```console
 $ nyl validate
 2026-11-20T02:41:15.605358Z ERROR nyl: Configuration error: units are invalid:
-  - dev: NYL-UNIT-INVALID: unit web-image (/nyl/units.yaml): spec.context.path.$enviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/) (correct the unit's spec so that it matches its kind's schema)
+  - dev: NYL-UNIT-INVALID: unit web-image (/nyl/units.yaml): spec.context.path.$fromEnviroment is not a value source; `$` keys are reserved for value sources in the typed fields of a resource; did you mean $fromEnvironment? (see https://niklasrosenstein.github.io/nyl/reference/value-sources/) (correct the unit's spec so that it matches its kind's schema)
 …
 ```
 
@@ -570,10 +569,10 @@ $ nyl render apps/web/web.yaml
 Hint: Check your nyl.toml syntax and structure. Run 'nyl validate --strict' for detailed validation.
 ```
 
-A likely slip, and a source with other keys next to it:
+A common typo, and a source with other keys next to it:
 
 ```console
 $ nyl validate
 …
-Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$values is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)
+Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.values.host holds $fromUnit next to other keys (pointer); a value source replaces the whole object, so it must be the object's only key (wrap the object in $literal to keep it as data); spec.values.region.$fromEnv is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)
 ```

@@ -658,7 +658,7 @@ mod tests {
         let document = json!({
             "plain": {"$literal": {"a": 1}},
             "shaped": {"$literal": {"$fromUnit": "data"}},
-            "slip": {"$values": "/x"},
+            "slip": {"$fromEnv": "/x"},
             "noun": {"$input": "x"},
             "foreign": {"$schema": "x"},
         });
@@ -671,7 +671,7 @@ mod tests {
             issues,
             [
                 "spec.noun.$input is not a value source; did you mean $fromInput? (write {$literal: …} to keep the key as data)",
-                "spec.slip.$values is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)",
+                "spec.slip.$fromEnv is not a value source; did you mean $fromEnvironment? (write {$literal: …} to keep the key as data)",
             ]
         );
 

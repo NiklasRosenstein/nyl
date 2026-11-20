@@ -97,41 +97,13 @@ impl Source {
     }
 }
 
-/// Spellings that look like a source but are none, normalised as
-/// [`normalise_key`] does, with the source probably meant: the bare nouns of
-/// the sources, plurals, abbreviations, and `…From` suffixes.
-const SLIPS: &[(&str, Source)] = &[
-    ("environment", Source::Environment),
+/// Short names of a source's noun, normalised as [`normalise_key`] does:
+/// what a common typo may say instead of the noun after `$from`.
+const ABBREVIATIONS: &[(&str, Source)] = &[
     ("env", Source::Environment),
-    ("value", Source::Environment),
-    ("values", Source::Environment),
-    ("fromenv", Source::Environment),
-    ("fromvalue", Source::Environment),
-    ("fromvalues", Source::Environment),
-    ("valuefrom", Source::Environment),
-    ("valuesfrom", Source::Environment),
-    ("input", Source::Input),
-    ("inputs", Source::Input),
-    ("frominputs", Source::Input),
-    ("inputfrom", Source::Input),
-    ("parameter", Source::Parameter),
     ("param", Source::Parameter),
-    ("params", Source::Parameter),
-    ("parameters", Source::Parameter),
-    ("fromparam", Source::Parameter),
-    ("fromparams", Source::Parameter),
-    ("fromparameters", Source::Parameter),
-    ("unit", Source::Unit),
-    ("units", Source::Unit),
     ("output", Source::Unit),
     ("artifact", Source::Unit),
-    ("fromunits", Source::Unit),
-    ("fromoutput", Source::Unit),
-    ("fromartifact", Source::Unit),
-    ("promotion", Source::Promotion),
-    ("file", Source::File),
-    ("git", Source::Git),
-    ("publication", Source::Publication),
 ];
 
 /// `key` without its `$`, lowercased and without `_` and `-`, so that
@@ -144,10 +116,11 @@ fn normalise_key(key: &str) -> String {
         .collect()
 }
 
-/// What a `$` key that is no source probably meant, if it is a likely slip:
-/// another spelling of a source, a bare noun such as `$input`, a plural, an
-/// abbreviation, a `…From` suffix, or `$from` alone. In free-form data any
-/// other `$` key, such as `$ref` or `$schema`, is data.
+/// What a `$` key that is no source probably meant, if it is a common typo
+/// of a source's name: another case or separator (`$from_input`), the noun
+/// alone (`$input`), a plural (`$fromInputs`), an abbreviation (`$fromParam`,
+/// `$env`), a `…From` suffix (`$inputFrom`), or `$from` alone. In free-form data any other `$` key,
+/// such as `$ref` or `$schema`, is data.
 pub fn slip(key: &str) -> Option<String> {
     if !key.starts_with('$') || Source::from_key(key).is_some() {
         return None;
@@ -161,14 +134,34 @@ pub fn slip(key: &str) -> Option<String> {
             .collect::<Vec<_>>();
         return Some(format!("one of {}", sources.join(", ")));
     }
-    Source::ALL
+    if let Some(source) = Source::ALL
         .into_iter()
         .find(|source| normalise_key(source.key()) == normalised)
-        .or_else(|| {
-            SLIPS
-                .iter()
-                .find(|(slip, _)| *slip == normalised)
-                .map(|(_, source)| *source)
+    {
+        return Some(source.key().to_owned());
+    }
+    Source::ALL
+        .into_iter()
+        .filter(|source| *source != Source::Literal)
+        .find(|source| {
+            let full = normalise_key(source.key());
+            let noun = full.strip_prefix("from").unwrap_or(&full).to_owned();
+            let names = std::iter::once(noun).chain(
+                ABBREVIATIONS
+                    .iter()
+                    .filter(|(_, meant)| meant == source)
+                    .map(|(name, _)| (*name).to_owned()),
+            );
+            names.into_iter().any(|name| {
+                [
+                    name.clone(),
+                    format!("{name}s"),
+                    format!("from{name}"),
+                    format!("from{name}s"),
+                    format!("{name}from"),
+                ]
+                .contains(&normalised)
+            })
         })
         .map(|source| source.key().to_owned())
 }
@@ -737,8 +730,8 @@ mod tests {
         );
     }
 
-    /// Catches the two shorthand slips the UX review found: a pointer where a
-    /// name belongs, and a name where a pointer belongs.
+    /// Catches the two shorthand slips: a pointer where a name belongs, and a
+    /// name where a pointer belongs.
     #[test]
     fn test_shorthand_misuse_suggests_the_fix() {
         assert_eq!(
@@ -759,27 +752,34 @@ mod tests {
         );
     }
 
-    /// Catches a likely slip read as data: the bare nouns, plurals,
-    /// abbreviations, `…From` suffixes, and other spellings of a source.
+    /// Catches a common typo of a source's name read as data.
     #[test]
     fn test_slips_point_at_the_exact_spelling() {
         for (key, meant) in [
-            ("$input", "$fromInput"),
-            ("$environment", "$fromEnvironment"),
-            ("$publication", "$fromPublication"),
-            ("$value", "$fromEnvironment"),
-            ("$fromEnv", "$fromEnvironment"),
-            ("$valuesFrom", "$fromEnvironment"),
-            ("$inputFrom", "$fromInput"),
-            ("$fromInputs", "$fromInput"),
             ("$frominput", "$fromInput"),
             ("$from_input", "$fromInput"),
             ("$FromInput", "$fromInput"),
             ("$from-parameter", "$fromParameter"),
-            ("$params", "$fromParameter"),
-            ("$fromArtifact", "$fromUnit"),
-            ("$output", "$fromUnit"),
             ("$Literal", "$literal"),
+            ("$input", "$fromInput"),
+            ("$Unit", "$fromUnit"),
+            ("$environment", "$fromEnvironment"),
+            ("$env", "$fromEnvironment"),
+            ("$params", "$fromParameter"),
+            ("$output", "$fromUnit"),
+            ("$fromInputs", "$fromInput"),
+            ("$fromUnits", "$fromUnit"),
+            ("$fromParameters", "$fromParameter"),
+            ("$fromEnv", "$fromEnvironment"),
+            ("$fromParam", "$fromParameter"),
+            ("$fromParams", "$fromParameter"),
+            ("$fromOutput", "$fromUnit"),
+            ("$fromArtifact", "$fromUnit"),
+            ("$inputFrom", "$fromInput"),
+            ("$environmentFrom", "$fromEnvironment"),
+            ("$unitFrom", "$fromUnit"),
+            ("$parameter_from", "$fromParameter"),
+            ("$publicationFrom", "$fromPublication"),
         ] {
             assert_eq!(slip(key).as_deref(), Some(meant), "{key}");
         }
@@ -787,16 +787,16 @@ mod tests {
             slip("$from").as_deref(),
             Some("one of $fromEnvironment, $fromInput, $fromParameter, $fromUnit, $fromPromotion, $fromFile, $fromGit, $fromPublication")
         );
-        for key in ["$fromInput", "$literal", "$ref", "$schema", "$id", "$enviroment"] {
+        for key in ["$fromInput", "$literal", "$ref", "$schema", "$id", "$fromEnviroment"] {
             assert_eq!(slip(key), None, "{key}");
         }
     }
 
     /// Catches a suggestion for an unknown key that ignores the normalisation
-    /// slips use, or that misses a source whose noun is near.
+    /// slips use.
     #[test]
     fn test_suggestions_use_the_slip_normalisation() {
-        assert_eq!(suggest("$enviroment").as_deref(), Some("$fromEnvironment"));
+        assert_eq!(suggest("$fromEnviroment").as_deref(), Some("$fromEnvironment"));
         assert_eq!(suggest("$from_enviroment").as_deref(), Some("$fromEnvironment"));
         assert_eq!(suggest("$FROM_PUBLICATON").as_deref(), Some("$fromPublication"));
         assert_eq!(suggest("$from_input").as_deref(), Some("$fromInput"));

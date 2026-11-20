@@ -638,10 +638,10 @@ mod tests {
             })
         );
 
-        let slip = project("  values: {image: {$inputs: image}}\n", &[]);
+        let slip = project("  values: {image: {$fromInputs: image}}\n", &[]);
         let slip = error(&slip, Some(json!({"image": "web:1"})));
         assert!(
-            slip.contains("spec.values.image.$inputs is not a value source; did you mean $fromInput?"),
+            slip.contains("spec.values.image.$fromInputs is not a value source; did you mean $fromInput?"),
             "{slip}"
         );
     }
