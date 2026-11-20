@@ -10,9 +10,10 @@ guides explain the workflows: [Release inputs](/nyl/kubernetes-gitops/release-in
 for target bindings, and [References between units](/nyl/orchestration/runs/#references-between-units)
 for unit specs.
 
-Typed source clauses for unit fields, HelmChart fields, and EnvironmentTemplate
-values are being added. This page documents each one as it ships; until then,
-those places take literal values and Jinja.
+Unit fields read the environment's values with [`fromValues`](#unit-fields-fromvalues).
+Typed source clauses for HelmChart fields and EnvironmentTemplate values are
+being added. This page documents each one as it ships; until then, those
+places take literal values and Jinja.
 
 ## How resolution works
 
@@ -130,3 +131,82 @@ anything is published. A sensitive output cannot be referenced.
 `NYL-DEPENDENCY-UNKNOWN`, and an undeclared attestation with
 `NYL-ATTESTATION-UNDECLARED`. [`nyl validate`](/nyl/reference/cli/validate/)
 checks references without state.
+
+## Unit fields: `fromValues`
+
+A few fields of a unit spec read their value from the environment's `values`
+instead of writing it inline, so one unit document serves environments that
+need different values without structural Jinja:
+
+```yaml
+apiVersion: units.gitops.nyl/v1
+kind: KubernetesPublication
+metadata:
+  name: kubernetes
+  labels: {dev: 'true', preview: 'true'}
+spec:
+  target: {fromValues: {pointer: /target}}
+  teardownWait: {fromValues: {pointer: /teardownWait, default: {strategy: manual}}}
+  approval: {fromValues: {pointer: /approval, optional: true}}
+  timeout: 10m
+```
+
+**Where it is valid.** Only the fields that declare it, and only in unit
+documents:
+
+| Field | Units |
+| --- | --- |
+| `spec.approval`, `spec.timeout` | Every kind. |
+| `spec.target`, `spec.teardownWait` | [KubernetesPublication](/nyl/orchestration/resource-guides/kubernetes-publication/). |
+| `environment` of a `fromUnit` reference | Every `fromUnit` in the spec, at any depth, such as in `variables`, `values`, or an inline target's bindings. |
+
+The clause replaces the whole field. Every other place treats an object whose
+only field is `fromValues` as an error, never as data, and so does a clause in a
+document that is not a unit. The list grows only when a project still needs
+structural Jinja for a field.
+
+```yaml
+variables:
+  # dev's own network, or the environment that networkFrom names
+  vpc_id: {fromUnit: {unit: network, output: vpcId, environment: {fromValues: {pointer: /networkFrom, optional: true}}}}
+```
+
+**When it resolves.** At render time, when an environment's units render: in
+`nyl plan`, `nyl reconcile`, `nyl validate`, `nyl build -e`, and every other
+command that renders units. `pointer` is a JSON Pointer into the environment's
+effective `values`: an Environment's values over its groups' values, or an
+EnvironmentTemplate instance's values. Those values are already rendered, so the
+value the clause reads is used as it is and never templated again. A
+`fromValues` inside `fromUnit.environment` resolves first, so the reference
+names its environment before the run resolves the reference itself at
+execution time. A direct `nyl build` without `-e` has no environment, so a
+unit with a clause needs `-e`.
+
+**Missing values.** When nothing is at `pointer`, or the value there is `null`:
+
+- `default` applies. It must not be `null`.
+- With `optional: true` the field is removed, so the spec is the same as one
+  that omits the field.
+- Otherwise it is an error.
+
+`default` and `optional` are exclusive.
+
+**Types.** The resolved value is checked exactly as the same literal would be,
+by the unit's kind. A field filled from values renders the same spec as the
+literal, so its unit's execution key is the same too: replacing Jinja with
+`fromValues` re-runs nothing.
+
+**Errors.** A clause that cannot resolve fails the unit's render with
+`NYL-UNIT-INVALID`. A missing required value names the environment, the keys
+that exist where the pointer stops matching, and the nearest one:
+
+```console
+$ nyl validate
+…
+Configuration error: Rendering the units of Environment dev at 0000000000000000000000000000000000000000 failed: Configuration error: NYL-UNIT-INVALID: unit in units.yaml document 1: spec.timeout.fromValues reads /timout, which is not in the values of Environment dev: the values have keys "backendDir", "target", "timeout" (nearest to "timout": "timeout"); set it in the values, or give the clause a default, or optional: true to omit the field
+```
+
+[`nyl validate`](/nyl/reference/cli/validate/) renders every unit for every
+Environment that selects it, and for sample instances of every
+EnvironmentTemplate, so a pointer that one environment lacks fails before any
+run or instance exists.

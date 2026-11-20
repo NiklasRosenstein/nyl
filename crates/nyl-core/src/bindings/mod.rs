@@ -17,6 +17,8 @@
 //!   [`UNIT_REFERENCE_KINDS`].
 //! - [`resolve_declared`] substitutes typed source clauses ([`SourceKind`])
 //!   only at the fields a schema marks with [`Resolvable`], and
+//!   [`resolve_in_references`] does so inside each reference object of a
+//!   free-form document, such as `fromValues` in `fromUnit.environment`;
 //!   [`reject_surviving_clauses`] makes an unresolved clause an error.
 //! - A provider may report a reference as [`Provision::Blocked`], such as a
 //!   producer without a current receipt; blocked values are listed with their
@@ -47,12 +49,12 @@ pub use binding::{
     UnitInputSource,
 };
 pub use declaration::{json_type_name, validate_declarations_at, validate_input_name, InputDeclaration, InputType};
-pub use declared::{reject_surviving_clauses, resolve_declared, SourceProvider};
+pub use declared::{reject_surviving_clauses, resolve_declared, resolve_in_references, SourceProvider};
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
 pub use sources::{
-    resolvable_fields, FromInput, FromValues, InputSource, ParameterSource, Resolvable, ResolvableField, SourceClause,
-    SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
+    resolvable_fields, resolvable_schema, FromInput, FromValues, InputSource, ParameterSource, Resolvable,
+    ResolvableField, SourceClause, SourceKind, ValuesSource, RESOLVABLE_EXTENSION,
 };
 
 /// An effective value and where it came from.

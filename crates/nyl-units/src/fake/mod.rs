@@ -364,7 +364,7 @@ fn required_str<'a>(spec: &'a Value, pointer: &str) -> DriverResult<&'a str> {
 pub fn test_catalogue() -> nyl_render::config::ResourceCatalogue {
     let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
     descriptors.extend_from_slice(crate::catalog::RESOURCES);
-    nyl_render::config::ResourceCatalogue(descriptors)
+    nyl_render::config::ResourceCatalogue::new(descriptors)
 }
 
 #[cfg(test)]

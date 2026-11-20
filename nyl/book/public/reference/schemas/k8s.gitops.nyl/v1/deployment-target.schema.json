@@ -1344,11 +1344,28 @@
           "type": "array"
         },
         "environment": {
-          "description": "Environment of the unit, for cross-environment references.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "fromValues": {
+                  "$ref": "#/$defs/ValuesSource"
+                }
+              },
+              "required": [
+                "fromValues"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Environment of the unit, for cross-environment references. In a unit document, accepts `fromValues`, resolved when the unit renders.",
+          "x-nyl-resolvable": "fromValues"
         },
         "evidence": {
           "anyOf": [
@@ -1417,6 +1434,27 @@
       },
       "required": [
         "file"
+      ],
+      "type": "object"
+    },
+    "ValuesSource": {
+      "additionalProperties": false,
+      "description": "Reads a value from the environment's effective `values`.\n\nWhen nothing is at `pointer`, or the value there is `null`, `default`\napplies; with `optional: true` the field is removed instead, as if it were\nomitted; otherwise it is an error.",
+      "properties": {
+        "default": {
+          "description": "Value used when nothing is at `pointer` or the value there is `null`. Must not be `null`; use `optional` to leave the field out instead. Exclusive with `optional`."
+        },
+        "optional": {
+          "description": "Remove the field when nothing is at `pointer` or the value there is `null`, as if it were omitted. Exclusive with `default`.",
+          "type": "boolean"
+        },
+        "pointer": {
+          "description": "JSON Pointer into the environment's effective values, such as `/target`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pointer"
       ],
       "type": "object"
     }

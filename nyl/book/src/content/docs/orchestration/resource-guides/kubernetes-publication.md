@@ -16,12 +16,15 @@ metadata:
   name: kubernetes
   labels: {stage: dev}
 spec:
-  target: '{{ values.target }}'
+  target: {fromValues: {pointer: /target}}
   teardownWait: {strategy: manual}
 ```
 
 `target` names a static DeploymentTarget, or declares one inline (see
-[Inline targets](#inline-targets)). The unit places that target into its
+[Inline targets](#inline-targets)). `target` and `teardownWait` accept a
+[`fromValues`](/nyl/reference/value-sources/#unit-fields-fromvalues) clause,
+which reads the value from the environment's `values`, here the `target` each
+environment sets, so one unit serves environments with different targets. The unit places that target into its
 environment: a target belongs to at most one environment, and a target no
 publication unit names rejects `fromUnit` bindings. A unit publishes only,
 unless it declares `observe: {}`: it then publishes the same way and also
@@ -68,7 +71,11 @@ spec:
 ```
 
 The unit's templates see the environment's `values` and `environment`, as the
-other unit fields do. The inline target is named `<environment>-<unit>`, here
+other unit fields do. When the inline target differs between environments, such
+as a static target for `dev` and an inline one for each preview, keep it in the
+environments' values and write `target: {fromValues: {pointer: /target}}`: the
+clause takes the whole object, already rendered, and no Jinja decides the
+field's shape. The inline target is named `<environment>-<unit>`, here
 `dev-kubernetes`, so adding or removing publication units never renames another
 unit's target; `target.name` overrides the name. Target names are unique across
 declared and inline targets. Relative paths in `valuesFrom` start at the file
@@ -223,7 +230,7 @@ kind: KubernetesPublication
 metadata:
   name: kubernetes
 spec:
-  target: '{{ values.target }}'
+  target: {fromValues: {pointer: /target}}
   observe: {}
   env: {passthrough: [KUBECONFIG]}      # the credential for the access the ArgoCDInstance declares
 ```
@@ -357,7 +364,7 @@ shared evaluation over whatever reader the target's reconciler has:
 
 ```yaml
 spec:
-  target: '{{ values.target }}'
+  target: {fromValues: {pointer: /target}}
   observe: {waitHealthy: {timeout: 5m}}
   env: {passthrough: [KUBECONFIG]}
 ```
@@ -577,6 +584,15 @@ missing Application needs Argo CD's `can-i` to say the token may get it).
 A unit that waits by observing records the same reconciler facts at resolution
 and needs the same credential admitted; without one, or when Argo CD cannot be
 read, the teardown is uncertain with `observation-failed` and the reason.
+
+Environments that remove the unit differently set `teardownWait` in their
+values and read it with a default, so the unit waits for an operator unless the
+environment says otherwise, such as previews that expire unattended:
+
+```yaml
+spec:
+  teardownWait: {fromValues: {pointer: /teardownWait, default: {strategy: manual}}}
+```
 
 ### Teardown readiness
 

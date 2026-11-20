@@ -1479,7 +1479,7 @@ fn prepare_target_cache(
         &inventory
             .project_config
             .resource_catalogue
-            .0
+            .resources
             .iter()
             .map(|d| (d.name, d.api_version, d.dynamic_kind))
             .collect::<Vec<_>>(),

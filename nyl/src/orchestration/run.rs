@@ -87,11 +87,7 @@ impl ProcessWiring {
     /// [`Self::new`], cancelled when `cancellation` is set: the process
     /// runner forwards its signal to every running tool's process group.
     pub fn cancelled_by(cancellation: Cancellation) -> Self {
-        #[cfg(all(feature = "test-kinds", not(feature = "tier2")))]
-        let drivers =
-            nyl_units::registry::with_test_kinds(&nyl_units::fake::Script::new(), crate::resource_catalogue());
-        #[cfg(not(all(feature = "test-kinds", not(feature = "tier2"))))]
-        let drivers = nyl_units::registry::builtin(crate::resource_catalogue());
+        let drivers = crate::unit_drivers(crate::resource_catalogue());
         Self {
             ids: crate::orchestration::ids::UuidV7,
             drivers,

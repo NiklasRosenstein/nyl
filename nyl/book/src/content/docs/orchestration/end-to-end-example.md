@@ -116,15 +116,11 @@ spec:
 two through the target's `fromUnit` bindings, so nothing says so twice:
 
 ```yaml
-# Block-style labels, because the publication's document is not valid YAML
-# before it renders.
 apiVersion: units.gitops.nyl/v1
 kind: OpenTofu
 metadata:
   name: database
-  labels:
-    stage: dev
-    preview: 'true'
+  labels: {stage: dev, preview: 'true'}
 spec:
   source: {path: ../infra/database}
   backend: {path: '{{ values.stateDir }}/{{ environment.name }}-database.tfstate'}
@@ -136,9 +132,7 @@ apiVersion: units.gitops.nyl/v1
 kind: OciImage
 metadata:
   name: web-image
-  labels:
-    stage: dev
-    preview: 'true'
+  labels: {stage: dev, preview: 'true'}
 spec:
   env: {passthrough: [DOCKER_CONFIG]}
   context: {path: ../services/web}
@@ -148,20 +142,21 @@ apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
 metadata:
   name: kubernetes
-  labels:
-    stage: dev
-    preview: 'true'
+  labels: {stage: dev, preview: 'true'}
 spec:
-  target: {{ values.target | tojson }}      # dev, or the preview template's inline target
+  target: {fromValues: {pointer: /target}}   # dev, or the preview template's inline target
   observe: {}
-  teardownWait: {{ values.teardownWait | tojson }}
-  env: {passthrough: [KUBECONFIG]}       # the credential `nyl attest` reads Argo CD with
+  teardownWait: {fromValues: {pointer: /teardownWait}}
+  env: {passthrough: [KUBECONFIG]}           # the credential `nyl attest` reads Argo CD with
 ```
 
 The OpenTofu unit's root module declares `backend "local" {}` and an output
 `connection`, the image unit builds `services/web`, and the publication's
 `observe: {}` is what lets `nyl attest` and `nyl observe` read Argo CD later
 (see [Observing Argo CD](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd)).
+Its `target` and `teardownWait` read the environment's values with
+[`fromValues`](/nyl/reference/value-sources/#unit-fields-fromvalues): dev names
+its static target, and each preview declares an inline one.
 A local OpenTofu backend suits a workstation; [CI needs a remote one](#reconcile-on-main).
 
 `nyl/preview.yaml` is what makes every pull request an environment of its own.
