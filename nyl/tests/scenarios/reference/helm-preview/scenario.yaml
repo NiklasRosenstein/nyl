@@ -34,15 +34,15 @@ steps:
         branch: deploy
         contains:
           - 'develop/platform/platform/crd/platforms.platform.example.com.yaml'
-          - 'develop/platform/platform/deployment.apps/platform/platform.yaml'
-          - 'develop/platform/platform/deployment.apps/platform/platform-operator.yaml'
+          - 'develop/platform/platform/deployment.apps/platform.yaml'
+          - 'develop/platform/platform/deployment.apps/platform-operator.yaml'
           - 'develop/platform/platform/clusterrole.rbac.authorization.k8s.io/platform.yaml'
           - 'develop/_nyl/index.json'
         mentions:
-          'develop/platform/platform/deployment.apps/platform/platform.yaml':
+          'develop/platform/platform/deployment.apps/platform.yaml':
             - [get, artifact, platform-image/image, -e, develop, --pointer, /reference]
             - 'replicas: 2'                   # the sizing input's default: develop binds none
-          'develop/platform/platform/configmap/platform/platform.yaml':
+          'develop/platform/platform/configmap/platform.yaml':
             - 'OPERATOR_INSTALL_KIND: bool'
             - 'INGRESS_CLASS: internal'       # the chartValues input over the valuesFrom file
             - 'LOG_LEVEL: debug'              # the valuesFrom file over the chart's default
@@ -66,17 +66,17 @@ steps:
       deploy:
         branch: previews
         contains:
-          - 'pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1.yaml'
+          - 'pr-1/platform/platform/deployment.apps/platform-pr-1.yaml'
           - 'pr-1/platform/platform/clusterrole.rbac.authorization.k8s.io/platform-pr-1.yaml'
           - '_nyl/shared/previews/catalog.yaml'
         absent:
           - 'pr-1/platform/platform/crd/**'
-          - 'pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1-operator.yaml'
+          - 'pr-1/platform/platform/deployment.apps/platform-pr-1-operator.yaml'
         mentions:
-          'pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1.yaml':
+          'pr-1/platform/platform/deployment.apps/platform-pr-1.yaml':
             - [get, artifact, platform-image/image, -e, pr-1, --pointer, /reference]
             - 'replicas: 1'                   # $fromGit: the locked capacity file
-          'pr-1/platform/platform/configmap/pr-1/platform-pr-1.yaml':
+          'pr-1/platform/platform/configmap/platform-pr-1.yaml':
             - 'OPERATOR_INSTALL_KIND: bool'
             - 'PUBLIC_HOST: pr-1.preview.example.invalid'
             - 'INGRESS_CLASS: preview'
@@ -96,13 +96,13 @@ steps:
         branch: previews
         contains:
           - 'pr-2/platform/platform/crd/platforms.platform.example.com.yaml'
-          - 'pr-2/platform/platform/deployment.apps/pr-2/platform-pr-2-operator.yaml'
+          - 'pr-2/platform/platform/deployment.apps/platform-pr-2-operator.yaml'
         unchanged: ['pr-1/**']
         mentions:
-          'pr-2/platform/platform/deployment.apps/pr-2/platform-pr-2.yaml':
+          'pr-2/platform/platform/deployment.apps/platform-pr-2.yaml':
             - [get, artifact, platform-image/image, -e, pr-2, --pointer, /reference]
             - 'replicas: 1'
-          'pr-2/platform/platform/configmap/pr-2/platform-pr-2.yaml':
+          'pr-2/platform/platform/configmap/platform-pr-2.yaml':
             - 'OPERATOR_INSTALL_KIND: bool'
 
   # 6. Pull request 1 is updated: the valuesFrom file changes, and only the
@@ -118,7 +118,7 @@ steps:
         branch: previews
         unchanged: ['pr-2/**']
         mentions:
-          'pr-1/platform/platform/configmap/pr-1/platform-pr-1.yaml': ['LOG_LEVEL: trace']
+          'pr-1/platform/platform/configmap/platform-pr-1.yaml': ['LOG_LEVEL: trace']
 
   # 7. A new build reaches develop with the channel the tooling wrote back
   #    ($fromPublication), and develop keeps its cluster-wide pieces.
@@ -133,9 +133,9 @@ steps:
           - 'develop/platform/platform/crd/platforms.platform.example.com.yaml'
           - 'develop/state/release.json'
         mentions:
-          'develop/platform/platform/deployment.apps/platform/platform.yaml':
+          'develop/platform/platform/deployment.apps/platform.yaml':
             - [get, artifact, platform-image/image, -e, develop, --pointer, /reference]
-          'develop/platform/platform/configmap/platform/platform.yaml': ['CHANNEL: beta']
+          'develop/platform/platform/configmap/platform.yaml': ['CHANNEL: beta']
 
   # 8. Pull request 2 closes: its preview is torn down and its tree removed;
   #    pull request 1's stays.
@@ -148,7 +148,7 @@ steps:
       deploy:
         branch: previews
         absent: ['pr-2/**']
-        contains: ['pr-1/platform/platform/deployment.apps/pr-1/platform-pr-1.yaml']
+        contains: ['pr-1/platform/platform/deployment.apps/platform-pr-1.yaml']
         unchanged: ['pr-1/**']
   - {nyl: [get, environments, pr-2], exit: 1}
 
@@ -197,7 +197,7 @@ steps:
       current: [platform-image]
       deploy:
         branch: previews
-        contains: ['pr-3/platform/platform/deployment.apps/pr-3/platform-pr-3.yaml']
+        contains: ['pr-3/platform/platform/deployment.apps/platform-pr-3.yaml']
         unchanged: ['pr-1/**']
 
   # 10. A template that reads its parameter with $fromInput fails `nyl
