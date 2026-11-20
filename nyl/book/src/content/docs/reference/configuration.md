@@ -34,7 +34,7 @@ not: use them for fixed places in the repository. Only discovery of control
 resources is bounded by the `nyl.toml` directory; sources may name any
 directory of the worktree.
 
-Paths inside another repository, such as a remote source or a `fromGit`
+Paths inside another repository, such as a remote source or a `$git`
 binding, are relative to that repository's root instead. Recorded paths, such
 as rendered provenance and ownership-index inputs, are relative to the
 `nyl.toml` directory for files beneath it and start with `/` for other files of
@@ -108,7 +108,7 @@ lfs_threshold_bytes = 1048576
 - `path` defaults to `vendor` and must remain beneath the directory containing
   `nyl.toml`. Nyl excludes this subtree from GitOps YAML discovery.
 - `lfs_threshold_bytes` defaults to 1 MiB. Helm and Git archives always use Git
-  LFS rules; RemoteManifest blobs and the files `fromGit` Release input
+  LFS rules; RemoteManifest blobs and the files `$git` Release input
   bindings lock use LFS at or above this threshold.
 
 `nyl init --vendor <MODE>` writes this section with the selected mode when it

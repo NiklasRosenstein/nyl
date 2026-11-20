@@ -13,7 +13,7 @@ sourceRevision: 3e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a
 spec:
   values:
     host:
-      fromUnit:
+      $unit:
         output: host
         unit: network
 readiness:

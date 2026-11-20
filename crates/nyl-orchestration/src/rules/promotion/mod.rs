@@ -193,7 +193,7 @@ pub struct PromotionInput<'a> {
     /// covers them. A target whose source is promoted along the path selects
     /// them as its definitions at each state's source commit say.
     pub target_units: &'a TargetUnits,
-    /// Whether the target's source is `fromPromotion` naming this path.
+    /// Whether the target's source is `promotion` naming this path.
     pub promotes_source: bool,
     /// Per value name, the deployment of its selected unit that consumes it
     /// (D7), as the unit's driver maps the selector

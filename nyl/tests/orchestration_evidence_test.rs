@@ -1,5 +1,5 @@
 //! Attested evidence for dependents, end to end through the orchestration
-//! shell with Command units and Git state: a `dependsOn` entry or `fromUnit`
+//! shell with Command units and Git state: a `dependsOn` entry or `$unit`
 //! that requires the producer's attestations keeps its consumer `blocked`
 //! until the producer's current receipt has them passing, whether `nyl
 //! attest` records them or the producer's own `command` reports them.
@@ -63,7 +63,7 @@ metadata:
 spec:
   command: [sh, -c, 'true']
   values:
-    greeting: {{fromUnit: {{unit: svc, output: greeting, attestations: [smoke]}}}}
+    greeting: {{$unit: {{unit: svc, output: greeting, attestations: [smoke]}}}}
 {extra_units}"
         );
         let project = project(&[

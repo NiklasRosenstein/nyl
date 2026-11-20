@@ -51,8 +51,8 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
@@ -72,8 +72,8 @@ spec:
   releaseInputs:
     web/web:
       # Path-less: from the record that supplied prod's source.
-      image: {fromPromotion: {value: webImage}}
-      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+      image: {$promotion: {value: webImage}}
+      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -97,7 +97,7 @@ metadata:
   name: prod
 spec:
   source:
-    fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}
+    promotion: {paths: [dev-to-prod, hotfix-to-prod]}
   unitSelector:
     matchLabels: {prod: 'true'}       # no web-image: prod reuses dev's or the hotfix's
   protectedRefs: [main, 'release/*']  # a hotfix commit is reachable only from release/prod until merged
@@ -151,8 +151,8 @@ spec:
     pathPrefix: hotfix
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {value: db.hotfix.example.invalid}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: db.hotfix.example.invalid
 ---
 # Follows release/prod, which is cut from what prod runs; nothing points from
 # it back to prod but hotfix-to-prod.

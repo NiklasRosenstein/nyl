@@ -38,7 +38,7 @@ export const domainModelingRoadmap = {
       items: [
         { text: 'The `collections` unit field with membership, ordering, and `allowEmpty`', done: false },
         { text: 'Ownership claims with `access: own` and `access: read`, with removal and transition guards only for owners', done: false },
-        { text: '`fromUnit` references inside declarations', done: false },
+        { text: '`$unit` references inside declarations', done: false },
         { text: 'The versioned `ResourceBundle` and its provenance in desired state', done: false },
         { text: 'The bundle digest in the execution key', done: false },
         { text: '`fromCollection` references and the Command unit’s `collections` input', done: false },

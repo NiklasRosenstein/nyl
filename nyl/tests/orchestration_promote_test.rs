@@ -34,7 +34,7 @@ apiVersion: gitops.nyl/v1
 kind: Environment
 metadata: {name: prod}
 spec:
-  source: {fromPromotion: {path: dev-to-prod}}
+  source: {promotion: {path: dev-to-prod}}
   unitSelector: {matchLabels: {prod: 'true'}}
   allowUnprotectedSource: true
 ---
@@ -100,7 +100,7 @@ metadata:
 spec:
   command: [sh, -c, 'true']
   values:
-    image: {fromPromotion: {value: webImage}}
+    image: {$promotion: {value: webImage}}
 ";
 
 struct Promote {
@@ -851,8 +851,8 @@ fn test_environments_sharing_a_ref_keep_their_own_promotions() {
     };
     let environments = ENVIRONMENTS
         .replace(
-            "  source: {fromPromotion: {path: dev-to-prod}}\n",
-            &format!("  source: {{fromPromotion: {{path: dev-to-prod}}}}\n{}", shared("prod")),
+            "  source: {promotion: {path: dev-to-prod}}\n",
+            &format!("  source: {{promotion: {{path: dev-to-prod}}}}\n{}", shared("prod")),
         )
         .replace("metadata: {name: values}\nspec:\n  from: {environment: dev}\n  to: {environment: prod}", "metadata: {name: values}\nspec:\n  from: {environment: dev}\n  to: {environment: staging}")
         + &format!(
@@ -880,11 +880,11 @@ fn test_environments_sharing_a_ref_keep_their_own_promotions() {
     assert_eq!(staging.report["history"].as_array().unwrap().len(), 2);
 }
 
-/// prod with `record: source`, its `fromPromotion` in block style.
+/// prod with `record: source`, its `promotion` source in block style.
 fn record_source_environments() -> String {
     ENVIRONMENTS.replace(
-        "  source: {fromPromotion: {path: dev-to-prod}}\n",
-        "  source:\n    fromPromotion:\n      path: dev-to-prod\n      record: source\n",
+        "  source: {promotion: {path: dev-to-prod}}\n",
+        "  source:\n    promotion:\n      path: dev-to-prod\n      record: source\n",
     )
 }
 
@@ -986,7 +986,7 @@ fn promote_with(
             .spec
             .source
             .as_ref()
-            .and_then(|source| source.from_promotion.clone()),
+            .and_then(|source| source.promotion.clone()),
         requested: nyl_core::orchestration::promotion::PromotionRequest {
             by: "test".to_owned(),
             identity: nyl_core::orchestration::state::ApprovalIdentity::Asserted,
@@ -1373,8 +1373,8 @@ fn test_switching_to_record_source_writes_the_first_block() {
 fn two_source_paths() -> String {
     ENVIRONMENTS
         .replace(
-            "source: {fromPromotion: {path: dev-to-prod}}",
-            "source: {fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}}",
+            "source: {promotion: {path: dev-to-prod}}",
+            "source: {promotion: {paths: [dev-to-prod, hotfix-to-prod]}}",
         )
         .replace(
             "metadata: {name: attested}\nspec:\n  from: {environment: dev}\n  to: {environment: prod}\n  evidence: attested",

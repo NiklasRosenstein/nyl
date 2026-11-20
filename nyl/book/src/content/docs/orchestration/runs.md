@@ -44,7 +44,7 @@ metadata:
   labels: {tier: platform}
 spec:
   values:
-    host: {fromUnit: {unit: database, output: host}}
+    host: {$unit: {unit: database, output: host}}
   command: ['./migrate.sh']
 ```
 
@@ -64,26 +64,26 @@ Common fields every kind shares:
 | `timeout` | The deadline of one execution, at most `7d`. |
 | `env` | `passthrough`, the names of runner variables the unit may read, and `secrets`, mapping variable names to project secret keys. Missing credentials stop the unit before execution. |
 
-`approval` and `timeout` accept a
-[`fromValues`](/nyl/reference/value-sources/#unit-fields-fromvalues) clause, such
-as `approval: {fromValues: {pointer: /approval}}`, which reads the value from
+Any field of a unit document accepts an
+[`$environment`](/nyl/reference/value-sources/#environment) source, such
+as `approval: {$environment: /approval}`, which reads the value from
 the environment's `values`, so environments that need different values share
 one unit document.
 
 ## References between units
 
-`{fromUnit: {unit: <name>, output: <output>}}` stands for an output of
-another unit's current receipt, `{fromUnit: {unit: <name>, artifact: <name>,
+`{$unit: {unit: <name>, output: <output>}}` stands for an output of
+another unit's current receipt, `{$unit: {unit: <name>, artifact: <name>,
 pointer: /…}}` for a value inside one of its artifacts, and
-`{fromUnit: {unit: <name>, observation: <name>}}` for one of its
+`{$unit: {unit: <name>, observation: <name>}}` for one of its
 [observed values](#observed-values). A reference replaces
-the whole value it stands for, at any depth of the fields a kind accepts
-references in, such as a Command's `values`. References add a dependency on
+the whole value it stands for, at any depth of the spec, such as in a
+Command's `values`. References add a dependency on
 their producer, as `dependsOn` does. A cycle is rejected with
 `NYL-DEPENDENCY-CYCLE`, and a reference to a unit the environment does not
-select with `NYL-DEPENDENCY-UNKNOWN`. [Value sources](/nyl/reference/value-sources/#unit-references)
-lists every field of `fromUnit` and `fromPromotion` and the reference-object
-rule.
+select with `NYL-DEPENDENCY-UNKNOWN`. [Value sources](/nyl/reference/value-sources/#unit)
+lists every field of `$unit` and `$promotion` and the rules every value
+source shares.
 
 A consumer whose producer has no current receipt is **blocked**: it keeps its
 previous resolution and does not execute in this run. When the producer
@@ -98,14 +98,14 @@ for the producer's existence.
 ### Requiring attestations
 
 A receipt says a unit ran, not that what it did works. A `dependsOn` entry or a
-`fromUnit` reference can require more of its producer with `evidence` and
+`$unit` reference can require more of its producer with `evidence` and
 `attestations`:
 
 ```yaml
 dependsOn:
   - {unit: kubernetes, attestations: [healthy]}   # smoke tests run against healthy workloads
 values:
-  endpoint: {fromUnit: {unit: service, output: endpoint, evidence: attested}}
+  endpoint: {$unit: {unit: service, output: endpoint, evidence: attested}}
 ```
 
 - `evidence: published` (the default) requires a current receipt.
@@ -149,13 +149,13 @@ once the new receipt has its attestations, the consumer is `current` and
 nothing executes. To run a smoke test against each new version, make the
 version an input: read an output or artifact field of the producer that
 changes with it, such as its version, image digest, or endpoint, with
-`fromUnit`. When the value changes, the consumer's execution key changes and
+`$unit`. When the value changes, the consumer's execution key changes and
 it runs, after the new receipt's attestations pass if the reference requires
 them:
 
 ```yaml
 values:
-  version: {fromUnit: {unit: service, output: version, attestations: [healthy]}}
+  version: {$unit: {unit: service, output: version, attestations: [healthy]}}
 ``` The attestation `maxAttestationAge` limit belongs to
 promotion paths.
 
@@ -189,7 +189,7 @@ metadata: {name: dns}
 spec:
   command: ['./dns.sh']
   values:
-    address: {fromUnit: {unit: kubernetes, observation: ingressIp}}
+    address: {$unit: {unit: kubernetes, observation: ingressIp}}
 ```
 
 `type` is one of the output types, checked on every read; `maxAge` is how old
@@ -608,7 +608,7 @@ A cross-environment reference uses the producer's declared environment:
 ```yaml
 values:
   networkId:
-    fromUnit: {environment: infra, unit: network, output: id}
+    $unit: {environment: infra, unit: network, output: id}
 ```
 
 `dependsOn` also accepts `{environment: infra, unit: network}`. The producer

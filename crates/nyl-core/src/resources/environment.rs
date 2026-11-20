@@ -15,9 +15,8 @@ use super::strict::DenyUnknownFields;
 use super::units::DeletionPolicy;
 use super::{GitSource, InlineGitRepository, LabelSelector, LocalReference};
 use crate::bindings::{
-    reject_surviving_clauses, resolve_document, validate_declarations_at, BindingIssue, FromParameter,
-    InputDeclaration, Origin, ParameterSource, Provided, Providers, Provision, Resolved, SourceKind,
-    TEMPLATE_VALUE_KINDS,
+    find_clauses, resolve_document, validate_declarations_at, BindingIssue, Context, InputDeclaration, Origin,
+    ParameterSource, Provided, Providers, Provision, Resolved,
 };
 use crate::constants::API_VERSION_GITOPS;
 use crate::orchestration::codes::{Code, Finding};
@@ -137,7 +136,7 @@ pub struct EnvironmentTemplateSpec {
     /// Matches literal unit `metadata.labels` across all unit kinds. An empty selector selects every unit.
     #[serde(rename = "unitSelector", default)]
     pub unit_selector: LabelSelector,
-    /// Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created. At any depth, an object whose only field is `fromParameter` (`{fromParameter: {name, pointer?}}`) is replaced by the instance's bound parameter `name`, typed as declared, or the value `pointer` selects in it.
+    /// Values unit templates see as `values`, with every string rendered as a template over `params` and `environment.name` when an instance is created. At any depth, a `$parameter` source (`{$parameter: name}` or `{$parameter: {name, pointer?}}`) is replaced by the instance's bound parameter `name`, typed as declared, or the value `pointer` selects in it; other value sources are carried to the documents the values land in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, serde_json::Value>,
     /// Where an instance's state lives. Strings may read `environment.name` only. With `path` such as `{{ environment.name }}`, every instance shares the refs, one directory each.
@@ -245,8 +244,8 @@ pub struct EnvironmentSource {
     #[serde(flatten)]
     pub git: GitSource,
     /// The source commit recorded by the newest promotion on a path; excludes the other fields.
-    #[serde(rename = "fromPromotion", default, skip_serializing_if = "Option::is_none")]
-    pub from_promotion: Option<PromotedSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PromotedSource>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub unknown_fields: DenyUnknownFields,
@@ -395,18 +394,19 @@ impl Environment {
                 validate_static_required(&format!("spec.protectedRefs[{index}]"), value)?;
             }
         }
-        reject_parameter_sources("spec.values", &self.spec.values)
+        check_value_sources("spec.values", &self.spec.values)
     }
 }
 
-/// Reject a `fromParameter` clause in `values` at `field`: only an
-/// EnvironmentTemplate's `spec.values` resolve one, when an instance is created.
-fn reject_parameter_sources(field: &str, values: &BTreeMap<String, serde_json::Value>) -> Result<()> {
-    let mut issues = Vec::new();
-    for (key, value) in values {
-        reject_surviving_clauses(&format!("{field}.{key}"), value, TEMPLATE_VALUE_KINDS, &mut issues);
-    }
-    issues_to_result(issues)
+/// Check the value sources of a declared Environment's or EnvironmentGroup's
+/// `values` at `field`: none resolves there; the ones the documents the values
+/// land in resolve are carried and checked where they land, and the others,
+/// such as `$parameter`, are errors.
+fn check_value_sources(field: &str, values: &BTreeMap<String, serde_json::Value>) -> Result<()> {
+    let document = serde_json::Value::Object(values.clone().into_iter().collect());
+    find_clauses(field, "", &document, Context::EnvironmentValues.into())
+        .map(drop)
+        .map_err(|issues| CoreError::config(issues.join("; ")))
 }
 
 fn issues_to_result(issues: Vec<BindingIssue>) -> Result<()> {
@@ -465,33 +465,36 @@ impl EnvironmentTemplate {
                 ));
             }
         }
-        // `values` is the one field whose clauses resolve; parameter defaults
+        // `values` is the one field whose sources resolve; parameter defaults
         // and `enum` values are literals.
         let mut issues = Vec::new();
         for (name, declaration) in &self.spec.parameters {
             let declaration =
                 serde_json::to_value(declaration).map_err(|error| CoreError::config(error.to_string()))?;
-            reject_surviving_clauses(
+            if let Err(found) = find_clauses(
                 &format!("spec.parameters.{name}"),
+                "",
                 &declaration,
-                TEMPLATE_VALUE_KINDS,
-                &mut issues,
-            );
+                Context::Literal.into(),
+            ) {
+                issues.extend(found.into_iter().map(BindingIssue::new));
+            }
         }
         issues_to_result(issues)
     }
 
-    /// `values` with every `fromParameter` clause replaced by the instance's
+    /// `values` with every `$parameter` source replaced by the instance's
     /// `bound` parameters ([`Self::bind_parameters`]), at any depth.
     ///
     /// Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
-    /// §4. A clause is a reference object (exactly one field, anything else
-    /// is data) holding `{name, pointer?}`. The value is the bound parameter,
+    /// the EnvironmentTemplate context. The value is the bound parameter,
     /// already checked against its declaration with the declared default
-    /// applied, so the clause has no `default`; `pointer` selects inside it.
+    /// applied, so the source has no `default`; `pointer` selects inside it.
     /// A parameter the template does not declare, a pointer that selects
-    /// nothing, and a malformed clause are errors, all reported together.
+    /// nothing, and a malformed source are errors, all reported together.
     /// The resolved value is data: it is never templated or resolved again.
+    /// The sources of the documents the values land in, such as `$unit` in
+    /// an inline target's bindings, are carried and checked there.
     pub fn resolve_parameter_sources(
         &self,
         values: &BTreeMap<String, serde_json::Value>,
@@ -504,7 +507,7 @@ impl EnvironmentTemplate {
             "spec.values",
             "",
             &document,
-            TEMPLATE_VALUE_KINDS,
+            Context::TemplateValues.into(),
             &provider,
             &mut issues,
         );
@@ -587,37 +590,37 @@ impl EnvironmentSource {
     /// repository or a named one, and never names a `path`.
     pub fn validate(&self, field: &str) -> Result<()> {
         let git = &self.git;
-        if let Some(promoted) = &self.from_promotion {
+        if let Some(promoted) = &self.promotion {
             if git != &GitSource::default() {
                 return Err(CoreError::config(format!(
-                    "{field}.fromPromotion excludes repositoryRef, repository, revision, and commit"
+                    "{field}.promotion excludes repositoryRef, repository, revision, and commit"
                 )));
             }
             if promoted.path.is_some() != promoted.paths.is_empty() {
                 return Err(CoreError::config(format!(
-                    "{field}.fromPromotion needs exactly one of path and paths"
+                    "{field}.promotion needs exactly one of path and paths"
                 )));
             }
             if promoted.verify.is_some() && promoted.record.as_deref() != Some("source") {
                 return Err(CoreError::config(format!(
-                    "{field}.fromPromotion.verify checks the block of `record: source`; set record: source, or remove verify (a record in state needs no signature)"
+                    "{field}.promotion.verify checks the block of `record: source`; set record: source, or remove verify (a record in state needs no signature)"
                 )));
             }
             if let Some(verify) = &promoted.verify {
                 crate::local_path::validate_local_path(
-                    &format!("{field}.fromPromotion.verify.allowedSigners"),
+                    &format!("{field}.promotion.verify.allowedSigners"),
                     &verify.allowed_signers,
                 )?;
             }
             if promoted.promoted.is_some() && promoted.record.as_deref() != Some("source") {
                 return Err(CoreError::config(format!(
-                    "{field}.fromPromotion.promoted is the record of `record: source`; set record: source, or remove the block (state holds the record otherwise)"
+                    "{field}.promotion.promoted is the record of `record: source`; set record: source, or remove the block (state holds the record otherwise)"
                 )));
             }
             return match promoted.record.as_deref() {
                 None | Some("state" | "source") => Ok(()),
                 Some(other) => Err(CoreError::config(format!(
-                    "{field}.fromPromotion.record {other:?} must be state or source"
+                    "{field}.promotion.record {other:?} must be state or source"
                 ))),
             };
         }
@@ -655,7 +658,7 @@ impl EnvironmentGroup {
         if state.repository_ref.is_some() || state.repository.is_some() {
             validate_repository_choice(state.repository_ref.as_ref(), state.repository.as_ref(), "spec.state")?;
         }
-        reject_parameter_sources("spec.values", &self.spec.values)
+        check_value_sources("spec.values", &self.spec.values)
     }
 
     /// Whether the group selects an Environment with these labels.
@@ -776,13 +779,13 @@ fn merge_values(base: &mut serde_json::Value, overlay: serde_json::Value) {
     }
 }
 
-/// The `fromParameter` source of a template instance: its bound parameters.
+/// The `$parameter` source of a template instance: its bound parameters.
 struct BoundParameters<'a> {
     template: &'a EnvironmentTemplate,
     bound: &'a BTreeMap<String, serde_json::Value>,
 }
 
-/// Where a resolved `fromParameter` clause read its value: always the
+/// Where a resolved `$parameter` source read its value: always the
 /// instance's bound parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParameterOrigin;
@@ -806,7 +809,7 @@ impl Providers for BoundParameters<'_> {
     type Origin = ParameterOrigin;
 
     fn parameter(&self, field: &str, source: &ParameterSource) -> Provided<ParameterOrigin> {
-        let clause = format!("{field}.{}", <FromParameter as SourceKind>::FIELD);
+        let clause = format!("{field}.$parameter");
         let template = &self.template.metadata.name;
         let Some(value) = self.bound.get(&source.name) else {
             let declared = self.template.spec.parameters.keys().cloned().collect::<Vec<_>>();
@@ -887,12 +890,12 @@ mod tests {
     }
 
     /// Catches a template parameter that reaches a binding as anything but
-    /// its declared type, or a clause read as data: `fromParameter` resolves
-    /// at any depth of `values` (inside a binding's `value` too) to the bound
-    /// parameter with its declared default and type, `pointer` selects inside
-    /// it, and a `fromUnit` or a clause with siblings is left alone or refused.
+    /// its declared type, or a source read as data: `$parameter` resolves at
+    /// any depth of `values` (inside a binding too) to the bound parameter
+    /// with its declared default and type, `pointer` selects inside it, a
+    /// `$unit` is carried, and a source with siblings is refused.
     #[test]
-    fn test_from_parameter_resolves_at_any_depth_of_template_values() {
+    fn test_parameter_resolves_at_any_depth_of_template_values() {
         let template = template(json!({
             "parameters": {
                 "pr": {"type": "integer"},
@@ -903,12 +906,12 @@ mod tests {
         }));
         let bound = template.bind_parameters(&map(json!({"pr": 7}))).unwrap();
         let values = map(json!({
-            "pr": {"fromParameter": {"name": "pr"}},
+            "pr": {"$parameter": "pr"},
             "target": {"inline": {"releaseInputs": {"rise/rise": {
-                "clusterWide": {"value": {"fromParameter": {"name": "crds"}}},
-                "image": {"fromUnit": {"unit": "image", "artifact": "image"}},
+                "clusterWide": {"$parameter": "crds"},
+                "image": {"$unit": {"unit": "image", "artifact": "image"}},
             }}}},
-            "replicas": [{"fromParameter": {"name": "sizes", "pointer": "/web/replicas"}}],
+            "replicas": [{"$parameter": {"name": "sizes", "pointer": "/web/replicas"}}],
             "data": {"name": "pr"},
         }));
         let resolved = template.resolve_parameter_sources(&values, &bound).unwrap();
@@ -917,8 +920,8 @@ mod tests {
             json!({
                 "pr": 7,
                 "target": {"inline": {"releaseInputs": {"rise/rise": {
-                    "clusterWide": {"value": false},
-                    "image": {"fromUnit": {"unit": "image", "artifact": "image"}},
+                    "clusterWide": false,
+                    "image": {"$unit": {"unit": "image", "artifact": "image"}},
                 }}}},
                 "replicas": [2],
                 "data": {"name": "pr"},
@@ -928,35 +931,37 @@ mod tests {
         let error = template
             .resolve_parameter_sources(
                 &map(json!({
-                    "a": {"fromParameter": {"name": "crd"}},
-                    "b": {"fromParameter": {"name": "sizes", "pointer": "/db"}},
-                    "c": {"fromParameter": {"name": "pr"}, "other": 1},
-                    "d": {"fromParameter": {"name": "pr", "default": 1}},
+                    "a": {"$parameter": "crd"},
+                    "b": {"$parameter": {"name": "sizes", "pointer": "/db"}},
+                    "c": {"$parameter": "pr", "other": 1},
+                    "d": {"$parameter": {"name": "pr", "default": 1}},
+                    "e": {"$environment": "/target"},
                 })),
                 &bound,
             )
             .unwrap_err();
         for expected in [
-            "spec.values.a.fromParameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: crds, pr, sizes)",
-            "spec.values.b.fromParameter selects /db in parameter \"sizes\" of EnvironmentTemplate preview, which holds no value there",
-            "spec.values.c mixes fromParameter with other fields",
-            "spec.values.d.fromParameter is not a valid reference: unknown field `default`",
+            "spec.values.a.$parameter names parameter \"crd\", which EnvironmentTemplate preview does not declare (declared: crds, pr, sizes)",
+            "spec.values.b.$parameter selects /db in parameter \"sizes\" of EnvironmentTemplate preview, which holds no value there",
+            "spec.values.c holds $parameter next to other keys (other)",
+            "spec.values.d.$parameter is not valid: unknown field `default`",
+            "spec.values.e holds a $environment source, which reads the environment's values and resolves only in unit documents; the environment's values cannot read its values",
         ] {
             assert!(error.contains(expected), "{expected}\n{error}");
         }
     }
 
-    /// Catches a `fromParameter` clause outside a template's `values` being
+    /// Catches a `$parameter` source outside a template's `values` being
     /// read as data: a declared Environment, a group, and a template's
     /// parameter defaults refuse one with where it works.
     #[test]
-    fn test_from_parameter_is_an_error_outside_template_values() {
-        let clause = json!({"fromParameter": {"name": "pr"}});
+    fn test_parameter_is_an_error_outside_template_values() {
+        let clause = json!({"$parameter": "pr"});
         let error = environment(json!({"values": {"target": {"nested": [clause]}}}))
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("spec.values.target.nested[0] holds a fromParameter clause where none resolves; fromParameter resolves only in an EnvironmentTemplate's spec.values"),
+            error.contains("spec.values.target.nested[0] holds a $parameter source, which reads a template parameter and resolves only in an EnvironmentTemplate's spec.values; only an EnvironmentTemplate's values read parameters"),
             "{error}"
         );
         let shared = group(
@@ -964,7 +969,7 @@ mod tests {
             &json!({"environmentSelector": {"matchLabels": {"stage": "preview"}}, "values": {"pr": clause}}),
         );
         let error = shared.validate().unwrap_err().to_string();
-        assert!(error.contains("spec.values.pr holds a fromParameter clause"), "{error}");
+        assert!(error.contains("spec.values.pr holds a $parameter source"), "{error}");
         let declared: EnvironmentTemplate = serde_json::from_value(json!({
             "apiVersion": "gitops.nyl/v1",
             "kind": "EnvironmentTemplate",
@@ -974,7 +979,7 @@ mod tests {
         .unwrap();
         let error = declared.validate().unwrap_err().to_string();
         assert!(
-            error.contains("spec.parameters.size.default.x holds a fromParameter clause"),
+            error.contains("spec.parameters.size.default.x holds a $parameter source"),
             "{error}"
         );
     }
@@ -1062,10 +1067,8 @@ mod tests {
                 .to_string()
                 .contains("spec.source.revision is required")
         );
-        assert!(environment(json!({"source": {"fromPromotion": {"path": "dev-to-prod"}}})).is_ok());
-        assert!(
-            environment(json!({"source": {"fromPromotion": {"path": "dev-to-prod"}, "revision": "main"}})).is_err()
-        );
+        assert!(environment(json!({"source": {"promotion": {"path": "dev-to-prod"}}})).is_ok());
+        assert!(environment(json!({"source": {"promotion": {"path": "dev-to-prod"}, "revision": "main"}})).is_err());
         // Typos in a flattened source fail like everywhere else.
         assert!(environment(json!({"source": {"revison": "main"}}))
             .unwrap_err()

@@ -67,7 +67,7 @@ spec:
 | `state.path` | relative directory | `''` |
 | `state.coordinationRefPrefix` | ref prefix ending in `/` | `refs/nyl/` |
 | `state.admissionRef` (M8) | ref name | the desired ref |
-| `source` | Git source without `path`, or `{fromPromotion}` | the entry worktree's commit |
+| `source` | Git source without `path`, or `{$promotion}` | the entry worktree's commit |
 | `protectedRefs` | list of ref names or globs | the group's, else each repository's default branch |
 | `allowUnprotectedSource` | boolean | the group's, else `false` |
 | `driftRepair` | `converge` or `manual` | the group's, else `converge` |
@@ -187,9 +187,9 @@ spec:
 ### Source
 
 Every run of an environment works in one worktree at one immutable source commit S:
-discovery, the Environment's own fields, targets, units, Releases, `fromFile`,
+discovery, the Environment's own fields, targets, units, Releases, `$file`,
 are all read there, and nothing else in the entry worktree is read again. The
-one exception is a `carryFileFromWorktree` file for a `fromPublication` binding: it exists only
+one exception is a `carryFileFromWorktree` file for a `$publication` binding: it exists only
 in the worktree of the job that produced it, so it is read from the entry
 worktree and recorded as carried, as release-inputs.md describes. The Environment's `source` field decides S:
 
@@ -201,7 +201,7 @@ spec:
     repositoryRef: {name: platform}     # optional; default: this repository
   # or, instead of the fields above:
   source:
-    fromPromotion: {path: dev-to-prod}  # the commit recorded by the latest promotion;
+    promotion: {path: dev-to-prod}  # the commit recorded by the latest promotion;
                                         # `paths: [dev-to-prod, hotfix-to-prod]` for several
 ```
 
@@ -210,7 +210,7 @@ spec:
 | omitted | The entry worktree's commit, typical for dev and previews |
 | `revision` | The tip of `revision`, such as a `release/prod` branch that carries hotfixes |
 | `revision` and `commit` | `commit`, a reviewed pin in source that `nyl update source-locks` moves; never a promotion target |
-| `fromPromotion` | The source commit in the newest PromotionRecord on that path, or on any of `paths`, kept in the target's desired state or, with `record: source`, in this field; before the first promotion, runs exit 2 (see [Promoting an environment's source](promotion.md#promoting-an-environments-source)) |
+| `$promotion` | The source commit in the newest PromotionRecord on that path, or on any of `paths`, kept in the target's desired state or, with `record: source`, in this field; before the first promotion, runs exit 2 (see [Promoting an environment's source](promotion.md#promoting-an-environments-source)) |
 
 - The three forms exclude each other. `commit` requires `revision`, as for
   ApplicationGroup and unit sources: it must be reachable from `protectedRefs`
@@ -325,7 +325,7 @@ spec:
   source: {path: infra/database}
   backend: {key: '{{ values.stateKey }}'}
   variables:
-    vpcId: {fromUnit: {unit: network, output: vpcId}}
+    vpcId: {$unit: {unit: network, output: vpcId}}
   outputs:
     host: {type: string}
     port: {type: integer}
@@ -380,7 +380,7 @@ spec:
   them, at any depth inside object and array values; a reference object
   replaces the whole value it stands for, never part of a string. Every Git
   source field (`source`, `context`, directory `contexts`) accepts
-  `fromPromotion` for a promoted source. Besides those, `Command` accepts
+  `$promotion` for a promoted source. Besides those, `Command` accepts
   references in `values`; `Terraform` and `OpenTofu` in `variables`;
   `OciImage` in `buildArgs` and image `contexts`; and `KubernetesPublication`
   in the inline target's `releaseInputs`.
@@ -402,7 +402,7 @@ spec:
   dependencies implicitly. An entry with `environment` names a unit of another
   declared environment, under the rules of
   [Cross-environment references](#cross-environment-references).
-- A `dependsOn` entry or a `fromUnit` reference may require stronger evidence
+- A `dependsOn` entry or a `$unit` reference may require stronger evidence
   from its producer with `evidence: published | attested` (default
   `published`, which is a current receipt) and `attestations`, which names the
   producer's attestations to require instead of all it declares (see
@@ -447,7 +447,7 @@ spec:
     containing `nyl.toml`, with leading `..` segments allowed, or from the
     worktree root with a leading `/`, never leaving the worktree or traversing
     a symbolic link. The same rule covers `files` globs, Command
-    `workingDir`, and `fromFile`. In another repository, `path` is relative to
+    `workingDir`, and `$file`. In another repository, `path` is relative to
     its root. Resolution records every such path in `resolvedSpec` in its
     worktree-rooted form, such as `/infra/database`, so the desired document
     means the same wherever `nyl.toml` lives.
@@ -499,11 +499,11 @@ spec:
 
 | Reference | Resolves to | Freshness |
 | --- | --- | --- |
-| `fromUnit: {unit, output, pointer, evidence, attestations}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
-| `fromUnit: {unit, artifact, kind, pointer, evidence, attestations}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
-| `fromUnit: {unit, observation, pointer, evidence, attestations}` | The latest recorded value of a unit's [observed value](#observed-values) for its current receipt | The producer's receipt must be current, with the required `evidence`, and the observation must have a value (not `pending`, not older than its `maxAge`) |
-| `fromPromotion: {value, path}` | A value in a PromotionRecord in this environment's desired state: without `path`, the newest record carrying the value, limited to the source paths when the environment's source is promoted (see [Several paths into one environment](promotion.md#several-paths-into-one-environment)) | The record must exist; broken selectors are errors |
-| `fromUnit: {environment, unit, output \| artifact \| observation, …}` | An output, artifact, or observed value of a unit in another, declared environment (see [Cross-environment references](#cross-environment-references)) | As `fromUnit`, against the other environment's current receipt |
+| `$unit: {unit, output, pointer, evidence, attestations}` | A declared, non-sensitive output of a unit in the same environment; `pointer` optionally selects inside an `object` or `array` output | The producer's receipt must be current, with the required `evidence` |
+| `$unit: {unit, artifact, kind, pointer, evidence, attestations}` | A field of an artifact the unit published; `kind` optionally asserts the artifact kind | The producer's receipt must be current, list the artifact's digest, and have the required `evidence` |
+| `$unit: {unit, observation, pointer, evidence, attestations}` | The latest recorded value of a unit's [observed value](#observed-values) for its current receipt | The producer's receipt must be current, with the required `evidence`, and the observation must have a value (not `pending`, not older than its `maxAge`) |
+| `$promotion: {value, path}` | A value in a PromotionRecord in this environment's desired state: without `path`, the newest record carrying the value, limited to the source paths when the environment's source is promoted (see [Several paths into one environment](promotion.md#several-paths-into-one-environment)) | The record must exist; broken selectors are errors |
+| `$unit: {environment, unit, output \| artifact \| observation, …}` | An output, artifact, or observed value of a unit in another, declared environment (see [Cross-environment references](#cross-environment-references)) | As `$unit`, against the other environment's current receipt |
 
 - `pointer` is a JSON Pointer ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)):
   `/` separates tokens, `~1` escapes `/`, and `~0` escapes `~`. An empty or
@@ -603,7 +603,7 @@ spec:
         values: {hostname: '{{ values.hostname }}'}
         releaseInputs:
           platform/web:
-            image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+            image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
   ```
 
   An inline target is named `<environment>-<unit>`, so adding or removing
@@ -627,7 +627,7 @@ spec:
   target: it joins the project's inventory
   (`GitOpsInventory::with_inline_target`), is parsed as strictly as a
   discovered one, and renders, validates, and publishes through the same
-  compile and publish path. The `fromUnit` bindings of its `releaseInputs`
+  compile and publish path. The `$unit` bindings of its `releaseInputs`
   expand into `releases` as for any target. Reference resolution replaces each
   such binding in the stored spec with the value it resolved, so the driver
   renders the inline target without the bindings the pinned `releases`
@@ -660,7 +660,7 @@ spec:
   EnvironmentTemplates.
 - The unit places its DeploymentTarget into the environment. A target
   referenced by publication units in two environments is an error; a target
-  referenced by none rejects `fromUnit` bindings and reads `fromPromotion`
+  referenced by none rejects `$unit` bindings and reads `$promotion`
   from its own `spec.promotions` (see
   [Promoting into a target](promotion.md#promoting-into-a-target)). A
   publication unit that is `deleting` still owns its target until its
@@ -715,8 +715,8 @@ spec:
     prefix is `unknown` with the same code.
   - Every answer of the directory reads state again, so an incarnation
     created since an earlier answer is never taken over.
-- Its dependencies are the units named by the target's `fromUnit` bindings and
-  the PromotionRecords named by its `fromPromotion` bindings.
+- Its dependencies are the units named by the target's `$unit` bindings and
+  the PromotionRecords named by its `$promotion` bindings.
 - Its execution key covers the target render's complete input record from
   Nyl's dependency recorder, plus the resolved spec (`observe`, the Release inputs under `releases`) and the recorded `reconciler` facts of a unit that observes (everything the render derives from them, never how the reconciler is read): every file and directory listing,
   value, chart, Kubernetes capability, resolved source identity, and external
@@ -737,25 +737,25 @@ spec:
     reconcile.
 - Its resolved spec contains every Release input of its target under
   `releases`, keyed by `<group>/<release>` and then by input, so the pointer to
-  an input is `/releases/<group>~1<release>/<input>`: `value`, `fromFile` at the source
-  commit, locked `fromGit`, `fromUnit`, `fromPromotion`, and `fromPublication`.
+  an input is `/releases/<group>~1<release>/<input>`: a literal, `$file` at the source
+  commit, locked `$git`, `$unit`, `$promotion`, and `$publication`.
   - As implemented: `releases` holds the bindings only
-    orchestration can resolve: `fromUnit`, resolved through the shared
+    orchestration can resolve: `$unit`, resolved through the shared
     reference resolver in both its `output` and `artifact` forms, and
-    `fromPromotion`, resolved through the same binding resolver from the
+    `$promotion`, resolved through the same binding resolver from the
     PromotionRecords of the target's desired state. The driver passes
     `releases` to the render as the pinned input snapshot, which takes an
     override's precedence over the binding and is checked against the
     Release's declared input types, so an unusable value fails before
-    anything is published. `value`, `fromFile`, locked `fromGit`, and
-    `fromPublication` inputs resolve inside the render at the source commit
+    anything is published. Literals, `$file`, locked `$git`, and
+    `$publication` inputs resolve inside the render at the source commit
     and enter the execution key through its input record, so a change to any
     of them still re-executes the unit. Every resolved input, whatever its
     source, is recorded in the published ownership index as
     `@input/<group>/<release>/<input>` with the digest of its canonical
     value. The renderer owns `releases`: an authored `spec.releases` is
     rejected.
-- `fromPublication` is resolved like every other binding. Resolution reads the
+- `$publication` is resolved like every other binding. Resolution reads the
   state file from the publication branch head B, or the carried file from the
   runner's working tree. The value enters the resolved spec and the execution
   key; B is recorded only as provenance. A new state file therefore changes
@@ -906,7 +906,7 @@ orchestration:
   orchestration shell hands the driver a snapshot of them committed as a
   Git worktree (one fixed commit), which the render needs, and the ownership
   index names the unit's source commit, never the snapshot's.
-- Without `-e`, a target whose Release inputs bind `fromUnit` fails like any
+- Without `-e`, a target whose Release inputs bind `$unit` fails like any
   reference (`-e` names the way out). A unit that declares its target inline
   cannot be built without `-e`: the inline target is named
   `<environment>-<unit>` and rendered with the environment's values, so the
@@ -1024,7 +1024,7 @@ the real publication path (the tree changes are in
 `_nyl/index.json`. A publication that loses the race for the branch head,
 before or at its compare-and-swap push, is built again on the new head, at
 most three times and within the unit's `timeout`. A target with
-`fromPublication` bindings is rendered again on the new head: when the state
+`$publication` bindings is rendered again on the new head: when the state
 it read (the `@input/`, `@publication/`, and `@carried/` digests of its
 index) is unchanged, it publishes there; when it changed, the execution ends
 without publishing as a retryable failure with `NYL-UNIT-INPUTS-CHANGED` (`publication-state-changed`),
@@ -2562,7 +2562,7 @@ nyl get environments                                         # declared environm
   commit cannot lock anyone out of removing an instance.
 - An instance's units read shared infrastructure from declared environments
   with a cross-environment reference, such as
-  `fromUnit: {environment: dev, unit: network, output: vpcId}`, under the
+  `$unit: {environment: dev, unit: network, output: vpcId}`, under the
   rules of [Cross-environment references](#cross-environment-references),
   including the protection of the units they read.
 - Instances cannot be a PromotionPath source; previews build and test, and
@@ -2780,7 +2780,7 @@ prints a `RenderedTree` for a plain build and a `TreeDiff` for `--diff` (see
 the [publication unit](#kubernetes-publication-unit)). Their `metadata.name`
 is `tree` and `diff`, no receipt lists them, and no reference reads them.
 
-A reference reads an artifact through `fromUnit` with `artifact` instead of
+A reference reads an artifact through `$unit` with `artifact` instead of
 `output`, an optional `kind` assertion, and a `pointer` into the artifact's
 `spec`:
 
@@ -2789,13 +2789,13 @@ A reference reads an artifact through `fromUnit` with `artifact` instead of
 releaseInputs:
   platform/web:
     image:
-      fromUnit: {unit: web-image, artifact: image, kind: ContainerImage, pointer: /reference}
+      $unit: {unit: web-image, artifact: image, kind: ContainerImage, pointer: /reference}
 ---
 # OpenTofu variables
 spec:
   variables:
-    web_image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-    web_platforms: {fromUnit: {unit: web-image, artifact: image, pointer: /platforms}}
+    web_image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+    web_platforms: {$unit: {unit: web-image, artifact: image, pointer: /platforms}}
 ```
 
 - A `kind` that does not match the artifact is a resolution error.
@@ -2833,7 +2833,7 @@ names another.
 `desired/promotions/<path>.yaml` and `observed/attestations.yaml` were listed
 from the start but are first written in M6; they are added to format `v1`
 without a version change. A Nyl older than that release keeps them through
-its transitions but cannot act on them: it refuses a `fromPromotion` source,
+its transitions but cannot act on them: it refuses a `promotion` source,
 must not run `reconcile` in an environment that uses promotion, and does not
 read environment-wide attestations. Its `state move`, when it copies
 documents rather than history, does not carry them, and its `state restore`
@@ -2913,7 +2913,7 @@ sourceRevision: 3e7b…                      # effective revision for repository
 spec:                                      # rendered, references still as expressions
   source: {path: infra/database}
   variables:
-    vpc_id: {fromUnit: {unit: network, output: vpcId}}
+    vpc_id: {$unit: {unit: network, output: vpcId}}
   outputs: {host: {type: string}, port: {type: integer}}
   approval: {mode: manual, bind: plan}
 resolvedSpec:                              # references replaced by values
@@ -3135,7 +3135,7 @@ attestations:
   `evidence` says, and `evidence: published` with no names requires only the
   receipt. A producer that declares none satisfies `attested` with its current
   receipt. A failing attestation fails that requirement until a newer one
-  passes. Dependents (`dependsOn` and `fromUnit`, in this environment or
+  passes. Dependents (`dependsOn` and `$unit`, in this environment or
   another declared one) apply these rules to the producer's current receipt as
   [Units](#units) describes; a dependent does not age attestations, since a
   recorded pass for the current receipt satisfies it, and `maxAttestationAge`
@@ -3167,7 +3167,7 @@ consumer on the producer's current receipt and attestations, but contributes
 no value to the consumer's execution key. A producer's new receipt, once
 attested, therefore leaves such a consumer `current`; it does not run again.
 A smoke test that must run against each new version of its producer consumes
-something that changes with it, such as `fromUnit` of an output or artifact
+something that changes with it, such as `$unit` of an output or artifact
 field that carries the version, image digest, or endpoint, whose changed value
 changes the consumer's execution key. It also keeps the evidence gate: with
 `attestations` on the same reference, the new value is read only once the new
@@ -3234,7 +3234,7 @@ spec:
   read (`value` with the value, `pending` or `failed` with the reason); a unit
   that executes nothing here is `current` in `status` until a consumer's
   stored resolution differs from the recorded value. `nyl get observation
-  <unit>/<name>` prints the recorded value, resolved like a `fromUnit`
+  <unit>/<name>` prints the recorded value, resolved like a `$unit`
   reference.
 - **Changed values are work for the next reconcile.** An observation that
   changed is neither drift nor evidence: the producer's receipt still holds.
@@ -3306,7 +3306,7 @@ spec:
   observations whose value arrived, changed, or went `pending` under
   `observationsChanged` (`{lb: [ip]}`); a unit's first `pending` record, and
   a re-read of the same value, are no change.
-- **Consumers.** `fromUnit: {unit, observation, pointer}` resolves the
+- **Consumers.** `$unit: {unit, observation, pointer}` resolves the
   recorded value; the producer's receipt must be current with the required
   `evidence`, as for an output. A `pending` observation blocks the consumer,
   exit 2, with `NYL-OBSERVATION-PENDING` and the driver's reason. The resolved
@@ -4571,7 +4571,7 @@ selection is independent of the state repository.
 ### Pinned commits
 
 Every commit Nyl pins must stay fetchable: locked unit sources, promoted source
-revisions, and locked `fromGit` bindings.
+revisions, and locked `$git` bindings.
 
 - A pinned commit must be reachable from one of the Environment's
   `protectedRefs` in its repository, or from the branch named by its lock's
@@ -4832,7 +4832,7 @@ metadata:
 spec:
   files: ['../scripts/seed/**']
   values:
-    bucket: {fromUnit: {unit: storage, output: bucket}}
+    bucket: {$unit: {unit: storage, output: bucket}}
   command: ['./run.sh']
   detectDrift: ['./drift.sh']  # optional; for `nyl detect-drift`
   attest: ['./smoke.sh']       # optional; for `nyl attest`
@@ -5100,9 +5100,9 @@ kubernetes  KubernetesPublication  held               current   0a1d… 09:12   
 nyl get unit database -e dev -o yaml             # exact DesiredUnit and ObservedUnit documents
 nyl get unit database -e dev -o yaml --observed  # only one of them (--desired, --observed)
 
-nyl get output network/vpcId -e dev              # resolves like {fromUnit: {unit: network, output: vpcId}}
+nyl get output network/vpcId -e dev              # resolves like {$unit: {unit: network, output: vpcId}}
 nyl get output database/connection -e dev --pointer /host   # pointer inside an object output
-nyl get observation kubernetes/ingressIp -e dev  # resolves like {fromUnit: {unit: kubernetes, observation: ingressIp}}
+nyl get observation kubernetes/ingressIp -e dev  # resolves like {$unit: {unit: kubernetes, observation: ingressIp}}
 
 nyl get artifacts -e dev
 UNIT        NAME   KIND            SUMMARY
@@ -5110,7 +5110,7 @@ web-image   image  ContainerImage  registry.example.com/web@sha256:4f0c…
 kubernetes  tree   PublishedTree   deploy/dev@9c1e…
 
 nyl get artifact web-image/image -e dev -o yaml
-nyl get artifact web-image/image -e dev --pointer /reference   # pointer relative to spec, as in fromUnit
+nyl get artifact web-image/image -e dev --pointer /reference   # pointer relative to spec, as in $unit
 
 nyl get environments
 nyl get promotion-paths
@@ -5127,7 +5127,7 @@ nyl get promotion-candidates dev-to-prod   # dev's states judged as nyl promote 
   one document.
 - `nyl get output <unit>/<output>`, `nyl get observation <unit>/<name>`, and
   `nyl get artifact <unit>/<name> --pointer …` return single values for scripts and resolve exactly like the
-  matching `fromUnit` reference: the same pointer base (inside the artifact's
+  matching `$unit` reference: the same pointer base (inside the artifact's
   `spec`), the same digest check, and the same freshness rule. When the
   reference would not resolve (no current receipt, or a missing output,
   artifact, or pointer target), they print nothing and exit 1. `--allow-stale`
@@ -5337,7 +5337,7 @@ written; it exits 0. The next `reconcile` starts at once, converges
 recorded receipts for every unit. A later run R2 at S2 changed `web-image`,
 whose build failed, so the state R2 wrote has a new `web-image` desired
 document without a receipt for its execution key, and `kubernetes` blocked.
-Prod's source is `fromPromotion`, so before the first promotion
+Prod's source is `promotion`, so before the first promotion
 `reconcile -e prod` exits 2 and names `nyl promote`, and `nyl promote
 dev-to-prod` exits 2 with `NYL-PROMOTE-NO-EVIDENCE`, because dev has
 recorded no state: missing evidence.
@@ -5380,7 +5380,7 @@ Application that runs no publication of dev (`unmatched`) or is `Degraded`
 blocks the value-only path as well. The walkthrough runs from M6.
 ([`value-only-promotion`](../nyl/tests/scenarios/walkthroughs/value-only-promotion/scenario.yaml))
 
-**A promotion recorded in source (M6).** Prod's `source.fromPromotion` sets
+**A promotion recorded in source (M6).** Prod's `source.promotion` sets
 `record: source`, so `nyl promote dev-to-prod` writes the PromotionRecord into
 prod's Environment as a commit on `main`, with `sequence` 1, and writes only a
 marker commit, without a record file, into prod's desired state; `reconcile -e prod` runs at the promoted commit and records the

@@ -55,7 +55,7 @@ pub struct RenderTreeArgs {
     #[arg(long)]
     pub allow_secret_inputs: bool,
 
-    /// Resolve Git charts and remote ApplicationGroup sources from cached refs and read fromPublication state at the cached publication branch head.
+    /// Resolve Git charts and remote ApplicationGroup sources from cached refs and read $publication state at the cached publication branch head.
     #[arg(long)]
     pub offline: bool,
 }

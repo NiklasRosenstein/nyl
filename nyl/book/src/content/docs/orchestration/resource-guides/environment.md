@@ -53,7 +53,7 @@ them. See [Runs](/nyl/orchestration/runs/#source-commit).
 
 ## A promoted source
 
-With `source.fromPromotion`, the environment runs the source commit a
+With `source.promotion`, the environment runs the source commit a
 [PromotionPath](/nyl/orchestration/resource-guides/promotion-path/) recorded
 into it (see [Promotion](/nyl/orchestration/promotion/)). `record: source`
 keeps that record in the Environment's own `promoted` block, which `nyl
@@ -65,7 +65,7 @@ file, a local path of the project:
 ```yaml
 spec:
   source:
-    fromPromotion:
+    promotion:
       path: dev-to-prod
       record: source
       verify:

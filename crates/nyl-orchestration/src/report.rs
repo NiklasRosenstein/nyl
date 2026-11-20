@@ -906,7 +906,7 @@ pub struct PromotionsReport {
     /// environment's source is promoted: the newest on its source paths.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<AppliedPromotion>,
-    /// Each `fromPromotion` binding of the environment's units and the record
+    /// Each `$promotion` binding of the environment's units and the record
     /// that supplies it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<BindingSupplier>,
@@ -919,7 +919,7 @@ pub struct PromotionsReport {
     pub errors: Vec<Finding>,
 }
 
-/// A `fromPromotion` binding and the record it reads.
+/// A `$promotion` binding and the record it reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BindingSupplier {
     /// The unit whose spec holds the binding; a DeploymentTarget's

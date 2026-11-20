@@ -6,7 +6,7 @@
 //! plan): [`PromotionRecord`] is the shape. In `desired/promotions/<path>.yaml`
 //! it is wrapped as a [`PromotionRecordDocument`] with `apiVersion:
 //! gitops.nyl/v1` and `kind: PromotionRecord`, both required; in the
-//! `source.fromPromotion.promoted` block of an Environment with `record:
+//! `source.promotion.promoted` block of an Environment with `record:
 //! source` it stands alone, and the markers are rejected there.
 //!
 //! The shape reserves M11's target source: [`PromotionFrom::Target`] and a value
@@ -34,7 +34,7 @@ use super::time::Timestamp;
 document_kind!(PromotionRecordKind, "PromotionRecord");
 
 /// Which field of the source a promoted value reads: the same selectors, with
-/// the same JSON Pointer semantics and resolver, as `fromUnit` references and
+/// the same JSON Pointer semantics and resolver, as `$unit` references and
 /// `nyl get`.
 ///
 /// Set exactly one of the four forms:
@@ -254,7 +254,7 @@ pub struct PromotionRequest {
 /// What `nyl promote` records about one promotion on one path.
 ///
 /// Each promotion replaces the path's record; Git history keeps earlier ones.
-/// In an Environment's `source.fromPromotion.promoted` block it stands alone;
+/// In an Environment's `source.promotion.promoted` block it stands alone;
 /// in state it is a [`PromotionRecordDocument`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

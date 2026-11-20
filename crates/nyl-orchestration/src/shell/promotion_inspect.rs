@@ -77,9 +77,9 @@ pub struct CandidatesRequest<'a> {
     /// Where the target's definitions at each candidate's source commit are
     /// read, as `nyl promote` reads them.
     pub target_sources: promote::TargetSources<'a>,
-    /// Whether the target's source is `fromPromotion` naming this path.
+    /// Whether the target's source is `promotion` naming this path.
     pub promotes_source: bool,
-    /// The target's `source.fromPromotion` as the entry worktree declares
+    /// The target's `source.promotion` as the entry worktree declares
     /// it: with `record: source`, its block is the path's current record.
     pub promoted: Option<&'a PromotedSource>,
     pub now: Timestamp,
@@ -200,10 +200,10 @@ fn states_named(record: &PromotionRecord) -> Vec<CommitId> {
 
 /// `nyl get promotions -e <env>`: the environment's PromotionRecords, the
 /// one its last run applied, the record that supplies its source and each of
-/// its units' `fromPromotion` bindings (as the binding resolver chooses it,
+/// its units' `$promotion` bindings (as the binding resolver chooses it,
 /// [`crate::rules::sources::binding_supplier`], over the units' desired
 /// documents), and every promotion its desired history records.
-/// With `record: source`, `promoted` (the Environment's `source.fromPromotion`
+/// With `record: source`, `promoted` (the Environment's `source.promotion`
 /// as the entry worktree declares it) supplies the path's record; its earlier
 /// records are commits in source, not in the desired history.
 pub fn promotions(

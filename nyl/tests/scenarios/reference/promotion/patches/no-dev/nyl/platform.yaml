@@ -50,8 +50,8 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
@@ -71,8 +71,8 @@ spec:
   releaseInputs:
     web/web:
       # Path-less: from the record that supplied prod's source.
-      image: {fromPromotion: {value: webImage}}
-      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+      image: {$promotion: {value: webImage}}
+      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -80,7 +80,7 @@ metadata:
   name: prod
 spec:
   source:
-    fromPromotion: {path: dev-to-prod}
+    promotion: {path: dev-to-prod}
   unitSelector:
     matchLabels: {prod: 'true'}       # no web-image: prod reuses dev's
   values:

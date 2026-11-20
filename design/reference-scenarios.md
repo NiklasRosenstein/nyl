@@ -248,7 +248,7 @@ and to the harness's validation, together with the first scenario using them.
 | `deploy` | Files on a deploy branch after the step: `contains` (patterns that match a file), `unchanged` (the files that match are the ones the step started with), `absent` (patterns that match no file), and `mentions` (per file pattern, texts that appear in at least one matching file: a literal, or the arguments of a `nyl get` invocation, whose value must appear) |
 | `keep-refs` | The keep refs of preview instances in `project.git` (`refs/nyl-keep/`): `count`, how many exist, and `kept`, revisions such as `pr-124` whose commit has one |
 | `source` | The commit a reconcile ran its environment at, as a Git revision of `project.git` |
-| `promotion` | The PromotionRecord a `promote` step wrote, read where its path keeps it (`record`: `state`, the default, reads the target environment's `desired/promotions/<path>.yaml`; `source` reads the Environment's `source.fromPromotion.promoted` block at the tip of the branch the step ran at), or for `--dry-run` the record the report shows it would write, under its top-level `record`. Keys not given are not checked: `path`; `sequence`; `sourceCommit` as a Git revision of `project.git` such as `main~1`, or `null` for a path that promotes only values; `from.run` as the `id` of the `nyl` step whose run recorded the promoted state, `from.environment` (not given: the path's `from`), and `from.desiredCommit` and `from.observedCommit` (usually `%STATE(<id>)%` and `%OBSERVED(<id>)%`); `values`, exactly these names, each `equals` a literal or the value a `nyl get` invocation prints, and `state`, the `id` of the step whose run wrote the value's own state (not given: the record names none, so the value came from `from`); `evidence` with `level`, `override`, and exactly the `attestations` used as `<unit>/<name>` or `environment/<name>`; `superseded`, exactly these commits in commit order, each a revision of `project.git` with its `reason` and, when given, its `repository`; `artifactsVerified`; `requested.reason`; `ignoredAttestations`, exactly these entries, each `{attestation: <unit>/<name> or environment/<name>, reason}`; and `excludedDeployments`, exactly this map of unit to deployment names, the ones the path's `coverage` excluded |
+| `promotion` | The PromotionRecord a `promote` step wrote, read where its path keeps it (`record`: `state`, the default, reads the target environment's `desired/promotions/<path>.yaml`; `source` reads the Environment's `source.promotion.promoted` block at the tip of the branch the step ran at), or for `--dry-run` the record the report shows it would write, under its top-level `record`. Keys not given are not checked: `path`; `sequence`; `sourceCommit` as a Git revision of `project.git` such as `main~1`, or `null` for a path that promotes only values; `from.run` as the `id` of the `nyl` step whose run recorded the promoted state, `from.environment` (not given: the path's `from`), and `from.desiredCommit` and `from.observedCommit` (usually `%STATE(<id>)%` and `%OBSERVED(<id>)%`); `values`, exactly these names, each `equals` a literal or the value a `nyl get` invocation prints, and `state`, the `id` of the step whose run wrote the value's own state (not given: the record names none, so the value came from `from`); `evidence` with `level`, `override`, and exactly the `attestations` used as `<unit>/<name>` or `environment/<name>`; `superseded`, exactly these commits in commit order, each a revision of `project.git` with its `reason` and, when given, its `repository`; `artifactsVerified`; `requested.reason`; `ignoredAttestations`, exactly these entries, each `{attestation: <unit>/<name> or environment/<name>, reason}`; and `excludedDeployments`, exactly this map of unit to deployment names, the ones the path's `coverage` excluded |
 
 A `promote` step's `commits` count the refs of the environment its path
 promotes into, which the harness reads from the PromotionPath at the step's
@@ -376,7 +376,7 @@ examples/platform/
     platform.yaml            # GitRepository platform; ArgoCDInstances dev and prod; PromotionPath dev-to-prod; units
     web.yaml                 # ApplicationGroup web, source ../applications/web
     dev.yaml                 # Cluster dev, DeploymentTarget dev, Environment dev (follows its worktree)
-    prod.yaml                # Cluster prod, DeploymentTarget prod, Environment prod (source fromPromotion)
+    prod.yaml                # Cluster prod, DeploymentTarget prod, Environment prod (source $promotion)
     preview.yaml             # EnvironmentTemplate preview: dev cluster, shared catalog, ttl 7d
     demo.yaml                # DeploymentTarget demo: static inputs, no orchestration
   infra/network/main.tf
@@ -437,7 +437,7 @@ apiVersion: gitops.nyl/v1
 kind: Environment
 metadata: {name: prod}
 spec:
-  source: {fromPromotion: {path: dev-to-prod}}
+  source: {promotion: {path: dev-to-prod}}
   unitSelector: {matchLabels: {prod: 'true'}}      # no web-image
   values:
     target: prod
@@ -451,8 +451,8 @@ spec:
   reconciler: {argocd: {instanceRef: {name: prod}}}
   releaseInputs:
     web/web:
-      image: {fromPromotion: {value: webImage}}   # from the record that supplied prod's source
-      database: {fromUnit: {unit: database, output: connection}}
+      image: {$promotion: {value: webImage}}   # from the record that supplied prod's source
+      database: {$unit: {unit: database, output: connection}}
 ---
 # platform.yaml: one Argo CD instance per cluster with teardown-ready catalog
 # defaults; every target, inline ones included, names its instance
@@ -502,7 +502,7 @@ spec:
   source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
-    vpc_id: {fromUnit: {unit: network, output: vpcId}}   # previews: from environment dev, see below
+    vpc_id: {$unit: {unit: network, output: vpcId}}   # previews: from environment dev, see below
   outputs:
     connection: {type: object}    # host, port, secretName; never the password
   approval: {{ values.approval | tojson }}
@@ -525,8 +525,8 @@ spec:
 spec:
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      database: {fromUnit: {unit: database, output: connection}}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      database: {$unit: {unit: database, output: connection}}
 ---
 # preview.yaml
 apiVersion: gitops.nyl/v1
@@ -551,8 +551,8 @@ spec:
         values: {namespace: '{{ environment.name }}-web'}   # its own namespace; names come from the target name
         releaseInputs:
           web/web:
-            image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-            database: {fromUnit: {unit: database, output: connection}}
+            image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+            database: {$unit: {unit: database, output: connection}}
   state: {path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
   allowUnprotectedSource: true
   deletionPolicy: Teardown
@@ -572,7 +572,7 @@ spec:
   migrations on startup, which must not touch dev's data. `database` carries
   both labels and keys its backend by environment name, so previews need no
   separate unit. Its `vpc_id` variable reads
-  `{fromUnit: {environment: '{{ values.networkFrom }}', unit: network, …}}`
+  `{$unit: {environment: '{{ values.networkFrom }}', unit: network, …}}`
   when `networkFrom` is set, so previews use dev's network without running
   `network` themselves.
 - `network` and `database` store their inputs in `terraform_data` resources and
@@ -585,7 +585,7 @@ spec:
   Application and AppProject names from the target's name, and each preview
   sets its own namespace, so no preview can collide with dev or delete its
   namespace.
-- Target `demo` binds the Release's inputs with plain `value` bindings and
+- Target `demo` binds the Release's inputs with plain literal bindings and
   belongs to no environment. `render-tree --target demo` renders the same
   Release without orchestration, while `render-tree --target dev` fails and
   names `nyl build kubernetes -e dev`, because dev's bindings resolve only in
@@ -638,7 +638,7 @@ through the fenced push.
 | 4 | `nyl plan -e dev` → 2 | `network`, `web-image`, and `seed` are plannable; `database` and `kubernetes` are reported blocked on missing receipts, so the plan is incomplete |
 | 5 | `nyl reconcile -e dev` → 0 | Wave 1 runs `network`, `web-image`, `seed`; wave 2 runs `database` with `network`'s `vpcId`; wave 3 runs `kubernetes`, which publishes `dev/` with the image's digest reference and the database connection. One desired and one observed commit |
 | 6 | `nyl status -e dev` → 0 | Every unit is current; the status names the publication commit and the image reference |
-| 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference`; then `nyl publish-tree --target static` → 0 | Value forms resolve like `fromUnit`, and the published `dev/web/` files carry those two values (step 5's `mentions`). The same Release renders with static inputs in the target `static`, which no environment uses, so without orchestration: its tree carries the written image and host |
+| 7 | `nyl get output database/connection -e dev --pointer /host`, `nyl get artifact web-image/image -e dev --pointer /reference`; then `nyl publish-tree --target static` → 0 | Value forms resolve like `$unit`, and the published `dev/web/` files carry those two values (step 5's `mentions`). The same Release renders with static inputs in the target `static`, which no environment uses, so without orchestration: its tree carries the written image and host |
 | 8 | `nyl reconcile -e dev` → 0 | A repeated run executes nothing and writes no transition or publication commit; only its lease and run refs come and go |
 | 9 | Commit a change to `services/web/index.html`; reconcile → 0 | Exactly `web-image` and `kubernetes` execute |
 | 10 | Commit a comment-only change to `infra/network/main.tf`; reconcile → 0 | `network` executes; its outputs are unchanged, so `database` and `kubernetes` stay current |
@@ -793,10 +793,10 @@ then blocks exits 2.
 
 `reference/promotion` runs a project of its own: scenario 1's dev units
 (`network`, `database`, `web-image`, `kubernetes`), and prod, whose source is
-`fromPromotion: {path: dev-to-prod}`, selecting `network`, `database`, and
+`promotion: {path: dev-to-prod}`, selecting `network`, `database`, and
 `kubernetes` with its own backend and `approval: {mode: manual, bind: plan,
 requireDigest: true}` for `database`. Prod's target binds the image with a
-path-less `fromPromotion: {value: webImage}`. dev declares the
+path-less `$promotion: {value: webImage}`. dev declares the
 environment-wide attestation `qa`; `dev-to-prod` is `evidence: attested` with
 `maxAttestationAge: 1h`. S1, S2, S3 are the commits of `main` dev runs.
 
@@ -821,7 +821,7 @@ environment-wide attestation `qa`; `dev-to-prod` is `evidence: attested` with
 
 `reference/hotfix` is scenario 4's project with the hotfix pattern of the
 [promotion contract](promotion.md#hotfixes): prod's source is
-`fromPromotion: {paths: [dev-to-prod, hotfix-to-prod]}` with `release/*` in
+`promotion: {paths: [dev-to-prod, hotfix-to-prod]}` with `release/*` in
 `protectedRefs`; `prod-hotfix` follows `release/prod`, selects `web-image`
 and `kubernetes` (label `hotfix`), publishes to a target `hotfix` of its own
 on a Cluster or Argo CD instance of its own (here a Cluster, so its

@@ -23,7 +23,7 @@ spec:
     path: '{{ values.statePath }}'
   variables:
     image:
-      fromUnit: {unit: web-image, artifact: image, pointer: /reference}
+      $unit: {unit: web-image, artifact: image, pointer: /reference}
   env:
     passthrough: [DOCKER_HOST]
   outputs:

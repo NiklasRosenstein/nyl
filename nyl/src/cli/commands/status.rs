@@ -88,7 +88,7 @@ fn status(args: &StatusArgs, wiring: &Wiring<'_>) -> std::result::Result<Command
     let promoted = session
         .entry()
         .ok()
-        .and_then(|entry| entry.spec.source.and_then(|source| source.from_promotion));
+        .and_then(|entry| entry.spec.source.and_then(|source| source.promotion));
     let mut report = nyl_orchestration::shell::inspect::status_with(
         &context,
         &session.resolved.name,

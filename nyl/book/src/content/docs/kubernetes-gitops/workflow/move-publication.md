@@ -5,7 +5,7 @@ title: 'Move a Publication'
 Changing a target's `publication` (its repository, `revision`, or `pathPrefix`)
 starts a new publication. Nyl reconciles only inside the current prefix, so it
 leaves the old prefix, its catalog, and its ownership index untouched, and it
-does not carry `fromPublication` state across. `diff-tree --against source`
+does not carry `$publication` state across. `diff-tree --against source`
 warns with `publication_moved` in the pull request that makes the change.
 
 Move a target from `prod/` to `production/` on one publication branch in this

@@ -9,13 +9,16 @@ use nyl_core::orchestration::codes::{Code, Finding};
 use nyl_core::orchestration::ids::EnvironmentName;
 use serde_json::Value;
 
-/// Environments explicitly referenced by a rendered unit's bindings or dependencies.
+/// Environments explicitly referenced by a rendered unit's bindings or
+/// dependencies. A reference that does not parse orders nothing here:
+/// [`validate_available_sources`] reports it, and its environment does not
+/// run.
 pub fn dependencies(spec: &Value) -> BTreeSet<EnvironmentName> {
     if spec.get("enabled") == Some(&Value::Bool(false)) {
         return BTreeSet::new();
     }
     let mut result = BTreeSet::new();
-    if let Ok(references) = nyl_core::bindings::unit_references("", spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
+    if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
         for reference in references {
             if let Some(environment) = reference.source.environment {
                 if let Ok(name) = EnvironmentName::new(environment) {
@@ -257,38 +260,43 @@ fn check_references(
             )
         })
     };
-    if let Ok(references) = nyl_core::bindings::unit_references("", spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
-        for reference in references {
-            let Some(environment) = reference.source.environment.as_deref() else {
-                continue;
-            };
-            if environment == consumer_environment.as_str() {
-                continue;
-            }
-            let name = producer_environment(environment)?;
-            if unavailable.contains(&name) {
-                continue;
-            }
-            let producer = nyl_core::orchestration::ids::UnitName::new(&reference.source.unit).ok();
-            let Some(producer_spec) = producer_spec(sources, &name, &reference.source.unit) else {
-                return Err(Finding::new(
-                    Code::ReferenceInvalid,
-                    format!(
-                        "{at} references unit {environment}/{}, which is outside its ownership set",
-                        reference.source.unit
-                    ),
-                    "reference an enabled unit the producer Environment selects",
-                ));
-            };
-            super::references::check_spec_declaration(producer.as_ref().unwrap(), producer_spec, &reference.source)
-                .map_err(|error| {
-                    Finding::new(
-                        Code::ReferenceInvalid,
-                        format!("{at}: {error}"),
-                        "reference a declared, non-sensitive producer output",
-                    )
-                })?;
+    let references = nyl_core::bindings::unit_references("", spec).map_err(|issues| {
+        Finding::new(
+            Code::ReferenceInvalid,
+            format!("{at}: {}", issues.join("; ")),
+            "correct the reference so that it parses: a $unit names a unit and exactly one of output, artifact, and observation",
+        )
+    })?;
+    for reference in references {
+        let Some(environment) = reference.source.environment.as_deref() else {
+            continue;
+        };
+        if environment == consumer_environment.as_str() {
+            continue;
         }
+        let name = producer_environment(environment)?;
+        if unavailable.contains(&name) {
+            continue;
+        }
+        let producer = nyl_core::orchestration::ids::UnitName::new(&reference.source.unit).ok();
+        let Some(producer_spec) = producer_spec(sources, &name, &reference.source.unit) else {
+            return Err(Finding::new(
+                Code::ReferenceInvalid,
+                format!(
+                    "{at} references unit {environment}/{}, which is outside its ownership set",
+                    reference.source.unit
+                ),
+                "reference an enabled unit the producer Environment selects",
+            ));
+        };
+        super::references::check_spec_declaration(producer.as_ref().unwrap(), producer_spec, &reference.source)
+            .map_err(|error| {
+                Finding::new(
+                    Code::ReferenceInvalid,
+                    format!("{at}: {error}"),
+                    "reference a declared, non-sensitive producer output",
+                )
+            })?;
     }
     if let Ok(entries) = super::references::depends_on(spec) {
         for entry in entries {
@@ -319,6 +327,8 @@ fn check_references(
 
 /// Inputs wait for selected producers whose run failed or is waiting, or whose preceding
 /// plan would change the referenced unit. Preview outputs never become inputs.
+/// `spec` is a rendered spec whose references [`validate_available_sources`]
+/// checked, so one that does not parse never reaches here.
 pub fn blocked_references(
     spec: &Value,
     planned: &BTreeMap<EnvironmentName, BTreeSet<nyl_core::orchestration::ids::UnitName>>,
@@ -345,7 +355,7 @@ pub fn blocked_references(
         };
         reasons.push(BlockedReason::new(pointer, blocker));
     };
-    if let Ok(references) = nyl_core::bindings::unit_references("", spec, nyl_core::bindings::UNIT_REFERENCE_KINDS) {
+    if let Ok(references) = nyl_core::bindings::unit_references("", spec) {
         for binding in references {
             reference(
                 binding.source.environment.as_deref(),
@@ -405,7 +415,7 @@ mod tests {
     fn test_instance_producers_are_found_in_references_and_depends_on() {
         let instances = BTreeSet::from([name("pr-1")]);
         let by_reference =
-            json!({"values": {"vpc": {"fromUnit": {"environment": "pr-1", "unit": "network", "output": "id"}}}});
+            json!({"values": {"vpc": {"$unit": {"environment": "pr-1", "unit": "network", "output": "id"}}}});
         let by_depends_on = json!({"dependsOn": [{"environment": "pr-1", "unit": "seed"}]});
         let declared = json!({"dependsOn": [{"environment": "dev", "unit": "seed"}]});
         assert_eq!(
@@ -427,11 +437,11 @@ mod tests {
     fn test_dependencies_and_qualified_units() {
         assert_eq!(
             dependencies(
-                &json!({"values": {"vpc": {"fromUnit": {"environment": "infra", "unit": "network", "output": "id"}}}, "dependsOn": [{"environment": "dev", "unit": "seed"}]})
+                &json!({"values": {"vpc": {"$unit": {"environment": "infra", "unit": "network", "output": "id"}}}, "dependsOn": [{"environment": "dev", "unit": "seed"}]})
             ),
             BTreeSet::from([name("dev"), name("infra")])
         );
-        assert!(dependencies(&json!({"enabled": false, "dependsOn": [{"environment": "infra", "unit": "network"}], "values": {"id": {"fromUnit": {"environment": "infra", "unit": "network", "output": "id"}}}})).is_empty());
+        assert!(dependencies(&json!({"enabled": false, "dependsOn": [{"environment": "infra", "unit": "network"}], "values": {"id": {"$unit": {"environment": "infra", "unit": "network", "output": "id"}}}})).is_empty());
         let selected = vec!["dev".to_owned(), "prod".to_owned()];
         assert_eq!(
             units(

@@ -49,7 +49,7 @@ behavior `render`, `diff`, and `apply` share.
 
 ### Source and Capability Options
 
-- `--offline` - Resolve Git charts from cached refs and read `fromPublication` Release inputs at the cached publication branch head, as with `render-tree --offline`.
+- `--offline` - Resolve Git charts from cached refs and read `$publication` Release inputs at the cached publication branch head, as with `render-tree --offline`.
 - `--kube-version <KUBE_VERSION>` - Kubernetes version for a targetless render of Helm charts. With `--target`, the Cluster's committed capabilities apply.
 - `--kube-api-versions <KUBE_API_VERSIONS>` - Kubernetes API versions for a targetless render, comma-separated or repeated.
 - `--context <CONTEXT>` - Without GitOps configuration, render with this kube context's live Kubernetes version and API versions, in place of `--kube-version` and `--kube-api-versions`. With a DeploymentTarget, `render` uses the Cluster's committed capabilities, never connects (except for `--lookup=live`, where `--context` selects how to reach the Cluster), and otherwise ignores the flag with a warning.

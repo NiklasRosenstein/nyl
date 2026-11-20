@@ -34,7 +34,7 @@ const TOKEN: &str = "argocd-api-token";
 fn real() -> KubernetesPublicationDriver {
     let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
     descriptors.extend_from_slice(nyl_units::catalog::RESOURCES);
-    KubernetesPublicationDriver::new(nyl_render::config::ResourceCatalogue::new(descriptors))
+    KubernetesPublicationDriver::new(nyl_render::config::ResourceCatalogue(descriptors))
 }
 
 fn identity() -> CommitIdentity {

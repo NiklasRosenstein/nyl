@@ -23,10 +23,10 @@ spec:
   source: {path: ../infra/database}
   backend: {path: '{{ values.backendDir }}/{{ environment.name }}-database.tfstate'}
   variables:
-    vpc_id: {fromUnit: {unit: network, output: vpcId}}
+    vpc_id: {$unit: {unit: network, output: vpcId}}
   outputs:
     connection: {type: object}
-  approval: {fromValues: {pointer: /approval}}
+  approval: {$environment: /approval}
   timeout: 60m
 ---
 apiVersion: units.gitops.nyl/v1
@@ -46,6 +46,6 @@ metadata:
   name: kubernetes
   labels: {dev: 'true', prod: 'true'}
 spec:
-  target: {fromValues: {pointer: /target}}
+  target: {$environment: /target}
   teardownWait: {strategy: manual}
   timeout: 10m

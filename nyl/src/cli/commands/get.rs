@@ -4,7 +4,7 @@
 //! State forms read one snapshot through a read-only store and never take
 //! the lease. Document and table forms exit 0 whenever they can read the
 //! requested state; `get output`, `get artifact`, and `get observation` resolve like the
-//! matching `fromUnit` reference and exit 1 when it would not resolve.
+//! matching `$unit` reference and exit 1 when it would not resolve.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -79,11 +79,11 @@ enum GetCommand {
     Units(GetUnitsArgs),
     /// Get one unit's persisted desired and observed documents.
     Unit(GetUnitArgs),
-    /// Get a unit output's value, resolved like a fromUnit reference.
+    /// Get a unit output's value, resolved like a $unit reference.
     Output(GetValueArgs),
-    /// Get an artifact or a value inside it, resolved like a fromUnit reference.
+    /// Get an artifact or a value inside it, resolved like a $unit reference.
     Artifact(GetValueArgs),
-    /// Get an observed value, resolved like a fromUnit reference.
+    /// Get an observed value, resolved like a $unit reference.
     Observation(GetValueArgs),
     /// Get the artifacts of the units' latest receipts.
     Artifacts(GetStateArgs),
@@ -188,7 +188,7 @@ struct GetValueArgs {
     #[command(flatten)]
     state: StateOptions,
 
-    /// A JSON Pointer inside the value; for artifacts relative to the spec, as in fromUnit.
+    /// A JSON Pointer inside the value; for artifacts relative to the spec, as in $unit.
     #[arg(long)]
     pointer: Option<String>,
 
@@ -540,7 +540,7 @@ enum ValueKind {
 }
 
 /// `nyl get output`, `get artifact`, and `get observation`: one value,
-/// resolved like `fromUnit`; `now` judges an observed value's `maxAge`.
+/// resolved like `$unit`; `now` judges an observed value's `maxAge`.
 fn value_form(
     args: &GetValueArgs,
     kind: ValueKind,

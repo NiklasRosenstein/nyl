@@ -46,7 +46,7 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
@@ -63,7 +63,7 @@ spec:
     pathPrefix: prod
   releaseInputs:
     web/web:
-      image: {fromPromotion: {value: webImage}}
+      image: {$promotion: {value: webImage}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -84,7 +84,7 @@ metadata:
   name: prod
 spec:
   source:
-    fromPromotion:
+    promotion:
       path: dev-to-prod
       record: source                  # nyl promote writes the record here, into main
   unitSelector:

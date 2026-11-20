@@ -1,4 +1,4 @@
-//! The one resolver of `fromUnit` references.
+//! The one resolver of `$unit` references.
 //!
 //! Contract: [References](../../../../design/orchestration-core.md#references),
 //! [Desired unit](../../../../design/orchestration-core.md#desired-unit)
@@ -138,7 +138,7 @@ pub struct ReferenceView<'a> {
     /// which consumers requiring evidence read (see [`super::evidence`]).
     pub attestations: &'a BTreeMap<UnitName, BTreeMap<String, Attestation>>,
     /// The observed values recorded for the latest receipts, overlaid
-    /// likewise, which `fromUnit: {unit, observation}` references read (see
+    /// likewise, which `$unit: {unit, observation}` references read (see
     /// [`super::observed_values`]).
     pub observations: &'a BTreeMap<UnitName, ObservationRecord>,
     /// The time observed values' `maxAge` is judged at.
@@ -152,7 +152,7 @@ pub struct ReferenceView<'a> {
     /// [`resolve_unit`] keeps where it still cites the same receipt.
     pub previous: &'a BTreeMap<UnitName, DesiredUnit>,
     /// The PromotionRecords of the environment's desired state, which
-    /// `fromPromotion` bindings read.
+    /// `$promotion` bindings read.
     pub promotions: &'a BTreeMap<
         nyl_core::orchestration::ids::PromotionPathName,
         nyl_core::orchestration::promotion::PromotionRecord,
@@ -655,7 +655,7 @@ impl Providers for ViewProviders<'_, '_> {
 }
 
 impl ViewProviders<'_, '_> {
-    /// The record a `fromPromotion` binding reads
+    /// The record a `$promotion` binding reads
     /// ([`super::sources::binding_supplier`]): with `path`, that path's;
     /// without it, in an environment whose source is promoted, the record
     /// that supplied the source commit, and otherwise the newest record that
@@ -686,7 +686,7 @@ pub fn resolve_unit(view: &ReferenceView<'_>, unit: &DesiredUnit) -> Resolution 
         "spec",
         "",
         &unit.spec,
-        nyl_core::bindings::UNIT_REFERENCE_KINDS,
+        nyl_core::bindings::Context::UnitExecution.into(),
         &providers,
         &mut issues,
     );
@@ -1082,7 +1082,7 @@ mod tests {
         ));
         let resolution = resolve_unit(
             &world.view(),
-            &consumer(&json!({"vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}}})),
+            &consumer(&json!({"vpc": {"$unit": {"unit": "network", "output": "vpcId"}}})),
         );
         assert_eq!(resolution.resolved_spec, None);
         assert_eq!(
@@ -1109,14 +1109,14 @@ mod tests {
         json!({"value": value, "select": {"unit": "web-image", "input": "/repository"}})
     }
 
-    /// A `fromPromotion` binding reads the record of its `path`; without a
+    /// A `$promotion` binding reads the record of its `path`; without a
     /// path it reads the newest record that carries the value, and in a
     /// promoted environment the record that supplied its source; a value no
     /// record carries blocks the consumer with the fix. Catches a binding
     /// that reads another path's value, an older record winning, or a
     /// missing promotion failing instead of waiting.
     #[test]
-    fn test_from_promotion_bindings_read_records_and_block_without_one() {
+    fn test_promotion_bindings_read_records_and_block_without_one() {
         let mut world = World::new();
         for record in [
             promoted("dev-to-prod", 1, &json!({"image": promoted_value("old")})),
@@ -1128,7 +1128,7 @@ mod tests {
         let read = |world: &World, source_paths: Option<&BTreeSet<String>>, reference: Value| {
             let mut view = world.view();
             view.source_paths = source_paths;
-            resolve_unit(&view, &consumer(&json!({"image": {"fromPromotion": reference}})))
+            resolve_unit(&view, &consumer(&json!({"image": {"$promotion": reference}})))
         };
         let value = |resolution: Resolution| resolution.resolved_spec.map(|spec| spec["variables"]["image"].clone());
         assert_eq!(
@@ -1207,7 +1207,7 @@ mod tests {
     #[test]
     fn test_resolve_unit_keeps_a_stable_citation() {
         let mut world = World::new();
-        let unit = consumer(&json!({"vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}}}));
+        let unit = consumer(&json!({"vpc": {"$unit": {"unit": "network", "output": "vpcId"}}}));
         // Run R1 produced network and resolved database against it.
         world.produced_in_run.insert(name("network"));
         let first = resolve_unit(&world.view(), &unit);
@@ -1340,8 +1340,8 @@ mod tests {
             json!({
                 "dependsOn": ["network", {"unit": "cache"}],
                 "variables": {
-                    "vpc": {"fromUnit": {"unit": "network", "output": "vpcId"}},
-                    "bad": {"fromUnit": {"unit": "network", "output": "nope"}},
+                    "vpc": {"$unit": {"unit": "network", "output": "vpcId"}},
+                    "bad": {"$unit": {"unit": "network", "output": "nope"}},
                 },
             }),
             "database",
@@ -1396,7 +1396,7 @@ mod tests {
         );
     }
 
-    /// Catches a `fromUnit` with `evidence: attested` or named attestations
+    /// Catches a `$unit` with `evidence: attested` or named attestations
     /// resolving on a bare receipt, or a failing, replaced, or missing
     /// attestation not blocking it: the value arrives only once every
     /// required attestation of the current receipt passes, and each way
@@ -1668,7 +1668,7 @@ mod tests {
     }
 
     /// Catches a dependent that cannot gate on an external attestation: a
-    /// `fromUnit` requiring `qa` (declared `from: external`), by name or
+    /// `$unit` requiring `qa` (declared `from: external`), by name or
     /// through `evidence: attested`, waits as pending while nothing is
     /// recorded for the current receipt, as failing for a recorded `fail`
     /// (also from another environment), and resolves once a pass for the
@@ -1733,9 +1733,9 @@ mod tests {
             "smoke",
             "Command",
             json!({"variables": {
-                "a": {"fromUnit": {"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["nope"]}},
-                "b": {"fromUnit": {"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["helthy"]}},
-                "c": {"fromUnit": {"environment": "elsewhere", "unit": "network", "output": "vpcId"}},
+                "a": {"$unit": {"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["nope"]}},
+                "b": {"$unit": {"environment": "infra", "unit": "network", "output": "vpcId", "attestations": ["helthy"]}},
+                "c": {"$unit": {"environment": "elsewhere", "unit": "network", "output": "vpcId"}},
             }}),
             "smoke",
         );
@@ -1902,7 +1902,7 @@ mod tests {
     fn test_resolve_unit_keeps_the_citation_of_an_unchanged_observed_value() {
         let mut world = World::new();
         observing(&mut world, &recorded_values());
-        let reader = json!({"values": {"address": {"fromUnit": {"unit": "kubernetes", "observation": "ip"}}}});
+        let reader = json!({"values": {"address": {"$unit": {"unit": "kubernetes", "observation": "ip"}}}});
         let unit = desired("dns", "Command", reader, "dns");
         let first = resolve_unit(&world.view(), &unit);
         let pointer = nyl_core::orchestration::ids::JsonPointer::new("/values/address").unwrap();

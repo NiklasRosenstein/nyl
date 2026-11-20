@@ -43,8 +43,8 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -89,5 +89,5 @@ spec:
     pathPrefix: static
   releaseInputs:
     web/web:
-      image: {value: 'registry.example.invalid/web@sha256:0000000000000000000000000000000000000000000000000000000000000000'}
-      databaseHost: {value: db.static.example.invalid}
+      image: 'registry.example.invalid/web@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+      databaseHost: db.static.example.invalid

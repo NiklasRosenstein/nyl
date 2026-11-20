@@ -14,127 +14,142 @@ use crate::resources::{schema, validate_relative_path};
 use crate::resources::{DenyUnknownFields, GitSource};
 use crate::{CoreError, Result};
 
-/// Where one Release input's value comes from. Set exactly one field.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(transform = input_binding_constraints)]
-pub struct InputBinding {
-    /// Inline literal value. DeploymentTargets are static, so it is never templated.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
-    pub value: Option<Value>,
-    /// A YAML or JSON file of this repository.
-    #[serde(default, rename = "fromFile", skip_serializing_if = "Option::is_none")]
-    pub from_file: Option<FileInputSource>,
-    /// A YAML or JSON file of a Git repository at a locked commit.
-    #[serde(default, rename = "fromGit", skip_serializing_if = "Option::is_none")]
-    pub from_git: Option<GitInputSource>,
-    /// A state file in this target's publication branch, read at the publication base commit.
-    #[serde(default, rename = "fromPublication", skip_serializing_if = "Option::is_none")]
-    pub from_publication: Option<PublicationInputSource>,
-    /// Reserved for orchestration: a recorded unit output or artifact field. Rejected outside orchestrated execution.
-    #[serde(default, rename = "fromUnit", skip_serializing_if = "Option::is_none")]
-    pub from_unit: Option<UnitInputSource>,
-    /// Reserved for orchestration: a value recorded through a PromotionPath. Rejected outside orchestrated execution.
-    #[serde(default, rename = "fromPromotion", skip_serializing_if = "Option::is_none")]
-    pub from_promotion: Option<PromotionInputSource>,
-}
+/// Where one Release input's value comes from: a literal, or a value source
+/// (`$file`, `$git`, `$publication`, `$unit`, `$promotion`, `$literal`).
+///
+/// A bare value is the input's value. An object whose only key is a source
+/// reads the value from it, and sources inside a literal are resolved too,
+/// at any depth ([`super::resolve_binding`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InputBinding(pub Value);
 
-/// The source a binding selects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingKind {
-    /// `value`
-    Value,
-    /// `fromFile`
-    FromFile,
-    /// `fromGit`
-    FromGit,
-    /// `fromPublication`
-    FromPublication,
-    /// `fromUnit`
-    FromUnit,
-    /// `fromPromotion`
-    FromPromotion,
-}
-
-impl BindingKind {
-    /// The field name as authored.
-    pub fn field(self) -> &'static str {
-        match self {
-            Self::Value => "value",
-            Self::FromFile => "fromFile",
-            Self::FromGit => "fromGit",
-            Self::FromPublication => "fromPublication",
-            Self::FromUnit => "fromUnit",
-            Self::FromPromotion => "fromPromotion",
-        }
+/// The schema offers each source a binding accepts, for editors to complete,
+/// next to any literal: the context table's Release-input bindings.
+impl JsonSchema for InputBinding {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "InputBinding".into()
     }
 
-    /// Whether only orchestrated execution may resolve this kind.
-    pub fn requires_orchestration(self) -> bool {
-        matches!(self, Self::FromUnit | Self::FromPromotion)
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let source = |key: &str, description: &str, body: schemars::Schema| {
+            schemars::json_schema!({
+                "type": "object",
+                "description": description,
+                "properties": {key: body},
+                "required": [key],
+                "additionalProperties": false,
+            })
+        };
+        schemars::json_schema!({
+            "description": "The input's value: a literal, or a value source that reads it. See https://niklasrosenstein.github.io/nyl/reference/value-sources/.",
+            "anyOf": [
+                source("$file", "Reads the value from a YAML or JSON file of this repository.", generator.subschema_for::<FileInputSource>()),
+                source("$git", "Reads the value from a file of a Git repository at a locked commit.", generator.subschema_for::<GitInputSource>()),
+                source("$publication", "Reads the value from a state file in this target's publication branch.", generator.subschema_for::<PublicationInputSource>()),
+                source("$unit", "Reads a unit's output, artifact, or observed value; resolved by orchestration.", generator.subschema_for::<UnitInputSource>()),
+                source("$promotion", "Reads a value recorded through a PromotionPath; resolved by orchestration.", generator.subschema_for::<PromotionInputSource>()),
+                source("$literal", "The content, verbatim, even when it looks like a value source.", schemars::json_schema!(true)),
+                {"description": "A literal value."},
+            ],
+        })
     }
 }
 
 impl InputBinding {
-    /// The single source this binding sets.
-    pub fn kind(&self, field: &str) -> Result<BindingKind> {
-        let set = [
-            (self.value.is_some(), BindingKind::Value),
-            (self.from_file.is_some(), BindingKind::FromFile),
-            (self.from_git.is_some(), BindingKind::FromGit),
-            (self.from_publication.is_some(), BindingKind::FromPublication),
-            (self.from_unit.is_some(), BindingKind::FromUnit),
-            (self.from_promotion.is_some(), BindingKind::FromPromotion),
-        ]
-        .into_iter()
-        .filter_map(|(present, kind)| present.then_some(kind))
-        .collect::<Vec<_>>();
-        match set.as_slice() {
-            [kind] => Ok(*kind),
-            [] => Err(CoreError::config(format!(
-                "{field} must set exactly one of value, fromFile, fromGit, fromPublication, fromUnit, or fromPromotion"
-            ))),
-            _ => Err(CoreError::config(format!(
-                "{field} sets {}; set exactly one source",
-                set.iter().map(|kind| kind.field()).collect::<Vec<_>>().join(" and ")
-            ))),
-        }
+    /// A binding of the literal `value`.
+    pub fn literal(value: Value) -> Self {
+        Self(value)
     }
 
-    /// Validate the static form of this binding.
+    /// The binding as written.
+    pub fn value(&self) -> &Value {
+        &self.0
+    }
+
+    /// The source the whole binding is, if it is one and parses.
+    pub fn clause(&self) -> Option<super::Clause> {
+        let fields = self.0.as_object()?;
+        let source = super::clause_key(fields).ok()??;
+        super::Clause::parse("binding", source, &fields[source.key()]).ok()
+    }
+
+    /// Every value source of the binding, at any depth, with its JSON Pointer
+    /// inside the binding; empty for a binding that does not validate.
+    pub fn clauses(&self) -> Vec<super::FoundClause> {
+        super::find_clauses("binding", "", &self.0, super::Context::ReleaseInputs.into()).unwrap_or_default()
+    }
+
+    /// Whether only orchestrated execution resolves this binding: it holds a
+    /// `$unit` or `$promotion` source.
+    pub fn requires_orchestration(&self) -> bool {
+        self.clauses()
+            .iter()
+            .any(|found| found.clause.source().requires_orchestration())
+    }
+
+    /// The `$file` sources of the binding.
+    pub fn files(&self) -> Vec<FileInputSource> {
+        self.clauses()
+            .into_iter()
+            .filter_map(|found| match found.clause {
+                super::Clause::File(source) => Some(source),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `$git` sources of the binding, with their pointers inside it.
+    pub fn git_sources(&self) -> Vec<(String, GitInputSource)> {
+        self.clauses()
+            .into_iter()
+            .filter_map(|found| match found.clause {
+                super::Clause::Git(source) => Some((found.pointer, source)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `$publication` sources of the binding.
+    pub fn publications(&self) -> Vec<PublicationInputSource> {
+        self.clauses()
+            .into_iter()
+            .filter_map(|found| match found.clause {
+                super::Clause::Publication(source) => Some(source),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `$unit` sources of the binding.
+    pub fn units(&self) -> Vec<UnitInputSource> {
+        self.clauses()
+            .into_iter()
+            .filter_map(|found| match found.clause {
+                super::Clause::Unit(source) => Some(source),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Validate the static form of this binding at `field`: every source in
+    /// it parses and is valid in a binding, and a binding that orchestration
+    /// resolves reads nothing rendering resolves.
     pub fn validate(&self, field: &str) -> Result<()> {
-        match self.kind(field)? {
-            BindingKind::Value | BindingKind::FromPromotion => Ok(()),
-            BindingKind::FromUnit => {
-                let source = self.from_unit.as_ref().expect("kind agrees with the set field");
-                match (&source.output, &source.artifact, &source.observation) {
-                    (Some(_), None, None) | (None, Some(_), None) | (None, None, Some(_)) => {}
-                    _ => {
-                        return Err(CoreError::config(format!(
-                            "{field}.fromUnit must set exactly one of output, artifact, and observation"
-                        )))
-                    }
-                }
-                source.pointer.as_deref().map_or(Ok(()), |pointer| {
-                    crate::json_pointer::validate(&format!("{field}.fromUnit.pointer"), pointer)
-                })
-            }
-            BindingKind::FromFile => {
-                let source = self.from_file.as_ref().expect("kind agrees with the set field");
-                crate::local_path::validate_local_path(&format!("{field}.fromFile.path"), &source.path)?;
-                crate::json_pointer::validate(&format!("{field}.fromFile.pointer"), &source.pointer)
-            }
-            BindingKind::FromGit => self
-                .from_git
-                .as_ref()
-                .expect("kind agrees with the set field")
-                .validate(&format!("{field}.fromGit")),
-            BindingKind::FromPublication => self
-                .from_publication
-                .as_ref()
-                .expect("kind agrees with the set field")
-                .validate(&format!("{field}.fromPublication")),
+        let found = super::find_clauses(field, "", &self.0, super::Context::ReleaseInputs.into())
+            .map_err(|issues| CoreError::config(issues.join("; ")))?;
+        let orchestrated = found.iter().any(|found| found.clause.source().requires_orchestration());
+        if let Some(rendered) = found
+            .iter()
+            .find(|found| orchestrated && !found.clause.source().requires_orchestration())
+        {
+            return Err(CoreError::config(format!(
+                "{} holds a {} source in a binding that orchestration resolves; a binding reads either $unit and $promotion, or sources rendering reads, so split the value into two inputs",
+                rendered.field,
+                rendered.clause.source().key()
+            )));
         }
+        Ok(())
     }
 }
 
@@ -147,6 +162,14 @@ pub struct FileInputSource {
     /// JSON Pointer selecting the value inside the document; the whole document when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pointer: String,
+}
+
+impl FileInputSource {
+    /// Validate the static form of this source.
+    pub fn validate(&self, field: &str) -> Result<()> {
+        crate::local_path::validate_local_path(&format!("{field}.path"), &self.path)?;
+        crate::json_pointer::validate(&format!("{field}.pointer"), &self.pointer)
+    }
 }
 
 /// A value read from a file of a Git repository at a locked commit.
@@ -228,8 +251,8 @@ impl PublicationInputSource {
     }
 }
 
-/// `fromUnit.environment` once its document is resolved: a name. A
-/// `fromValues` clause reaches deserialization only where nothing resolves
+/// `$unit.environment` once its document is resolved: a name. An
+/// `$environment` source reaches deserialization only where nothing resolves
 /// it, such as a declared DeploymentTarget, so it fails with where it works.
 fn environment_name<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
 where
@@ -238,29 +261,30 @@ where
     match Value::deserialize(deserializer)? {
         Value::String(name) => Ok(Some(name)),
         Value::Null => Ok(None),
-        Value::Object(object) if object.len() == 1 && object.contains_key(<super::FromValues as super::SourceKind>::FIELD) => {
-            Err(serde::de::Error::custom(
-                "fromUnit.environment holds a fromValues clause, which resolves only in unit documents (including an inline target of a KubernetesPublication); write the environment name here, see https://niklasrosenstein.github.io/nyl/reference/value-sources/#unit-fields-fromvalues",
-            ))
+        Value::Object(object) if object.len() == 1 && object.contains_key(super::Source::Environment.key()) => {
+            Err(serde::de::Error::custom(format!(
+                "environment holds an $environment source, which resolves only in unit documents (including an inline target of a KubernetesPublication unit); write the environment name here (see {})",
+                super::VALUE_SOURCES_DOCS
+            )))
         }
         other => Err(serde::de::Error::custom(format!(
-            "fromUnit.environment must be an environment name, got {}",
+            "environment must be an environment name, got {}",
             super::json_type_name(&other)
         ))),
     }
 }
 
-/// Reserved orchestration reference to a unit output or artifact field.
+/// `$unit`: a unit's output, artifact, or observed value, which orchestration
+/// resolves from the producer's current receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnitInputSource {
-    /// Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `fromValues`, resolved when the unit renders.
+    /// Environment of the unit, for cross-environment references. In a unit document, including an inline target's bindings, accepts `$environment`, resolved when the unit renders.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "environment_name"
     )]
-    #[schemars(with = "super::Resolvable<Option<String>, super::FromValues>")]
     pub environment: Option<String>,
     /// Producing unit name.
     pub unit: String,
@@ -287,7 +311,25 @@ pub struct UnitInputSource {
     pub attestations: Vec<String>,
 }
 
-/// Reserved orchestration reference to a promoted value.
+impl UnitInputSource {
+    /// Validate the static form of this source at `field`.
+    pub fn validate(&self, field: &str) -> Result<()> {
+        match (&self.output, &self.artifact, &self.observation) {
+            (Some(_), None, None) | (None, Some(_), None) | (None, None, Some(_)) => {}
+            _ => {
+                return Err(CoreError::config(format!(
+                    "{field} must set exactly one of output, artifact, and observation"
+                )))
+            }
+        }
+        self.pointer.as_deref().map_or(Ok(()), |pointer| {
+            crate::json_pointer::validate(&format!("{field}.pointer"), pointer)
+        })
+    }
+}
+
+/// `$promotion`: a value recorded through a PromotionPath, which
+/// orchestration resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionInputSource {
@@ -296,36 +338,6 @@ pub struct PromotionInputSource {
     /// PromotionPath the value must come from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-}
-
-fn input_binding_constraints(schema: &mut schemars::Schema) {
-    schema::exclusive_fields(
-        schema,
-        &[
-            ("value", "Binds an inline literal value."),
-            (
-                "fromFile",
-                "Reads the value from a YAML or JSON file of this repository.",
-            ),
-            (
-                "fromGit",
-                "Reads the value from a file of a Git repository at a locked commit.",
-            ),
-            (
-                "fromPublication",
-                "Reads the value from a state file in this target's publication branch.",
-            ),
-            (
-                "fromUnit",
-                "Reserved for orchestration: reads a recorded unit output or artifact field.",
-            ),
-            (
-                "fromPromotion",
-                "Reserved for orchestration: reads a value recorded through a PromotionPath.",
-            ),
-        ],
-        None,
-    );
 }
 
 /// Deserialize a present field as `Some`, even when it is `null`, so `null`
@@ -344,19 +356,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_binding_sets_exactly_one_source() {
-        let binding: InputBinding = serde_json::from_value(json!({"value": null})).unwrap();
-        assert_eq!(binding.kind("b").unwrap(), BindingKind::Value);
-        let binding: InputBinding = serde_json::from_value(json!({})).unwrap();
-        assert!(binding.kind("b").unwrap_err().to_string().contains("exactly one"));
-        let binding: InputBinding =
-            serde_json::from_value(json!({"value": 1, "fromFile": {"path": "a.yaml"}})).unwrap();
-        assert!(binding
-            .kind("b")
+    fn test_binding_is_a_literal_or_a_source() {
+        let binding = InputBinding(json!({"$promotion": {"value": "image"}}));
+        assert!(binding.requires_orchestration());
+        assert_eq!(binding.clause().unwrap().source(), crate::bindings::Source::Promotion);
+        let literal = InputBinding(json!({"tag": "v1"}));
+        assert!(literal.clause().is_none());
+        literal.validate("b").unwrap();
+        let nested = InputBinding(json!({"tag": {"$unit": {"unit": "build", "output": "tag"}}}));
+        assert!(nested.requires_orchestration());
+        assert!(nested.clause().is_none());
+    }
+
+    /// Catches a binding that would need both rendering and orchestration to
+    /// resolve it, which neither can.
+    #[test]
+    fn test_binding_mixing_render_and_run_sources_is_rejected() {
+        let binding = InputBinding(json!({
+            "a": {"$unit": {"unit": "build", "output": "tag"}},
+            "b": {"$file": {"path": "x.yaml"}},
+        }));
+        let error = binding.validate("b").unwrap_err().to_string();
+        assert!(
+            error.contains("b.b holds a $file source in a binding that orchestration resolves"),
+            "{error}"
+        );
+        let error = InputBinding(json!({"$environment": "/x"}))
+            .validate("b")
             .unwrap_err()
-            .to_string()
-            .contains("value and fromFile"));
-        let binding: InputBinding = serde_json::from_value(json!({"fromPromotion": {"value": "image"}})).unwrap();
-        assert!(binding.kind("b").unwrap().requires_orchestration());
+            .to_string();
+        assert!(error.starts_with("b holds a $environment source"), "{error}");
     }
 }

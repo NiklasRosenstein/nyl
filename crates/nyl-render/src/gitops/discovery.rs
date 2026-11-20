@@ -73,7 +73,7 @@ pub struct GitOpsInventory {
     /// `project_root` (see [`crate::util::project_path`]).
     pub worktree_yaml_files: Vec<PathBuf>,
     /// Every eligible YAML and JSON file in the worktree, relative to
-    /// `worktree_root`: the files a `fromFile` Release input binding may read,
+    /// `worktree_root`: the files a `$file` Release input binding may read,
     /// under the same Git visibility rule as discovery.
     pub worktree_data_files: BTreeSet<PathBuf>,
     /// Compiler resources keyed by their static kind and local name.
@@ -538,17 +538,26 @@ fn discover_document(
         let (api_version, kind, name) = scan_static_envelope_fields(document);
         serde_json::json!({"apiVersion": api_version, "kind": kind, "metadata": {"name": name}})
     });
-    nyl_core::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.resources).map_err(
-        |error| {
-            NylError::config(format!(
-                "{} document {}: {error}",
-                relative_path.display(),
-                document_index + 1
-            ))
-        },
-    )?;
+    nyl_core::resources::schema::validate_resource_api_with_catalog(&envelope, &catalogue.0).map_err(|error| {
+        NylError::config(format!(
+            "{} document {}: {error}",
+            relative_path.display(),
+            document_index + 1
+        ))
+    })?;
     if !advertises_gitops_api(document) {
         return Ok(None);
+    }
+    // Discovery and selection read these fields before anything resolves.
+    if let Some(issue) = parsed
+        .as_ref()
+        .and_then(|parsed| nyl_core::bindings::literal_field_issues(parsed).into_iter().next())
+    {
+        return Err(NylError::config(format!(
+            "{} document {}: {issue}",
+            relative_path.display(),
+            document_index + 1
+        )));
     }
     let scanned_identity = scan_static_identity(document)?;
     if advertises_release_kind(document) {

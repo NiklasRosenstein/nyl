@@ -58,9 +58,9 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
     web/api:
-      image: {fromUnit: {unit: api-image, artifact: image, pointer: /reference}}
+      image: {$unit: {unit: api-image, artifact: image, pointer: /reference}}
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
@@ -77,9 +77,9 @@ spec:
     pathPrefix: staging
   releaseInputs:
     web/web:
-      image: {fromPromotion: {path: dev-to-staging, value: webImage}}
+      image: {$promotion: {path: dev-to-staging, value: webImage}}
     web/api:
-      image: {fromPromotion: {path: dev-to-staging, value: apiImage}}
+      image: {$promotion: {path: dev-to-staging, value: apiImage}}
 ---
 apiVersion: k8s.gitops.nyl/v1
 kind: DeploymentTarget
@@ -96,9 +96,9 @@ spec:
     pathPrefix: prod
   releaseInputs:
     web/web:
-      image: {fromPromotion: {value: webImage}}
+      image: {$promotion: {value: webImage}}
     web/api:
-      image: {fromPromotion: {value: apiImage}}
+      image: {$promotion: {value: apiImage}}
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -130,7 +130,7 @@ metadata:
   name: prod
 spec:
   source:
-    fromPromotion: {path: dev-to-prod}
+    promotion: {path: dev-to-prod}
   unitSelector:
     matchLabels: {prod: 'true'}
   values: {target: prod}

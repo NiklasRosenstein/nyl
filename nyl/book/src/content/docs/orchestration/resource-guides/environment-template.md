@@ -86,20 +86,20 @@ syntax renders once, when an instance is created or loaded, with `params` and
 `environment.name`. A unit then sees the rendered values, so a `values.target`
 object that declares a publication's inline target can name its prefix after
 the instance, and a unit places it with
-[`target: {fromValues: {pointer: /target}}`](/nyl/reference/value-sources/#unit-fields-fromvalues),
+[`target: {$environment: /target}`](/nyl/reference/value-sources/#environment),
 which takes the object as rendered and never templates it again. The same
-clause in a `fromUnit` reference's `environment` lets an instance read another
+source in a `$unit` reference's `environment` lets an instance read another
 environment's unit where a declared environment reads its own:
 
 ```yaml
 variables:
-  vpc_id: {fromUnit: {unit: network, output: vpcId, environment: {fromValues: {pointer: /networkFrom, optional: true}}}}
+  vpc_id: {$unit: {unit: network, output: vpcId, environment: {$environment: {pointer: /networkFrom, optional: true}}}}
 ```
 
 A string renders to a string. Where a value needs a parameter's own type, such
 as a boolean or an integer, write
-[`{fromParameter: {name, pointer?}}`](/nyl/reference/value-sources/#template-parameters-fromparameter)
-in its place, at any depth of `values`, also inside an inline target's
+[`{$parameter: name}`](/nyl/reference/value-sources/#parameter) (or
+`{$parameter: {name, pointer?}}`) in its place, at any depth of `values`, also inside an inline target's
 bindings:
 
 ```yaml
@@ -113,20 +113,22 @@ spec:
         # …
         releaseInputs:
           rise/rise:
-            clusterWide: {value: {fromParameter: {name: crds}}}
+            clusterWide: {$parameter: crds}
 ```
 
-The clause is replaced by the instance's bound parameter, checked against its
+The source is replaced by the instance's bound parameter, checked against its
 declaration when `--param` is parsed and defaulted as declared, after the
 strings render and before any unit reads the values. `--param crds=true` gives
-the binding `{value: true}`, a boolean the Release's `boolean` input accepts.
-A clause that names a parameter the template does not declare fails with
+the binding `true`, a boolean the Release's `boolean` input accepts. Other
+sources in the values, such as a `$unit` binding of the inline target, are
+carried to where the values land and resolve there.
+A `$parameter` that names a parameter the template does not declare fails with
 `NYL-TEMPLATE-INVALID`, naming the declared ones. Only a template's `values`
-take the clause.
+resolve `$parameter`; anywhere else it is an error that says so.
 
 [`nyl validate`](/nyl/reference/cli/validate/) renders the units of sample
 instances of every template, so a pointer the template's values lack, or a
-`fromParameter` that names an undeclared parameter, fails before any instance
+`$parameter` that names an undeclared parameter, fails before any instance
 exists.
 
 `state` is different: it locates the `state.yaml` that holds the parameters,
@@ -515,12 +517,12 @@ is `catalog:<name>`, so no instance writes outside its prefix.
 
 An instance's units read units of a declared environment, such as dev's network,
 with the cross-environment references that
-[`fromUnit` and `dependsOn`](/nyl/orchestration/runs/#multi-environment-runs)
+[`$unit` and `dependsOn`](/nyl/orchestration/runs/#multi-environment-runs)
 define:
 
 ```yaml
 variables:
-  vpc_id: {fromUnit: {environment: dev, unit: network, output: vpcId}}
+  vpc_id: {$unit: {environment: dev, unit: network, output: vpcId}}
 ```
 
 The instance's unit waits, exit 2, until dev's `network` has a current receipt,

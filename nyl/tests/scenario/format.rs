@@ -594,7 +594,7 @@ pub struct PromotionExpectation {
     pub path: String,
     /// Where the record was written: `state` (default), the target
     /// environment's `desired/promotions/<path>.yaml`, or `source`, the
-    /// Environment's `source.fromPromotion.promoted` block on the branch the
+    /// Environment's `source.promotion.promoted` block on the branch the
     /// step ran at.
     #[serde(default)]
     pub record: RecordLocation,

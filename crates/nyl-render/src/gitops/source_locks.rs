@@ -1,7 +1,7 @@
 //! Source locks: groups, Release inputs, unit sources and named contexts,
 //! and Environment sources, refreshed together by `nyl update source-locks`.
 //!
-//! Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds).
+//! Contract: [`$git`](../../../../design/release-inputs.md#binding-kinds).
 //!
 //! - Every lock moves to the head of its revision. Moving a lock to what
 //!   another target runs is promotion, not a lock update.
@@ -26,8 +26,15 @@ use super::GitOpsInventory;
 pub enum LockOwner {
     /// `ApplicationGroup.spec.source.commit`.
     ApplicationGroup { name: String },
-    /// `DeploymentTarget.spec.releaseInputs.<key>.<input>.fromGit.commit`.
-    ReleaseInput { target: String, key: String, input: String },
+    /// `DeploymentTarget.spec.releaseInputs.<key>.<input>…$git.commit`, where
+    /// `at` holds the keys from the binding to its `$git` source: none when
+    /// the binding is the source.
+    ReleaseInput {
+        target: String,
+        key: String,
+        input: String,
+        at: Vec<String>,
+    },
     /// A unit or Environment Git source field, addressed by its document path.
     Source {
         kind: String,
@@ -40,7 +47,9 @@ impl std::fmt::Display for LockOwner {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApplicationGroup { name } => write!(formatter, "ApplicationGroup {name}"),
-            Self::ReleaseInput { target, key, input } => write!(formatter, "DeploymentTarget {target} {key}/{input}"),
+            Self::ReleaseInput { target, key, input, .. } => {
+                write!(formatter, "DeploymentTarget {target} {key}/{input}")
+            }
             Self::Source { kind, name, path } => write!(formatter, "{kind} {name} {}", path.join(".")),
         }
     }
@@ -131,24 +140,29 @@ pub fn collect_source_locks(
                 target_found = true;
                 for (key, inputs) in &resource.spec.release_inputs {
                     for (input, binding) in inputs {
-                        let Some(source) = binding.from_git.as_ref().map(|source| &source.git) else {
-                            continue;
-                        };
-                        let repository = inventory.resolve_git_source(source)?.0;
-                        locks.push(SourceLock {
-                            owner: LockOwner::ReleaseInput {
-                                target: resource.metadata.name.clone(),
-                                key: key.clone(),
-                                input: input.clone(),
-                            },
-                            source_path: discovered.source_path.clone(),
-                            document_index: discovered.document_index,
-                            raw_document: discovered.raw_document.clone(),
-                            repository_url: repository.repo_url,
-                            local: false,
-                            revision: source.revision.clone().expect("validated fromGit source has revision"),
-                            commit: source.commit.clone().expect("validated fromGit source has commit"),
-                        });
+                        for (pointer, source) in binding.git_sources() {
+                            let source = &source.git;
+                            let repository = inventory.resolve_git_source(source)?.0;
+                            locks.push(SourceLock {
+                                owner: LockOwner::ReleaseInput {
+                                    target: resource.metadata.name.clone(),
+                                    key: key.clone(),
+                                    input: input.clone(),
+                                    at: pointer
+                                        .split('/')
+                                        .skip(1)
+                                        .map(|token| token.replace("~1", "/").replace("~0", "~"))
+                                        .collect(),
+                                },
+                                source_path: discovered.source_path.clone(),
+                                document_index: discovered.document_index,
+                                raw_document: discovered.raw_document.clone(),
+                                repository_url: repository.repo_url,
+                                local: false,
+                                revision: source.revision.clone().expect("validated $git source has revision"),
+                                commit: source.commit.clone().expect("validated $git source has commit"),
+                            });
+                        }
                     }
                 }
             }
@@ -283,7 +297,7 @@ fn collect_git_source(
 
 /// Resolve every lock to the commit it should name: the head of its revision.
 ///
-/// Contract: [`fromGit`](../../../../design/release-inputs.md#binding-kinds),
+/// Contract: [`$git`](../../../../design/release-inputs.md#binding-kinds),
 /// source locks. Refs are fetched once per repository URL and each revision
 /// is resolved once, so locks of one repository and revision move together.
 pub fn resolve_source_locks(locks: Vec<SourceLock>, manager: &mut GitManager) -> Result<Vec<LockResolution>> {
@@ -364,16 +378,11 @@ pub fn replace_lock_commit(lock: &SourceLock, resolved: &str) -> Result<String> 
             .map(String::as_str)
             .chain(std::iter::once("commit"))
             .collect(),
-        LockOwner::ReleaseInput { key, input, .. } => {
-            vec![
-                "spec",
-                "releaseInputs",
-                key.as_str(),
-                input.as_str(),
-                "fromGit",
-                "commit",
-            ]
-        }
+        LockOwner::ReleaseInput { key, input, at, .. } => ["spec", "releaseInputs", key.as_str(), input.as_str()]
+            .into_iter()
+            .chain(at.iter().map(String::as_str))
+            .chain(["$git", "commit"])
+            .collect(),
     };
     replace_block_scalar(&lock.raw_document, &path, &lock.commit, resolved).ok_or_else(|| {
         NylError::config(format!(
@@ -482,14 +491,14 @@ spec:
   releaseInputs:
     platform/web:
       image:
-        fromGit:
+        $git:
           repository: {repoURL: https://git.example.com/deploy.git}
           revision: deploy/dev
           commit: aaaa   # moved by source-locks
           path: dev/state/images.json
     "platform/api":
       image:
-        fromGit:
+        $git:
           revision: deploy/staging
           commit: "aaaa"
           path: staging/state/images.json
@@ -499,7 +508,7 @@ spec:
     fn test_replace_block_scalar_addresses_locks_by_position() {
         let web = replace_block_scalar(
             TARGET,
-            &["spec", "releaseInputs", "platform/web", "image", "fromGit", "commit"],
+            &["spec", "releaseInputs", "platform/web", "image", "$git", "commit"],
             "aaaa",
             "bbbb",
         )
@@ -509,7 +518,7 @@ spec:
 
         let api = replace_block_scalar(
             TARGET,
-            &["spec", "releaseInputs", "platform/api", "image", "fromGit", "commit"],
+            &["spec", "releaseInputs", "platform/api", "image", "$git", "commit"],
             "aaaa",
             "cccc",
         )
@@ -521,12 +530,12 @@ spec:
 
     #[test]
     fn test_replace_block_scalar_refuses_missing_or_mismatched_locks() {
-        let path = ["spec", "releaseInputs", "platform/web", "image", "fromGit", "commit"];
+        let path = ["spec", "releaseInputs", "platform/web", "image", "$git", "commit"];
         assert!(replace_block_scalar(TARGET, &path, "ffff", "bbbb").is_none());
-        let path = ["spec", "releaseInputs", "platform/web", "other", "fromGit", "commit"];
+        let path = ["spec", "releaseInputs", "platform/web", "other", "$git", "commit"];
         assert!(replace_block_scalar(TARGET, &path, "aaaa", "bbbb").is_none());
-        let flow = "spec:\n  releaseInputs:\n    g/r: {image: {fromGit: {commit: aaaa}}}\n";
-        let path = ["spec", "releaseInputs", "g/r", "image", "fromGit", "commit"];
+        let flow = "spec:\n  releaseInputs:\n    g/r: {image: {$git: {commit: aaaa}}}\n";
+        let path = ["spec", "releaseInputs", "g/r", "image", "$git", "commit"];
         assert!(replace_block_scalar(flow, &path, "aaaa", "bbbb").is_none());
     }
 
@@ -537,23 +546,23 @@ spec:
     workloads/api:
       config:
         value:
-          image: {fromGit: none}
+          image: {$git: none}
           notes: |
             path:
-              fromGit:
+              $git:
                 commit: aaaa
       image:
-        fromGit:
+        $git:
           commit: aaaa
           path: x.json
       path:
-        fromGit:
+        $git:
           commit: aaaa
           path: y.json
 ";
         let image = replace_block_scalar(
             document,
-            &["spec", "releaseInputs", "workloads/api", "image", "fromGit", "commit"],
+            &["spec", "releaseInputs", "workloads/api", "image", "$git", "commit"],
             "aaaa",
             "bbbb",
         )
@@ -568,7 +577,7 @@ spec:
         );
         let path = replace_block_scalar(
             document,
-            &["spec", "releaseInputs", "workloads/api", "path", "fromGit", "commit"],
+            &["spec", "releaseInputs", "workloads/api", "path", "$git", "commit"],
             "aaaa",
             "bbbb",
         )

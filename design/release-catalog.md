@@ -316,8 +316,8 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
   failing resource fails the render of every target whose Release selects
   it, with the resource's error. A target's tree is all or nothing, unlike a
   unit graph, where only the consumers stop.
-- **References in members.** A member field holding `fromUnit` or
-  `fromPromotion` cannot resolve in `render-tree`, `diff-tree`,
+- **References in members.** A member field holding `$unit` or
+  `$promotion` cannot resolve in `render-tree`, `diff-tree`,
   `publish-tree`, or the direct commands. They reject it with the binding
   rule's message, naming the member and the pointer. Orchestrated execution
   passes the resolved bundle in the pinned input snapshot (M5).

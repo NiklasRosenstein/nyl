@@ -1,205 +1,173 @@
 # Declarative value sources
 
-**Status:** proposed, revised after a case study (below). No schema or state
-changes yet.
+**Status:** implemented for unit documents, EnvironmentTemplate values,
+DeploymentTarget Release-input bindings, and HelmChart fields in Release
+bundles. `$input` in HelmChart `spec.values`, a Component's `spec`, a
+RemoteManifest, and plain Kubernetes manifests of a Release bundle is the
+next step (see [Open](#open)).
 
 *Structural* templating is Jinja that makes a document invalid YAML before it
 renders, or that decides a value's shape or type (`{{ x | tojson }}`,
 `{% if %}`, `{% for %}`). Quoted string interpolation
 (`'pr-{{ environment.name }}'`) is not the problem and stays. This note
-replaces structural templating with a few typed source clauses. Jinja stays
-for string interpolation and is otherwise a last resort: an example that still
-needs structural Jinja is a gap to close with a clause, not a pattern to
-document. The note deliberately does **not** add a general mechanism that
-resolves sources anywhere.
+replaces structural templating with one uniform model of typed value sources.
+Jinja stays for string interpolation and is otherwise a last resort: an
+example that still needs structural Jinja is a gap to close with a source, not
+a pattern to document.
 
-## Proposal
+## Why one model
 
-### 1. `HelmChart.spec.valuesFrom`
+An earlier draft of this note proposed a separate clause per use, each with
+its own syntax, its own place (some on a closed list of fields that each
+driver marked in its schema), and its own rule for a missing value; target
+bindings wrapped every literal in an object of its own. A UX review of the
+draft found that users had to learn field by field where each clause was
+allowed, that a clause in the wrong place was silently data, that the literal
+wrapper was noise, and that a pointer and a name were easy to swap. The
+decision was to replace all of it, as a clean break without a deprecation
+period, by one model:
 
-```yaml
-kind: HelmChart
-spec:
-  chart: {name: ../helm/rise}
-  valuesFrom:
-    - file: ../helm/rise/values-preview.yaml   # same rules as Cluster/DeploymentTarget valuesFrom
-    - input: chartValues                       # an object-typed Release input
-      pointer: /optional
-      key: optionalMountKey
-  values: {fullnameOverride: '{{ inputs.name }}'}
-```
+- one syntax, `$` keys, shared by every source;
+- one walker that recognises a source at any depth;
+- one table that says, per context, which sources resolve there;
+- specific errors for the mistakes the review saw.
 
-- Entries `deep_merge_value` in order, then inline `values`. Maps merge and everything else replaces, which is also Helm's `-f` rule.
-- `input` entries are allowed only in a Release bundle that declares the input.
-- The merged values are data. Nyl never walks them for source clauses, before or after the merge, and that includes values that embed Nyl resources.
-- Every cache that covers a HelmChart's output must key on the merged values, file bytes included.
+## The model
 
-### 2. `fromValues` on declared unit fields
-
-In unit documents, a field that its owner declares *resolvable* accepts a
-literal or one clause:
+An object whose only key is a known `$` source is a reference, at any depth of
+a document the user wrote, and is replaced by the value it names:
 
 ```yaml
-target: {fromValues: {pointer: /target}}
-teardownWait: {fromValues: {pointer: /teardownWait, default: {strategy: manual}}}
-approval: {fromValues: {pointer: /approval, optional: true}}
+target: {$environment: /target}
+teardownWait: {$environment: {pointer: /teardownWait, default: {strategy: manual}}}
+approval: {$environment: {pointer: /approval, optional: true}}
+variables:
+  vpc_id: {$unit: {unit: network, output: vpcId, environment: {$environment: {pointer: /networkFrom, optional: true}}}}
 ```
 
-- **Where the pointer reads.** `pointer` is rooted at the environment's effective `values`, from an Environment or a template instance. The value it reads is the already rendered value and is never templated again.
-- **When a value is missing.** If nothing is at the pointer, or the value is null:
-  - `default` applies if set, and it must be non-null;
-  - with `optional: true` the key is removed, so the rendered spec is identical to omitting the field;
-  - otherwise it is an error.
-- **Who declares which fields are resolvable.** Core declares resolvable common fields (`approval`, `timeout`); each driver declares its own (`KubernetesPublication.target`, `teardownWait`). Core does the substitution generically, and the declaring side validates the type exactly as it does for a literal. Errors are `NYL-UNIT-INVALID`. The list is closed and grows only by decision.
-- **Inside `fromUnit`.** `fromUnit.environment` is the one sanctioned nested case. Render-time sources resolve before execution-time ones.
-- **One place, fail-closed.** Resolution happens in one place, environment unit rendering, so direct and environment paths agree. No clause may survive rendering: a surviving one is an error, never data.
-- **Errors.** A missing pointer names the environment, the keys that exist, and the nearest match. `nyl validate` checks every pointer against every environment and every template sample instance that selects the unit.
+| Source | Shorthand | Object form | Reads |
+| --- | --- | --- | --- |
+| `$environment` | a JSON Pointer, `{$environment: /target}` | `{pointer, default?, optional?}` | The environment's effective values: an Environment's over its groups', or a template instance's. |
+| `$input` | a name, `{$input: image}` | `{name, pointer?}` | A Release's declared, typed input. |
+| `$parameter` | a name, `{$parameter: pr}` | `{name, pointer?}` | An EnvironmentTemplate instance's typed parameter. |
+| `$unit` | none | `{unit, output \| artifact \| observation, pointer?, environment?, kind?, evidence?, attestations?}` | A unit's output, artifact, or observed value from its current receipt. |
+| `$promotion` | none | `{value, path?}` | A value recorded through a PromotionPath. |
+| `$file`, `$git`, `$publication` | none | as the former binding kinds | A file of this repository, a file at a locked commit, a state file in the target's publication branch. |
+| `$literal` | — | any value | Its content, verbatim and never walked. |
 
-### 3. `fromInput` on two HelmChart fields
+Every source shares parsing, the missing-value rules, and the type checks;
+only the context decides which sources are allowed. The rules:
 
-`includeCrds` and `lookup` accept `{fromInput: {name, pointer?}}`. There is no
-`default` on the clause: the Release input's declared default applies.
+- **Shorthand misuse.** `{$input: /image}` fails with "`$input` takes a name;
+  did you mean image?", and `{$environment: target}` with "`$environment`
+  takes a JSON Pointer; did you mean /target?". These are the two slips the
+  review saw most.
+- **Missing values.** When a source finds nothing (or `null` for
+  `$environment`): `default` applies, and it must not be `null`; with
+  `optional: true` the key is removed, so the rendered spec is identical to
+  omitting the field; otherwise it is an error that names the location, the
+  context (the environment, the instance, or the Release), the keys that
+  exist, and the nearest one. `default` and `optional` are exclusive. `$input`
+  and `$parameter` have no `default` of their own: the declaration's applies.
+- **Types.** The resolved document is deserialized and validated exactly as a
+  literal would be, so a field's schema checks the value; a Release input or a
+  template parameter is also checked against its declaration.
+- **Siblings.** A known source next to other keys is an error, because the
+  source would replace them.
+- **`$literal`.** `{$literal: <anything>}` is the escape hatch for data that
+  looks like a source.
+- **The `$` namespace.** Inside Nyl's typed resource fields every `$` key is
+  reserved, so an unknown one is an error. Inside free-form data (chart values,
+  a Component's spec, plain manifests, a unit's `variables` and `values`)
+  foreign keys such as `$ref` or `$schema` stay data, but a fixed list of
+  likely slips (`$value`, `$values`, `$env`, `$inputs`, `$param`, `$params`,
+  `$parameters`, `$units`, `$output`, `$artifact`) is an error with a
+  suggestion.
 
-### 4. `fromParameter` in `EnvironmentTemplate.spec.values`
+### Contexts
 
-```yaml
-kind: EnvironmentTemplate
-spec:
-  parameters:
-    pr: {type: integer}
-    crds: {type: boolean, default: false}
-  values:
-    networkFrom: dev
-    target:
-      inline:
-        releaseInputs:
-          rise/rise:
-            clusterWide: {value: {fromParameter: {name: crds}}}
-```
+| Context | Resolves | Carries |
+| --- | --- | --- |
+| Release bundle: the fields of a HelmChart | `$input`, `$literal` | — |
+| Unit document, when the unit renders | `$environment` | `$unit`, `$promotion` to the run; in an inline target's `releaseInputs` also `$file`, `$git`, `$publication` to the target's rendering |
+| Unit document, when a run resolves it | `$unit`, `$promotion`, `$literal` | — |
+| EnvironmentTemplate `spec.values` | `$parameter` | `$unit`, `$promotion`, `$file`, `$git`, `$publication`, `$literal`, checked where the values land |
+| Declared Environment and EnvironmentGroup `values` | — | as template values |
+| DeploymentTarget `releaseInputs`, declared or inline | `$file`, `$git`, `$publication`, `$unit`, `$promotion` (the last two only through orchestration), `$literal` | — |
+| Anything else, such as a target's other fields or a template's parameter declarations | — | — |
 
-- **Where clauses are resolved.** A reference object `{fromParameter: {name, pointer?}}` is resolved at any depth of the template's `spec.values`, and nowhere else. This is the same reference-object rule as `fromUnit` in unit `values`: exactly one field, no siblings, anything else is data. That includes inline targets and their bindings, which is the case that needed `| tojson`.
-- **What a clause resolves to.** The value is the instance's bound parameter, which is already type-checked against the declaration when `--param` is parsed, with the declared default applied. The clause has no `default` of its own.
-- **When it is resolved.** Parameters are stored in the instance's `state.yaml`, so resolution happens whenever the instance's effective values are computed: at `state init`, at `reconcile --template`, and at every later command. That is before units render, so `fromValues` reads resolved values.
-- **What is an error.** An unknown parameter name is an error, and so is a clause anywhere outside the template's `values`, for example in a declared Environment.
-- **What `validate` checks.** `nyl validate` resolves the clauses for every sample instance, so a template whose values reference a missing parameter fails before any instance exists.
+A source a context rejects is an error that teaches the fix, such as `$unit`
+in a Release: "declare a Release input and bind it on the target with
+`$unit`". A bare literal binding is the input's value; there is no wrapper.
+
+- **Data vs. configuration.** A value read from outside the user's
+  configuration (a unit's output, artifact, or observed value; a file read with
+  `$file`, `$git`, `$publication`, or a `valuesFrom` file; a promotion record;
+  a template parameter) is data and is never walked. A value copied from the
+  user's configuration (an environment's values) carries its references:
+  `{$environment: /target}` can read an inline target whose bindings hold
+  `$unit`, and the `$unit` resolves when the run resolves the unit. The
+  environment's values cannot read the environment's values.
+- **Literal-only fields.** `apiVersion`, `kind`, `metadata.name`, and
+  `metadata.labels` are read by discovery and selection before anything
+  resolves, so a source there is an error. `metadata.namespace` may hold one.
+- **`$literal` in unit documents.** A unit renders before a run resolves it,
+  and the rendered spec is stored. `$literal` unwraps when the unit renders,
+  unless its content holds `$` keys; then it unwraps when the run resolves the
+  unit, so its content never reads as a reference.
+- **HelmChart `valuesFrom`** stays for whole-object merges and files:
+  `[{file | input, pointer?, key?}]`, merged in order, inline `values` last.
+  Its merged values are data.
+- **Component value imports** stay as they are: target values reach nested
+  invocations without sources.
 
 ## Implementation shape
 
-### Resolve on `Value`, then deserialize
-
-Typed fields resolve on the `serde_json::Value` of a document before anything
-deserializes it into its typed struct:
-
 ```text
 authored YAML → Jinja (strings only) → Value
-  → resolve the declared clauses (nyl-core, pure)
-  → reject any clause that survived
-  → validate and deserialize, exactly as today
+  → resolve the context's sources at any depth (nyl-core, pure)
+  → validate and deserialize, exactly as a literal
 ```
 
-- **Drivers never see a clause.** They already take the spec as `&Value` (`Driver::validate_spec`, `teardown_wait`, …), and their typed structs keep resolved types.
-- **Execution keys are unchanged.** They hash the resolved spec, so a field filled by a clause hashes exactly like the same literal. Moving a document from Jinja to clauses re-runs nothing.
-- **Rejected alternative: `Resolvable<T>` as a runtime type** (`pub target: Resolvable<TargetRef>`). Every reader would have to unwrap it, "already resolved" would be invisible in the type, and drivers would handle a concept that belongs to core.
+- **One walker.** `bindings::resolve_document(field, pointer, document,
+  scope, providers, issues)` walks a `serde_json::Value`, classifies each
+  object (data, a source, an error), and asks the context
+  (`bindings::Context::treats`) what to do with each source: resolve, carry,
+  or reject. `bindings::find_clauses` walks the same way without reading
+  anything, for callers that need the references of a document before any has
+  a value: the dependency graph, teardown order, consumer protection, observed
+  value changes, and PromotionPath readers. A `Scope` gives parts of a
+  document their own context, such as an inline target's `releaseInputs` in a
+  publication unit.
+- **One provider trait.** Each source is one `Providers` method; a caller
+  implements the sources it reads. Release-input bindings (`bindings::resolve`)
+  read a binding that is one source through its provider, so a source with no
+  value yet leaves the slot unbound and the declared default applies; a literal
+  binding is walked for sources inside it.
+- **Drivers never see a source they cannot use.** Render-time sources resolve
+  in environment unit rendering, which every entry point uses; execution-time
+  sources resolve in the run's reference resolver. Drivers take the spec as
+  `&Value` and their typed structs keep resolved types.
+- **Execution keys are unchanged.** They hash the resolved spec, so a field
+  filled by a source hashes exactly like the same literal.
+- **No schema-driven machinery.** The walker needs no per-field markers, so
+  the earlier `Resolvable<T, S>` schema type, the `x-nyl-resolvable` pointer
+  lists, and the catalogue's per-kind field lists are gone. Editor schemas
+  offer the sources of a Release-input binding; unit fields show only their
+  literal type, so an editor may flag a source there that Nyl accepts.
+- **Stored specs.** A unit's desired document stores its rendered spec with
+  its `$unit` and `$promotion` references. Every reader of stored specs parses
+  them with the walker, and a reference that does not parse is an error, never
+  a dropped dependency edge. This changed the stored form in place: state
+  written by Nyl 0.7 is not readable as is and is re-created with
+  `nyl state init --fresh`.
 
-### The schema is the declaration
+## Open
 
-`Resolvable<T, S>` is a schema-only type, applied with `#[schemars(with = …)]`:
-
-```rust
-/// nyl-core `bindings`: a clause kind and the clause object it takes.
-pub trait SourceKind { const FIELD: &'static str; type Clause: JsonSchema; }
-pub enum FromValues {}   // FIELD = "fromValues", Clause = ValuesSource
-pub enum FromInput {}    // FIELD = "fromInput",  Clause = InputSource
-
-/// `anyOf: [T, {<FIELD>: Clause}]` plus `"x-nyl-resolvable": <FIELD>`.
-pub struct Resolvable<T, S: SourceKind>(PhantomData<(T, S)>);
-
-// a driver's spec struct: runtime type unchanged
-#[schemars(with = "Resolvable<TargetRef, FromValues>")]
-pub target: TargetRef,
-
-// HelmChartSpec
-#[schemars(with = "Resolvable<Option<bool>, FromInput>")]
-pub include_crds: Option<bool>,
-```
-
-- **The source is a type parameter.** The clause a field accepts depends on the kind of document it sits in, not on the field: unit specs take `fromValues`, and Nyl resources in a Release bundle take `fromInput`. Each struct lives in one kind of document, so its fields name their source, and the editor schema only offers a clause that can resolve there.
-- **Core reads the marker.** For each unit kind, core walks `driver.spec_schema()` once and collects the JSON pointers marked `x-nyl-resolvable`. Core's own schema marks the common unit fields; HelmChart's schema marks its two fields. The resolver substitutes only at those pointers. That is how "each driver declares its own fields" keeps the driver boundary: the declaration is the driver's schema, and core never names a kind or a field.
-- **How rendering reaches the drivers' schemas.** `nyl-render` cannot depend on the driver crates, so the application reads the markers once from its registered drivers (`DriverSet::resolvable_unit_fields`) and passes them in the `ResourceCatalogue` (`unit_fields`), which already reaches every entry point, `nyl validate` included. A driver whose spec schema is written by hand, as `KubernetesPublication`'s is, wraps a field with `bindings::resolvable_schema::<S>`, the function `Resolvable<T, S>` generates its schema with.
-- **The caller supplies one kind of clause.** Unit rendering supplies `FromValues` and Release rendering supplies `FromInput`. A marker that names another kind is a configuration error, so a struct reused somewhere else fails loudly instead of resolving from the wrong place.
-- **Several sources on one field** (`Resolvable<T, (FromValues, FromInput)>`) is the natural extension. It is added only when a real case needs it.
-
-### Clause types
-
-These live in nyl-core `bindings`, next to `InputBinding`:
-
-```rust
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ValuesSource {
-    pub pointer: String,
-    #[serde(default, deserialize_with = "present_non_null")]
-    pub default: Option<Value>,   // rejects `default: null` instead of reading it as absent
-    #[serde(default)]
-    pub optional: bool,           // exclusive with `default`
-}
-pub struct InputSource     { pub name: String, pub pointer: Option<String> }
-pub struct ParameterSource { pub name: String, pub pointer: Option<String> }
-```
-
-### Per mechanism
-
-| Mechanism | Code change |
-|---|---|
-| `HelmChart.valuesFrom` | A runtime field, `values_from: Vec<HelmValuesSource>`. Each entry holds exactly one of `file` (`ValuesFromFile`'s path rules) or `input`, plus `pointer` and `key`. The bundle loader merges the entries into `spec.values` as it parses each file of a Release bundle (`render::sources`), because only there is the declaring file's directory known; the values files join the bundle's inputs, which the Release and target cache keys and the ownership index record. A remote ApplicationGroup source roots `/` at its checkout. A HelmChart that rendering generates cannot use `valuesFrom`. |
-| `fromValues` on unit fields | Only the schema attributes. Resolution happens once, in environment unit rendering (`render_environment_units`), which also serves the direct path. |
-| `fromInput` on `includeCrds` and `lookup` | Only the schema attributes. Resolution runs against the Release's inputs in the same bundle-loading step, before anything (expansion, `lookup` detection, cache decisions) reads the HelmChart. The surviving-clause check then covers the bundle's Nyl resources outside their free-form values. |
-| `fromParameter` | No struct change, because `values` is already a free-form `Value`. The any-depth walker (`resolve_document`) takes the set of clause kinds it accepts as a parameter instead of the fixed `REFERENCE_KINDS`: template values accept `fromParameter` (`TEMPLATE_VALUE_KINDS`), and unit `values` and `variables` keep `fromUnit` and `fromPromotion`. A `fromParameter` reference parses as its clause (`ParameterSource`), not as an `InputBinding`, and reads through one more provider method, `Providers::parameter`, which rejects it by default. `EnvironmentTemplate::resolve_parameter_sources` (nyl-core, pure) resolves it against the bound parameters, called once in `instantiate` after the strings render, which every entry point and `validate`'s sample instances use. Environment, EnvironmentGroup, and DeploymentTarget validation, unit rendering, and the bundle loader add `fromParameter` to their surviving-clause checks. |
-
-- **`fromUnit.environment` is the exception.** It sits inside a reference object within a free-form map, not at a fixed schema path. The any-depth walker resolves `fromValues` inside each `fromUnit` it finds. Its schema still says `Resolvable<Option<String>, FromValues>` for editors, but the marked pointers do not drive resolution there. `UnitInputSource` is shared with DeploymentTarget bindings, and a declared DeploymentTarget is no unit document: its published schema drops the clause (`bindings::without_clauses`), and deserializing one fails with where it works.
-- **The surviving-clause check is explicit.** After substitution, an object whose only key is a known clause name is an error. A typed field with `deny_unknown_fields` would catch most survivors anyway, but a field typed as free-form `Value` would not.
-- **Every value a clause reads enters the dependency recorder** at the layer that consumes it, as the cache invariants require. Environment values and Release inputs already do.
-- **One resolver, one shell call.** The resolver is pure (`resolve_declared::<S>(field, spec, pointers, provider, issues)`), and each source kind is one provider method, `SourceProvider<S>::provide`, as in `bindings::Providers`. The clause type carries its own validation and missing-value rule (`SourceClause`: `default`, `optional`), so the resolver applies them without naming a kind; a provider answer of `null` counts as missing for every kind. Bindings, unit references and declared fields share one resolver, as the architecture rules require.
-
-## Case study
-
-**Subjects:**
-- the Rise draft (a Release plus a publication unit);
-- the reference scenarios `preview` and `promotion`;
-- independently, the end-to-end example and `hotfix`.
-
-**Method:** three reviewers.
-- A spec-only author rewrote projects it had not seen rewritten.
-- A task-based user performed five change tasks against both versions.
-- An adversarial reviewer checked the spec against the code.
-
-| Measure | Before | After |
-|---|---|---|
-| Structural-templating sites, own rewrite (4 projects) | 10 | 0 |
-| Same, spec-only author (2 projects it had not seen rewritten) | 3 | 0, matching the own rewrite |
-| Unit documents that are valid YAML before rendering | 0 of 4 | 4 of 4 |
-| Edit size for the 5 change tasks | same | same |
-| Typo in a required pointer is caught | late or silent | at render, before any effect |
-
-**Findings that changed the proposal:**
-- **Any-depth resolution in HelmChart `values` dropped.** Data from `valuesFrom` would become code, and charts that embed Nyl resources would be resolved eagerly. The tier-3 rewrite showed it is unnecessary.
-- **`default: null` replaced by `optional: true`.** `null` satisfies no input type, serde cannot tell `default: null` apart from an absent `default`, and emitting `field: null` changes a unit's execution key.
-- **Resolvable fields declared by their owner.** `teardownWait` and `target` are driver-owned (`COMMON_UNIT_FIELDS` lists only common ones), so a shared list would break the driver boundary.
-- **Fail-closed invariant added.** Several readers parse references with `if let Ok` (`rules/multi_environment.rs:260`), so an unresolved clause inside `fromUnit` would silently drop a cross-environment edge.
-- **A defaulted pointer still fails silently on a typo.** `validate` therefore checks pointers against all selecting environments, and error messages suggest the nearest key.
-- **Template parameters had no clause.** A typed parameter reaching a binding still needed `| tojson`, which led to §4.
-
-**Usefulness:**
-- The gains are documents that are valid YAML before rendering, lintable, and written with flow-style labels; type errors before execution; and a defined merge instead of a loop that could emit duplicate keys.
-- Editing is not cheaper. The benefit is correctness and readability.
-
-## Not proposed
-
-- **Resolving sources anywhere.** It collides with real data, lets chart output become input, has no type at the site, and leaves the scope rules implicit.
-- **Type-preserving `'{{ x }}'` interpolation.** It is implicit and changes the output of existing documents.
-- **A promise that every field becomes resolvable.** That would be a second templating language arriving one field at a time. New clause sites are added by decision, when a real project still needs structural Jinja.
-
-## Compatibility
-
-- The changes are additive: existing documents render byte-identically.
-- There is no state or ownership-index change.
-- The Jinja and declarative forms of each case-study project must render identical specs.
+- `$input` in HelmChart `spec.values`, a Component's `spec`, a RemoteManifest,
+  and plain Kubernetes manifests of a Release bundle, and `metadata.namespace`
+  sources there.
+- An error for any `$` source in the output of recursive expansion (chart
+  output, remote manifests), and a hint for one in a `valuesFrom` file.
+- `nyl validate` checking the sources a template's values carry against the
+  context they land in, per sample instance.

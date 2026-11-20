@@ -261,12 +261,10 @@ fn holding(
     let mut after = None;
     if check == Check::Observe {
         let records = records_after(&snapshot, &changes.observations);
-        report.warnings.extend(changed_consumer_warnings(
-            &request.environment,
-            &snapshot,
-            &records,
-            context.base.clock.now(),
-        ));
+        match changed_consumer_warnings(&request.environment, &snapshot, &records, context.base.clock.now()) {
+            Ok(warnings) => report.warnings.extend(warnings),
+            Err(finding) => report.errors.push(finding),
+        }
         if snapshot.desired.values().any(observed_values::declares) {
             let mut observed = snapshot.clone();
             observed.observations = records;
@@ -318,16 +316,16 @@ fn changed_consumer_warnings(
     snapshot: &EnvironmentSnapshot,
     records: &BTreeMap<UnitName, ObservationRecord>,
     now: Timestamp,
-) -> Vec<Finding> {
-    let changed = observed_values::changed_consumers(environment, &snapshot.desired, &snapshot.observed, records, now);
+) -> Result<Vec<Finding>, Finding> {
+    let changed = observed_values::changed_consumers(environment, &snapshot.desired, &snapshot.observed, records, now)?;
     let consumers: BTreeSet<&UnitName> = changed.iter().map(|changed| &changed.consumer).collect();
-    consumers
+    Ok(consumers
         .into_iter()
         .flat_map(|consumer| {
             let reasons: Vec<_> = changed.iter().filter(|changed| &changed.consumer == consumer).collect();
             observed_values::changed_warnings(environment, consumer, &reasons)
         })
-        .collect()
+        .collect())
 }
 
 /// `NYL-OBSERVATION-CHANGED` for each consumer in another environment that
@@ -358,11 +356,12 @@ fn other_environment_warnings(
             Err(problem) => warnings.push(problem.into_finding()),
         }
     }
-    warnings.extend(
-        observed_values::changed_consumers_reading(environment, observed, &others, context.base.clock.now())
-            .iter()
-            .map(observed_values::external_changed_warning),
-    );
+    // Advisory like the snapshots: an environment whose stored references
+    // do not parse is a warning that names it.
+    match observed_values::changed_consumers_reading(environment, observed, &others, context.base.clock.now()) {
+        Ok(changed) => warnings.extend(changed.iter().map(observed_values::external_changed_warning)),
+        Err(finding) => warnings.push(finding),
+    }
     warnings
 }
 

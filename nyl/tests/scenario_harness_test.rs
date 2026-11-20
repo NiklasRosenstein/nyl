@@ -1499,7 +1499,8 @@ fn test_a_promote_step_counts_the_target_environments_refs() {
     );
     // record: source is read from the target Environment.
     assert!(!target.record_source);
-    let source = "kind: Environment\nmetadata: {name: prod}\nspec: {source: {fromPromotion: {path: dev-to-prod, record: source}}}\n";
+    let source =
+        "kind: Environment\nmetadata: {name: prod}\nspec: {source: {promotion: {path: dev-to-prod, record: source}}}\n";
     let mut with_source = documents.clone();
     with_source.push(serde_saphyr::from_str(source).unwrap());
     assert!(promotion_target(&with_source, &promote).unwrap().record_source);

@@ -45,7 +45,7 @@ pub fn declared_paths(inventory: &GitOpsInventory) -> Vec<PromotionPath> {
 }
 
 /// Every finding of the project's PromotionPaths, given each environment's
-/// rendered units. A project without paths and without `fromPromotion`
+/// rendered units. A project without paths and without `$promotion`
 /// bindings has none.
 pub fn findings(
     inventory: &GitOpsInventory,
@@ -232,7 +232,7 @@ pub fn promotable_path(
 pub struct TargetView {
     pub entry_units: BTreeSet<nyl_core::orchestration::ids::UnitName>,
     pub promotes_source: bool,
-    /// The target's `source.fromPromotion` as the entry worktree declares
+    /// The target's `source.promotion` as the entry worktree declares
     /// it; with `record: source` its block is the path's current record.
     pub promoted: Option<nyl_core::resources::environment::PromotedSource>,
 }
@@ -245,16 +245,12 @@ pub fn target_view(
 ) -> std::result::Result<TargetView, Finding> {
     use nyl_core::orchestration::codes::Code;
     let entry = session.entry()?;
-    let promoted = entry
-        .spec
-        .source
-        .as_ref()
-        .and_then(|source| source.from_promotion.clone());
+    let promoted = entry.spec.source.as_ref().and_then(|source| source.promotion.clone());
     let promotes_source = entry
         .spec
         .source
         .as_ref()
-        .and_then(|source| source.from_promotion.as_ref())
+        .and_then(|source| source.promotion.as_ref())
         .is_some_and(|promoted| {
             promoted
                 .path
@@ -292,7 +288,7 @@ pub fn target_view(
 /// with `record: source` the block is refused below the applied sequence and
 /// checked against its path and the source state it names, which is read
 /// through `store` at the source environment's location in `inventory`, or
-/// with `fromPromotion.verify` by the signature on the commit of the clone at
+/// with `promotion.verify` by the signature on the commit of the clone at
 /// `git_dir` that last changed it.
 pub fn environment_promotions(
     (inventory, git_dir): (&GitOpsInventory, &std::path::Path),

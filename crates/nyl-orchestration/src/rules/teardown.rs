@@ -135,10 +135,38 @@ pub struct TeardownPlan {
     pub external_overrides: BTreeMap<UnitName, Vec<String>>,
 }
 
+/// The plan when the stored specs' references do not parse: no unit leaves,
+/// because the order of teardown is unknown, and each candidate names why.
+fn unordered(inputs: &TeardownInputs<'_>, issues: &[String]) -> TeardownPlan {
+    let finding = Finding::new(
+        Code::ReferenceInvalid,
+        format!(
+            "the stored specs hold references that do not parse, so the order of teardown is unknown: {}",
+            issues.join("; ")
+        ),
+        "fix the references in source and run `nyl reconcile`, which stores the rendered specs again; state written by Nyl 0.7 is re-created with `nyl state init --fresh`",
+    );
+    let mut plan = TeardownPlan::default();
+    for (name, unit) in inputs.desired {
+        if is_candidate(name, unit, inputs.drops, inputs.options) {
+            plan.pending.insert(
+                name.clone(),
+                Pending::Readiness {
+                    findings: vec![finding.clone()],
+                },
+            );
+        }
+    }
+    plan
+}
+
 /// Decide which leaving units to tear down, retain, release, or drop now.
 pub fn plan(inputs: &TeardownInputs<'_>) -> TeardownPlan {
     let desired = inputs.desired;
-    let dependencies = dependencies(desired);
+    let dependencies = match dependencies(desired) {
+        Ok(dependencies) => dependencies,
+        Err(issues) => return unordered(inputs, &issues),
+    };
     // Every leaving action is a barrier for its producers, including
     // releases whose stored lifecycle is still active or retained.
     let leaving: BTreeSet<&UnitName> = desired
@@ -393,17 +421,24 @@ pub fn citing_tombstones(desired: &BTreeMap<UnitName, DesiredUnit>, unit: &Desir
         .collect()
 }
 
-/// The dependencies among `units` from their stored specs (`fromUnit`
+/// The dependencies among `units` from their stored specs (`$unit`
 /// references and `dependsOn`), ignoring producers outside `units`: for
-/// each unit, the units it depends on.
-pub fn dependencies(units: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitName, BTreeSet<UnitName>> {
-    units
+/// each unit, the units it depends on. A stored reference that does not parse
+/// is an error naming its unit, never a dropped edge, because a dropped edge
+/// could tear a producer down before its consumer.
+pub fn dependencies(
+    units: &BTreeMap<UnitName, DesiredUnit>,
+) -> Result<BTreeMap<UnitName, BTreeSet<UnitName>>, Vec<String>> {
+    let mut issues = Vec::new();
+    let dependencies = units
         .iter()
         .map(|(name, unit)| {
             let mut producers = BTreeSet::new();
-            for reference in
-                unit_references("", &unit.spec, nyl_core::bindings::UNIT_REFERENCE_KINDS).unwrap_or_default()
-            {
+            let references = unit_references("", &unit.spec).unwrap_or_else(|found| {
+                issues.extend(found.into_iter().map(|issue| format!("unit {name}: {issue}")));
+                Vec::new()
+            });
+            for reference in references {
                 if reference.source.environment.is_none() {
                     producers.extend(UnitName::new(reference.source.unit.as_str()).ok());
                 }
@@ -416,7 +451,12 @@ pub fn dependencies(units: &BTreeMap<UnitName, DesiredUnit>) -> BTreeMap<UnitNam
             producers.retain(|producer| producer != name && units.contains_key(producer));
             (name.clone(), producers)
         })
-        .collect()
+        .collect();
+    if issues.is_empty() {
+        Ok(dependencies)
+    } else {
+        Err(issues)
+    }
 }
 
 /// The warnings `plan` and `reconcile` give for units that stay in the
@@ -566,7 +606,7 @@ mod tests {
     }
 
     fn reads(producer: &str) -> Value {
-        json!({"values": {"input": {"fromUnit": {"unit": producer, "output": "value"}}}})
+        json!({"values": {"input": {"$unit": {"unit": producer, "output": "value"}}}})
     }
 
     fn deleting(unit: &str, spec: Value, reason: DeletionReason, intent: DeletionIntent) -> DesiredUnit {
@@ -663,6 +703,33 @@ mod tests {
             teardown("api", reads("database")),
         ]);
         assert_eq!(case.plan().ready, names(&["api", "database", "network"]));
+    }
+
+    /// Catches a stored reference that does not parse dropping its
+    /// dependency edge, which would let a producer leave before its
+    /// consumer: nothing leaves, and each candidate names the reference.
+    #[test]
+    fn test_a_stored_reference_that_does_not_parse_stops_every_teardown() {
+        let case = Case::new(vec![
+            teardown("network", json!({})),
+            teardown("api", json!({"values": {"vpc": {"$unit": {"unit": "network"}}}})),
+        ]);
+        let plan = case.plan();
+        assert!(plan.ready.is_empty(), "{plan:?}");
+        assert!(plan.wave.is_empty(), "{plan:?}");
+        for unit in ["api", "network"] {
+            let Pending::Readiness { findings } = &plan.pending[&name(unit)] else {
+                panic!("{unit} is not pending on the stored reference: {plan:?}");
+            };
+            assert_eq!(findings[0].code, Code::ReferenceInvalid);
+            assert!(
+                findings[0].message.contains(
+                    "unit api: spec.values.vpc.$unit must set exactly one of output, artifact, and observation"
+                ),
+                "{}",
+                findings[0].message
+            );
+        }
     }
 
     /// Q6: catches a retention or a drop happening while a deleting

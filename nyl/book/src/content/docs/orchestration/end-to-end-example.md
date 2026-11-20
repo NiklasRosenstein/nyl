@@ -95,9 +95,9 @@ spec:
     pathPrefix: dev
   releaseInputs:
     web/web:
-      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-      databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
-      namespace: {value: web}
+      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+      databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+      namespace: web
 ---
 apiVersion: gitops.nyl/v1
 kind: Environment
@@ -113,7 +113,7 @@ spec:
 ```
 
 `nyl/units.yaml` declares the three units. The publication depends on the other
-two through the target's `fromUnit` bindings, so nothing says so twice:
+two through the target's `$unit` bindings, so nothing says so twice:
 
 ```yaml
 apiVersion: units.gitops.nyl/v1
@@ -144,9 +144,9 @@ metadata:
   name: kubernetes
   labels: {stage: dev, preview: 'true'}
 spec:
-  target: {fromValues: {pointer: /target}}   # dev, or the preview template's inline target
+  target: {$environment: /target}   # dev, or the preview template's inline target
   observe: {}
-  teardownWait: {fromValues: {pointer: /teardownWait}}
+  teardownWait: {$environment: /teardownWait}
   env: {passthrough: [KUBECONFIG]}           # the credential `nyl attest` reads Argo CD with
 ```
 
@@ -155,7 +155,7 @@ The OpenTofu unit's root module declares `backend "local" {}` and an output
 `observe: {}` is what lets `nyl attest` and `nyl observe` read Argo CD later
 (see [Observing Argo CD](/nyl/orchestration/resource-guides/kubernetes-publication/#observing-argo-cd)).
 Its `target` and `teardownWait` read the environment's values with
-[`fromValues`](/nyl/reference/value-sources/#unit-fields-fromvalues): dev names
+[`$environment`](/nyl/reference/value-sources/#environment): dev names
 its static target, and each preview declares an inline one.
 A local OpenTofu backend suits a workstation; [CI needs a remote one](#reconcile-on-main).
 
@@ -184,9 +184,9 @@ spec:
         publication: {repositoryRef: {name: shop}, revision: previews, pathPrefix: '{{ environment.name }}'}
         releaseInputs:
           web/web:
-            image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}
-            databaseHost: {fromUnit: {unit: database, output: connection, pointer: /host}}
-            namespace: {value: '{{ environment.name }}-web'}
+            image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}
+            databaseHost: {$unit: {unit: database, output: connection, pointer: /host}}
+            namespace: '{{ environment.name }}-web'
   state: {repositoryRef: {name: shop}, path: '{{ environment.name }}', desiredRef: nyl/previews, observedRef: nyl/previews}
   allowUnprotectedSource: true
   deletionPolicy: Teardown
@@ -300,7 +300,7 @@ warning  dev/kubernetes: the self-managing catalog Application and its AppProjec
 The warning is the publication's teardown readiness: the catalog Application of
 a target lives in the tree it manages and stays when the target is removed.
 `status` shows the three receipts, and `get` resolves a value the way a
-`fromUnit` binding does:
+`$unit` binding does:
 
 ```console
 $ nyl status -e dev
@@ -357,14 +357,14 @@ warning  dev/kubernetes: the self-managing catalog Application and its AppProjec
 
 A Release does not know whether its inputs come from units. The project also
 declares a `static` DeploymentTarget that no environment uses, with the image
-and database host written out as `value` bindings:
+and database host written out as literal bindings:
 
 ```yaml
 releaseInputs:
   web/web:
-    image: {value: 'registry.example.com/web@sha256:0000…'}
-    databaseHost: {value: shop.db.internal}
-    namespace: {value: web}
+    image: 'registry.example.com/web@sha256:0000…'
+    databaseHost: shop.db.internal
+    namespace: web
 ```
 
 [`nyl publish-tree`](/nyl/reference/cli/publish-tree/) renders and publishes it
@@ -393,7 +393,7 @@ static/web/web/deployment.apps/web/web.yaml
 static/web/web/namespace/web.yaml
 ```
 
-Only `fromUnit` bindings need orchestration; see
+Only `$unit` bindings need orchestration; see
 [Release inputs from other units](/nyl/orchestration/resource-guides/kubernetes-publication/#release-inputs-from-other-units).
 
 ### Apply the catalogs once

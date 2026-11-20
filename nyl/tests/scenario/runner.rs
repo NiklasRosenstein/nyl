@@ -1246,8 +1246,8 @@ impl<'s: 'scope, 'scope, 'l: 'scope> RunState<'s, 'scope, 'l> {
                     document.get("kind").and_then(Value::as_str) == Some("Environment")
                         && document.pointer("/metadata/name").and_then(Value::as_str) == Some(target.as_str())
                 })
-                .find_map(|document| document.pointer("/spec/source/fromPromotion/promoted").cloned())
-                .ok_or_else(|| format!("{branch} has no source.fromPromotion.promoted block on Environment {target}")),
+                .find_map(|document| document.pointer("/spec/source/promotion/promoted").cloned())
+                .ok_or_else(|| format!("{branch} has no source.promotion.promoted block on Environment {target}")),
         }
     }
 
@@ -1865,7 +1865,7 @@ pub fn promotion_target(documents: &[Value], args: &[String]) -> Result<Promotio
         kind(document, "Environment")
             && named(document, &to)
             && document
-                .pointer("/spec/source/fromPromotion/record")
+                .pointer("/spec/source/promotion/record")
                 .and_then(Value::as_str)
                 == Some("source")
     });

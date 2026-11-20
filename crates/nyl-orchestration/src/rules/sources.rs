@@ -7,12 +7,12 @@
 //! - S is the entry worktree's commit when the Environment's `source` is
 //!   omitted, the tip of `source.revision`, or `source.commit` when both are
 //!   set; `--source` overrides it for one invocation, recorded as `override`.
-//!   A `source.fromPromotion` Environment takes S from the newest
+//!   A `source.promotion` Environment takes S from the newest
 //!   PromotionRecord on its path or paths ([`promoted_record`]), recorded as
 //!   `sourceChosenBy: promotion` with the record's `sequence`; a path with no
 //!   record yet is `NYL-PROMOTION-MISSING`.
 //! - With `record: source` the record of the Environment's path is the
-//!   `source.fromPromotion.promoted` block of the Environment as the entry
+//!   `source.promotion.promoted` block of the Environment as the entry
 //!   worktree declares it, in place of any record in state
 //!   ([`promotion_records`]); every reader takes the records through this
 //!   module. A block with a lower `sequence` than the one a run applied is
@@ -102,7 +102,7 @@ impl SourceRequest {
 /// instance's recorded commit when `recorded`), an optional `--source`
 /// override, and the PromotionRecords of the environment's desired state.
 ///
-/// A `source.fromPromotion` Environment takes S from [`promoted_record`]; the
+/// A `source.promotion` Environment takes S from [`promoted_record`]; the
 /// override still wins for one invocation.
 pub fn source_request(
     entry: &Environment,
@@ -126,7 +126,7 @@ pub fn source_request(
     let Some(source) = &entry.spec.source else {
         return Ok(without_source());
     };
-    if let Some(promoted) = &source.from_promotion {
+    if let Some(promoted) = &source.promotion {
         let record = promoted_record(&entry.metadata.name, promoted, promotions)?;
         return Ok(SourceRequest::Promotion {
             path: record.path.clone(),
@@ -194,7 +194,7 @@ pub fn promoted_record<'a>(
     })
 }
 
-/// The record a `fromPromotion` binding reads among an environment's
+/// The record a `$promotion` binding reads among an environment's
 /// `records`, or `None` when none supplies it yet. Every reader of a
 /// binding takes it here: the binding provider of the shared resolver and
 /// `nyl get promotions`.
@@ -228,12 +228,12 @@ pub fn binding_supplier<'a>(
 
 /// The promotion paths that supply an environment's source, from its
 /// Environment spec (the declared one or the one an environment record
-/// keeps): `None` unless `source.fromPromotion` is set. A `fromPromotion`
+/// keeps): `None` unless `source.promotion` is set. A `$promotion`
 /// binding without `path` reads only records on these paths, so every
 /// resolution of references, run, `get`, or direct command, derives them
 /// here.
 pub fn promoted_source_paths(environment_spec: &Value) -> Option<std::collections::BTreeSet<String>> {
-    let promoted = environment_spec.pointer("/source/fromPromotion")?;
+    let promoted = environment_spec.pointer("/source/promotion")?;
     let single = promoted.get("path").and_then(Value::as_str).map(str::to_owned);
     let several = promoted
         .get("paths")
@@ -260,23 +260,23 @@ pub fn unsupported_source(entry: &Environment) -> Option<Finding> {
     })
 }
 
-/// The `source.fromPromotion` of an Environment that keeps its record in its
+/// The `source.promotion` of an Environment that keeps its record in its
 /// source (`record: source`).
 pub fn record_in_source(promoted: Option<&PromotedSource>) -> Option<&PromotedSource> {
     promoted.filter(|promoted| promoted.record.as_deref() == Some("source"))
 }
 
-/// The `source.fromPromotion` of an Environment spec as JSON, such as the
+/// The `source.promotion` of an Environment spec as JSON, such as the
 /// one an environment record keeps.
 pub fn promoted_source(environment_spec: &Value) -> Option<PromotedSource> {
     environment_spec
-        .pointer("/source/fromPromotion")
+        .pointer("/source/promotion")
         .and_then(|promoted| serde_json::from_value(promoted.clone()).ok())
 }
 
 /// What an environment's runs applied, as its environment record keeps it:
 /// the highest promotion sequence, and the `record: source` block the last
-/// run applied (the record's `spec.source.fromPromotion.promoted`).
+/// run applied (the record's `spec.source.promotion.promoted`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Applied {
     pub sequence: Option<u64>,
@@ -316,9 +316,9 @@ pub fn invalid_block(environment: &str, problem: impl std::fmt::Display) -> Find
     )
 }
 
-/// The PromotionRecords an environment's source and its `fromPromotion`
+/// The PromotionRecords an environment's source and its `$promotion`
 /// bindings read: the records in its state, and with `record: source` the
-/// `promoted` block of `promoted` (the Environment's `source.fromPromotion`)
+/// `promoted` block of `promoted` (the Environment's `source.promotion`)
 /// in place of any record in state on the paths it names, which never
 /// count. No block is no record, which [`promoted_record`] reports as
 /// `NYL-PROMOTION-MISSING`.
@@ -948,7 +948,7 @@ mod tests {
     /// running at all: it is `NYL-PROMOTION-MISSING`, naming `nyl promote`.
     #[test]
     fn test_promoted_source_is_the_newest_records_commit_or_missing() {
-        let promoted = environment(&json!({"source": {"fromPromotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}}));
+        let promoted = environment(&json!({"source": {"promotion": {"paths": ["dev-to-prod", "hotfix-to-prod"]}}}));
         let entry = commit('e');
         let missing = source_request(&promoted, &entry, None, false, &BTreeMap::new()).unwrap_err();
         assert_eq!(missing.code, Code::PromotionMissing);
@@ -1027,7 +1027,7 @@ mod tests {
             Some(&block),
             "a newer block is checked against its state"
         );
-        let environment = environment(&json!({"source": {"fromPromotion": serde_json::to_value(&promoted).unwrap()}}));
+        let environment = environment(&json!({"source": {"promotion": serde_json::to_value(&promoted).unwrap()}}));
         assert_eq!(
             source_request(&environment, &commit('e'), None, false, &read.records).unwrap(),
             SourceRequest::Promotion {
@@ -1138,7 +1138,7 @@ mod tests {
                 api_version: StateV1,
                 kind: EnvironmentRecordKind,
                 environment: nyl_core::orchestration::ids::EnvironmentName::new("prod").unwrap(),
-                spec: json!({"source": {"fromPromotion": serde_json::to_value(&applied).unwrap()}}),
+                spec: json!({"source": {"promotion": serde_json::to_value(&applied).unwrap()}}),
                 source_commit: commit('a'),
                 source_chosen_by: SourceChoice::Promotion {
                     path: "dev-to-prod".to_owned(),

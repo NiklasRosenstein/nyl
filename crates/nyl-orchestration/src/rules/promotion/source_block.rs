@@ -39,7 +39,7 @@ fn invalid(block: &PromotionRecord, problem: &str) -> Finding {
 /// declares, and their selectors. A path that promotes the target's source
 /// takes every value from `from`, so a value that names a state of its own
 /// is refused. A block trusted by its signature
-/// (`source.fromPromotion.verify`) is checked this far. Returns the path's
+/// (`source.promotion.verify`) is checked this far. Returns the path's
 /// source environment.
 pub fn check_block_shape(block: &PromotionRecord, path: &PromotionPath) -> Result<EnvironmentName, Finding> {
     let invalid = |problem: String| invalid(block, &problem);

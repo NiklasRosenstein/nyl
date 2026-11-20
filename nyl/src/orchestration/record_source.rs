@@ -1,5 +1,5 @@
 //! The `record: source` writer: `nyl promote` commits the PromotionRecord
-//! into the target Environment's `source.fromPromotion.promoted` block.
+//! into the target Environment's `source.promotion.promoted` block.
 //!
 //! Contract: [Promoting an environment's source](../../../design/promotion.md#promoting-an-environments-source)
 //! and decision D3 of the [M6 plan](../../../design/m6-plan.md#open-decisions):
@@ -61,7 +61,7 @@ pub struct GitRecordWriter {
     /// Extra environment of every local `git` the writer runs, such as an
     /// isolated configuration in tests; empty in production.
     pub git_env: Vec<(String, String)>,
-    /// The allowed signers file of `source.fromPromotion.verify`: the
+    /// The allowed signers file of `source.promotion.verify`: the
     /// promotion commit must be signed by a key it lists, which is checked
     /// before the push.
     pub verify: Option<PathBuf>,
@@ -443,21 +443,21 @@ impl GitRecordWriter {
 }
 
 /// `document` (an Environment, in block style) with `record` as its
-/// `spec.source.fromPromotion.promoted` block, replacing an earlier one and
+/// `spec.source.promotion.promoted` block, replacing an earlier one and
 /// keeping every other line as written. The result must read back as exactly
 /// `record`.
 pub fn place_block(document: &str, record: &PromotionRecord) -> Result<String, String> {
     let declared = nyl_render::yaml::parse_yaml_value_k8s_compatible(document)
         .map_err(|error| format!("the Environment does not parse: {error}"))?;
-    if declared.pointer("/spec/source/fromPromotion").is_none() {
+    if declared.pointer("/spec/source/promotion").is_none() {
         return Err(
-            "the Environment's document does not declare `spec.source.fromPromotion`: it is inherited, such as from its EnvironmentGroup, and the block belongs in the Environment's own document"
+            "the Environment's document does not declare `spec.source.promotion`: it is inherited, such as from its EnvironmentGroup, and the block belongs in the Environment's own document"
                 .to_owned(),
         );
     }
     let newline = if document.contains("\r\n") { "\r\n" } else { "\n" };
     let lines: Vec<&str> = document.split_inclusive('\n').collect();
-    let FromPromotion { end, child, promoted } = scan_from_promotion(&lines)?;
+    let PromotionBlock { end, child, promoted } = scan_promotion(&lines)?;
     let child = child.ok_or_else(unplaceable)?;
     let yaml = nyl_render::yaml::serialize_yaml_document(record)
         .map_err(|error| format!("cannot write the record as YAML: {error}"))?;
@@ -489,9 +489,9 @@ pub fn place_block(document: &str, record: &PromotionRecord) -> Result<String, S
     Ok(output)
 }
 
-/// The children of a block-style `spec.source.fromPromotion`, by line index
+/// The children of a block-style `spec.source.promotion`, by line index
 /// of the document.
-struct FromPromotion {
+struct PromotionBlock {
     /// The line after its last child.
     end: usize,
     /// The indentation of its children; `None` when it has none.
@@ -500,12 +500,12 @@ struct FromPromotion {
     promoted: Option<(usize, usize)>,
 }
 
-fn scan_from_promotion(lines: &[&str]) -> Result<FromPromotion, String> {
-    let (from_promotion, parent) = from_promotion_line(lines)?;
-    let mut end = from_promotion + 1;
+fn scan_promotion(lines: &[&str]) -> Result<PromotionBlock, String> {
+    let (promotion, parent) = promotion_line(lines)?;
+    let mut end = promotion + 1;
     let mut child = None;
     let mut promoted: Option<(usize, usize)> = None;
-    let mut index = from_promotion + 1;
+    let mut index = promotion + 1;
     while index < lines.len() {
         let line = lines[index];
         if blank(line) {
@@ -534,11 +534,11 @@ fn scan_from_promotion(lines: &[&str]) -> Result<FromPromotion, String> {
         index += 1;
         end = index;
     }
-    Ok(FromPromotion { end, child, promoted })
+    Ok(PromotionBlock { end, child, promoted })
 }
 
 fn unplaceable() -> String {
-    "cannot place the block: write `spec.source.fromPromotion` of the Environment in block style, one key per line"
+    "cannot place the block: write `spec.source.promotion` of the Environment in block style, one key per line"
         .to_owned()
 }
 
@@ -552,12 +552,12 @@ fn blank(line: &str) -> bool {
     trimmed.is_empty() || trimmed.starts_with('#')
 }
 
-/// The line of `spec.source.fromPromotion` in block style, and its indentation.
-fn from_promotion_line(lines: &[&str]) -> Result<(usize, usize), String> {
+/// The line of `spec.source.promotion` in block style, and its indentation.
+fn promotion_line(lines: &[&str]) -> Result<(usize, usize), String> {
     let mut start = 0;
     let mut parent: Option<usize> = None;
     let mut found = None;
-    for key in ["spec", "source", "fromPromotion"] {
+    for key in ["spec", "source", "promotion"] {
         let mut child = None;
         let mut hit = None;
         for (index, line) in lines.iter().enumerate().skip(start) {
@@ -594,14 +594,14 @@ fn check_placed(document: &str, output: &str, record: &PromotionRecord) -> Resul
     let original: serde_json::Value = nyl_render::yaml::parse_yaml_value_k8s_compatible(document)
         .map_err(|error| format!("the Environment does not parse: {error}"))?;
     let placed = read
-        .pointer("/spec/source/fromPromotion/promoted")
+        .pointer("/spec/source/promotion/promoted")
         .cloned()
         .and_then(|value| serde_json::from_value::<PromotionRecord>(value).ok());
     let mut rest = read;
     let mut before = original;
     for value in [&mut rest, &mut before] {
         if let Some(promoted) = value
-            .pointer_mut("/spec/source/fromPromotion")
+            .pointer_mut("/spec/source/promotion")
             .and_then(serde_json::Value::as_object_mut)
         {
             promoted.remove("promoted");
@@ -643,15 +643,12 @@ pub fn writer_for(
     let verify = session
         .entry()
         .ok()
-        .and_then(|entry| entry.spec.source?.from_promotion?.verify)
+        .and_then(|entry| entry.spec.source?.promotion?.verify)
         .map(|verify| {
             session
                 .inventory
                 .paths()
-                .resolve(
-                    "spec.source.fromPromotion.verify.allowedSigners",
-                    &verify.allowed_signers,
-                )
+                .resolve("spec.source.promotion.verify.allowedSigners", &verify.allowed_signers)
                 .map_err(|error| RecordWriteError::Failed(error.to_string()))
         })
         .transpose()?;
@@ -670,7 +667,7 @@ pub fn writer_for(
 }
 
 /// Verifies the signature on the commit that last changed an Environment's
-/// `record: source` block, for `source.fromPromotion.verify`
+/// `record: source` block, for `source.promotion.verify`
 /// ([`PromotionBlockVerifier`]). Every command that resolves an environment
 /// on the run path gets it from its session.
 pub struct GitBlockVerifier<'a> {
@@ -693,7 +690,7 @@ impl PromotionBlockVerifier for GitBlockVerifier<'_> {
         let signers = self
             .inventory
             .paths()
-            .resolve("spec.source.fromPromotion.verify.allowedSigners", allowed_signers)
+            .resolve("spec.source.promotion.verify.allowedSigners", allowed_signers)
             .map_err(|error| unreadable(error.to_string()))?;
         if !signers.is_file() {
             return Err(unreadable(format!(
@@ -912,7 +909,7 @@ impl BlockSignatures {
                 "the Environment in {relative} has no block-style `promoted` block"
             ))
         };
-        let (first, last) = scan_from_promotion(&lines)
+        let (first, last) = scan_promotion(&lines)
             .ok()
             .and_then(|scan| scan.promoted)
             .ok_or_else(no_block)?;
@@ -981,7 +978,7 @@ fn check_block_lines(document: &str, block: &[&str]) -> Result<(), String> {
         .map_err(|error| format!("the Environment does not parse: {error}"))?;
     match (
         read.get("promoted"),
-        declared.pointer("/spec/source/fromPromotion/promoted"),
+        declared.pointer("/spec/source/promotion/promoted"),
     ) {
         (Some(read), Some(declared)) if read == declared => Ok(()),
         _ => Err("the block's lines do not hold exactly the `promoted` block the Environment declares".to_owned()),
@@ -1003,7 +1000,7 @@ metadata:
   name: prod
 spec:
   source:
-    fromPromotion:
+    promotion:
       path: dev-to-prod
       record: source                  # nyl promote writes the record here
   unitSelector:
@@ -1031,10 +1028,10 @@ spec:
 
     fn promoted(document: &str) -> PromotionRecord {
         let value = nyl_render::yaml::parse_yaml_value_k8s_compatible(document).unwrap();
-        serde_json::from_value(value.pointer("/spec/source/fromPromotion/promoted").unwrap().clone()).unwrap()
+        serde_json::from_value(value.pointer("/spec/source/promotion/promoted").unwrap().clone()).unwrap()
     }
 
-    /// The block lands under `fromPromotion`, a later promotion replaces it,
+    /// The block lands under `promotion`, a later promotion replaces it,
     /// and every other line (comments, flow mappings, the keys after it)
     /// stays as written. Catches a promotion that rewrites the user's
     /// Environment, or one that appends a second block.
@@ -1058,13 +1055,13 @@ spec:
         assert_eq!(second.lines().count(), first.lines().count());
     }
 
-    /// A `fromPromotion` in flow style has no line to place a block under:
+    /// A `promotion` source in flow style has no line to place a block under:
     /// refused rather than rewritten.
     #[test]
     fn test_place_block_refuses_a_flow_style_source() {
         let flow = ENVIRONMENT.replace(
-            "    fromPromotion:\n      path: dev-to-prod\n      record: source                  # nyl promote writes the record here\n",
-            "    fromPromotion: {path: dev-to-prod, record: source}\n",
+            "    promotion:\n      path: dev-to-prod\n      record: source                  # nyl promote writes the record here\n",
+            "    promotion: {path: dev-to-prod, record: source}\n",
         );
         let error = place_block(&flow, &record(1)).unwrap_err();
         assert!(error.contains("block style"), "{error}");
@@ -1083,11 +1080,11 @@ spec:
         );
     }
 
-    /// A `fromPromotion` the Environment inherits, such as from its group,
+    /// A `promotion` source the Environment inherits, such as from its group,
     /// has no place in the Environment's own document: refused with a
     /// precise reason, not the block-style one.
     #[test]
-    fn test_place_block_refuses_an_inherited_from_promotion() {
+    fn test_place_block_refuses_an_inherited_promotion() {
         let inherited =
             "apiVersion: gitops.nyl/v1\nkind: Environment\nmetadata:\n  name: prod\nspec:\n  values: {target: prod}\n";
         let error = place_block(inherited, &record(1)).unwrap_err();
@@ -1477,7 +1474,7 @@ spec:
         path
     }
 
-    /// `source.fromPromotion.verify` (item 11, option c2): the commit that
+    /// `source.promotion.verify` (item 11, option c2): the commit that
     /// last changed the block must carry an SSH signature by a key the
     /// allowed signers file lists. A later edit elsewhere in the file keeps
     /// the signed commit as the one that changed the block; a signature by
@@ -1655,7 +1652,7 @@ spec:
     fn test_block_lines_must_hold_the_declared_block() {
         let document = place_block(ENVIRONMENT, &record(1)).unwrap();
         let lines: Vec<&str> = document.split_inclusive('\n').collect();
-        let (first, last) = scan_from_promotion(&lines).unwrap().promoted.unwrap();
+        let (first, last) = scan_promotion(&lines).unwrap().promoted.unwrap();
         check_block_lines(&document, &lines[first..last]).unwrap();
         assert!(check_block_lines(&document, &lines[first..last - 1]).is_err());
         assert!(git_supports_ssh_signatures("git version 2.34.1"));

@@ -545,7 +545,11 @@ pub fn status_with_producers(
     // A current consumer whose observed value changed is work for the next
     // reconcile: state `ready`, exit 2. Contract:
     // [Observed values](../../../../design/orchestration-core.md#observed-values).
-    let changed = super::observed_values::changed_consumers_across(environment, snapshot, producers, now);
+    let changed = super::observed_values::changed_consumers_across(environment, snapshot, producers, now)
+        .unwrap_or_else(|finding| {
+            report.errors.push(finding);
+            Vec::new()
+        });
     for (name, desired) in &snapshot.desired {
         let observed = snapshot.observed.get(name);
         let mut unit = UnitReport::new(desired.unit.kind.clone());

@@ -1,20 +1,23 @@
 //! Value sources of the Nyl resources in a Release bundle: HelmChart
-//! `valuesFrom` and `fromInput` on `includeCrds` and `lookup`.
+//! `valuesFrom`, and `$input` in a HelmChart's fields.
 //!
 //! Contract: [Declarative value sources](../../../../design/declarative-value-sources.md),
-//! §1 and §3. Each resource is resolved on its [`Value`] right after its file
-//! is parsed, before anything deserializes or inspects it, so every reader
-//! (expansion, `lookup` detection, cache bypass decisions) sees the resolved
-//! document:
+//! the Release bundle context. Each resource is resolved on its [`Value`]
+//! right after its file is parsed, before anything deserializes or inspects
+//! it, so every reader (expansion, `lookup` detection, cache bypass
+//! decisions) sees the resolved document:
 //!
-//! - `fromInput` clauses at the fields the HelmChart schema marks resolvable
-//!   resolve against the Release's resolved inputs ([`resolve_declared`]).
+//! - The literal-only fields (`apiVersion`, `kind`, `metadata.name`,
+//!   `metadata.labels`) hold no source ([`literal_field_issues`]).
+//! - `$input` sources in a HelmChart's fields, outside its chart `values`,
+//!   resolve against the Release's resolved inputs ([`resolve_document`] in
+//!   the [`Context::ReleaseBundle`]); the resolved document is then
+//!   deserialized, which checks each value's type as a literal's.
 //! - `valuesFrom` entries merge in order, then the inline `values`
 //!   ([`merge_chart_values`]); the result replaces `spec.values` and the
-//!   entries are removed. The merged values are data and are never walked for
-//!   clauses.
-//! - A clause left anywhere else in a Nyl resource, outside its free-form
-//!   values, is an error ([`reject_surviving_clauses`]).
+//!   entries are removed. The merged values are data and are never walked.
+//! - The other Nyl resources of a bundle hold no source outside their
+//!   free-form data.
 //!
 //! Every value read enters the dependency recorder at the layer that consumes
 //! it: a values file is returned to the caller as a bundle input (the Release
@@ -23,28 +26,17 @@
 //! a parameter of the Helm cache key.
 
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use nyl_core::bindings::{
-    reject_surviving_clauses, resolvable_fields, resolve_declared, BindingIssue, FromInput, FromParameter, FromValues,
-    InputSource, Origin, Provided, Provision, ResolvableField, Resolved, SourceKind, SourceProvider,
+    find_clauses, literal_field_issues, resolve_document, BindingIssue, Clause, Context, InputSource, Origin, Provided,
+    Providers, Provision, Resolved,
 };
 use nyl_core::constants::API_VERSION;
 use serde_json::Value;
 
 use crate::gitops::values::{load_chart_values_file, ValuesFileRoot};
-use crate::resources::{
-    merge_chart_values, HelmChartSpec, HelmValuesOrigin, HelmValuesSource, Release, RemoteManifest,
-};
+use crate::resources::{merge_chart_values, HelmValuesOrigin, HelmValuesSource, Release, RemoteManifest};
 use crate::{NylError, Result};
-
-/// The fields of a HelmChart spec that accept `fromInput`.
-static CHART_INPUT_FIELDS: LazyLock<Vec<ResolvableField>> =
-    LazyLock::new(|| resolvable_fields(&schemars::schema_for!(HelmChartSpec)));
-
-/// The clause kinds no Nyl resource of a Release bundle may hold after
-/// resolution, outside its free-form values.
-const BUNDLE_CLAUSES: &[&str] = &[FromInput::FIELD, FromValues::FIELD, FromParameter::FIELD];
 
 /// Where the files of a Release bundle come from, for `valuesFrom` files.
 #[derive(Debug, Clone, Copy)]
@@ -81,12 +73,16 @@ pub(crate) fn resolve_bundle_resource(
     let Some(subject) = BundleResource::of(resource) else {
         return Ok(());
     };
-    let mut issues = Vec::new();
-    if subject == BundleResource::HelmChart {
-        resolve_chart(resource, file, files, inputs, read, &mut issues);
-    }
+    let mut issues = literal_field_issues(resource)
+        .into_iter()
+        .map(BindingIssue::new)
+        .collect::<Vec<_>>();
     if issues.is_empty() {
-        reject_surviving(resource, subject, &mut issues);
+        if subject == BundleResource::HelmChart {
+            resolve_chart(resource, file, files, inputs, read, &mut issues);
+        } else {
+            reject_sources(resource, subject, &mut issues);
+        }
     }
     if issues.is_empty() {
         return Ok(());
@@ -100,7 +96,7 @@ pub(crate) fn resolve_bundle_resource(
     )))
 }
 
-/// The Nyl resources of a bundle whose typed fields are checked for clauses.
+/// The Nyl resources of a bundle whose typed fields are checked for sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BundleResource {
     HelmChart,
@@ -147,7 +143,8 @@ fn describe(resource: &Value) -> String {
     format!("{kind} {name:?}")
 }
 
-fn reject_surviving(resource: &Value, subject: BundleResource, issues: &mut Vec<BindingIssue>) {
+/// `resource` without its free-form data.
+fn typed_part(resource: &Value, subject: BundleResource) -> Value {
     let mut typed = resource.clone();
     if let Some(pointer) = subject.data_pointer() {
         let (parent, key) = pointer.rsplit_once('/').expect("a data pointer names a field");
@@ -155,11 +152,18 @@ fn reject_surviving(resource: &Value, subject: BundleResource, issues: &mut Vec<
             parent.remove(key);
         }
     }
-    reject_surviving_clauses("", &typed, BUNDLE_CLAUSES, issues);
-    for issue in issues.iter_mut() {
-        if let Some(field) = issue.message.strip_prefix('.') {
-            issue.message = field.to_owned();
-        }
+    typed
+}
+
+/// Report every value source in a resource that resolves none, outside its
+/// free-form data.
+fn reject_sources(resource: &Value, subject: BundleResource, issues: &mut Vec<BindingIssue>) {
+    if let Err(found) = find_clauses("", "", &typed_part(resource, subject), Context::Literal.into()) {
+        issues.extend(
+            found
+                .into_iter()
+                .map(|message| BindingIssue::new(message.strip_prefix('.').map(str::to_owned).unwrap_or(message))),
+        );
     }
 }
 
@@ -171,14 +175,29 @@ fn resolve_chart(
     read: &mut Vec<PathBuf>,
     issues: &mut Vec<BindingIssue>,
 ) {
-    let Some(spec) = resource.get("spec").filter(|spec| spec.is_object()) else {
+    let provider = ReleaseInputs { inputs };
+    // The chart values are data: they leave the walk and come back after it.
+    let values = resource
+        .get_mut("spec")
+        .and_then(Value::as_object_mut)
+        .and_then(|spec| spec.remove("values"));
+    let resolved = resolve_document("", "", resource, Context::ReleaseBundle.into(), &provider, issues);
+    for issue in issues.iter_mut() {
+        if let Some(field) = issue.message.strip_prefix('.') {
+            issue.message = field.to_owned();
+        }
+    }
+    *resource = resolved.value;
+    let Some(spec) = resource.get_mut("spec").and_then(Value::as_object_mut) else {
         return;
     };
-    let provider = ReleaseInputs { inputs };
-    let resolved = resolve_declared::<FromInput, _>("spec", spec, &CHART_INPUT_FIELDS, &provider, issues);
-    let mut spec = resolved.value;
-    let Some(entries) = spec.as_object_mut().and_then(|spec| spec.remove("valuesFrom")) else {
-        resource["spec"] = spec;
+    if let Some(values) = values {
+        spec.insert("values".to_owned(), values);
+    }
+    if !issues.is_empty() {
+        return;
+    }
+    let Some(entries) = spec.remove("valuesFrom") else {
         return;
     };
     let entries: Vec<HelmValuesSource> = match serde_json::from_value(entries) {
@@ -211,7 +230,7 @@ fn resolve_chart(
                     Err(error) => Err(error.to_string()),
                 }
             }
-            HelmValuesOrigin::Input(name) => match provider.input(&format!("{field}.input"), name) {
+            HelmValuesOrigin::Input(name) => match provider.input_value(&format!("{field}.input"), name) {
                 Ok(value) if value.is_object() => entry.select(value, &format!("Release input {name:?}")),
                 Ok(value) => Err(format!(
                     "Release input {name:?} has type {}; valuesFrom reads only inputs of type object",
@@ -234,22 +253,21 @@ fn resolve_chart(
     let inline = spec.get("values").cloned().unwrap_or(Value::Null);
     match merge_chart_values(sources, inline) {
         Ok(values) => {
-            spec["values"] = values;
-            resource["spec"] = spec;
+            spec.insert("values".to_owned(), values);
         }
         Err(message) => issues.push(BindingIssue::new(message)),
     }
 }
 
-/// The `fromInput` source of a Release bundle: the Release's resolved
-/// inputs, when its Release declares any.
+/// The `$input` source of a Release bundle: the Release's resolved inputs,
+/// when its Release declares any.
 struct ReleaseInputs<'a> {
     inputs: Option<&'a Value>,
 }
 
 impl ReleaseInputs<'_> {
     /// The resolved value of input `name`, read at `field`.
-    fn input(&self, field: &str, name: &str) -> std::result::Result<&Value, BindingIssue> {
+    fn input_value(&self, field: &str, name: &str) -> std::result::Result<&Value, BindingIssue> {
         let Some(inputs) = self.inputs.and_then(Value::as_object) else {
             return Err(BindingIssue::new(format!(
                 "{field} reads Release input {name:?}, but this resource is not rendered as part of a Release that declares inputs; Release inputs are read only in the bundle of a Release whose spec.inputs declares them"
@@ -269,8 +287,8 @@ impl ReleaseInputs<'_> {
     }
 }
 
-/// Where a resolved `fromInput` clause read its value: always the Release
-/// input, because the clause has no default of its own.
+/// Where a resolved `$input` source read its value: always the Release
+/// input, because the source has no default of its own.
 #[derive(Debug, Clone, PartialEq)]
 struct ReleaseInputOrigin;
 
@@ -289,42 +307,34 @@ impl Origin for ReleaseInputOrigin {
     }
 }
 
-impl SourceProvider<FromInput> for ReleaseInputs<'_> {
+impl Providers for ReleaseInputs<'_> {
     type Origin = ReleaseInputOrigin;
 
-    /// Every HelmChart field that accepts `fromInput` is a boolean, so the
-    /// value must be one.
-    fn provide(&self, field: &str, clause: &InputSource) -> Provided<ReleaseInputOrigin> {
-        let input = self.input(&format!("{field}.fromInput"), &clause.name)?;
-        let pointer = clause.pointer.as_deref().unwrap_or_default();
+    /// The input's value, or the value `pointer` selects in it. Its type is
+    /// checked where the resolved resource is deserialized, as a literal's.
+    fn input(&self, field: &str, source: &InputSource) -> Provided<ReleaseInputOrigin> {
+        let field = format!("{field}.$input");
+        let input = self.input_value(&field, &source.name)?;
+        let pointer = source.pointer.as_deref().unwrap_or_default();
         let Some(value) = input.pointer(pointer) else {
             return Err(BindingIssue::new(format!(
-                "{field}.fromInput reads {pointer:?} of Release input {:?}, which holds nothing there",
-                clause.name
+                "{field} reads {pointer:?} of Release input {:?}, which holds nothing there",
+                source.name
             )));
         };
-        if !value.is_boolean() && !value.is_null() {
-            return Err(BindingIssue::new(format!(
-                "{field}.fromInput reads Release input {:?}{}, which has type {}; {field} takes a boolean",
-                clause.name,
-                if pointer.is_empty() {
-                    String::new()
-                } else {
-                    format!(" at {pointer:?}")
-                },
-                nyl_core::bindings::json_type_name(value)
-            )));
-        }
         Ok(Provision::Value(Resolved {
             value: value.clone(),
             origin: ReleaseInputOrigin,
         }))
     }
 
-    fn missing(&self, field: &str, clause: &InputSource) -> Option<BindingIssue> {
+    fn missing(&self, field: &str, clause: &Clause) -> Option<BindingIssue> {
+        let Clause::Input(source) = clause else {
+            return None;
+        };
         Some(BindingIssue::new(format!(
-            "{field}.fromInput reads Release input {:?}, which is null; bind a boolean or give the input a default",
-            clause.name
+            "{field}.$input reads Release input {:?}, which is null; bind a value or give the input a default",
+            source.name
         )))
     }
 }
@@ -337,7 +347,7 @@ pub(crate) fn reject_generated_sources(resource: &Value) -> Result<()> {
     if resource.pointer("/spec/valuesFrom").is_some() {
         issues.push(BindingIssue::new("spec.valuesFrom is set"));
     }
-    reject_surviving(resource, BundleResource::HelmChart, &mut issues);
+    reject_sources(resource, BundleResource::HelmChart, &mut issues);
     if issues.is_empty() {
         return Ok(());
     }
@@ -415,7 +425,7 @@ mod tests {
     #[test]
     fn test_values_from_merges_files_and_inputs_in_order_then_inline_values() {
         let temp = project(
-            "  valuesFrom:\n    - file: ../shared/base.yaml\n    - file: /apps/overlay.yaml\n      pointer: /web\n    - input: chartValues\n      key: fromInput\n    - input: chartValues\n      pointer: /optional\n  values: {replicas: 3, nested: {inline: true}}\n",
+            "  valuesFrom:\n    - file: ../shared/base.yaml\n    - file: /apps/overlay.yaml\n      pointer: /web\n    - input: chartValues\n      key: mounted\n    - input: chartValues\n      pointer: /optional\n  values: {replicas: 3, nested: {inline: true}}\n",
             &[
                 ("shared/base.yaml", "replicas: 1\nnested: {base: true, list: [1, 2]}\norder: base\n"),
                 ("apps/overlay.yaml", "web: {nested: {list: [3]}, order: overlay}\nother: {ignored: true}\n"),
@@ -429,7 +439,7 @@ mod tests {
                 "replicas": 3,
                 "nested": {"base": true, "list": [3], "inline": true},
                 "order": "overlay",
-                "fromInput": {"order": "input", "optional": {"feature": {"enabled": true}}},
+                "mounted": {"order": "input", "optional": {"feature": {"enabled": true}}},
                 "feature": {"enabled": true},
             })
         );
@@ -439,18 +449,18 @@ mod tests {
         assert!(read.contains(&root.join("apps/overlay.yaml")), "{read:?}");
     }
 
-    /// Catches merged values being walked for clauses: they are chart data,
-    /// even when a values file holds what looks like a clause.
+    /// Catches merged values being walked for sources: in this release they
+    /// are chart data, inline and from a values file.
     #[test]
     fn test_values_from_values_are_data() {
         let temp = project(
-            "  valuesFrom: [{file: values.yaml}]\n  values: {inline: {fromInput: {name: flag}}}\n",
-            &[("apps/values.yaml", "file: {fromValues: {pointer: /x}}\n")],
+            "  valuesFrom: [{file: values.yaml}]\n  values: {inline: {$ref: '#/x'}}\n",
+            &[("apps/values.yaml", "file: {$schema: x}\n")],
         );
         let (chart, _) = load(&temp, None).unwrap();
         assert_eq!(
             chart["spec"]["values"],
-            json!({"file": {"fromValues": {"pointer": "/x"}}, "inline": {"fromInput": {"name": "flag"}}})
+            json!({"file": {"$schema": "x"}, "inline": {"$ref": "#/x"}})
         );
     }
 
@@ -503,12 +513,13 @@ mod tests {
         assert!(error(&escaped, None).contains("outside the Git worktree"));
     }
 
-    /// Catches `fromInput` on `includeCrds` and `lookup` not resolving, a
-    /// non-boolean passing, or a clause anywhere else surviving as data.
+    /// Catches `$input` in a HelmChart's fields not resolving, a value of
+    /// the wrong type passing, or a source the bundle cannot resolve, or one
+    /// in a literal-only field, surviving as data.
     #[test]
-    fn test_from_input_resolves_boolean_chart_fields() {
+    fn test_input_resolves_chart_fields() {
         let temp = project(
-            "  includeCrds: {fromInput: {name: crds}}\n  lookup: {fromInput: {name: features, pointer: /lookup}}\n",
+            "  includeCrds: {$input: crds}\n  lookup: {$input: {name: features, pointer: /lookup}}\n",
             &[],
         );
         let (chart, _) = load(&temp, Some(json!({"crds": false, "features": {"lookup": true}}))).unwrap();
@@ -517,30 +528,47 @@ mod tests {
         let parsed: crate::resources::HelmChart = serde_json::from_value(chart).unwrap();
         assert_eq!(parsed.spec.include_crds, Some(false));
 
-        let wrong = error(&temp, Some(json!({"crds": "no", "features": {"lookup": true}})));
-        assert!(
-            wrong.contains("spec.includeCrds.fromInput reads Release input \"crds\", which has type string; spec.includeCrds takes a boolean"),
-            "{wrong}"
-        );
+        let (wrong, _) = load(&temp, Some(json!({"crds": "no", "features": {"lookup": true}}))).unwrap();
+        assert!(serde_json::from_value::<crate::resources::HelmChart>(wrong).is_err());
         let outside = error(&temp, None);
         assert!(
-            outside.contains("not rendered as part of a Release that declares inputs"),
+            outside.contains("spec.includeCrds.$input reads Release input \"crds\", but this resource is not rendered as part of a Release that declares inputs"),
             "{outside}"
         );
 
-        let surviving = project("  values: {}\n  version: [{fromInput: {name: chart}}]\n", &[]);
-        let surviving = error(&surviving, Some(json!({"chart": "x"})));
+        let shorthand = project("  includeCrds: {$input: /crds}\n", &[]);
+        let shorthand = error(&shorthand, Some(json!({"crds": true})));
         assert!(
-            surviving.contains("spec.version[0] holds a fromInput clause where none resolves"),
-            "{surviving}"
+            shorthand.contains("spec.includeCrds.$input takes a name; did you mean crds?"),
+            "{shorthand}"
         );
 
-        // Only an EnvironmentTemplate's values resolve `fromParameter`.
-        let parameter = project("  values: {}\n  releaseName: {fromParameter: {name: pr}}\n", &[]);
-        let parameter = error(&parameter, None);
+        let unit = project(
+            "  values: {}\n  version: {$unit: {unit: chart, output: version}}\n",
+            &[],
+        );
+        let unit = error(&unit, Some(json!({"chart": "x"})));
         assert!(
-            parameter.contains("spec.releaseName holds a fromParameter clause where none resolves"),
-            "{parameter}"
+            unit.contains("spec.version holds a $unit source")
+                && unit.contains("declare a Release input and bind it on the target with $unit"),
+            "{unit}"
+        );
+
+        let named = project("  values: {}\n", &[]);
+        fs::write(
+            named.path().join("apps/app.yaml"),
+            "apiVersion: k8s.nyl/v1\nkind: Release\nmetadata: {name: web, namespace: web}\n---\napiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata: {name: {$input: name}}\nspec: {chart: {name: ./chart}}\n",
+        )
+        .unwrap();
+        let named = load_release_bundle(
+            &named.path().join("apps/app.yaml"),
+            &context(Some(json!({"name": "x"}))),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            named.contains("metadata.name holds a $input source, but metadata.name must be literal"),
+            "{named}"
         );
     }
 
@@ -548,13 +576,13 @@ mod tests {
     #[test]
     fn test_generated_charts_take_no_sources() {
         let chart = json!({"apiVersion": API_VERSION, "kind": "HelmChart", "metadata": {"name": "nested"},
-            "spec": {"chart": {"name": "c"}, "valuesFrom": [{"file": "a.yaml"}], "includeCrds": {"fromInput": {"name": "crds"}}}});
+            "spec": {"chart": {"name": "c"}, "valuesFrom": [{"file": "a.yaml"}], "includeCrds": {"$input": "crds"}}});
         let error = reject_generated_sources(&chart).unwrap_err().to_string();
         assert!(
             error.contains("HelmChart \"nested\" was generated while rendering"),
             "{error}"
         );
         assert!(error.contains("spec.valuesFrom is set"), "{error}");
-        assert!(error.contains("spec.includeCrds holds a fromInput clause"), "{error}");
+        assert!(error.contains("spec.includeCrds holds a $input source"), "{error}");
     }
 }

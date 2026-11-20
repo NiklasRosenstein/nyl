@@ -528,7 +528,7 @@ impl RenderSession {
         for resource in &bundle.resources {
             nyl_core::resources::schema::validate_resource_api_with_catalog(
                 &resource.value,
-                &self.project_config.resource_catalogue.resources,
+                &self.project_config.resource_catalogue.0,
             )
             .map_err(|error| {
                 NylError::from(error).with_render_provenance(resource.provenance.resource(&resource.value).to_string())
@@ -819,7 +819,7 @@ impl RenderSession {
         recorder.record_value(
             "request",
             &serde_json::json!({
-                "resourceCatalogue": self.project_config.resource_catalogue.resources.iter().map(|d| (d.name, d.api_version, d.dynamic_kind)).collect::<Vec<_>>(),
+                "resourceCatalogue": self.project_config.resource_catalogue.0.iter().map(|d| (d.name, d.api_version, d.dynamic_kind)).collect::<Vec<_>>(),
                 "onlySourceKind": request.only_source_kind,
                 "pathMode": format!("{:?}", request.path_mode),
                 "provenanceRoot": request.provenance_root,

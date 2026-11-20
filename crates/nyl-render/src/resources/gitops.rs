@@ -1127,18 +1127,7 @@ pub fn generate_gitops_resource_schema(kind: GitOpsResourceKind) -> serde_json::
         GitOpsResourceKind::GitRepository => serde_json::to_value(schema_for!(GitRepository)),
         GitOpsResourceKind::Cluster => serde_json::to_value(schema_for!(Cluster)),
         GitOpsResourceKind::ArgoCDInstance => serde_json::to_value(schema_for!(ArgoCDInstance)),
-        GitOpsResourceKind::DeploymentTarget => {
-            serde_json::to_value(schema_for!(DeploymentTarget)).map(|mut schema| {
-                // Bindings share `fromUnit` with unit documents, where an inline
-                // target's `environment` accepts `fromValues`; a declared target
-                // is no unit document, so it takes only the literal.
-                nyl_core::bindings::without_clauses(
-                    &mut schema,
-                    <nyl_core::bindings::FromValues as nyl_core::bindings::SourceKind>::FIELD,
-                );
-                schema
-            })
-        }
+        GitOpsResourceKind::DeploymentTarget => serde_json::to_value(schema_for!(DeploymentTarget)),
         GitOpsResourceKind::AppProjectDefinition => serde_json::to_value(schema_for!(AppProjectDefinition)),
         GitOpsResourceKind::ApplicationGroup => serde_json::to_value(schema_for!(ApplicationGroup)),
         GitOpsResourceKind::Environment => {
@@ -1454,29 +1443,18 @@ impl DeploymentTarget {
             .get_or_insert_with(|| self.metadata.name.clone());
     }
 
-    /// A `fromParameter` clause resolves only in an EnvironmentTemplate's
-    /// `values`, so an inline target written there holds none once its
-    /// instance is created; one anywhere in a target, such as in a binding's
-    /// `value`, is an error instead of reaching a Release as data.
-    fn reject_parameter_sources(&self) -> Result<()> {
-        let spec = serde_json::to_value(&self.spec).map_err(|error| CoreError::config(error.to_string()))?;
-        let mut issues = Vec::new();
-        nyl_core::bindings::reject_surviving_clauses(
-            "spec",
-            &spec,
-            nyl_core::bindings::TEMPLATE_VALUE_KINDS,
-            &mut issues,
-        );
-        if issues.is_empty() {
-            return Ok(());
+    /// Value sources are valid in a target only in its `releaseInputs`, which
+    /// [`super::release_inputs::validate_bindings`] checks: anywhere else,
+    /// such as a `$parameter` an EnvironmentTemplate's values did not resolve,
+    /// one is an error instead of reaching a Release as data.
+    fn reject_value_sources(&self) -> Result<()> {
+        let mut spec = serde_json::to_value(&self.spec).map_err(|error| CoreError::config(error.to_string()))?;
+        if let Some(spec) = spec.as_object_mut() {
+            spec.remove("releaseInputs");
         }
-        Err(CoreError::config(
-            issues
-                .into_iter()
-                .map(|issue| issue.message)
-                .collect::<Vec<_>>()
-                .join("; "),
-        ))
+        nyl_core::bindings::find_clauses("spec", "", &spec, nyl_core::bindings::Context::Literal.into())
+            .map(drop)
+            .map_err(|issues| CoreError::config(issues.join("; ")))
     }
 
     pub fn cluster_name(&self) -> &str {
@@ -1526,7 +1504,7 @@ impl DeploymentTarget {
             KIND_DEPLOYMENT_TARGET,
             &self.metadata,
         )?;
-        self.reject_parameter_sources()?;
+        self.reject_value_sources()?;
         validate_static_required("spec.clusterRef.name", self.cluster_name())?;
         if self.spec.legacy_argocd_ref.is_some() {
             return Err(CoreError::config(format!(
@@ -2718,51 +2696,53 @@ mod tests {
         assert!(serde_json::to_value(schema).unwrap().is_object());
     }
 
-    /// Catches a declared DeploymentTarget accepting, or its schema offering,
-    /// `fromValues` in a `fromUnit` binding's `environment`: only unit
-    /// documents resolve it, so the declared target fails with where it works,
-    /// and only a literal name is offered to editors.
-    /// Catches a `fromParameter` clause in a declared DeploymentTarget, such
-    /// as in a binding's `value`, reaching a Release as data: only an
-    /// EnvironmentTemplate's values resolve one.
+    /// Catches a value source in a declared DeploymentTarget reaching a
+    /// Release as data where it cannot resolve: `$parameter` in a binding, and
+    /// `$environment` in a `$unit`, which only unit documents resolve, fail
+    /// with where they work.
     #[test]
-    fn declared_targets_reject_from_parameter() {
+    fn declared_targets_reject_sources_they_cannot_resolve() {
         let error = parse_gitops_resource(&target_with(json!({
             "reconciler": {"argocd": {}},
-            "releaseInputs": {"rise/rise": {"clusterWide": {"value": {"fromParameter": {"name": "crds"}}}}}
+            "releaseInputs": {"rise/rise": {"clusterWide": {"$parameter": "crds"}}}
         })))
         .unwrap_err()
         .to_string();
         assert!(
             error.contains(
-                "spec.releaseInputs.rise/rise.clusterWide.value holds a fromParameter clause where none resolves"
+                "spec.releaseInputs.\"rise/rise\".clusterWide holds a $parameter source, which reads a template parameter"
             ),
             "{error}"
         );
-    }
 
-    #[test]
-    fn declared_targets_take_a_literal_from_unit_environment() {
         let binding = |environment: serde_json::Value| {
             target_with(json!({
                 "reconciler": {"argocd": {}},
-                "releaseInputs": {"apps/web": {"image": {"fromUnit": {"unit": "image", "output": "ref", "environment": environment}}}}
+                "releaseInputs": {"apps/web": {"image": {"$unit": {"unit": "image", "output": "ref", "environment": environment}}}}
             }))
         };
         assert!(parse_gitops_resource(&binding(json!("dev"))).is_ok());
-        let error = parse_gitops_resource(&binding(json!({"fromValues": {"pointer": "/imageFrom"}})))
+        let error = parse_gitops_resource(&binding(json!({"$environment": "/imageFrom"})))
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("fromValues clause, which resolves only in unit documents"),
+            error.contains(
+                "$environment source, which reads the environment's values and resolves only in unit documents"
+            ),
             "{error}"
         );
         assert!(error.contains("/nyl/reference/value-sources/"), "{error}");
 
-        let schema = generate_gitops_resource_schema(GitOpsResourceKind::DeploymentTarget);
-        let environment = &schema["$defs"]["UnitInputSource"]["properties"]["environment"];
-        assert_eq!(environment["type"], json!(["string", "null"]), "{environment}");
-        assert!(!schema.to_string().contains(nyl_core::bindings::RESOLVABLE_EXTENSION));
+        let error = parse_gitops_resource(&target_with(json!({
+            "reconciler": {"argocd": {}},
+            "values": {"replicas": {"$parameter": "replicas"}},
+        })))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("spec.values.replicas holds a $parameter source"),
+            "{error}"
+        );
     }
 
     #[test]

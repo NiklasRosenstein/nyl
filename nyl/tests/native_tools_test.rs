@@ -56,7 +56,7 @@ spec:
   source: {path: ../infra/database}
   backend: {path: '%SCENARIO_TMP%/database.tfstate'}
   variables:
-    vpc_id: {fromUnit: {unit: network, output: vpcId}}
+    vpc_id: {$unit: {unit: network, output: vpcId}}
   outputs:
     host: {type: string}
 "#),

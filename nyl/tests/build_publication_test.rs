@@ -76,8 +76,8 @@ fn standalone_project() -> tempfile::TempDir {
     edit("nyl/units.yaml", "target: '{{ values.target }}'", "target: dev");
     edit(
         "nyl/platform.yaml",
-        "      image: {fromUnit: {unit: web-image, artifact: image, pointer: /reference}}\n      databaseHost: {fromUnit: {unit: database, output: host}}",
-        "      image: {value: 'registry.invalid:5000/web:direct'}\n      databaseHost: {value: db.internal}",
+        "      image: {$unit: {unit: web-image, artifact: image, pointer: /reference}}\n      databaseHost: {$unit: {unit: database, output: host}}",
+        "      image: 'registry.invalid:5000/web:direct'\n      databaseHost: db.internal",
     );
     copy
 }
@@ -114,7 +114,7 @@ fn deploy_branch_exists(harness: &harness::Harness) -> bool {
 
 /// End to end, for a publication an environment runs: after a reconcile
 /// publishes `dev`, a build with `-e dev` renders the same tree through the
-/// pinned `fromUnit` inputs of the receipts and finds the published one
+/// pinned `$unit` inputs of the receipts and finds the published one
 /// current; `--diff` names the unit that owns it, and `--push` refuses with
 /// its code, the environment, and the way to publish, without touching the
 /// branch. Catches a direct build that resolves inputs any other way than a
@@ -156,7 +156,7 @@ fn test_build_of_an_environments_publication_renders_diffs_and_refuses_to_push()
 }
 
 /// Catches a build reading an environment's receipts without being told
-/// which environment: the target's `fromUnit` bindings fail the build, naming
+/// which environment: the target's `$unit` bindings fail the build, naming
 /// the way out, instead of rendering with whatever state is at hand.
 #[test]
 fn test_build_without_an_environment_fails_on_bindings_only_orchestration_resolves() {
@@ -241,7 +241,7 @@ fn inline_project() -> tempfile::TempDir {
         "target: dev\n",
         "target:\n    inline:\n      reconciler: {argocd: {}}\n      clusterRef: {name: dev}\n      applicationGroupSelector: {matchLabels: {app: web}}\n      \
          publication: {repositoryRef: {name: platform}, revision: deploy, pathPrefix: preview}\n      \
-         releaseInputs:\n        web/web:\n          image: {value: 'registry.invalid:5000/web:direct'}\n          databaseHost: {value: db.internal}\n",
+         releaseInputs:\n        web/web:\n          image: 'registry.invalid:5000/web:direct'\n          databaseHost: db.internal\n",
     );
     // The declared target goes: its Applications would collide with the inline target's.
     let platform = project.path().join("nyl/platform.yaml");
