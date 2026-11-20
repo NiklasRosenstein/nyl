@@ -171,7 +171,8 @@ impl Script {
 
     /// The scripted drift result of the fake's next `detect_drift` of
     /// `unit`, or `None` when none is queued and the fake decides itself. A
-    /// scripted failure is a driver error, which records no drift.
+    /// scripted failure is a driver error, which records no drift; a scripted
+    /// coded error is that driver error, with its code, detail, and fix.
     fn drift(&self, unit: &UnitName) -> DriverResult<Option<Drift>> {
         Ok(match self.take(unit, DriverOperation::DetectDrift) {
             None => None,
@@ -182,10 +183,14 @@ impl Script {
             Some(Scripted::Uncertain) => Some(Drift::Unknown {
                 reason: "scripted unknown drift".to_owned(),
             }),
+            Some(Scripted::CodedError { code, detail, fix }) => {
+                return Err(DriverError::before_effects("scripted coded detect-drift error")
+                    .coded(code, Some(&detail))
+                    .with_fix(fix));
+            }
             Some(
                 Scripted::Failed { .. }
                 | Scripted::CodedFailure { .. }
-                | Scripted::CodedError { .. }
                 | Scripted::RetryRequired { .. }
                 | Scripted::Pending,
             ) => {

@@ -521,6 +521,40 @@ fn test_detect_drift_records_once_and_reports_drift() {
         .contains("drift: drifted"));
 }
 
+/// Catches a check dropping what a driver said went wrong: a coded driver
+/// error of `detect-drift` keeps the driver's code, detail, and fix in its
+/// finding, as in a run, instead of becoming `NYL-DRIVER-ERROR` with the
+/// code in its message.
+#[test]
+fn test_a_coded_driver_error_of_detect_drift_keeps_its_code_and_fix() {
+    let harness = Harness::new();
+    harness.init();
+    assert_eq!(harness.reconcile(&[]).exit, 0);
+    harness.script.push(
+        unit("network"),
+        DriverOperation::DetectDrift,
+        &Scripted::CodedError {
+            code: Code::UnitAccessUndeclared,
+            detail: "endpoint-missing".to_owned(),
+            fix: "declare the endpoint".to_owned(),
+        },
+        1,
+    );
+    let checked = harness.invoke(&["detect-drift", "-e", "dev", "--unit", "network", "-o", "json"]);
+    assert_eq!(checked.exit, 1, "{}", checked.stderr);
+    let errors = checked.report["environments"][0]["errors"].as_array().expect("errors");
+    let [finding] = errors.as_slice() else {
+        panic!("one finding in {errors:?}");
+    };
+    assert_eq!(finding["code"], "NYL-UNIT-ACCESS-UNDECLARED", "{finding}");
+    assert_eq!(finding["detail"], "endpoint-missing", "{finding}");
+    assert_eq!(finding["fix"], "declare the endpoint", "{finding}");
+    assert_eq!(
+        finding["message"], "unit network: scripted coded detect-drift error",
+        "{finding}"
+    );
+}
+
 /// What one `detect-drift` call of a [`Recording`] driver saw.
 #[derive(Debug, Clone)]
 struct Seen {

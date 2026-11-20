@@ -242,7 +242,7 @@ counts them, such as `nyl: detect-drift dev (3 clean, 1 drifted)` or
 | `NYL-ATTEST-NO-RECEIPT` | The unit has no current receipt to attest. Run `nyl reconcile`. |
 | `NYL-ATTEST-UNKNOWN` | The driver could not tell the results of the unit's attestations. Fix the cause and run `attest` again. |
 | `NYL-ATTEST-UNSUPPORTED` | `--unit` named a unit whose kind produces no attestations for its spec, such as a Command unit without an `attest` step. |
-| `NYL-DRIVER-ERROR` | The check could not run, for example because the unit's commit could not be checked out, or it passed its `timeout` (the message reads `timeout: detect-drift passed …`). Fix the cause, or raise the unit's `timeout`, and run the command again. |
+| `NYL-DRIVER-ERROR` | The check could not run, for example because the unit's commit could not be checked out, or it passed its `timeout` (the message reads `timeout: detect-drift passed …`). Fix the cause, or raise the unit's `timeout`, and run the command again. When the unit's driver says what went wrong, its code (such as `NYL-UNIT-INVALID`), detail, and fix are reported instead, as in a run. |
 | `NYL-LEASE-BROKEN` | The lease was broken and its run is not imported yet. Run `nyl recover -e <env>`, then run the command again. |
 
 ## Exit codes
