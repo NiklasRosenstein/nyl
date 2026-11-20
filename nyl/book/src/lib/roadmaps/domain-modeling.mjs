@@ -41,7 +41,7 @@ export const domainModelingRoadmap = {
         { text: '`$fromUnit` references inside declarations', done: false },
         { text: 'The versioned `ResourceBundle` and its provenance in desired state', done: false },
         { text: 'The bundle digest in the execution key', done: false },
-        { text: '`fromCollection` references and the Command unit’s `collections` input', done: false },
+        { text: '`$fromCollection` references and the Command unit’s `collections` input', done: false },
         { text: '`nyl prepare` with fixture outputs', done: false },
         { text: 'Referenced resources in the bundle: the `x-nyl-reference` closure, read-only and part of the digest', done: false },
       ],

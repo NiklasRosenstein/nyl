@@ -81,9 +81,8 @@ Native tool policy belongs to drivers. The engine coordinates generic ownership
 claims, driver-declared defaults and source requirements, and reasoned retry
 acknowledgements. Drivers canonicalize resource identities and validate their
 own non-secret retry context; shared orchestration and state storage do not
-interpret tool names, backend details, or diagnostic messages. M4 supplies and
-exercises this boundary for image and infrastructure drivers; M5 uses the same
-contract for publication.
+interpret tool names, backend details, or diagnostic messages. The image and
+infrastructure drivers (M4) and the publication driver (M5) use this boundary.
 
 ### Initial scope
 
@@ -204,11 +203,55 @@ deletion and recreation. Different unit names do not imply disjoint native
 ownership: validate backend/workspace, registry repository, and cluster/resource
 scopes where the driver can establish them.
 
+### Value sources
+
+Every value that comes from somewhere other than the document itself is
+written the same way: an object whose only key is a `$from…` source, at any
+depth of a document, replaced by the value it names. The model is
+[design/declarative-value-sources.md](design/declarative-value-sources.md); the
+[value sources reference](https://niklasrosenstein.github.io/nyl/reference/value-sources/)
+documents each source.
+
+| Source | Reads | Resolves |
+| --- | --- | --- |
+| `$fromEnvironment` | The environment's effective values, in unit documents | Render time |
+| `$fromInput` | A Release's declared, typed input, in every resource of its bundle | Render time |
+| `$fromParameter` | An EnvironmentTemplate instance's typed parameter, in the template's values | When the instance's values are computed |
+| `$fromFile`, `$fromGit`, `$fromPublication` | A file of the repository, a file at a locked commit, a state file in the target's publication branch, in Release-input bindings | Render time |
+| `$fromUnit` | A unit's output, artifact, or observed value from its current receipt | Execution time |
+| `$fromPromotion` | A value recorded through a PromotionPath | Execution time |
+| `$literal` | Its content, verbatim and never read for sources | With the document |
+
+- **One resolver.** One walker in `nyl_core::bindings` recognizes sources and
+  asks a context table whether each resolves, is carried to the document it
+  lands in, or is rejected with an error that names the fix. Unit documents,
+  environment and template values, Release-input bindings, and Release
+  bundles all use it, as do the dependency graph and promotion selectors.
+- **Render time and execution time.** Render-time sources resolve the same way
+  in every command that renders the document. Execution-time sources resolve
+  only in a run, where a value that does not exist yet blocks its consumer;
+  ordinary rendering rejects them.
+- **Types and keys.** A resolved document is validated exactly as if its values
+  were written inline, and execution keys hash the resolved spec, so a field
+  filled by a source hashes like the same literal.
+- **Data stays data.** Values read from outside the configuration (receipts,
+  files, promotion records, parameters, rendering output) are never read for
+  sources; a source in a `valuesFrom` file or in what a chart generates is an
+  error. Typed fields reserve every `$` key, and common typos of a source's
+  name are errors with a suggestion.
+- **Jinja for strings.** Jinja stays for string interpolation; a value's
+  shape or type comes from a source. `nyl validate` renders every environment
+  and sample instances of every template, so a source in the wrong place
+  fails before any run.
+
 ### Release inputs (M2)
 
-A Release may declare named, typed inputs. Templates read them as
-`inputs.<name>`, alongside the existing `values`. A Release without declared
-inputs renders exactly as today. The contract is
+A Release may declare named, typed inputs. Every resource of its bundle reads
+them with `$fromInput`: plain manifests, a HelmChart's fields and chart
+`values`, a Component's `spec`, a RemoteManifest, and `metadata.namespace`.
+String interpolation reads them as `inputs.<name>`. A HelmChart's `valuesFrom`
+merges values files and `object` inputs before its inline `values`. A Release
+without declared inputs renders as it would without the feature. The contract is
 [design/release-inputs.md](design/release-inputs.md).
 
 Inputs use a small closed type set (`string`, `integer`, `number`, `boolean`,
@@ -240,7 +283,8 @@ Group-level defaults can be added later if repetition across targets proves to
 be a problem. Bindings are keyed by the Release's rendered
 identity, `<applicationGroup>/<release>`, because one Release name can appear in
 several groups on one target. Unknown keys, unknown input names, and duplicate
-bindings are errors. Each binding is a literal or one value source:
+bindings are errors. Each binding is a literal or one value source, and
+sources inside a literal resolve too:
 
 | Binding | Resolves from | Needs orchestration |
 | --- | --- | --- |
@@ -250,6 +294,7 @@ bindings are errors. Each binding is a literal or one value source:
 | `$fromPublication` | State file in the target's own publication branch at the publication base commit | No |
 | `$fromUnit` | Recorded public output, observed value, or published artifact field of a unit in the same environment | Yes (M5) |
 | `$fromPromotion` | A value recorded by a PromotionPath into this environment | Yes (M6) |
+| `$literal` | Its content verbatim, for data that looks like a source | No |
 
 ```yaml
 apiVersion: k8s.gitops.nyl/v1
@@ -296,8 +341,7 @@ spec:
   already receive target `values`; the platform's binding key is the admission.
 - Resolved inputs participate in the dependency recorder and render-cache key.
   The rendered ownership index records a digest and provenance per input in its
-  existing `inputs` map, not raw values, and without a format version change;
-  published trees remain reconcilable across the upgrade.
+  existing `inputs` map, not raw values, within index format version 2.
 - `$fromUnit` and `$fromPromotion` bindings are rejected by ordinary
   `render-tree`. Only orchestrated execution may resolve them, and it passes
   them to rendering as an explicit, pinned input snapshot. Ordinary rendering
@@ -309,8 +353,10 @@ spec:
 The [orchestration core contract](design/orchestration-core.md) specifies
 environments, units, state, execution, recovery, deletion, drivers, and the
 command unit. In summary, an Environment selects labelled unit templates of any
-unit kind and renders them with its values, mirroring how a DeploymentTarget selects
-ApplicationGroups, so a unit is written once for every environment:
+unit kind, mirroring how a DeploymentTarget selects ApplicationGroups, and the
+units read its values with `$fromEnvironment`, so a unit is written once for
+every environment. An EnvironmentTemplate instantiates environments such as
+previews from typed parameters, which its values read with `$fromParameter`:
 
 ```yaml
 apiVersion: gitops.nyl/v1
@@ -325,7 +371,7 @@ kind: Terraform
 metadata: {name: database, labels: {tier: platform}}
 spec:
   source: {path: infra/database}
-  backend: {key: '{{ values.stateKey }}'}
+  backend: {key: {$fromEnvironment: /stateKey}}
   variables:
     vpcId: {$fromUnit: {unit: network, output: vpcId}}
   outputs:
@@ -336,7 +382,7 @@ apiVersion: units.gitops.nyl/v1
 kind: KubernetesPublication
 metadata: {name: kubernetes, labels: {tier: platform}}
 spec:
-  target: '{{ values.target }}'   # DeploymentTarget whose Release inputs use $fromUnit
+  target: {$fromEnvironment: /target}   # DeploymentTarget whose Release inputs use $fromUnit
 ```
 
 A Kubernetes publication unit places its target into the unit's environment,
@@ -382,7 +428,7 @@ Cluster.
 - The Kubernetes publication unit wraps `render-tree` and `publish-tree` for one
   DeploymentTarget, because one target owns one publication tree and ownership
   index. Its desired unit contains the Release inputs only orchestration can
-  resolve (`$fromUnit`, and later `$fromPromotion`) as the pinned input snapshot,
+  resolve (`$fromUnit` and `$fromPromotion`) as the pinned input snapshot,
   keyed by `<applicationGroup>/<release>`, and the target's effective teardown
   settings, which the driver records when it resolves the unit; the other
   bindings resolve inside the render and enter its execution key. Its recorded
@@ -457,7 +503,9 @@ sources.
 
 Teams declare typed resources, such as AWS accounts or GitHub teams, in
 paths they own, and explicitly registered units consume them as a tool-neutral
-bundle. This is the fourth layer of Nyl, above orchestration. Its direction is
+bundle: a unit reads a collection with `$fromCollection`, and a declaration
+field that accepts references holds `$fromUnit` or `$fromPromotion`. This is
+the fourth layer of Nyl, above orchestration. Its direction is
 the [domain modeling design](design/domain-resources.md), and its slices and
 progress are on the
 [Domain modeling roadmap](https://niklasrosenstein.github.io/nyl/domain-modeling/roadmap/).
@@ -491,12 +539,11 @@ hotfix paths, and promotion from non-orchestrated targets.
 M6 promotes between environments and records every promotion directly. M11
 adds the rest of the contract: DeploymentTargets that no environment
 orchestrates as promotion sources and targets, `nyl attest --target`, and
-`changeGate: pullRequest`. They are split off because they reach outside
-orchestration (the ownership index, the publication tree's reserved files,
-tree and direct commands) or need a forge integration, and the M6 exit
-criterion needs none of them; the [M6 plan](design/m6-plan.md) records the
-split. Until M11, validation rejects `changeGate: pullRequest` and a target
-in `from` or `to`.
+`changeGate: pullRequest`. They belong to their own milestone because they
+reach outside orchestration (the ownership index, the publication tree's
+reserved files, tree and direct commands) or need a forge integration. Until
+M11, validation rejects `changeGate: pullRequest` and a target in `from` or
+`to`.
 
 ```yaml
 apiVersion: gitops.nyl/v1
@@ -667,15 +714,21 @@ Versioned Release metadata preserves mixed source provenance. The shared render
 API exposes selection and the pinned publication base for orchestration callers;
 a scoped result cannot establish target-wide source freshness. See
 [partial publication](design/partial-publication.md). The KubernetesPublication
-driver continues to publish the full target. M5 adds environment and unit
-ownership in the version 3 index, which stays readable without an owner; scoped receipts and promotion
-coverage need an explicit caller contract before it adopts selection.
+driver publishes the full target. The version 3 index records environment and
+unit ownership and stays readable without an owner; scoped receipts and
+promotion coverage need an explicit caller contract before the driver adopts
+selection.
 
 `nyl.toml` may sit at the repository root or beside the configuration in
 `nyl/`, where Nyl finds it from the root. Local paths, such as ApplicationGroup
 sources, unit sources, and `$fromFile`, share one resolver: relative to the
 `nyl.toml` directory or `/`-rooted at the Git worktree, so Releases can live
 beside `nyl/` as well as beneath it.
+
+A Release bundle resolves `$fromInput` in each resource right after its file
+is parsed, before lookup detection, cache decisions, and namespace defaults
+read it; the Release's inputs are part of the Release and target cache keys,
+and the resolved chart values part of the Helm cache key.
 
 Kubernetes normalization, namespace handling, deduplication, and policy
 processing belong to this path. Every input affecting rendered bytes, including
@@ -869,6 +922,8 @@ reasons to delay independent work.
   PromotionRecord, state selection, attestations, and observation for M5–M6
 - [Walkthrough scenarios](nyl/tests/scenarios/walkthroughs/): the M1 exit
   criterion as executable scenarios
+- [Value sources](design/declarative-value-sources.md): the `$from…` model,
+  its contexts, and the shared resolver
 - [Domain modeling](design/domain-resources.md): the M9 proposal
   for team-owned declarations as unit inputs
 - [Release catalog](design/release-catalog.md): Releases as inventoried
@@ -884,7 +939,7 @@ reasons to delay independent work.
 - [Direct Kubernetes application](nyl/src/cli/commands/apply.rs)
 - [Kubernetes release state](crates/nyl-render/src/kubernetes/state.rs)
 - [Direct reconciler](design/orchestration-core.md#direct-reconciler): the M10
-  proposal for applying a target's Releases through the publication unit
+  contract for applying a target's Releases through the publication unit
 
 These are navigation aids, not frozen API guarantees.
 

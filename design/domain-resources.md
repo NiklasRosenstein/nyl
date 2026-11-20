@@ -389,7 +389,7 @@ spec:
       type: {apiVersion: domain.acme.example/v1, kind: GitHubTeam}
       access: read
   variables:
-    accounts: {fromCollection: {collection: accounts, each: /spec}}
+    accounts: {$fromCollection: {collection: accounts, each: /spec}}
 ```
 
 | Field | Default | Meaning |
@@ -569,14 +569,15 @@ collect it. The bundle's `referenced` map therefore carries it:
 The bundle reaches an implementation in one of two ways. Neither needs a
 kind-specific option.
 
-**Through references.** `fromCollection` is a new reference form for the
-reference resolver, accepted wherever a kind accepts references:
+**Through references.** `$fromCollection` is a new
+[value source](declarative-value-sources.md) for the reference resolver,
+accepted wherever a kind accepts references:
 
 | Reference | Resolves to |
 | --- | --- |
-| `fromCollection: {collection}` | The collection's `items` map: name to `{labels, spec}` |
-| `fromCollection: {collection, each: <pointer>}` | Name to the value at `pointer` inside each item, such as `/spec` or `/spec/email`; a member without it is a resolution error |
-| `fromCollection: {collection, pointer: <pointer>}` | A value inside the collection document, such as `/items/payments-prod/spec` |
+| `$fromCollection: {collection}` | The collection's `items` map: name to `{labels, spec}` |
+| `$fromCollection: {collection, each: <pointer>}` | Name to the value at `pointer` inside each item, such as `/spec` or `/spec/email`; a member without it is a resolution error |
+| `$fromCollection: {collection, pointer: <pointer>}` | A value inside the collection document, such as `/items/payments-prod/spec` |
 
 It is the only projection, and it is decidable. A map keyed by name is what
 Terraform's `for_each` expects:
@@ -951,7 +952,7 @@ instantiating it differently in some environments.
 
 | Rule or type | Home |
 | --- | --- |
-| `ResourceDefinition`, the domain envelope, `collections`, `fromCollection`, `ResourceBundle`, its provenance, golden files | `nyl-core` (`resources::domain`, `bindings`) |
+| `ResourceDefinition`, the domain envelope, `collections`, `$fromCollection`, `ResourceBundle`, its provenance, golden files | `nyl-core` (`resources::domain`, `bindings`) |
 | Identity, duplicates, ordering, membership, ownership claims, the reference closure, removal detection, transition-rule decisions | `nyl-collections`, pure rules, one module each; CEL evaluation behind a `RuleEvaluator` port in `nyl-core` |
 | Schema validation and defaulting (JSON Schema 2020-12, a new dependency to evaluate) | `nyl-collections`, pure |
 | Bundle assembly and its canonical digest | `nyl-collections`, shared by units and [Releases](release-catalog.md) |
@@ -971,7 +972,7 @@ consumer, and two owners rejected.
 | Slice | Delivers | Needs |
 | --- | --- | --- |
 | R1 | Definitions, discovery, schema and referential admission, `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
-| R2 | `collections`, ownership, the bundle and its state files, `fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
+| R2 | `collections`, ownership, the bundle and its state files, `$fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3 |
 | R3 | Kyverno admission with trusted context | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4 |
 | R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base`, the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
@@ -1005,7 +1006,7 @@ teams/
    `nyl get unit aws-accounts --collections` shows each member and why it
    matched.
 3. **Consume the bundle.** Map it with
-   `variables.accounts: {fromCollection: {collection: accounts, each: /spec}}`,
+   `variables.accounts: {$fromCollection: {collection: accounts, each: /spec}}`,
    declare the matching `map(object(…))` variable, and `for_each` over it.
    Add `prevent_destroy` to resources that must survive removal.
 4. **Inspect.** `nyl prepare -e org --unit aws-accounts --native` writes the
