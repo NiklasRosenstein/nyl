@@ -75,9 +75,10 @@ input.
 2. Teams write instances of the type as literal YAML. Each has a project-wide
    identity, and Nyl takes its source path from Git, never from the document.
 3. Nyl validates each declaration against its schema and admits it through
-   Kyverno policies, which receive the trusted source path as context.
-4. A unit declares the collections it consumes: a type, plus label and path
-   filters. Membership is explicit, and nothing is linked by matching names.
+   Kyverno policies, which receive the trusted source path and the resources
+   the declaration references as context.
+4. A unit declares the collections it consumes: a type, plus label, field,
+   and path filters. Membership is explicit, and nothing is linked by matching names.
 5. Nyl resolves the value sources a declaration holds, such as
    `$fromUnit` for another unit's output, in the consuming unit's
    environment, and builds one tool-neutral bundle for the unit. The bundle

@@ -13,7 +13,7 @@ export const domainModelingRoadmap = {
   page: 'domain-modeling/roadmap/',
   itemNoun: 'deliverables',
   exitCriterion:
-    'Colocated team declarations feed independently registered units and export, without any unit, as versioned bundles for other tools. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. Releases select their manifests and are selected by label or path, read the same bundles in every render, and render identically with and without the cache. The guide runs end to end.',
+    'Colocated team declarations feed independently registered units and export, without any unit, as versioned bundles for other tools. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. Releases select their manifests and are selected by label or path, read the same bundles in every render, render outside orchestration unless a template reads a value that resolves only in an orchestrated publication, and render identically with and without the cache. The guide runs end to end.',
   // Set when the exit criterion is met, which completes M9.
   done: false,
   // GitHub issues this roadmap delivers; close them when `done` is set.
@@ -48,11 +48,12 @@ export const domainModelingRoadmap = {
         { text: 'The versioned `ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` formats, with golden files and published JSON Schemas', done: false },
         { text: '`nyl get resources -o yaml|json` printing the admitted catalog with defaults applied', done: false },
         { text: '`nyl bundle` selecting members by kind, labels, paths, or a unit’s named collection, with referenced resources and provenance', done: false },
+        { text: 'Field selection on the admitted, defaulted `spec`: `matchFields` in collections and `--field` on `nyl get resources` and `nyl bundle`, with equality and set membership on scalar fields, and fields that hold a source never matching', done: false },
         { text: 'Sources left in place and listed under `unresolved` without `-e`, and resolved read-only against current receipts with `-e`', done: false },
-        { text: 'The example’s standalone consumers: the on-call export from `nyl bundle`, and the static service directory page generated from `nyl get resources -o json`, checked in its reference scenario', done: false },
+        { text: 'The example’s standalone consumers: the on-call export from `nyl bundle --field /spec/tier=critical`, and the static service directory page generated from `nyl get resources -o json`, checked in its reference scenario', done: false },
       ],
       exitCriterion:
-        'A project with only `[resources]`, definitions, and declarations, and no Environment, unit, or Release, exports its catalog and a bundle for any selection, byte-identical across machines and worktree layouts; without `-e` the bundle lists its sources and exits 0, and with `-e` they resolve against current receipts, a missing receipt exiting 2; no state is written and no driver is loaded; the published schemas and golden files pin each format.',
+        'A project with only `[resources]`, definitions, and declarations, and no Environment, unit, or Release, exports its catalog and a bundle for any selection, byte-identical across machines and worktree layouts; a field selector reads the admitted `spec` and never matches a source; without `-e` the bundle lists its sources and exits 0, and with `-e` they resolve against current receipts, a missing receipt exiting 2; no state is written and no driver is loaded; the published schemas and golden files pin each format.',
     },
     {
       id: 'R2',
@@ -79,7 +80,8 @@ export const domainModelingRoadmap = {
         { text: 'Kyverno validating policies loaded from `[resources] policies`', done: false },
         { text: 'Trusted source-path annotations and a CRD derived from each definition', done: false },
         { text: 'Rejection of mutating policies', done: false },
-        { text: 'The example’s policy requiring a critical service’s team to name an on-call member', done: false },
+        { text: 'The `referenced` policy context holding the declaration’s `x-nyl-reference` closure, its digest in the admission cache key, and every other lookup failing offline', done: false },
+        { text: 'The example’s policy requiring a critical service’s owning Team, read from `referenced`, to name an on-call member', done: false },
       ],
     },
     {
@@ -167,8 +169,9 @@ export const domainModelingRoadmap = {
         { text: 'Release `spec.collections`, read-only, with `${ … }` selector values, assembled by the code of R12', done: false },
         { text: '`collections` and `referenced` template variables with YAML-safe output', done: false },
         { text: 'Bundle digests in the dependency recorder and the ownership index', done: false },
-        { text: 'Rejection in remote sources and of unresolvable references', done: false },
-        { text: 'The example’s `service-namespaces` Release rendering a Namespace, a ResourceQuota, and a RoleBinding per Service, and `render-tree` rejecting `checkout`’s carried `$fromUnit` with the binding rule’s message', done: false },
+        { text: 'Rejection in remote sources', done: false },
+        { text: 'Carried sources as unknown values outside orchestration, failing the render only when a template reads one, with the rendered-output backstop, and resolved in an orchestrated `KubernetesPublication`', done: false },
+        { text: 'The example’s `service-namespaces` Release rendering a Namespace, a ResourceQuota, and a RoleBinding per Service in `render-tree`, `checkout` included, and failing with `NYL-RELEASE-VALUE-UNKNOWN` once a template reads its `database.host`', done: false },
       ],
     },
     {

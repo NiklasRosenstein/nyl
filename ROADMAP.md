@@ -518,14 +518,17 @@ that names the fix, and the envelope and `x-nyl-reference` fields stay
 literal. The definition's schema describes resolved values: admission treats a
 position that holds a source as not yet known, and resolution validates the
 value against the field's subschema. No schema keyword marks which fields take
-sources, so every definition follows the one context table.
+sources, so every definition follows the one context table. Kyverno policies
+admit declarations offline and read other resources only through the
+declaration's `x-nyl-reference` closure, which is part of the admission
+input.
 
 Domain modeling also stands on its own. Definition, discovery, admission,
 collection, resolution, and bundling need no unit, driver, Release, or
 cluster; only adapting a bundle to a native tool needs a driver. `nyl get
 resources -o yaml|json` exports the admitted catalog, and `nyl bundle` exports
 a `ResourceBundle` for a selection made like a collection (a kind, labels,
-paths, or a unit's named collection) with its referenced resources and
+scalar fields of the admitted `spec`, paths, or a unit's named collection) with its referenced resources and
 provenance. Without `-e` the bundle lists its sources as unresolved and
 exits 0; with `-e` they resolve read-only against current receipts, as `nyl
 get output` resolves them. Neither command writes state or loads a driver, and
@@ -549,7 +552,10 @@ namespaces and rendered kinds, so label membership requires an AppProject
 that derives nothing from its members, or Kyverno policies that admit each
 Release and its rendered manifests with their trusted source. A Release reads
 collections, never owns them, and can be instantiated once per domain
-resource with `forEach`. A bundle carries the resources its members
+resource with `forEach`. Outside orchestration, a source in a collected
+resource reaches the templates as an unknown value, which fails the render
+only when a template reads it; an orchestrated `KubernetesPublication`
+resolves it. A bundle carries the resources its members
 reference, so a Release that reads GitHub teams also sees their
 organization. The rules units and Releases share live in a pure
 `nyl-collections` crate that both `nyl-render` and `nyl-orchestration` use,

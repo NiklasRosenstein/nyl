@@ -264,7 +264,8 @@ so its result applies to every environment and can be cached under the
    resource in the catalog (`NYL-RESOURCE-REFERENCE-MISSING`), as a
    misspelled owner in the [running example](#running-example-teams-and-services) shows.
 3. **Policy.** Kyverno validating policies run against the resource. They are
-   loaded only from `[resources] policies`.
+   loaded only from `[resources] policies`. A failed validation rejects the
+   resource with `NYL-RESOURCE-POLICY-DENIED` and the policy's message.
    - Nyl evaluates a copy of the resource with trusted context added as
      annotations: `source.gitops.nyl/path` (`/teams/payments/aws.yaml`),
      `source.gitops.nyl/directory`, and `source.gitops.nyl/document`. Authors
@@ -289,6 +290,43 @@ so its result applies to every environment and can be cached under the
    - Policies see the declaration as written, carried sources included,
      because admission runs once per catalog, before any consumer resolves
      them.
+   - **Lookups through references only.** A policy can read other resources
+     only through what the declaration references. Nyl adds one variable to
+     the policy's CEL context, `referenced`, which holds the declaration's
+     [reference closure](#referenced-resources): every resource reachable
+     from it through `x-nyl-reference` fields, transitively, in the shape of
+     a bundle's `referenced` map. It is keyed by `<apiVersion>/<kind>`
+     and then by name, and each entry holds `labels` and `spec`, with
+     defaults applied and sources as written:
+
+     ```yaml
+     domain.acme.example/v1/Team:
+       payments: {labels: {team: payments}, spec: {displayName: Payments, members: [alice, bob], onCall: alice}}
+     ```
+
+     A declaration without reference fields gets an empty map.
+     The entries have passed checks 1 and 2, the schema and the references,
+     which do not depend on policies. So policy admission has no order
+     between resources, and reference cycles are fine. A policy outcome of
+     a referenced resource is not part of the context: that resource fails
+     its own admission, and every consumer that reads it fails with it. When
+     a referenced resource fails check 1 or 2, the referencing declaration's
+     policies do not run, and its admission fails with
+     `NYL-RESOURCE-REFERENCE-INADMISSIBLE`, naming the referenced resource.
+   - **No other lookups.** Admission runs offline. Nyl starts the Kyverno CLI
+     with no cluster, so `resource.Get`, `resource.List`, and every other
+     lookup of cluster or API state fail. The failure is reported as
+     `NYL-RESOURCE-POLICY-LOOKUP`, naming the policy and the expression,
+     with the fix to read the resource through `referenced` and to give the
+     definition an `x-nyl-reference` field that names it. No lookup covers
+     the whole catalog: a policy cannot list other teams' declarations, so a
+     declaration's admission never depends on files it does not reference.
+   - **Determinism and caching.** The admission input of a resource is its
+     declaration, the trusted context, its definition, the policies, the
+     Kyverno CLI version, and the canonical digest of its `referenced`
+     context. The per-resource admission cache key covers all of these.
+     Editing a Team therefore re-admits the Services that reference it, and
+     nothing else, and the same commit admits the same way on every machine.
    - Only validating policies are accepted. A mutating policy in the policy
      paths is an error (`NYL-RESOURCE-POLICY-MUTATES`), because mutation would
      make the bundle differ from what was reviewed.
@@ -460,8 +498,10 @@ nyl exec --unit aws-accounts --advance refs/nyl-applied/aws-accounts -- apply tf
 `plan` report every failure. A unit whose collection includes a failing
 resource fails resolution and has no effects. Units that do not consume it
 still run, so one team's broken declaration only blocks the units that
-consume it. Membership never depends on the content that failed, because
-selection reads only the envelope and the path (stage 3). A pull request
+consume it. Membership never depends on the content that failed: a
+resource that fails admission but matches a collection's labels and paths
+fails that collection even when it uses `matchFields`
+([Field selection](#field-selection)). A pull request
 pipeline that runs `nyl validate` catches failures before merge.
 
 CODEOWNERS is review, and admission is enforcement. Neither replaces the
@@ -484,7 +524,9 @@ spec:
   collections:
     accounts:
       type: {apiVersion: domain.acme.example/v1, kind: AwsAccount}
-      selector: {matchLabels: {stage: '{{ values.stage }}'}}   # optional
+      selector:                                               # optional
+        matchLabels: {stage: '{{ values.stage }}'}
+        matchFields: {/spec/ou: [workloads, security]}
       paths: ['/teams/**', '/platform/accounts/**']           # optional
       access: own                                             # own | read
       allowEmpty: false
@@ -499,7 +541,7 @@ spec:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `type` | required | One definition's `apiVersion` and `kind` |
-| `selector` | `{}`: all | `matchLabels` over literal `metadata.labels`, as `unitSelector` |
+| `selector` | `{}`: all | `matchLabels` over literal `metadata.labels`, as `unitSelector`, and `matchFields` over the admitted `spec` (see [Field selection](#field-selection)) |
 | `paths` | all | Globs over the resource's trusted, worktree-rooted path, under the local path rule |
 | `access` | `own` | `own` claims the members (see [Ownership](#ownership)); `read` only reads them |
 | `allowEmpty` | `false` | An empty collection fails resolution (`NYL-RESOURCE-COLLECTION-EMPTY`) unless `true` |
@@ -509,15 +551,74 @@ spec:
   today, so a selector can follow `values` or `environment`. The domain
   resources themselves never change per environment.
 - Membership is the set of catalog resources of `type` that match both
-  `selector` and `paths`. It is computed only from the envelope and the
-  trusted path, so it is known even when a member fails admission.
+  `selector` and `paths`. `matchLabels` and `paths` read only the envelope
+  and the trusted path. `matchFields` reads the admitted `spec`, which is
+  known at S as well. Membership is therefore fixed before stage 4 resolves
+  anything, and the dependency edges that sources add are known at S.
 - **Ordering.** Members are keyed by `metadata.name` and sorted bytewise.
   File order, discovery order, and directory layout never affect the bundle.
 - A resource may be a member of several collections and of several units'
   collections.
 - `plan` and `nyl get unit <u> --collections` list the members and say for
-  each one why it matched: its labels, and which of the `paths` globs matched
-  its path.
+  each one why it matched: its labels, its selected fields, and which of the
+  `paths` globs matched its path.
+
+### Field selection
+
+Selection can read a resource's content, not only its labels, so a
+declaration does not have to copy a `spec` field into a label to be
+selectable. One syntax serves every selection: a collection's
+`selector.matchFields` (for units, Releases, and `forEach`), and `--field` on
+`nyl get resources` and `nyl bundle`.
+
+```yaml
+selector:
+  matchFields:
+    /spec/tier: critical                  # equality
+    /spec/ou: [workloads, security]       # set membership: any of the values
+```
+
+```sh
+nyl bundle --kind Service --field /spec/tier=critical
+nyl get resources --kind AwsAccount --field '/spec/ou=[workloads, security]'
+```
+
+- **Keys** are JSON pointers into the resource, and must start with
+  `/spec/`; labels keep `matchLabels`. A pointer must name a property that
+  the definition's schema declares with a scalar type (`string`, `integer`,
+  `number`, or `boolean`), reached only through object properties, never
+  through array items. Anything else fails selection with
+  `NYL-RESOURCE-FIELD-SELECTOR-INVALID`, which names the pointer and the
+  definition.
+- **Values** are a scalar, which must equal the field, or a list of scalars,
+  of which the field must equal one. Equality is exact JSON equality: the
+  string `'2'` does not equal the integer `2`. On the command line, the text
+  after the first `=` is read as a YAML flow scalar or flow sequence, so
+  `--field /spec/replicas=3` compares with the integer `3`, and
+  `--field '/spec/version="3"'` with the string `"3"`. `--field` is
+  repeatable. All entries of `matchFields`, all `--field` options, and
+  `matchLabels` or `-l` must match together.
+- **Evaluated after admission.** Fields are read from the admitted,
+  defaulted `spec` (stage 2), so a default counts: a Service that omits a
+  defaulted field is selected by its default. A field that is absent and has
+  no default never matches.
+- **Sources are not selectable.** Fields are read before stage 4, so a
+  field that holds a carried source, or lies inside one, has no value yet
+  and never matches, whichever environment would resolve it. Selection can
+  therefore never depend on another unit's output, and membership stays the
+  same in every environment. `nyl get unit <u> --collections` and `nyl get
+  resources --field` name such resources, and the pointer that holds the
+  source, as not matched.
+- **Admission failures.** A resource of the selected type whose labels and
+  path match but which fails admission has no admitted fields, so Nyl cannot
+  tell whether it matches. It counts as a member that fails admission, so
+  the consumer fails with the resource's error; Nyl never drops it silently.
+- **Leaving by content.** Editing a selected field can move a resource out of
+  a collection. For an owning collection, that is a dropped member under
+  `removal: approve`, as if the declaration had been deleted.
+  A consumer that should see a field change as a change of one member, such
+  as a tier downgrade guarded by a transition rule, collects the resources
+  without that field and filters them itself.
 
 ### Ownership
 
@@ -567,6 +668,11 @@ resolves the unit, and the one `-e` names for `nyl bundle`.
   bundle` without `-e`, which leaves every source in place (see
   [Standalone export](#standalone-export-nyl-bundle)). Everything else in
   stages 3–5 is the same code for every entry point.
+- A Release resolves sources only inside an orchestrated
+  `KubernetesPublication`, in its environment. Outside orchestration its
+  templates see each source as an
+  [unknown value](release-catalog.md#unknown-values), which fails the render
+  only when a template reads it.
 - For a unit, each source adds a dependency edge from the consuming unit to
   the producer. These edges exist at S before any value does, so the pure
   dependency graph, the CI export, and `plan` see them and report `blockedBy`
@@ -707,14 +813,18 @@ on-call export and a static service directory page from them
 ### `nyl get resources`
 
 ```text
-nyl get resources [<kind>/<name>] [--kind <type>] [-l <selector>] [--path <glob>]...
-                  [-e <env>] [--base <rev>] [-o table|wide|yaml|json|name] [<project>]
+nyl get resources [<kind>/<name>] [--kind <type>] [-l <selector>] [--field <pointer>=<value>]...
+                  [--path <glob>]... [-e <env>] [--base <rev>] [-o table|wide|yaml|json|name] [<project>]
 ```
 
 - `--kind` takes the kind when one definition serves it (`AwsAccount`), or
   `<group>/<version>/<kind>`. `-l` is an equality selector over literal
   labels (`team=payments,stage=production`), as `matchLabels` in a
-  collection. `--path` takes the globs of a collection's `paths`.
+  collection. `--field` selects on the admitted `spec`, as `matchFields`
+  ([Field selection](#field-selection)); resources that fail admission
+  match no `--field`, and are listed as not admitted when the other filters
+  match them, so a filter never hides a failure. `--path` takes the globs of
+  a collection's `paths`.
 - The table shows the name, kind, labels, source location, and admission
   result. `-o yaml|json` prints a versioned `ResourceCatalog` document from
   the same report:
@@ -747,16 +857,17 @@ nyl get resources [<kind>/<name>] [--kind <type>] [-l <selector>] [--path <glob>
 ### `nyl bundle`
 
 ```text
-nyl bundle (--kind <type> [-l <selector>] [--path <glob>]... [--as <name>] [--allow-empty]
+nyl bundle (--kind <type> [-l <selector>] [--field <pointer>=<value>]... [--path <glob>]...
+            [--as <name>] [--allow-empty]
             | --collection <unit>/<collection>...)
            [-e <env>] [--worktree | --source <rev>] [--base <rev> | --no-base]
            [--allow-change <resource>:<reason>] [-o yaml|json] [--output-dir <dir>] [<project>]
 ```
 
-- **Selection, like a collection.** `--kind`, `-l`, and `--path` select one
-  collection's members by the rules of [stage 3](#stage-3-collection): type,
-  literal labels, and trusted paths, from the envelope and path alone, keyed
-  by name and sorted. `--as` names the collection in the bundle, by default
+- **Selection, like a collection.** `--kind`, `-l`, `--field`, and `--path`
+  select one collection's members by the rules of
+  [stage 3](#stage-3-collection): type, literal labels, admitted fields, and
+  trusted paths, keyed by name and sorted. `--as` names the collection in the bundle, by default
   the definition's plural (`awsaccounts`). An empty selection fails with
   `NYL-RESOURCE-COLLECTION-EMPTY` unless `--allow-empty`, as `allowEmpty`
   does.
@@ -779,8 +890,10 @@ nyl bundle (--kind <type> [-l <selector>] [--path <glob>]... [--as <name>] [--al
   to a consuming unit. A guarded change exits 2 unless `--allow-change` names
   it.
 - **Failure scope.** Only the selected members and their referenced resources
-  must pass admission; another team's failing declaration does not stop the
-  export.
+  must pass admission, together with any resource that matches the type,
+  labels, and paths but fails admission before `--field` could be checked;
+  another team's failing declaration that the selection excludes does not
+  stop the export.
 - **Source files** come from the worktree or `--source`, under the rules of
   [Which files a unit is read from](#which-files-a-unit-is-read-from).
 
@@ -1299,9 +1412,9 @@ consumer, and two owners rejected.
 | Slice | Delivers | Needs |
 | --- | --- | --- |
 | R1 | Definitions, discovery, schema and referential admission, the domain-resource context in the value-source table (sources carried, rejected with their fixes, and skipped by schema checks), `nyl validate`, `get resources`, `schema resources` | M2 (useful without orchestration) |
-| R12 | The standalone export: `nyl-collections` membership, the reference closure, and bundle assembly; the `ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` formats with golden files and published schemas; `nyl get resources -o yaml\|json`; `nyl bundle` with and without `-e` | R1, M6 |
+| R12 | The standalone export: `nyl-collections` membership, the reference closure, and bundle assembly; the `ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` formats with golden files and published schemas; `nyl get resources -o yaml\|json`; field selection (`matchFields`, `--field`); `nyl bundle` with and without `-e` | R1, M6 |
 | R2 | `collections`, ownership, the bundle in state files and the execution key, sources in members resolved by runs, `$fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3, R12 |
-| R3 | Kyverno admission with trusted context | R1 |
+| R3 | Kyverno admission with trusted context and the declaration's `referenced` closure as the only lookup | R1 |
 | R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4 |
 | R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base` (on `nyl bundle` too), the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
@@ -1429,7 +1542,7 @@ spec: {displayName: Payments, members: [alice, bob], onCall: alice}
 # teams/payments/services.yaml
 apiVersion: domain.acme.example/v1
 kind: Service
-metadata: {name: checkout, labels: {team: payments, tier: critical}}
+metadata: {name: checkout, labels: {team: payments}}
 spec:
   owner: payments
   tier: critical
@@ -1440,7 +1553,7 @@ spec:
 ---
 apiVersion: domain.acme.example/v1
 kind: Service
-metadata: {name: invoices, labels: {team: payments, tier: standard}}
+metadata: {name: invoices, labels: {team: payments}}
 spec: {owner: payments, tier: standard, namespace: invoices}
 ```
 
@@ -1453,14 +1566,14 @@ spec: {displayName: Search, members: [carol, dan], onCall: carol}
 ---
 apiVersion: domain.acme.example/v1
 kind: Service
-metadata: {name: search-api, labels: {team: search, tier: critical}}
+metadata: {name: search-api, labels: {team: search}}
 spec: {owner: search, tier: critical, namespace: search-api}
 ```
 
-The tier appears twice on purpose. Membership and `-l` read only the literal
-envelope ([stage 3](#stage-3-collection)), so selection uses the `tier`
-label; transition rules guard `spec`, so the rule uses `spec.tier`. The
-policy of R3 keeps the two equal.
+The tier is a `spec` field only. Selections read it through a
+[field selector](#field-selection), `--field /spec/tier=critical`, and the
+transition rule of R5 guards the same field, so nothing has to keep a label
+in step with it.
 
 `database` is the one unit the catalog depends on, a Command unit that writes
 `{"connection": {"host": "checkout-db.dev.internal", "port": 5432}}` to
@@ -1470,7 +1583,7 @@ policy of R3 keeps the two equal.
 
 | Consumer | Reads | Path | Slice |
 | --- | --- | --- | --- |
-| On-call export | `nyl bundle --kind Service -l tier=critical -o json` piped to `jq` | Standalone | R12 |
+| On-call export | `nyl bundle --kind Service --field /spec/tier=critical -o json` piped to `jq` | Standalone | R12 |
 | Service directory page | `nyl get resources -o json` piped to `tools/service-directory.py` | Standalone | R12 |
 | Service directory page | The `service-directory` Command unit's `collections` input, same generator | Orchestrated | R2 |
 | On-call roster | The `oncall-roster` OpenTofu unit, `access: own` | Orchestrated | R2, R4 |
@@ -1490,10 +1603,10 @@ $ nyl validate
 ok: 2 definitions, 5 domain resources admitted
 
 $ nyl get resources --kind Service
-NAME        KIND     LABELS                         SOURCE                         ADMITTED
-checkout    Service  team=payments,tier=critical    /teams/payments/services.yaml#0  yes
-invoices    Service  team=payments,tier=standard    /teams/payments/services.yaml#1  yes
-search-api  Service  team=search,tier=critical      /teams/search/catalog.yaml#1     yes
+NAME        KIND     LABELS         SOURCE                           ADMITTED
+checkout    Service  team=payments  /teams/payments/services.yaml#0  yes
+invoices    Service  team=payments  /teams/payments/services.yaml#1  yes
+search-api  Service  team=search    /teams/search/catalog.yaml#1     yes
 ```
 
 - **Referential integrity.** A misspelled owner fails at the declaration,
@@ -1524,7 +1637,7 @@ and their teams' on-call handles from one bundle, which carries the owning
 Teams through the [reference closure](#referenced-resources):
 
 ```console
-$ nyl bundle --kind Service -l tier=critical -o json | jq '
+$ nyl bundle --kind Service --field /spec/tier=critical -o json | jq '
     .referenced["domain.acme.example/v1/Team"] as $teams
     | .collections.services.items | to_entries
     | map({service: .key, team: .value.spec.owner, onCall: $teams[.value.spec.owner].spec.onCall})'
@@ -1536,7 +1649,8 @@ warning[NYL-RESOURCE-SOURCES-UNRESOLVED]: 1 value source left in place; pass -e 
 ]
 ```
 
-Without `-e`, the bundle lists `checkout`'s host under
+The field selector reads the admitted `spec.tier`, so `invoices` is left
+out. Without `-e`, the bundle lists `checkout`'s host under
 `unresolved: [{pointer: /collections/services/items/checkout/spec/database/host, source: $fromUnit}]`
 and exits 0. With `-e dev`, the host resolves read-only from `database`'s
 current receipt, `unresolved` disappears, and a tool can read
@@ -1648,7 +1762,8 @@ resource "local_file" "roster" {
 }
 ```
 
-- The unit owns all Services and filters critical ones itself, so a tier
+- The unit owns all Services and filters critical ones itself, rather than
+  selecting them with `matchFields: {/spec/tier: critical}`, so a tier
   change stays a change of one member, which the transition rule of R5 can
   guard, instead of the member leaving the collection.
 - A second unit with `access: own` on Services fails resolution with
@@ -1659,8 +1774,10 @@ resource "local_file" "roster" {
 
 ### R3: policy admission
 
-A policy keeps the tier label equal to `spec.tier`, and requires a critical
-service's team to have an on-call handle:
+A policy requires a critical service's team to have an on-call handle. The
+Service names its Team in the `x-nyl-reference` field `owner`, so the Team
+is in the policy's `referenced` context
+([stage 2](#stage-2-admission)):
 
 ```yaml
 # platform/policies/services.yaml
@@ -1672,19 +1789,30 @@ spec:
     resourceRules:
       - {apiGroups: [domain.acme.example], apiVersions: [v1], resources: [services], operations: [CREATE, UPDATE]}
   validations:
-    - expression: object.metadata.labels['tier'] == object.spec.tier
-      message: The tier label must equal spec.tier.
     - expression: >-
         object.spec.tier != 'critical'
-        || has(resource.Get('domain.acme.example/v1', 'teams', '', object.spec.owner).spec.onCall)
+        || has(referenced['domain.acme.example/v1/Team'][object.spec.owner].spec.onCall)
       message: A critical service's team must name an onCall member.
 ```
 
-Removing `onCall` from `search` rejects `search-api`, which blocks
-`oncall-roster` and `service-directory` in `dev` and fails the R12 exports
-that select it, while `invoices` and its consumers are unaffected. The second
-rule reads the owning Team, which admission must serve offline from the
-admitted catalog; see [Open decisions](#open-decisions).
+- Removing `onCall` from `search` rejects `search-api`, which blocks
+  `oncall-roster` and `service-directory` in `dev` and fails the R12 exports
+  that select it, while `invoices` and its consumers are unaffected:
+
+  ```console
+  $ nyl validate
+  error[NYL-RESOURCE-POLICY-DENIED]: Service/search-api: critical-services-have-on-call: A critical service's team must name an onCall member.
+    --> /teams/search/catalog.yaml#1
+    = note: referenced: Team/search (/teams/search/catalog.yaml#0)
+  ```
+
+- The edit is to `search`'s Team, but the failure is `search-api`'s: the
+  Team is part of `search-api`'s admission input, so editing it re-admits
+  the Services that reference it. `checkout` and `invoices` reference only
+  `payments`, so their cached admission stands.
+- The policy runs offline and reads nothing beyond `referenced`. A version
+  that called `resource.Get` for the Team would fail with
+  `NYL-RESOURCE-POLICY-LOOKUP`.
 
 ### R4: removal under approval
 
@@ -1702,8 +1830,8 @@ The two `x-nyl-validations` rules of the definitions take effect:
 
 - `onCall: erin` in a team without `erin` in `members` fails admission at
   `/spec/onCall` with the rule's message.
-- Downgrading `checkout` from `critical` to `standard`, label and spec
-  together, is a guarded change:
+- Downgrading `checkout`'s `spec.tier` from `critical` to `standard` is a
+  guarded change:
 
   ```console
   $ nyl validate --base origin/main
@@ -1717,7 +1845,7 @@ The two `x-nyl-validations` rules of the definitions take effect:
   `service-directory`, which only reads, re-runs without waiting.
 - The Service definition now declares a rule with `oldSelf`, so the R12
   export commands take `--no-base` or `--base <rev>`; `nyl bundle --kind
-  Service -l tier=critical` without either fails with
+  Service --field /spec/tier=critical` without either fails with
   `NYL-RESOURCE-BASE-REQUIRED`.
 
 ### R8–R10: a Release per catalog
@@ -1770,11 +1898,26 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
   schema defaults, `checkout` `requests.cpu: "4"`.
 - Every interpolated string is a name, handle, or namespace that the schemas
   restrict to YAML-safe characters, or goes through `tojson`.
-- `checkout` carries a `$fromUnit` that `render-tree` cannot resolve, so
-  `render-tree` rejects the Release with the binding rule's message naming
-  `checkout` and `/spec/database/host`, although the template never reads
-  the host. Only orchestrated execution, which passes the resolved bundle,
-  renders it; see [Open decisions](#open-decisions).
+- `checkout` carries a `$fromUnit` that `render-tree` cannot resolve. It
+  reaches the template as an
+  [unknown value](release-catalog.md#unknown-values), and the template
+  never reads `database.host`, so `render-tree` renders all three Services,
+  `checkout` included, with no warning. An orchestrated
+  `KubernetesPublication` of the Release in `dev` resolves the host from
+  `database`'s receipt, depends on `database` from S on, and publishes the
+  same manifests.
+- A template that does read it fails outside orchestration. Adding a
+  ConfigMap with `host: {{ svc.spec.database.host | tojson }}` for Services
+  that declare a database gives:
+
+  ```console
+  $ nyl render-tree
+  error[NYL-RELEASE-VALUE-UNKNOWN]: Service/checkout: /spec/database/host is a $fromUnit of unit database, which resolves only in an orchestrated KubernetesPublication
+    --> /platform/templates/service-namespace.yaml:24
+    --> /teams/payments/services.yaml#0 /spec/database/host
+  ```
+
+  The same template publishes normally under orchestration.
 
 ## Guide sketch: implementing a domain resource
 
@@ -1845,12 +1988,10 @@ teams/
 | Whether `nyl get resources` needs a more specific name, because `nyl get` also reports Nyl's own project resources | R12 |
 | Whether one `nyl bundle` invocation takes several ad-hoc selections, each with its own `--as` | After R12 |
 | Whether `--collection` also names a Release's collection, as `<group>/<release>/<collection>` | R10 |
-| Whether a Release may render members whose carried sources its templates never read, as `checkout`'s `database.host` in the [running example](#r8r10-a-release-per-catalog), instead of rejecting them in `render-tree` | R10 |
 | Definition sharing across repositories through a locked `GitSource`, refreshed by `nyl update source-locks` | After R1 |
 | Version conversion between definition versions, or coordinated bumps only | After R2 |
 | Bundle size limits for desired state, and whether large bundles stay in state or are referenced by digest | R2 |
-| Offline Kyverno coverage of `ValidatingPolicy` for derived CRDs, and whether CODEOWNERS owners are offered as trusted policy context | R3 |
-| Whether and how a policy reads other catalog resources, such as the owning Team of a Service in the [running example](#r3-policy-admission), served offline from the admitted catalog, and how that enters the admission cache key | R3 |
+| Offline Kyverno coverage of `ValidatingPolicy` for derived CRDs, how the `referenced` context is passed to the Kyverno CLI, and whether CODEOWNERS owners are offered as trusted policy context | R3 |
 | Generating HCL variable types from definitions (`nyl schema hcl`) | After R4 |
 | Whether per-member removal approval should be per member (`--approve aws-accounts:legacy-sandbox`) | R4 |
 | Whether the character set for `resource` strings printed into templates should be wider, for example to allow `:` inside quoted scalars | R6 |
