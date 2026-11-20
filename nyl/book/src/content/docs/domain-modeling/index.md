@@ -86,6 +86,18 @@ input.
 6. The unit's driver turns the bundle into native input, such as a Terraform
    variable that `for_each` iterates over.
 
+An Environment decides which declarations are active in it, by labels, kinds,
+and paths, so a preview environment can hold only test services while
+production holds all of them. An environment may hold declarations and no
+units at all.
+
+A definition can also declare a status: facts that exist per environment,
+such as a service's URL, kept in the environment's state rather than in Git.
+The unit that owns a declaration fills its status from its outputs; without
+such a unit, a deploy job writes it with `nyl resources status set`, for one
+declaration or for many from one document. Units and Kubernetes publications
+read it with `$fromResource`, without naming the unit that produced it.
+
 A unit can also declare `forEach` and be instantiated once per declaration,
 for example one OpenTofu configuration per team, each with its own state.
 
@@ -115,7 +127,12 @@ describes it.
   `nyl get resources -o yaml` exports the admitted catalog, and `nyl bundle`
   exports a versioned bundle for any selection of declarations, so other
   tools can read them. Values that come from other units' outputs are listed
-  as unresolved, or resolved read-only with `-e`.
+  as unresolved, or resolved read-only with `-e`, which also adds each
+  declaration's status in that environment.
+- **Each status field has one writer.** In an environment where the owning
+  unit fills a field, nothing else can write it. A value written from
+  outside can expire, so consumers wait for a fresh one instead of using an
+  old one.
 - **Orchestration is optional.** In an existing Terraform or OpenTofu
   pipeline, `nyl exec` runs the tool with the collected inputs, or Nyl
   writes the inputs for the pipeline's own commands. Either way they are the

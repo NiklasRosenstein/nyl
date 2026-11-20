@@ -4,7 +4,8 @@
 // slice only when all of it has shipped. The orchestration milestones it
 // builds on are the M-numbered needs of its slices. Slice IDs stay stable for
 // issues and pull requests: a new slice takes the next free number and is
-// placed in rollout order, after the slices it needs, as R12 is after R1.
+// placed in rollout order, after the slices it needs, as R12 is after R1 and
+// R14 after R2.
 
 export const domainModelingRoadmap = {
   id: 'domain-modeling',
@@ -13,7 +14,7 @@ export const domainModelingRoadmap = {
   page: 'domain-modeling/roadmap/',
   itemNoun: 'deliverables',
   exitCriterion:
-    'Colocated team declarations feed independently registered units and export, without any unit, as versioned bundles for other tools. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. Releases select their manifests and are selected by label or path, read the same bundles in every render, render outside orchestration unless a template reads a value that resolves only in an orchestrated publication, and render identically with and without the cache. The guide runs end to end.',
+    'Colocated team declarations feed independently registered units and export, without any unit, as versioned bundles for other tools. Local and CI runs produce identical bundles and execution keys. Moving a declaration without changing its membership or admission re-runs nothing. Schema, policy, and missing-evidence failures block only the consuming units, before any effect. Releases select their manifests and are selected by label or path, read the same bundles in every render, render outside orchestration unless a template reads a value that resolves only in an orchestrated publication, and render identically with and without the cache. Environments scope which declarations are active in them, and each status field has one writer per environment. The guide runs end to end.',
   // Set when the exit criterion is met, which completes M9.
   done: false,
   // GitHub issues this roadmap delivers; close them when `done` is set.
@@ -56,6 +57,22 @@ export const domainModelingRoadmap = {
         'A project with only `[resources]`, definitions, and declarations, and no Environment, unit, or Release, exports its catalog and a bundle for any selection, byte-identical across machines and worktree layouts; a field selector reads the admitted `spec` and never matches a source; without `-e` the bundle lists its sources and exits 0, and with `-e` they resolve against current receipts, a missing receipt exiting 2; no state is written and no driver is loaded; the published schemas and golden files pin each format.',
     },
     {
+      id: 'R13',
+      title: 'Environment scoping',
+      summary:
+        'An Environment selects which declarations are active in it, and may hold only resources: collections and exports in an environment see only its active set.',
+      needs: ['R12'],
+      items: [
+        { text: '`resourceSelector` on Environment and EnvironmentTemplate: literal labels, kinds, and paths, with every admitted resource active when it is absent', done: false },
+        { text: 'Membership within the active set in `nyl-collections`, so collections, `forEach` instances, and removal approval act per environment', done: false },
+        { text: '`nyl get resources -e` listing the active set, and `nyl bundle -e` selecting from it', done: false },
+        { text: '`nyl validate` warnings `NYL-ENVIRONMENT-RESOURCE-SELECTOR-EMPTY` and `NYL-RESOURCE-UNSELECTED`', done: false },
+        { text: 'The example’s resource-only `prod` Environment and `preview` template selecting only test services', done: false },
+      ],
+      exitCriterion:
+        'An Environment or template instance with only a `resourceSelector` holds exactly the admitted resources it selects, computed from the commit and the literal selector alone, with no state written; `nyl get resources -e` and `nyl bundle -e` read only that set; a resource that leaves one environment’s selection leaves its collections there and nowhere else; `nyl validate` warns about a selector that matches nothing and a resource no environment selects.',
+    },
+    {
       id: 'R2',
       title: 'Collections and the bundle',
       summary: 'Units collect declarations and receive them as one tool-neutral bundle.',
@@ -70,6 +87,23 @@ export const domainModelingRoadmap = {
         { text: '`nyl prepare` with fixture outputs, writing the same `bundle.yaml` as `nyl bundle`', done: false },
         { text: 'The example’s `oncall-roster` OpenTofu unit owning the Services, and the `service-directory` Command unit publishing the same page from its `collections` input, both depending on `database` through `checkout`’s `$fromUnit`', done: false },
       ],
+    },
+    {
+      id: 'R14',
+      title: 'Resource status',
+      summary:
+        'Definitions declare a per-environment status that the owning unit projects from its outputs or that is written from outside, and consumers read it with `$fromResource`.',
+      needs: ['R13', 'R2'],
+      items: [
+        { text: 'The status schema of a `ResourceDefinition`, with `x-nyl-max-age` freshness for externally written fields', done: false },
+        { text: 'Projection by `access: own` collections from the owner’s current receipt, validated when the receipt is recorded, with one owner per member’s field', done: false },
+        { text: '`nyl resources status set` and `unset` for one resource or, from a document and a pointer mapping, many, recorded as a `ResourceStatusRecord` under the lease, with provenance and the one-writer check', done: false },
+        { text: '`$fromResource` in the value-source contexts of `$fromUnit`, with its dependency edges, freshness, blocking, and errors', done: false },
+        { text: 'Status in `nyl get resources -e` and `nyl bundle -e`, and `--no-status`', done: false },
+        { text: 'The example’s `Service` status: written from `endpoints.json` in `prod`, linked from the service directory page, projected by `oncall-roster` in `dev`, and read by the namespaces Release with `$fromResource`', done: false },
+      ],
+      exitCriterion:
+        'A resource-only environment records status from a bulk write in one commit, with provenance, and its exports show it; an owning unit’s projection is read from its current receipt and never stored twice, and an external write to a projected field is refused naming the owner; `$fromResource` blocks on a missing or stale value as `$fromUnit` blocks on a missing receipt, and resolves through the owner with the same dependency edge.',
     },
     {
       id: 'R3',

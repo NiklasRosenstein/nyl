@@ -44,6 +44,7 @@ variables:
 | `$fromParameter` | a name, `{$fromParameter: pr}` | `{name, pointer?}` | An EnvironmentTemplate instance's typed parameter. |
 | `$fromUnit` | none | `{unit, output \| artifact \| observation, pointer?, environment?, kind?, evidence?, attestations?}` | A unit's output, artifact, or observed value from its current receipt. |
 | `$fromPromotion` | none | `{value, path?}` | A value recorded through a PromotionPath. |
+| *Planned (M9):* `$fromResource` | none | `{kind, name, pointer}` | A domain resource's `spec`, or its status in the environment: the owning unit's projected output or an externally written value. |
 | `$fromFile`, `$fromGit`, `$fromPublication` | none | `{path, pointer?}`; `{repository \| repositoryRef, revision, commit, path, pointer?}`; `{path, pointer?, carryFileFromWorktree?}` | A file of this repository, a file at a locked commit, a state file in the target's publication branch. |
 | `$literal` | — | any value | Its content, verbatim and never walked. |
 
@@ -97,8 +98,9 @@ only the context decides which sources are allowed. The rules:
 | Declared Environment and EnvironmentGroup `values` | — | as template values |
 | DeploymentTarget `releaseInputs`, declared or inline | `$fromFile`, `$fromGit`, `$fromPublication`, `$fromUnit`, `$fromPromotion` (the last two only through orchestration), `$literal` | — |
 | Output of recursive expansion: a chart's or a Component's output, a remote manifest, a HelmChart either generates | — (any source is an error naming the expanding resource) | — |
-| *Planned (M9):* a domain resource's `spec`, at discovery and admission | `$literal` | `$fromUnit`, `$fromPromotion` at any depth, to the consumer's resolution |
-| *Planned (M9):* a domain resource's `spec`, when a consumer resolves its bundle | `$fromUnit`, `$fromPromotion`, `$literal`, in the consumer's environment | — |
+| *Planned (M9):* a domain resource's `spec`, at discovery and admission | `$literal` | `$fromUnit`, `$fromPromotion`, `$fromResource` at any depth, to the consumer's resolution |
+| *Planned (M9):* a domain resource's `spec`, when a consumer resolves its bundle | `$fromUnit`, `$fromPromotion`, `$fromResource`, `$literal`, in the consumer's environment | — |
+| *Planned (M9):* `$fromResource` in a unit document, a DeploymentTarget's `releaseInputs`, and EnvironmentTemplate `spec.values` | Where `$fromUnit` resolves: when a run resolves the unit, and in `releaseInputs` only through orchestration | Where `$fromUnit` is carried: by a rendered unit to its run, and by template values to where they land |
 | Anything else, such as a target's other fields or a template's parameter declarations | — | — |
 
 A source a context rejects is an error that teaches the fix, such as `$fromUnit`
@@ -117,6 +119,15 @@ treats a position that holds a source as not yet known, and resolution
 validates the value against the field's subschema. The same design plans
 `$fromCollection`, which a unit's spec carries and its run resolves from the
 unit's bundle.
+
+`$fromResource`, planned with
+[resource status](domain-resources.md#reading-status-fromresource), reads a
+domain resource's `spec` or status in the consumer's environment. A
+projected status resolves to the owning unit's output, with the dependency
+edge, freshness, and blocking of `$fromUnit`; an externally written one to
+the value recorded in the environment's state. An unknown resource, or one
+not active in the environment, is a resolution error; a status with no value
+yet, or a stale one, blocks the consumer.
 
 - **Data vs. configuration.** A value read from outside the user's
   configuration (a unit's output, artifact, or observed value; a file read with
