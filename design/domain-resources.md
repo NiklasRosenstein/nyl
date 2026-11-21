@@ -24,8 +24,7 @@ the [standalone export](#standalone-export-nyl-bundle), which needs neither
 units nor Releases. An Environment decides which declarations are
 [active](#environment-scoping) in it, and a definition can declare a
 [status](#resource-status): per-environment facts, such as a service's URL,
-that the owning unit projects from its outputs or that are written from
-outside.
+that the owning unit projects from its outputs.
 
 ```text
  definition ─► discovery ─► admission ─► collection ─► resolution ─► bundle ─► driver adaptation ─► execution
@@ -52,8 +51,8 @@ and its driver. No stage has a command-specific variant.
   receipt, or driver. A unit consumes it as an input. Changing a resource
   changes the input of the units that consume it. It never creates, deletes,
   or replaces a unit. Its status, where the definition declares one, is a
-  view of the owning unit's receipt or a value written from outside, per
-  environment, and never part of the declaration.
+  view of the owning unit's receipt, per environment, and never part of the
+  declaration.
 - **Literal declaration files.** A declaration file is not a template. A reviewer, a
   CODEOWNERS rule, and a policy all see the same bytes that reach the bundle,
   apart from the `$fromUnit`, `$fromPromotion`, and `$fromResource`
@@ -182,8 +181,10 @@ spec:
 - **Envelope.** `apiVersion`, `kind`, `metadata.name`, `metadata.labels`, and
   `metadata.annotations` are the only metadata fields. Template syntax
   anywhere in the document is an error (`NYL-RESOURCE-TEMPLATED`).
-- **Identity** is `<group>/<kind>/<name>` and is unique across the project.
-  Directories are not namespaces. A duplicate is an error that names both
+- **Identity** is `<group>/<kind>/<name>` and is unique across the project's
+  declaration files. A declaration
+  [emitted by a Release](#declarations-emitted-by-releases) is unique within
+  each environment's catalog instead. Directories are not namespaces. A duplicate is an error that names both
   locations (`NYL-RESOURCE-DUPLICATE`). Moving a file between directories
   keeps the identity and changes only provenance.
 - **Provenance** is recorded per resource: the worktree-rooted path, the
@@ -819,7 +820,10 @@ nothing else (no Release, Environment, unit, driver, or cluster) can validate
 its declarations and export them for tools Nyl does not drive: a service
 catalog, a provisioning script, another IaC tool, or a CI job that checks
 quotas. Two commands export, and both run stages 0–5 through the code that
-feeds units, so an export and a unit's bundle cannot disagree:
+feeds units, so an export and a unit's bundle hold the same members. With
+`-e`, an export also shows [status](#status-in-exports), which a unit's bundle
+never holds and no bundle digest covers; `--no-status` prints the bytes a
+unit receives:
 
 | Command | Exports | Stages |
 | --- | --- | --- |
@@ -1085,12 +1089,15 @@ spec:
 - **Execution keys.** The active set reaches a unit only through its
   membership, which the bundle digest covers. A selector change that leaves a
   unit's members unchanged re-runs nothing.
-- **Releases.** A Release renders the same in every render, inside or
-  outside orchestration, so its collections read every admitted resource.
-  Whether a publication narrows them to its environment's active set is an
-  [open decision](#open-decisions). Declarations
-  [emitted by Releases](#declarations-emitted-by-releases) are the exception
-  that exists only per render.
+- **Releases.** Inside an orchestrated `KubernetesPublication`, a Release's
+  collections read the publishing environment's active set: the declaration
+  files its `resourceSelector` selects, and the declarations
+  [emitted](#declarations-emitted-by-releases) in that environment. Outside
+  orchestration, a render narrows the same way only when it is given an
+  environment, as `nyl render -e <env>` and `nyl render-tree -e <env>`.
+  Without one, a Release reads every admitted declaration file, and the
+  declarations emitted in the same render, and narrows them only through its
+  own collection selectors.
 - **No per-environment content.** Scoping decides which declarations an
   environment holds, never what they say. A resource whose spec differs
   between environments is declared once per environment, with names and
@@ -1156,7 +1163,8 @@ kind: Release
 metadata: {name: dex, namespace: dex}
 spec:
   collections:
-    clients: {type: identity.acme.example/v1/OAuthClient}
+    clients:
+      type: {apiVersion: identity.acme.example/v1, kind: OAuthClient}
 ---
 # … Dex's ConfigMap renders one `staticClients` entry per member of
 # collections.clients …
@@ -1239,14 +1247,28 @@ the point of declaring it next to the manifests. The rules:
   The emitted content enters the consumer's bundle digest, so a binding
   change that changes the declaration re-runs the consumer, and one that
   does not re-runs nothing.
-- **Collections in Releases.** Outside orchestration, a Release's
-  collections read the declaration files and the declarations emitted in the
-  same render, that is by the Releases of the same target tree. Inside an
-  orchestrated `KubernetesPublication`, they also read what the environment's
-  other publications emit. This is the one place where a Release renders
-  differently inside orchestration, and it weighs on the
-  [open decision](#open-decisions) on narrowing a Release's collections to
-  the environment.
+- **Collections in Releases.** Inside an orchestrated
+  `KubernetesPublication`, a Release's collections read the environment's
+  active set, which holds what every publication of the environment emits.
+  Outside orchestration, without an environment, they read the declaration
+  files and the declarations emitted in the same render, that is by the
+  Releases of the same target tree; with `-e <env>`, they read that
+  environment's active set (see [Environment scoping](#environment-scoping)).
+- **`forEach`** expands over the active set, so a unit or Release has an
+  instance per emitted declaration in the environments where it is emitted.
+- **Ownership.** A collection with `access: own` may own an emitted
+  declaration. When the Release stops emitting it in an environment, because
+  the Release is no longer published there or an input change makes the
+  render leave it out, the declaration leaves that environment as if it had
+  left the selection: a dropped member under `removal: approve`, approved in
+  that environment, and a `forEach` instance under the teardown gate (see
+  [Removal and retention](#removal-and-retention)).
+- **References.** An emitted declaration may hold `x-nyl-reference` fields
+  that name declaration files, checked when it is admitted. A declaration
+  file may not name an emitted declaration (`NYL-RESOURCE-REFERENCE-EMITTED`),
+  because files are admitted once per commit, before any Release renders.
+  An emitted declaration may name another one emitted in the same
+  environment, checked at that environment's admission.
 - **Inspection.** `nyl get resources -e <env>` and `nyl bundle -e <env>`
   render the environment's emitting Releases and list their declarations
   with the origin `emitted by <group>/<release> for <target>`. Without `-e`, they list
@@ -1261,7 +1283,9 @@ A definition can declare a **status**: facts that exist once something
 implements a resource in an environment, such as a service's URL or the host
 of its database. Status is per environment and lives in the environment's
 state, never in Git: the declaration says what is wanted, and the status
-what an environment has.
+what an environment has. The owning unit supplies it by
+[projection](#projection-by-the-owning-unit). Writing status from outside
+Nyl is [deferred](#external-writes-deferred).
 
 ```yaml
 apiVersion: gitops.nyl/v1
@@ -1276,7 +1300,7 @@ spec:
     type: object
     additionalProperties: false
     properties:
-      url: {type: string, format: uri, x-nyl-max-age: 24h}
+      url: {type: string, format: uri}
       databaseHost: {type: string}
 ```
 
@@ -1287,16 +1311,10 @@ spec:
   a definition error (`NYL-RESOURCE-STATUS-SCHEMA`). Inside a field, the
   schema follows the rules of `schema`, without `default` and
   `x-nyl-reference`.
-- **One writer per field.** In each environment, a field's value comes
-  either from the resource's owning unit, by
-  [projection](#projection-by-the-owning-unit), or from an
-  [external write](#external-writes), never from both: a field that an
-  owning unit selected in the environment projects cannot be written from
-  outside there.
-- **Freshness.** `x-nyl-max-age`, a duration on a field, makes an externally
-  written value stale once it is older than that; a stale value counts as no
-  value. A projected value is as fresh as the owner's receipt, so the keyword
-  does not apply to it.
+- **One writer per field.** In each environment, a field's value comes only
+  from the resource's owning unit, by
+  [projection](#projection-by-the-owning-unit). A field that no owning unit
+  selected in the environment projects has no value there.
 - **Never secret.** Status is committed in plain text to the state
   repository, like an observed value, so a field must never hold a secret.
 - A declaration never holds `status`; discovery rejects it like any other
@@ -1345,101 +1363,27 @@ collections:
 - **No feedback.** The owner's own bundle never holds status, so a projection
   never changes the owner's execution key.
 
-### External writes
+### External writes (deferred)
 
-An environment without units, or a field that no unit projects, gets its
-status from outside, such as a deploy job that knows the URL it deployed to:
+An environment without units, or a field that no unit projects, could get
+its status from outside, such as a deploy job that knows the URL it deployed
+to. This is not part of R14. It is an
+[open decision](#open-decisions), together with staging externally asserted
+facts. The sketch it starts from:
 
-```text
-nyl resources status set -e <env> <kind>/<name> <field>=<value>... [<options>]
-nyl resources status set -e <env> --kind <type> [-l <selector>] [--field <pointer>=<value>]... [--path <glob>]...
-                         --from <file|-> (--map <field>=<pointer>... | --mapping <file>) [--allow-missing] [<options>]
-nyl resources status unset -e <env> <kind>/<name> <field>... [<options>]
-
-<options>: [--reason <text>] [--url <url>] [--wait-lease <duration>] [--source <rev>] [-o table|yaml|json] [<project>]
-```
-
-- **One resource.** Each `<field>=<value>` sets one field. The text after the
-  first `=` is read as a YAML flow value, as for `--field`, so `port=5432`
-  is the integer and `'port="5432"'` the string.
-- **Many resources.** `--kind`, `-l`, `--field`, and `--path` select
-  resources as [`nyl bundle`](#nyl-bundle) does, within the environment's
-  active set; an empty selection fails with `NYL-RESOURCE-COLLECTION-EMPTY`.
-  `--from` reads one JSON or YAML document, `-` for stdin. Each
-  `--map <field>=<pointer>` reads that field's value for every selected
-  resource at `pointer`, with `{name}` replaced by the resource's name, as a
-  projection reads a unit's output. `--mapping <file>` holds the same
-  entries in the projection's shape, with the document in place of
-  `output`:
-
-  ```yaml
-  url: {pointer: '/{name}/url'}
-  databaseHost: {pointer: '/{name}/database/host'}
-  ```
-
-  A pointer that finds nothing for a selected resource is an error
-  (`NYL-RESOURCE-STATUS-MISSING`) unless `--allow-missing`, which leaves
-  that field of that resource as it is and lists it in the report.
-- **`unset`** removes the named fields' values.
-- **Checks, before anything is written.** The resource is declared and
-  admitted (`NYL-RESOURCE-UNKNOWN`, with the nearest name) and active in the
-  environment (`NYL-RESOURCE-INACTIVE`); the definition declares the field
-  (`NYL-RESOURCE-STATUS-UNDEFINED`); no owning unit selected in the
-  environment projects it (`NYL-RESOURCE-STATUS-OWNED`, naming the unit and
-  its collection); and the value passes the field's schema
-  (`NYL-RESOURCE-STATUS-INVALID`). Definitions, declarations, Environments,
-  and the units' collections are read at the worktree's `HEAD`, or at
-  `--source`; relevant uncommitted changes refuse with `NYL-SOURCE-DIRTY`, as
-  for `nyl exec`. A write of many resources is all or nothing.
-- **Recording.** The write takes the environment's lease, like every
-  state-writing operation, and records every changed field in one transition
-  commit with operation `resource-status`. Each resource's external status is
-  one `ResourceStatusRecord` at
-  `observed/resources/<group>/<kind>/<name>.yaml`:
-
-  ```yaml
-  apiVersion: gitops.nyl/v1
-  kind: ResourceStatusRecord
-  resource: {apiVersion: domain.acme.example/v1, kind: Service, name: checkout}
-  fields:
-    url:
-      value: https://checkout.acme.example
-      at: 2026-11-20T10:12:00Z
-      source:
-        by: [deploy-bot]
-        identity: verified
-        sourceCommit: 3e7b…
-        run: https://ci.example.com/runs/88
-        from: {document: endpoints.json, pointer: /checkout/url}
-        reason: null
-  ```
-
-  `by` and `identity` come from the lookup that `nyl attest` uses for
-  external attestations; `run` is `--url`, or the CI provider's run URL.
-
-  `ResourceStatusRecord` is a member of state format `v1`, added in place:
-  no version bump and no migration. Every Nyl that shares an environment's
-  state must support it before any status is written there.
-- **Many resources in one commit.** `--from` with `--map` writes the status of
-  any number of resources in one transition commit, so a pipeline that gathers
-  values from several jobs merges them and calls `nyl resources status set`
-  once. There is no staged-change file; see the open decision on staging.
-- **Refreshing.** A write that changes no value writes nothing, unless the
-  field declares `x-nyl-max-age` and its recorded value is older than half
-  of it; the value is then written again with its new time, so a job that
-  re-asserts a value keeps it fresh without a commit on every run.
-- **Leftover records.** A record of a resource that is no longer declared or
-  active in the environment is ignored by every reader. The next write in
-  that environment removes it and lists it under `pruned` in its commit.
-- **Report.** stdout lists each resource with the fields written, unchanged,
-  or skipped; `-o yaml|json` prints the same report as a versioned
-  document. Diagnostics go to stderr.
-
-| Exit | Meaning |
-| --- | --- |
-| 0 | Every value was recorded, or nothing changed. |
-| 1 | A configuration or validation error, and nothing was written: an unknown or inactive resource, an undeclared field, a field the owner projects, a value the status schema rejects, a missing pointer without `--allow-missing`, an empty selection, an unreadable `--from` document, relevant uncommitted changes, or state that cannot be read or written. |
-| 2 | The environment's lease is held, as for every state-writing operation; `--wait-lease` waits for it first. |
+- `nyl resources status set|unset -e <env>`, for one resource
+  (`<kind>/<name> <field>=<value>…`) or, from one JSON or YAML document and a
+  pointer mapping in the projection's shape (`--from <file> --map
+  'url=/{name}/url'`), for every resource a `nyl bundle`-style selection
+  matches, all or nothing, in one transition commit under the lease.
+- Each resource's external status as a `ResourceStatusRecord` at
+  `observed/resources/<group>/<kind>/<name>.yaml` in state format `v1`, each
+  field with its value, time, and provenance (`by` and `identity` from the
+  lookup `nyl attest` uses, the run URL, the source commit).
+- One writer per field: a write to a field that an owning unit projects in
+  the environment is refused, naming the unit.
+- Freshness: `x-nyl-max-age` on a status field makes an externally written
+  value stale once it is older than that, and a stale value counts as none.
 
 ### Reading status: `$fromResource`
 
@@ -1472,8 +1416,6 @@ releaseInputs:
   projection: the same dependency edge from the consumer to the owning unit,
   the same freshness, and the same blocking as `$fromUnit` of that output.
   Provenance cites the owner's receipt.
-- **External status** resolves to the recorded value. Provenance cites the
-  state commit and the value's `at`.
 - The resolved value enters the consumer's execution key like any other
   resolved value, so a changed status re-runs its consumers.
 
@@ -1482,7 +1424,8 @@ releaseInputs:
 | No admitted resource of that kind and name | `NYL-RESOURCE-UNKNOWN`, a resolution error with the nearest name |
 | The resource is not active in the consumer's environment | `NYL-RESOURCE-INACTIVE`, a resolution error naming the environment's `resourceSelector` |
 | A status field the definition does not declare, or a pointer outside `/spec/` and `/status/` | `NYL-RESOURCE-STATUS-UNDEFINED`, a resolution error |
-| No status yet: the owner has no current receipt, its projection found nothing, no external value is recorded, or it is stale | Blocked, exit 2, with `NYL-RESOURCE-STATUS-PENDING` naming the writer: the owning unit, or `nyl resources status set` |
+| No status yet: the owner has no current receipt, or its projection found nothing | Blocked, exit 2, with `NYL-RESOURCE-STATUS-PENDING` naming the owning unit |
+| No owning unit selected in the environment projects the field | `NYL-RESOURCE-STATUS-UNPROJECTED`, a resolution error naming the field |
 | The owner reads its own members' status, or a declaration reads a status projected by its own owner | A reference cycle, a resolution error as for `$fromUnit` |
 
 ### Status in exports
@@ -1492,8 +1435,8 @@ releaseInputs:
   with the fields that have a current value. Fields without one are left
   out and listed on stderr under the warning `NYL-RESOURCE-STATUS-PENDING`;
   the exit code does not change. Without `-e` there is no status.
-- `nyl get resource <kind>/<name> -e <env>` shows each field's writer, its
-  time, and whether it is stale.
+- `nyl get resource <kind>/<name> -e <env>` shows each field's owning unit
+  and the receipt it was read from.
 - A bundle a unit receives never holds status. A unit reads another
   resource's status through `$fromResource`, which makes the dependency
   explicit, and an owner's status never feeds back into its own execution
@@ -1826,9 +1769,11 @@ spec:                                 # rendered once per (environment, resource
   `selector`, and `paths` follow the rules of
   [collection](#stage-3-collection), so the instance set is computed from
   the catalog of stages 0–2, narrowed in each environment to its
-  [active set](#environment-scoping). That set depends only on S and the
-  environment's literal `resourceSelector`, and is the same from every entry
-  point.
+  [active set](#environment-scoping). Its declaration files depend only on S
+  and the environment's literal `resourceSelector`, and are the same from
+  every entry point; its
+  [emitted declarations](#declarations-emitted-by-releases) add the
+  instances that the environment's Releases render.
 - **Names.** An instance is named `<unit>-<resource name>`, such as
   `team-aws-payments`. The name is not templated. A clash with any other
   unit or instance name, such as `team` + `aws-payments` against
@@ -1918,10 +1863,8 @@ instantiating it differently in some environments.
 | `nyl prepare`, `bundle`, `get resources`, `schema resources` | `nyl-cli`, wiring only: each passes the same catalog, selection, and providers to the shared stages |
 | `resourceSelector` on Environment and EnvironmentTemplate, and the status schema of a definition | `nyl-core` (`resources::environment`, `resources::domain`) |
 | The active set, membership within it, and the selector warnings of `nyl validate` | `nyl-collections`, pure, used by every consumer and export |
-| Status projection, the one-writer rule, validation of status values, and freshness | `nyl-collections`, pure; projection read from receipts by the read-only and run providers |
+| Status projection, the one-owner rule, and validation of status values | `nyl-collections`, pure; projection read from receipts by the read-only and run providers |
 | `$fromResource` in the context table, and its provider | `nyl-core` `bindings`; the run's provider in `nyl-orchestration` resolution, the read-only one in `shell::inspect` |
-| `ResourceStatusRecord`, its golden files, and the `resource-status` transition commit | `nyl-state`, written by an `nyl-orchestration` shell operation under the lease |
-| `nyl resources status set` and `unset` | `nyl-cli`, wiring only |
 
 Contract walkthroughs become scenarios under
 `nyl/tests/scenarios/walkthroughs/`. These include a member added, a member
@@ -1937,29 +1880,28 @@ consumer, and two owners rejected.
 | R12 | The standalone export: `nyl-collections` membership, the reference closure, and bundle assembly; the `ResourceBundle`, `ResourceBundleProvenance`, and `ResourceCatalog` formats with golden files and published schemas; `nyl get resources -o yaml\|json`; field selection (`matchFields`, `--field`); `nyl bundle` with and without `-e` | R1, M6 |
 | R13 | Environment scoping: `resourceSelector` on Environments and EnvironmentTemplates, membership within the active set in `nyl-collections`, `nyl get resources -e` and `nyl bundle -e` over the active set, and the `nyl validate` warnings for an empty selector and an unselected resource | R12 |
 | R2 | `collections`, ownership, the bundle in state files and the execution key, sources in members resolved by runs, `$fromCollection`, Command adaptation, `nyl prepare` without `--native` | M3, R12, R13 |
-| R14 | Resource status: the status schema, projection by owning collections, `nyl resources status set` and `unset` with the `ResourceStatusRecord`, freshness with `x-nyl-max-age`, `$fromResource`, and status in `nyl get resources -e` and `nyl bundle -e` | R13, R2 |
+| R14 | Resource status: the status schema, projection by owning collections, `$fromResource`, and status in `nyl get resources -e` and `nyl bundle -e`; [external writes](#external-writes-deferred) are deferred | R13, R2 |
 | R3 | Kyverno admission with trusted context and the declaration's `referenced` closure as the only lookup | R1 |
-| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4 |
+| R4 | `prepare` capability and `--native`, OpenTofu/Terraform adaptation, `prepare` and `exec` outside orchestration, the source rules for dirty worktrees, `prepare --check`, removal approval, exec with bundles | M4, R2 |
 | R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base` (on `nyl bundle` too), the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
 | R15 | [Declarations emitted by Releases](#declarations-emitted-by-releases): `spec.emitters` on definitions, the top-level render and cut-out, per-environment identity, admission with emitter context, unknown values in emitted declarations, dependency edges for consumers, and the example's `OAuthClient` emitted by `service-portal` and read by `dex` | R10, R13 |
-| R8–R11 | The [Release catalog](release-catalog.md#rollout): Release labels and `spec.manifests`, label selection in ApplicationGroups, Release admission, collections and `forEach` in Releases | M2, R1, R3, R12 |
+| R8–R11 | The [Release catalog](release-catalog.md#rollout): Release labels and `spec.manifests`, label selection in ApplicationGroups, Release admission, collections and `forEach` in Releases | M2, R1, R3, R12, R13 |
 
 R12 follows R1 and comes before R2: it is the first slice that assembles
 bundles, so every later consumer (units in R2, Releases in R10) reuses its
 code rather than building its own. R13 follows R12: it scopes that
 membership code to an environment's active set, so units (R2), removal
 approval (R4), and `forEach` instances (R6) see only active resources from
-their first release, and it needs no unit. R14 follows R2: external status
-writes need only R13's environments, and projection needs R2's owning
-collections. R15 follows R10 and R13: an emitted declaration needs a Release consumer
+their first release, and it needs no unit. R14 follows R2: projection needs
+R2's owning collections. R15 follows R10 and R13: an emitted declaration needs a Release consumer
 to read it and an environment to exist in. Slice identifiers are stable;
 R12 to R15 are numbered after the existing slices and ordered by what they
 need.
 
 The [running example](#running-example-teams-and-services) shows what each slice makes work on one
-small catalog, from R1 to R14, and becomes `examples/service-catalog/` with a
+small catalog, from R1 to R15, and becomes `examples/service-catalog/` with a
 reference scenario that each slice extends.
 
 ## Running example: teams and services
@@ -1983,17 +1925,19 @@ examples/service-catalog/
   platform/
     definitions/catalog.yaml                # Team and Service                      R1
     policies/services.yaml                  # Kyverno ValidatingPolicy              R3
-    units/database.yaml                     # Command unit producing `connection`   R12
+    units/database.yaml                     # Command unit for `nyl bundle -e` only R12
     units/service-directory.yaml            # Command unit publishing the page      R2
     units/oncall-roster.yaml, oncall-roster/main.tf   # OpenTofu, `local` provider  R2
     releases/service-namespaces.yaml, templates/service-namespace.yaml             R10
-  environments/dev.yaml                     # the `dev` Environment                 R12
+  environments/dev.yaml                     # `dev`, for `nyl bundle -e` only       R12
   environments/prod.yaml                    # `prod`: resources only, no units     R13
   environments/preview.yaml                 # EnvironmentTemplate `preview`        R13
   teams/
     payments/team.yaml services.yaml        # Team payments; Services checkout, invoices
     search/catalog.yaml                     # Team search and Service search-api in one file
   tools/service-directory.py                # the static-page generator              R12
+  apps/service-portal/release.yaml          # emits OAuthClient service-portal      R15
+  platform/dex/release.yaml                 # reads OAuthClients                    R15
 ```
 
 ### The definitions
@@ -2119,10 +2063,11 @@ in step with it.
 | --- | --- | --- | --- |
 | On-call export | `nyl bundle --kind Service --field /spec/tier=critical -o json` piped to `jq` | Standalone | R12 |
 | Service directory page | `nyl get resources -o json` piped to `tools/service-directory.py` | Standalone | R12 |
-| Service directory page with links | `nyl get resources -e prod -o json`, each Service's `status.url` | Standalone | R13, R14 |
+| Service directory page with links | `nyl get resources -e dev -o json`, each Service's `status.url` as `oncall-roster` projects it | Standalone, reading orchestrated status | R14 |
 | Service directory page | The `service-directory` Command unit's `collections` input, same generator | Orchestrated | R2 |
 | On-call roster | The `oncall-roster` OpenTofu unit, `access: own` | Orchestrated | R2, R4 |
 | Service namespaces | The `service-namespaces` Release's `spec.collections`, and `checkout`'s `status.databaseHost` through `$fromResource` | Rendering, orchestrated for the status | R10, R14 |
+| Dex | The `dex` Release's `clients` collection, holding the `OAuthClient` that the `service-portal` Release emits | Orchestrated | R15 |
 
 The service directory is the same consumer on both paths: one generator,
 first run on an export by any CI job, later run by a unit that publishes the
@@ -2531,7 +2476,7 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
 The Service definition gains a status, and `checkout` stops naming the
 `database` unit: the definition drops `database` from its schema, the
 declaration drops `spec.database`, and the host becomes
-`status.databaseHost`, which each environment supplies in its own way.
+`status.databaseHost`, which the owning unit projects in each environment.
 
 ```yaml
 # platform/definitions/catalog.yaml, the Service definition beneath spec
@@ -2539,42 +2484,9 @@ declaration drops `spec.database`, and the host becomes
     type: object
     additionalProperties: false
     properties:
-      url: {type: string, format: uri, x-nyl-max-age: 24h}
+      url: {type: string, format: uri}
       databaseHost: {type: string}
 ```
-
-**`prod`, written from outside.** `prod` has no units. Its deploy job knows
-where it deployed each service and writes `endpoints.json`:
-
-```json
-{"checkout":   {"url": "https://checkout.acme.example", "database": {"host": "checkout-db.prod.internal"}},
- "invoices":   {"url": "https://invoices.acme.example"},
- "search-api": {"url": "https://search.acme.example"}}
-```
-
-and then records the status of every Service in one commit:
-
-```console
-$ nyl resources status set -e prod --kind Service --from endpoints.json \
-    --map 'url=/{name}/url' --map 'databaseHost=/{name}/database/host' --allow-missing
-prod: recorded status of 3 Services (resource-status, 5c1d…)
-  checkout    url, databaseHost
-  invoices    url    skipped: databaseHost, /invoices/database/host not found
-  search-api  url    skipped: databaseHost, /search-api/database/host not found
-```
-
-- The job runs daily, and `url` declares `x-nyl-max-age: 24h`, so a URL that
-  no run has confirmed for a day is stale, and its readers wait as for a
-  missing value. A write that repeats a fresh value writes nothing.
-- One field of one Service is written the same way:
-  `nyl resources status set -e prod Service/checkout databaseHost=checkout-db-2.prod.internal`.
-- The service directory links each service to its `status.url` in `prod`:
-
-  ```sh
-  nyl get resources -e prod -o json | python3 tools/service-directory.py > public/index.html
-  ```
-
-  Without `-e`, the same generator renders the page without links.
 
 **`dev`, projected by the owner.** In `dev`, `oncall-roster` owns every
 Service, so it projects their status from its outputs. It reads the
@@ -2611,6 +2523,15 @@ output "endpoints" {
 }
 ```
 
+- The service directory links each service to its `status.url` in `dev`:
+
+  ```sh
+  nyl get resources -e dev -o json | python3 tools/service-directory.py > public/index.html
+  ```
+
+  Without `-e`, the same generator renders the page without links. `prod`
+  has no units, so its Services have no status and its page has no links;
+  writing status from outside is [deferred](#external-writes-deferred).
 - When a run records `oncall-roster`'s receipt, it validates each Service's
   projected status; an `endpoints` output whose `url` is not a URI fails the
   unit with `NYL-RESOURCE-STATUS-INVALID`. Nothing else is stored: `nyl get
@@ -2620,15 +2541,6 @@ output "endpoints" {
 - Services now have a status, so `nyl bundle -e dev` includes it, and the
   commands of [R2](#r2-collections-in-units) that reproduce a unit's bundle
   add `--no-status`.
-- The owner is the only writer of the fields it projects:
-
-  ```console
-  $ nyl resources status set -e dev Service/checkout url=https://checkout.example
-  error[NYL-RESOURCE-STATUS-OWNED]: Service/checkout: status field url is projected by unit oncall-roster in dev
-    --> /platform/units/oncall-roster.yaml /spec/collections/services/status/url
-    = help: change the unit's endpoints output, or remove the projection to write the field from outside
-  ```
-
 **The namespaces Release reads status.** The ConfigMap of
 [R8–R10](#r8r10-a-release-per-catalog) took the host from
 `svc.spec.database.host`. It now takes it from a Release input, which the
@@ -2662,13 +2574,32 @@ releaseInputs:
 
 - The binding names the Service, not the unit that knows its host. In `dev`
   it resolves to `oncall-roster`'s projection and depends on
-  `oncall-roster`; in an environment that writes the host from outside, the
-  same binding reads the record and depends on no unit.
+  `oncall-roster`; in an environment where another unit owns the Services,
+  the same binding depends on that unit instead.
 - Before a value exists, the publication blocks with
   `NYL-RESOURCE-STATUS-PENDING`, naming `oncall-roster` as the writer.
 - `render-tree` resolves no `$fromResource`, so the input keeps its default
   and renders no ConfigMap. With `spec.database` gone, no carried source is
   left in the catalog for it to report as an unknown value.
+
+### R15: emitted declarations
+
+The example gains the identity provider of
+[Declarations emitted by Releases](#declarations-emitted-by-releases): an
+`OAuthClient` definition with `emitters.paths: ['/apps/**']`, the
+`service-portal` Release that emits its client from its `host` and `sso`
+inputs, and the `dex` Release that reads every client as a collection.
+
+- `dev`'s publication renders both Releases. `nyl get resources -e dev
+  --kind OAuthClient` lists the `service-portal` client, with an origin that
+  names the `service-portal` Release and `dev`'s target. Without `-e`, it
+  lists no OAuthClient.
+- Binding `sso: false` on `dev`'s target leaves the client out of the
+  render, so it leaves `dev`, and `dex`'s next publication there drops its
+  `staticClients` entry. No other environment changes.
+- A `teams/` Release that emits an OAuthClient fails with
+  `NYL-RESOURCE-EMITTER-UNTRUSTED`, because `/teams/**` is not in the
+  definition's `emitters.paths`.
 
 ## Guide sketch: implementing a domain resource
 
@@ -2739,12 +2670,11 @@ teams/
 | Whether `nyl get resources` needs a more specific name, because `nyl get` also reports Nyl's own project resources | R12 |
 | Whether one `nyl bundle` invocation takes several ad-hoc selections, each with its own `--as` | After R12 |
 | Whether `--collection` also names a Release's collection, as `<group>/<release>/<collection>` | R10 |
-| Whether a Release's collections narrow to the active set of the environment whose `KubernetesPublication` publishes it, given that a Release renders the same outside orchestration | R13 |
 | Whether `resourceSelector` takes several terms, such as one per kind, any of which makes a resource active | After R13 |
 | `$fromEnvironment` in declaration files, so one file can vary per environment without a Release emitting it | After R15 |
 | Generated declarations: whether a HelmChart, Component, or RemoteManifest may emit declarations in its expanded output, which would need full expansion for inventory | After R15 |
 | Whether a Release may set `spec.emits` to declare, literally, which kinds it may emit, so `nyl get resources` without `-e` can list them per Release | R15 |
-| A staged-change file for externally asserted facts, starting with resource status and extended to external attestations: a versioned `StagedChanges` document for one environment with typed entries, each with its own precondition, its original time (never younger than the recorded value, refused past `x-nyl-max-age`), and the stager's claimed provenance, the applier's identity being authoritative; written with `--stage <file>` on the writing command through the same validation, and applied with kind-neutral `nyl staged diff\|apply <files…>` in one observed commit under the lease. Never desired state, never committed to source, no server-side pending state. Not for driver-read facts, runs, promotion, or coordination commands | When external attestations are designed |
+| External status writes ([sketch](#external-writes-deferred): `nyl resources status set` and `unset`, the `ResourceStatusRecord`, the one-writer check, and `x-nyl-max-age` freshness), and with them a staged-change file for externally asserted facts, starting with resource status and extended to external attestations: a versioned `StagedChanges` document for one environment with typed entries, each with its own precondition, its original time (never younger than the recorded value, refused past `x-nyl-max-age`), and the stager's claimed provenance, the applier's identity being authoritative; written with `--stage <file>` on the writing command through the same validation, and applied with kind-neutral `nyl staged diff\|apply <files…>` in one observed commit under the lease. Never desired state, never committed to source, no server-side pending state. Not for driver-read facts, runs, promotion, or coordination commands | When external attestations are designed |
 | Whether `$fromResource` takes `evidence`, `attestations`, and `environment` as `$fromUnit` does | R14 |
 | Whether a read collection's bundle may carry its members' status, with the dependency edges of `$fromResource` | After R14 |
 | Status observed by a driver through `nyl observe`, and Kubernetes-style `conditions` | After R14 |
