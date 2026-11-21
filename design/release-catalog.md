@@ -289,6 +289,16 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
   target are [template values](release-inputs.md#template-values), `${ … }`,
   expanded with the structural context: `values`, `cluster`, and `target`.
   Membership is therefore known before the Release renders.
+- **Environment.** Inside an orchestrated `KubernetesPublication`, a
+  collection selects from the publishing environment's
+  [active set](domain-resources.md#environment-scoping): the declaration
+  files its `resourceSelector` selects, and the declarations emitted in that
+  environment. A direct command narrows the same way only when it is given
+  an environment, as `nyl render -e <env>` and `nyl render-tree -e <env>`.
+  Without one, it selects from every admitted declaration file and the
+  declarations emitted in the same render, and a Release that should see
+  less narrows itself with its own `selector` and `paths`, as `team-rbac`
+  does with `${ values.stage }`.
 - **Access.** Releases only read collections. `access` defaults to `read`,
   and `access: own` fails with `NYL-RELEASE-COLLECTION-OWN`. A rendered
   workload resource already has at most one Application owner per destination
@@ -374,8 +384,8 @@ unknown value that would reach rendered output is an error as well:
   rendered manifest, a published tree, or a diff.
 - **Caching.** The unresolved bundle's digest, sources as written, is what
   the dependency recorder sees outside orchestration. A render that
-  succeeds does not depend on any source's value, so it is the same in
-  every environment.
+  succeeds does not depend on any source's value, so it depends only on the
+  members and their written sources, which that digest covers.
 
 ### Emitted declarations
 
@@ -495,7 +505,7 @@ of `nyl-core`.
 | --- | --- | --- |
 | R8 | Release labels and the static envelope with verification, `spec.manifests`, the `spec.include` deprecation, shared files, the Release catalog, `nyl get releases`, source `selector` with the AppProject guard, and `--release` for direct commands | M2 |
 | R9 | Release admission over Releases and their rendered manifests, with trusted annotations, as the second guard for `selector` | R3, R8 |
-| R10 | Release `collections` on the `nyl-collections` assembly of R12, referenced resources, YAML-safe output, unknown values for carried sources outside orchestration, bundle provenance in the ownership index | R1, R3, R8, R12 |
+| R10 | Release `collections` on the `nyl-collections` assembly of R12, narrowed to the publishing environment's active set (and with `-e` on direct commands), referenced resources, YAML-safe output, unknown values for carried sources outside orchestration, bundle provenance in the ownership index | R1, R3, R8, R12, R13 |
 | R11 | `forEach` on Releases, instance names, instance bindings | R10 |
 
 R8 is useful without domain resources. Membership, the bundle, and referenced

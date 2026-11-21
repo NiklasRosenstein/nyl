@@ -44,7 +44,8 @@ variables:
 | `$fromParameter` | a name, `{$fromParameter: pr}` | `{name, pointer?}` | An EnvironmentTemplate instance's typed parameter. |
 | `$fromUnit` | none | `{unit, output \| artifact \| observation, pointer?, environment?, kind?, evidence?, attestations?}` | A unit's output, artifact, or observed value from its current receipt. |
 | `$fromPromotion` | none | `{value, path?}` | A value recorded through a PromotionPath. |
-| *Planned (M9):* `$fromResource` | none | `{kind, name, pointer}` | A domain resource's `spec`, or its status in the environment: the owning unit's projected output or an externally written value. |
+| *Planned (M9):* `$fromResource` | none | `{kind, name, pointer}` | A domain resource's `spec`, or its status in the environment as the owning unit projects it from an output. |
+| *Planned (M9):* `$fromCollection` | none | `{collection, each?, pointer?}` | One of the unit's own collections, from its bundle. |
 | `$fromFile`, `$fromGit`, `$fromPublication` | none | `{path, pointer?}`; `{repository \| repositoryRef, revision, commit, path, pointer?}`; `{path, pointer?, carryFileFromWorktree?}` | A file of this repository, a file at a locked commit, a state file in the target's publication branch. |
 | `$literal` | — | any value | Its content, verbatim and never walked. |
 
@@ -101,6 +102,8 @@ only the context decides which sources are allowed. The rules:
 | *Planned (M9):* a domain resource's `spec`, at discovery and admission | `$literal` | `$fromUnit`, `$fromPromotion`, `$fromResource` at any depth, to the consumer's resolution |
 | *Planned (M9):* a domain resource's `spec`, when a consumer resolves its bundle | `$fromUnit`, `$fromPromotion`, `$fromResource`, `$literal`, in the consumer's environment | — |
 | *Planned (M9):* `$fromResource` in a unit document, a DeploymentTarget's `releaseInputs`, and EnvironmentTemplate `spec.values` | Where `$fromUnit` resolves: when a run resolves the unit, and in `releaseInputs` only through orchestration | Where `$fromUnit` is carried: by a rendered unit to its run, and by template values to where they land |
+| *Planned (M9):* `$fromCollection` in a unit document | When a run resolves the unit, from its bundle | By a rendered unit to its run |
+| *Planned (M9):* a domain resource emitted by a Release | As every document of the Release bundle: `$fromInput` | — |
 | Anything else, such as a target's other fields or a template's parameter declarations | — | — |
 
 A source a context rejects is an error that teaches the fix, such as `$fromUnit`
@@ -124,10 +127,9 @@ unit's bundle.
 [resource status](domain-resources.md#reading-status-fromresource), reads a
 domain resource's `spec` or status in the consumer's environment. A
 projected status resolves to the owning unit's output, with the dependency
-edge, freshness, and blocking of `$fromUnit`; an externally written one to
-the value recorded in the environment's state. An unknown resource, or one
+edge, freshness, and blocking of `$fromUnit`. An unknown resource, or one
 not active in the environment, is a resolution error; a status with no value
-yet, or a stale one, blocks the consumer.
+yet blocks the consumer.
 
 - **Data vs. configuration.** A value read from outside the user's
   configuration (a unit's output, artifact, or observed value; a file read with
