@@ -337,6 +337,51 @@ fn relative_to(path: &Path, root: &Path) -> Option<PathBuf> {
     if let Ok(relative) = path.strip_prefix(root) {
         return Some(relative.to_path_buf());
     }
-    let (path, root) = (path.canonicalize().ok()?, root.canonicalize().ok()?);
+    let (path, root) = (canonical(path)?, root.canonicalize().ok()?);
     path.strip_prefix(root).ok().map(Path::to_path_buf)
+}
+
+/// `path` with symbolic links resolved, as far as it exists: a file that is
+/// missing, which a message may name, keeps its name beneath its directory's
+/// canonical form (on macOS, `/var` is a link to `/private/var`).
+fn canonical(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+        if let Ok(canonical) = existing.canonicalize() {
+            return Some(missing.iter().rev().fold(canonical, |path, name| path.join(name)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches a missing file shown with its absolute path when the root is
+    /// reached through a symbolic link, as a temporary directory is on macOS
+    /// (`/var` links to `/private/var`) and files resolve to canonical paths.
+    #[cfg(unix)]
+    #[test]
+    fn test_provenance_path_of_a_missing_file_beneath_a_linked_root() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("real/apps")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("real"), temp.path().join("link")).unwrap();
+        let root = temp.path().join("link");
+        let roots = ProvenanceRoots {
+            root: Some(&root.join("apps")),
+            worktree: Some(&root),
+        };
+        let real = temp.path().join("real").canonicalize().unwrap();
+        assert_eq!(shown_path(&real.join("apps/missing.yaml"), roots), "missing.yaml");
+        assert_eq!(
+            shown_path(&real.join("shared/a/missing.yaml"), roots),
+            "/shared/a/missing.yaml"
+        );
+    }
 }
