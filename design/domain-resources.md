@@ -35,7 +35,10 @@ outside.
 ```
 
 Stages 0–2 depend only on the source commit S, so their results are the same
-for every environment and every entry point: `nyl validate`, `nyl get
+for every environment and every entry point (declarations
+[emitted by Releases](#declarations-emitted-by-releases) are the exception:
+they are discovered and admitted per environment, after their Release's
+top-level render): `nyl validate`, `nyl get
 resources`, `nyl bundle`, `nyl prepare`, `plan`, `reconcile`, `exec
 --worktree`, and CI all call them. Stages 3–5 run for a consumer: a unit
 during unit resolution, in the layer the core contract already defines, a
@@ -51,13 +54,16 @@ and its driver. No stage has a command-specific variant.
   or replaces a unit. Its status, where the definition declares one, is a
   view of the owning unit's receipt or a value written from outside, per
   environment, and never part of the declaration.
-- **Literal declarations.** Domain resources are not templates. A reviewer, a
+- **Literal declaration files.** A declaration file is not a template. A reviewer, a
   CODEOWNERS rule, and a policy all see the same bytes that reach the bundle,
   apart from the `$fromUnit`, `$fromPromotion`, and `$fromResource`
   [value sources](#value-sources-in-declarations) they may hold, which name
   exactly where a value comes from. Per-environment variation belongs in the
   consuming unit, whose spec is templated per environment; which
-  declarations an environment holds is its `resourceSelector`.
+  declarations an environment holds is its `resourceSelector`. A declaration
+  whose content or existence should follow a deployment's inputs is
+  [emitted by its Release](#declarations-emitted-by-releases) instead, where
+  it is a template by design and admitted per environment.
 - **One source model.** A domain resource is a context in the
   [value-source context table](declarative-value-sources.md#contexts), read by
   the same walker as every other document. No schema keyword decides where a
@@ -1079,14 +1085,16 @@ spec:
 - **Releases.** A Release renders the same in every render, inside or
   outside orchestration, so its collections read every admitted resource.
   Whether a publication narrows them to its environment's active set is an
-  [open decision](#open-decisions).
+  [open decision](#open-decisions). Declarations
+  [emitted by Releases](#declarations-emitted-by-releases) are the exception
+  that exists only per render.
 - **No per-environment content.** Scoping decides which declarations an
   environment holds, never what they say. A resource whose spec differs
   between environments is declared once per environment, with names and
   labels that the selectors tell apart, such as `orders-db-dev` and
-  `orders-db-prod`. `$fromEnvironment` in declarations, which would let one
-  declaration vary per environment, is a possible later extension and not
-  part of this design; stage 1 rejects it with its fix.
+  `orders-db-prod`, or [emitted by a Release](#declarations-emitted-by-releases),
+  whose render may vary it per target. `$fromEnvironment` in declaration
+  files is not part of this design; stage 1 rejects it with its fix.
 
 **Inspection and checks.**
 
@@ -1103,6 +1111,139 @@ spec:
     EnvironmentTemplate selects, so no consumer in any environment receives
     it. A project without Environments and EnvironmentTemplates gets
     neither warning.
+
+## Declarations emitted by Releases
+
+A declaration may also live in a Release bundle, next to the manifests it
+belongs with. An application's Release declares the OAuth client it needs,
+and the identity provider's consumer configures it:
+
+```yaml
+# apps/service-portal/release.yaml
+apiVersion: k8s.nyl/v1
+kind: Release
+metadata: {name: service-portal, namespace: portal}
+spec:
+  inputs:
+    host: {type: string}
+    sso: {type: boolean, default: true}
+---
+# … the Deployment, Service, and Ingress …
+{% if inputs.sso %}
+---
+apiVersion: identity.acme.example/v1
+kind: OAuthClient
+metadata:
+  name: service-portal
+  labels: {team: platform}
+spec:
+  name: Service portal
+  redirectURIs:
+    - 'https://{{ inputs.host }}/oauth2/callback'
+  secretRef: {namespace: portal, name: service-portal-oauth}
+{% endif %}
+```
+
+```yaml
+# platform/dex/release.yaml: the consumer
+apiVersion: k8s.nyl/v1
+kind: Release
+metadata: {name: dex, namespace: dex}
+spec:
+  collections:
+    clients: {type: identity.acme.example/v1/OAuthClient}
+---
+# … Dex's ConfigMap renders one `staticClients` entry per member of
+# collections.clients …
+```
+
+Unlike a declaration file, an **emitted declaration** is a template. Its
+content and whether it exists at all may depend on the target's inputs,
+`values`, and `cluster`, like every other document of its Release: that is
+the point of declaring it next to the manifests. The rules:
+
+- **Which Releases may emit.** A definition opts in with literal
+  `spec.emitters.paths`, globs under the local path rule over the Release
+  file's trusted path. Without it, a document of that kind in a Release
+  bundle is an error (`NYL-RESOURCE-EMITTER-UNTRUSTED`) naming the
+  definition. The definition lives in a trusted path, so the platform
+  decides who may declare an OAuth client, and a team's Release cannot
+  declare one by accident or by intent.
+
+  ```yaml
+  spec:
+    group: identity.acme.example
+    kind: OAuthClient
+    version: v1
+    emitters:
+      paths: ['/apps/**']
+  ```
+
+- **Top-level render only.** Emitted declarations are found by rendering the
+  Release's own file and its `spec.manifests` files: Jinja over the text,
+  then the walker in the Release bundle context, so `$fromInput` resolves
+  there. No chart, Component, or RemoteManifest expands. A rendered document
+  whose `apiVersion` and `kind` match a definition is cut out of the
+  manifests, never reaches Kubernetes, Argo CD, or a published tree, and
+  enters the catalog of the environment that renders the Release. Inventory
+  therefore needs neither Helm nor a cluster.
+- **Not from expansion.** A defined kind in the output of a HelmChart,
+  Component, or RemoteManifest is an error
+  (`NYL-RESOURCE-EMITTED-BY-EXPANSION`). Whether generated declarations
+  should be allowed is an [open decision](#open-decisions).
+- **Per target, per environment.** An emitted declaration exists in the
+  environment whose `KubernetesPublication` renders the Release, with that
+  target's bindings, and nowhere else. Its envelope and identity come from
+  the render, so `metadata.name` may be templated; `$` sources in the
+  envelope stay errors, as for every literal-only field. The environment's
+  `resourceSelector` applies to emitted declarations as to declaration
+  files.
+- **Identity.** `<group>/<kind>/<name>` is unique within an environment's
+  catalog: declaration files and every Release that environment renders.
+  A clash is `NYL-RESOURCE-DUPLICATE`, naming the file or the Release and
+  target of each side. The same Release rendered for two targets in one
+  environment must therefore name its declarations per target, for example
+  from an input.
+- **Provenance** is the Release file's trusted path and document index, the
+  Release's `<group>/<release>`, the target, and the digest of the rendered
+  document. It never comes from the document.
+- **Admission** runs per environment after the render, with the same
+  schema, reference, and policy stages as a declaration file. Policies get
+  the emitting Release and target as trusted context
+  (`emitter.gitops.nyl/release`, `emitter.gitops.nyl/target`), so a policy
+  can, for example, allow only redirect URIs under the target's domain.
+- **Value sources.** The Release bundle context applies: `$fromInput`
+  resolves at render time, and every other source is an error that teaches
+  the fix, as in any manifest of the Release. A value from another unit
+  reaches the declaration through a Release input bound with `$fromUnit`.
+- **Unknown values.** Outside orchestration, an input bound with `$fromUnit`
+  or `$fromPromotion` is an [unknown value](release-catalog.md#unknown-values).
+  A declaration that holds one is emitted with the value unknown, which
+  `nyl get resources` and `nyl bundle` list under `unresolved`, and which
+  fails a consumer's render only when a template reads it. A control
+  statement such as `{% if %}` that reads one fails the render, because the
+  declaration's existence would be unknown.
+- **Consumers and ordering.** Inside orchestration, a consumer whose
+  collection holds an emitted declaration gains a dependency edge on every
+  unit the emitting target's bindings read, as a carried source adds one.
+  The emitted content enters the consumer's bundle digest, so a binding
+  change that changes the declaration re-runs the consumer, and one that
+  does not re-runs nothing.
+- **Collections in Releases.** Outside orchestration, a Release's
+  collections read the declaration files and the declarations emitted in the
+  same render, that is by the Releases of the same target tree. Inside an
+  orchestrated `KubernetesPublication`, they also read what the environment's
+  other publications emit. This is the one place where a Release renders
+  differently inside orchestration, and it weighs on the
+  [open decision](#open-decisions) on narrowing a Release's collections to
+  the environment.
+- **Inspection.** `nyl get resources -e <env>` and `nyl bundle -e <env>`
+  render the environment's emitting Releases and list their declarations
+  with the Release and target as provenance. Without `-e`, they list
+  declaration files only and name the Releases that may emit, because
+  emitted declarations exist only per environment. `nyl render` and
+  `nyl render-tree` print the manifests without the emitted declarations and
+  list them in a separate section with `--show-emitted`.
 
 ## Resource status
 
@@ -1792,6 +1933,7 @@ consumer, and two owners rejected.
 | R5 | Transition rules: `x-nyl-validations` with `oldSelf`, `--base` and `--no-base` (on `nyl bundle` too), the receipt baseline, Kyverno `oldObject`, the `approve` effect for guarded changes, and tracked refs with `--advance` | R3, R4 |
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
+| R15 | [Declarations emitted by Releases](#declarations-emitted-by-releases): `spec.emitters` on definitions, the top-level render and cut-out, per-environment identity, admission with emitter context, unknown values in emitted declarations, dependency edges for consumers, and the example's `OAuthClient` emitted by `service-portal` and read by `dex` | R10, R13 |
 | R8–R11 | The [Release catalog](release-catalog.md#rollout): Release labels and `spec.manifests`, label selection in ApplicationGroups, Release admission, collections and `forEach` in Releases | M2, R1, R3, R12 |
 
 R12 follows R1 and comes before R2: it is the first slice that assembles
@@ -1801,8 +1943,10 @@ membership code to an environment's active set, so units (R2), removal
 approval (R4), and `forEach` instances (R6) see only active resources from
 their first release, and it needs no unit. R14 follows R2: external status
 writes need only R13's environments, and projection needs R2's owning
-collections. Slice identifiers are stable; R12, R13, and R14 are numbered
-after the existing slices and ordered by what they need.
+collections. R15 follows R10 and R13: an emitted declaration needs a Release consumer
+to read it and an environment to exist in. Slice identifiers are stable;
+R12 to R15 are numbered after the existing slices and ordered by what they
+need.
 
 The [running example](#running-example-teams-and-services) shows what each slice makes work on one
 small catalog, from R1 to R14, and becomes `examples/service-catalog/` with a
@@ -2587,7 +2731,9 @@ teams/
 | Whether `--collection` also names a Release's collection, as `<group>/<release>/<collection>` | R10 |
 | Whether a Release's collections narrow to the active set of the environment whose `KubernetesPublication` publishes it, given that a Release renders the same outside orchestration | R13 |
 | Whether `resourceSelector` takes several terms, such as one per kind, any of which makes a resource active | After R13 |
-| `$fromEnvironment` in declarations, so one declaration can vary per environment | After R13 |
+| `$fromEnvironment` in declaration files, so one file can vary per environment without a Release emitting it | After R15 |
+| Generated declarations: whether a HelmChart, Component, or RemoteManifest may emit declarations in its expanded output, which would need full expansion for inventory | After R15 |
+| Whether a Release may set `spec.emits` to declare, literally, which kinds it may emit, so `nyl get resources` without `-e` can list them per Release | R15 |
 | A staged-change file for externally asserted facts, starting with resource status and extended to external attestations: a versioned `StagedChanges` document for one environment with typed entries, each with its own precondition, its original time (never younger than the recorded value, refused past `x-nyl-max-age`), and the stager's claimed provenance, the applier's identity being authoritative; written with `--stage <file>` on the writing command through the same validation, and applied with kind-neutral `nyl staged diff\|apply <files…>` in one observed commit under the lease. Never desired state, never committed to source, no server-side pending state. Not for driver-read facts, runs, promotion, or coordination commands | When external attestations are designed |
 | Whether `$fromResource` takes `evidence`, `attestations`, and `environment` as `$fromUnit` does | R14 |
 | Whether a read collection's bundle may carry its members' status, with the dependency edges of `$fromResource` | After R14 |

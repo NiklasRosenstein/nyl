@@ -377,6 +377,16 @@ unknown value that would reach rendered output is an error as well:
   succeeds does not depend on any source's value, so it is the same in
   every environment.
 
+### Emitted declarations
+
+A Release may also *declare* domain resources, next to its manifests, where
+their definition allows it: an application's Release declares its OAuth
+client, and the identity provider's Release reads it as a collection. Such a
+declaration is found by the top-level render, cut out of the manifests, and
+exists per environment. The rules are in
+[Declarations emitted by Releases](domain-resources.md#declarations-emitted-by-releases)
+(slice R15).
+
 ## One Release per resource: `forEach`
 
 ```yaml
