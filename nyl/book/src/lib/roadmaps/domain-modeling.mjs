@@ -209,6 +209,23 @@ export const domainModelingRoadmap = {
       ],
     },
     {
+      id: 'R15',
+      title: 'Declarations emitted by Releases',
+      summary:
+        'A Release declares the domain resources its deployment needs, such as an OAuth client, next to its manifests; their content and existence follow the target’s inputs.',
+      needs: ['R10', 'R13'],
+      items: [
+        { text: '`spec.emitters.paths` on definitions, and `NYL-RESOURCE-EMITTER-UNTRUSTED` for a Release outside them', done: false },
+        { text: 'The top-level render of a Release’s file and `spec.manifests`, with defined kinds cut out of the manifests, and `NYL-RESOURCE-EMITTED-BY-EXPANSION` for chart, Component, or RemoteManifest output', done: false },
+        { text: 'Per-environment identity with `NYL-RESOURCE-DUPLICATE` across files and targets, provenance naming the Release and target, and admission with emitter context', done: false },
+        { text: 'Unknown values from inputs bound with `$fromUnit` or `$fromPromotion`, and dependency edges from consumers to the units the emitting bindings read', done: false },
+        { text: '`nyl get resources -e` and `nyl bundle -e` listing emitted declarations, and `--show-emitted` on `nyl render` and `render-tree`', done: false },
+        { text: 'The example’s `OAuthClient` emitted by the `service-portal` Release and read by the `dex` Release’s collection', done: false },
+      ],
+      exitCriterion:
+        'A Release emits a declaration only where its definition allows, the declaration never reaches Kubernetes, exists only in the environments that render the Release with the inputs that produce it, is admitted there like a file, and a consumer re-runs exactly when the emitted content changes.',
+    },
+    {
       id: 'R11',
       title: 'One Release per resource',
       summary: 'A Release instantiates once per matching declaration with `forEach`.',
