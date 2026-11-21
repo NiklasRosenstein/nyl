@@ -480,7 +480,13 @@ or <code dir="auto">$fromPromotion</code> has no value before a run, so
 <a href="/nyl/pr-preview/pr-309/reference/cli/validate/"><code dir="auto">nyl validate</code></a> gives it a placeholder of its
 declared type, and what a <code dir="auto">pointer</code> selects in an <code dir="auto">object</code> or <code dir="auto">array</code> input
 is unknown and not checked: an <code dir="auto">object</code> input that holds an image artifact
-can be read with <code dir="auto">{$fromInput: {name: image, pointer: /digest}}</code>. A <code dir="auto">pointer</code>
+can be read with <code dir="auto">{$fromInput: {name: image, pointer: /digest}}</code>. The unknown
+value takes the type of where it lands, so the checks there pass: in a typed
+field of a Nyl resource the type its schema gives the field (<code dir="auto">includeCrds</code>
+and <code dir="auto">lookup</code> read <code dir="auto">false</code>), in chart values the type the chart’s
+<code dir="auto">values.schema.json</code> gives it, as <code dir="auto">false</code>, <code dir="auto">0</code>, <code dir="auto">{}</code>, <code dir="auto">[]</code>, or the first
+<code dir="auto">enum</code> value, and anywhere else, or where a string fits, the string
+<code dir="auto">&#x3C;from orchestration></code>. A <code dir="auto">pointer</code>
 into a <code dir="auto">string</code>, <code dir="auto">integer</code>, <code dir="auto">number</code>, or <code dir="auto">boolean</code> input, a <code dir="auto">pointer</code> that selects nothing, a
 <code dir="auto">null</code> value, an input the Release does not declare, and a resource outside a
 Release that declares inputs are errors. String interpolation such as

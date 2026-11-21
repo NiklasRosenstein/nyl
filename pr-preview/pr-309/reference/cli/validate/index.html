@@ -167,9 +167,14 @@ spec that is no DeploymentTarget spec, naming the unit’s file. A disabled unit
 contributes no inline target.</p>
 <p>A placed target compiles with a placeholder of the declared type for each
 <code dir="auto">$fromUnit</code> and <code dir="auto">$fromPromotion</code> binding, because only a run resolves their
-values. What a <code dir="auto">$fromInput</code> <code dir="auto">pointer</code> selects in such an input is unknown, so
-neither the pointer nor the selected value’s type is checked; the input’s
-declared type is. Each <code dir="auto">$fromUnit</code> binding must instead name a unit the Environment
+values. What a <code dir="auto">$fromInput</code> <code dir="auto">pointer</code> selects in such an <code dir="auto">object</code> or <code dir="auto">array</code>
+input is unknown, so the pointer is not checked, and the selected value is
+a stand-in of the type of where it lands: a HelmChart’s <code dir="auto">includeCrds</code> and
+<code dir="auto">lookup</code> read <code dir="auto">false</code>, chart values read the type the chart’s
+<code dir="auto">values.schema.json</code> gives them (<code dir="auto">false</code>, <code dir="auto">0</code>, <code dir="auto">{}</code>, <code dir="auto">[]</code>, or the first
+<code dir="auto">enum</code> value), and any other place the string <code dir="auto">&#x3C;from orchestration></code>. A
+pointer into a scalar input is an error; the input’s declared type is
+checked. Each <code dir="auto">$fromUnit</code> binding must instead name a unit the Environment
 selects and enables; an <code dir="auto">output</code> reference must name an output the unit
 declares and does not mark <code dir="auto">sensitive</code>. An <code dir="auto">artifact</code> reference is checked
 only for the unit’s existence. Every problem names its binding, such as
