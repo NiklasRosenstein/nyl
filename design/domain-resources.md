@@ -55,11 +55,11 @@ and its driver. No stage has a command-specific variant.
   declaration.
 - **Literal declaration files.** A declaration file is not a template. A reviewer, a
   CODEOWNERS rule, and a policy all see the same bytes that reach the bundle,
-  apart from the `$fromUnit`, `$fromPromotion`, and `$fromResource`
-  [value sources](#value-sources-in-declarations) they may hold, which name
-  exactly where a value comes from. Per-environment variation belongs in the
-  consuming unit, whose spec is templated per environment; which
-  declarations an environment holds is its `resourceSelector`. A declaration
+  apart from the `$fromEnvironment`, `$fromUnit`, `$fromPromotion`, and
+  `$fromResource` [value sources](#value-sources-in-declarations) they may
+  hold, which name exactly where a value comes from. A value that differs per
+  environment is read with `$fromEnvironment`; which declarations an
+  environment holds is its `resourceSelector`. A declaration
   whose content or existence should follow a deployment's inputs is
   [emitted by its Release](#declarations-emitted-by-releases) instead, where
   it is a template by design and admitted per environment.
@@ -207,8 +207,8 @@ document:
 
 | Phase | Resolves | Carries |
 | --- | --- | --- |
-| Discovery and admission (stages 1–2), once per catalog | `$literal` | `$fromUnit`, `$fromPromotion`, and `$fromResource`, at any depth of `spec`, to the consumer's resolution |
-| Resolution (stage 4), per consumer and environment | `$fromUnit`, `$fromPromotion`, `$fromResource`, `$literal` | — |
+| Discovery and admission (stages 1–2), once per catalog | `$literal` | `$fromEnvironment` (R16), `$fromUnit`, `$fromPromotion`, and `$fromResource`, at any depth of `spec`, to the consumer's resolution |
+| Resolution (stage 4), per consumer and environment | `$fromEnvironment` (R16), `$fromUnit`, `$fromPromotion`, `$fromResource`, `$literal` | — |
 
 ```yaml
 apiVersion: domain.acme.example/v1
@@ -229,8 +229,6 @@ spec:
   the context decides, so every definition accepts the same sources.
 - **Other sources teach the fix.** Every other source is an error that names
   the location and says how to get the value:
-  - `$fromEnvironment`: a declaration is the same in every environment; read
-    the per-environment value in the consuming unit with `$fromEnvironment`;
   - `$fromInput` and `$fromParameter`: a declaration has no Release inputs or
     template parameters;
   - `$fromFile`, `$fromGit`, and `$fromPublication`: the declaration is
@@ -238,6 +236,10 @@ spec:
     own declaration and reference it with an `x-nyl-reference` field;
   - `$fromCollection`: it reads a unit's collection and is valid in the unit's
     spec, not in a declaration.
+- **`$fromEnvironment`** (slice R16) reads the consuming environment's
+  values, as in a unit document: an Environment's values over its groups', or
+  a template instance's values, with the same shorthand, `default`, and
+  `optional`. See [Per-environment values](#per-environment-values-fromenvironment).
 - **Literal-only fields.** The envelope (`apiVersion`, `kind`,
   `metadata.name`, `metadata.labels`, and `metadata.annotations`) is read by
   discovery, selection, and policies before anything resolves, and every
@@ -256,8 +258,8 @@ spec:
   data.
 - **Data, not configuration.** A value a source reads, such as a unit's
   output, is data and is never walked for further sources.
-- **Editor schemas.** `nyl schema resources` offers `$fromUnit`,
-  `$fromPromotion`, `$fromResource`, and `$literal` as `anyOf` alternatives next to the
+- **Editor schemas.** `nyl schema resources` offers `$fromEnvironment`,
+  `$fromUnit`, `$fromPromotion`, `$fromResource`, and `$literal` as `anyOf` alternatives next to the
   top-level `spec` fields that are not literal-only, generated from the same
   context table; deeper fields show only their literal type.
 - **Stored with the declaration.** The catalog keeps each source as written.
@@ -266,6 +268,75 @@ spec:
 In the [running example](#running-example-teams-and-services), `checkout`'s `database.host` is a
 `$fromUnit` that every consumer of `checkout` resolves, or lists, in its own
 way.
+
+### Per-environment values: `$fromEnvironment`
+
+A declaration file reads a value that differs per environment with
+`$fromEnvironment` (slice R16), so one declaration serves every environment
+instead of one copy per environment:
+
+```yaml
+# teams/payments/orders-db.yaml
+apiVersion: domain.acme.example/v1
+kind: Database
+metadata:
+  name: orders-db                      # the envelope stays literal
+  labels: {team: payments}
+spec:
+  engine: postgres
+  version: "16"
+  instanceClass: {$fromEnvironment: {pointer: /databases/instanceClass, default: db.t4g.small}}
+  multiAz: {$fromEnvironment: {pointer: /databases/multiAz, default: false}}
+  backupRetentionDays: {$fromEnvironment: /databases/backupRetentionDays}
+```
+
+```yaml
+# environments/prod.yaml (spec.values)
+databases: {instanceClass: db.r6g.large, multiAz: true, backupRetentionDays: 30}
+---
+# environments/dev.yaml (spec.values)
+databases: {backupRetentionDays: 1}
+```
+
+- **What it reads.** The consuming environment's values: an Environment's
+  values over its groups', or an EnvironmentTemplate instance's values, as
+  `$fromEnvironment` in a unit document reads them. Target values (Cluster
+  and DeploymentTarget `values`) are not read.
+- **Carried, then resolved.** Discovery and admission carry it like
+  `$fromUnit`. Stage 4 resolves it in the consumer's environment: a unit's
+  environment when a run resolves the unit, the environment `-e` names for
+  `nyl get resources` and `nyl bundle`, and for a Release, the environment
+  that publishes it or that `render -e` names. Without an environment it
+  stays unresolved: `nyl get resources` and `nyl bundle` list it under
+  `unresolved`, and a Release's template sees an
+  [unknown value](release-catalog.md#unknown-values).
+- **No dependency edge.** Environment values are part of S, so the source
+  adds no edge and never blocks. The resolved value enters the consumer's
+  bundle, and with it the bundle digest: a change to the environment's
+  values that changes a member re-runs its consumers, and one that does not
+  re-runs nothing.
+- **Admission and validation.** Admission treats the position as not yet
+  known, as for every carried source, because admission runs once per
+  catalog and has no environment. Because the value is known at S, `nyl
+  validate` also resolves it for every Environment and EnvironmentTemplate
+  sample instance whose active set holds the declaration, and validates the
+  resolved spec as [stage 4](#stage-4-resolution) does: the field's subschema,
+  the whole schema, and the deferred `x-nyl-validations` rules. A missing
+  value without `default` or `optional` is reported there, naming the
+  environment, not first at a run. Policies see the declaration as written.
+- **Membership.** The envelope and `x-nyl-reference` fields stay
+  literal-only, and selectors and `matchFields` never match a field that
+  holds a source, so `$fromEnvironment` never changes which declarations an
+  environment holds or which collection they join.
+- **Coupling.** The pointer is a contract between the declaration's team and
+  the platform that owns the environment values. The platform should
+  document the pointers it supports, such as `/databases/instanceClass`, and
+  keep them stable; a declaration that reads an undocumented pointer breaks
+  when the platform reorganizes its values.
+- **Not in emitted declarations.** A declaration
+  [emitted by a Release](#declarations-emitted-by-releases) is part of the
+  Release bundle, where `$fromEnvironment` is not a source; it varies through
+  the Release's inputs instead.
 
 ## Stage 2: Admission
 
@@ -690,13 +761,14 @@ resolves the unit, and the one `-e` names for `nyl bundle`.
   bundle` without `-e`, which leaves every source in place (see
   [Standalone export](#standalone-export-nyl-bundle)). Everything else in
   stages 3–5 is the same code for every entry point.
-- A Release resolves sources only inside an orchestrated
-  `KubernetesPublication`, in its environment. Outside orchestration its
+- A Release resolves `$fromUnit`, `$fromPromotion`, and `$fromResource` only
+  inside an orchestrated `KubernetesPublication`, in its environment, and
+  `$fromEnvironment` also when `render -e` names an environment. Otherwise its
   templates see each source as an
   [unknown value](release-catalog.md#unknown-values), which fails the render
   only when a template reads it.
-- For a unit, each source adds a dependency edge from the consuming unit to
-  the producer. These edges exist at S before any value does, so the pure
+- For a unit, each source other than `$fromEnvironment` adds a dependency
+  edge from the consuming unit to the producer. These edges exist at S before any value does, so the pure
   dependency graph, the CI export, and `plan` see them and report `blockedBy`
   as for any other reference. A blocked pointer is located inside the bundle,
   such as `/collections/grants/items/payments-admins/spec/principalGroupId`,
@@ -1098,13 +1170,12 @@ spec:
   Without one, a Release reads every admitted declaration file, and the
   declarations emitted in the same render, and narrows them only through its
   own collection selectors.
-- **No per-environment content.** Scoping decides which declarations an
-  environment holds, never what they say. A resource whose spec differs
-  between environments is declared once per environment, with names and
-  labels that the selectors tell apart, such as `orders-db-dev` and
-  `orders-db-prod`, or [emitted by a Release](#declarations-emitted-by-releases),
-  whose render may vary it per target. `$fromEnvironment` in declaration
-  files is not part of this design; stage 1 rejects it with its fix.
+- **Per-environment content.** Scoping decides which declarations an
+  environment holds, never what they say. A declaration file varies its
+  content per environment with
+  [`$fromEnvironment`](#per-environment-values-fromenvironment) (R16), and a
+  declaration [emitted by a Release](#declarations-emitted-by-releases) varies
+  with its Release's inputs.
 
 **Inspection and checks.**
 
@@ -1887,6 +1958,7 @@ consumer, and two owners rejected.
 | R6 | `forEach` unit instances: the `resource` context, YAML-safe values, instance names, leaving and teardown | R2 |
 | R7 | The worked guide, validated as a tier-2 reference scenario | R2–R6 |
 | R15 | [Declarations emitted by Releases](#declarations-emitted-by-releases): `spec.emitters` on definitions, the top-level render and cut-out, per-environment identity, admission with emitter context, unknown values in emitted declarations, dependency edges for consumers, and the example's `OAuthClient` emitted by `service-portal` and read by `dex` | R10, R13 |
+| R16 | [Per-environment values](#per-environment-values-fromenvironment): `$fromEnvironment` in declaration files, carried and resolved in the consumer's environment, `nyl validate` checking the resolved form per Environment and template sample, and editor schemas | R13, R12 |
 | R8–R11 | The [Release catalog](release-catalog.md#rollout): Release labels and `spec.manifests`, label selection in ApplicationGroups, Release admission, collections and `forEach` in Releases | M2, R1, R3, R12, R13 |
 
 R12 follows R1 and comes before R2: it is the first slice that assembles
@@ -1896,9 +1968,10 @@ membership code to an environment's active set, so units (R2), removal
 approval (R4), and `forEach` instances (R6) see only active resources from
 their first release, and it needs no unit. R14 follows R2: projection needs
 R2's owning collections. R15 follows R10 and R13: an emitted declaration needs a Release consumer
-to read it and an environment to exist in. Slice identifiers are stable;
-R12 to R15 are numbered after the existing slices and ordered by what they
-need.
+to read it and an environment to exist in. R16 follows R13: a declaration
+reads environment values only where an environment holds it. Slice
+identifiers are stable; R12 to R16 are numbered after the existing slices and
+ordered by what they need.
 
 The [running example](#running-example-teams-and-services) shows what each slice makes work on one
 small catalog, from R1 to R15, and becomes `examples/service-catalog/` with a
@@ -2104,8 +2177,9 @@ search-api  Service  team=search              /teams/search/catalog.yaml#1     y
   `quota: {cpu: '4', memory: 4Gi}`.
 - **A value source in a declaration.** `checkout`'s `database.host` is
   carried as written: its subschema is skipped at admission, and `nyl get
-  resources` shows the `$fromUnit` as declared. A `$fromEnvironment` in its
-  place fails with the fix to read the value in the consuming unit instead.
+  resources` shows the `$fromUnit` as declared. Until R16, a
+  `$fromEnvironment` in its place fails with the fix to read the value in the
+  consuming unit instead.
 
 ### R12: the standalone export
 
@@ -2671,7 +2745,6 @@ teams/
 | Whether one `nyl bundle` invocation takes several ad-hoc selections, each with its own `--as` | After R12 |
 | Whether `--collection` also names a Release's collection, as `<group>/<release>/<collection>` | R10 |
 | Whether `resourceSelector` takes several terms, such as one per kind, any of which makes a resource active | After R13 |
-| `$fromEnvironment` in declaration files, so one file can vary per environment without a Release emitting it | After R15 |
 | Generated declarations: whether a HelmChart, Component, or RemoteManifest may emit declarations in its expanded output, which would need full expansion for inventory | After R15 |
 | Whether a Release may set `spec.emits` to declare, literally, which kinds it may emit, so `nyl get resources` without `-e` can list them per Release | R15 |
 | External status writes ([sketch](#external-writes-deferred): `nyl resources status set` and `unset`, the `ResourceStatusRecord`, the one-writer check, and `x-nyl-max-age` freshness), and with them a staged-change file for externally asserted facts, starting with resource status and extended to external attestations: a versioned `StagedChanges` document for one environment with typed entries, each with its own precondition, its original time (never younger than the recorded value, refused past `x-nyl-max-age`), and the stager's claimed provenance, the applier's identity being authoritative; written with `--stage <file>` on the writing command through the same validation, and applied with kind-neutral `nyl staged diff\|apply <files…>` in one observed commit under the lease. Never desired state, never committed to source, no server-side pending state. Not for driver-read facts, runs, promotion, or coordination commands | When external attestations are designed |

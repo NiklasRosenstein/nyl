@@ -99,8 +99,8 @@ only the context decides which sources are allowed. The rules:
 | Declared Environment and EnvironmentGroup `values` | — | as template values |
 | DeploymentTarget `releaseInputs`, declared or inline | `$fromFile`, `$fromGit`, `$fromPublication`, `$fromUnit`, `$fromPromotion` (the last two only through orchestration), `$literal` | — |
 | Output of recursive expansion: a chart's or a Component's output, a remote manifest, a HelmChart either generates | — (any source is an error naming the expanding resource) | — |
-| *Planned (M9):* a domain resource's `spec`, at discovery and admission | `$literal` | `$fromUnit`, `$fromPromotion`, `$fromResource` at any depth, to the consumer's resolution |
-| *Planned (M9):* a domain resource's `spec`, when a consumer resolves its bundle | `$fromUnit`, `$fromPromotion`, `$fromResource`, `$literal`, in the consumer's environment | — |
+| *Planned (M9):* a domain resource's `spec`, at discovery and admission | `$literal` | `$fromEnvironment`, `$fromUnit`, `$fromPromotion`, `$fromResource` at any depth, to the consumer's resolution |
+| *Planned (M9):* a domain resource's `spec`, when a consumer resolves its bundle | `$fromEnvironment`, `$fromUnit`, `$fromPromotion`, `$fromResource`, `$literal`, in the consumer's environment | — |
 | *Planned (M9):* `$fromResource` in a unit document, a DeploymentTarget's `releaseInputs`, and EnvironmentTemplate `spec.values` | Where `$fromUnit` resolves: when a run resolves the unit, and in `releaseInputs` only through orchestration | Where `$fromUnit` is carried: by a rendered unit to its run, and by template values to where they land |
 | *Planned (M9):* `$fromCollection` in a unit document | When a run resolves the unit, from its bundle | By a rendered unit to its run |
 | *Planned (M9):* a domain resource emitted by a Release | As every document of the Release bundle: `$fromInput` | — |
@@ -112,11 +112,11 @@ in a Release: "declare a Release input and bind it on the target with
 
 The two domain-resource rows are planned with
 [domain modeling](domain-resources.md#value-sources-in-declarations) and not
-implemented. They follow the unit rows: a declaration carries the
-execution-time sources, and its consumer (a unit's run, or `nyl bundle -e`)
-resolves them in its environment; every other source is rejected with a fix,
-such as reading a per-environment value in the consuming unit with
-`$fromEnvironment`. The envelope and `x-nyl-reference` fields are
+implemented. They follow the unit rows: a declaration carries
+`$fromEnvironment` and the execution-time sources, and its consumer (a unit's
+run, or `nyl bundle -e`) resolves them in its environment; every other source
+is rejected with a fix, such as declaring the value or splitting it into its
+own declaration. The envelope and `x-nyl-reference` fields are
 literal-only. The definition's schema validates the resolved values: admission
 treats a position that holds a source as not yet known, and resolution
 validates the value against the field's subschema. The same design plans

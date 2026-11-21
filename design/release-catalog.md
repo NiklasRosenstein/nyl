@@ -334,6 +334,11 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: edit}
   **unknown value**. A Release fails to render only when a template reads
   one, and otherwise renders normally. See
   [Unknown values](#unknown-values).
+- **`$fromEnvironment` in members** (R16) resolves wherever an environment
+  is known: inside an orchestrated `KubernetesPublication`, and with
+  `render -e` or `render-tree -e`. It adds no dependency edge, because
+  environment values are part of S. Without an environment it is an unknown
+  value like the others.
 - **Orchestrated.** Inside an orchestrated `KubernetesPublication`, the
   sources resolve in the publication's environment by the rules of
   [stage 4](domain-resources.md#stage-4-resolution), and the resolved bundle

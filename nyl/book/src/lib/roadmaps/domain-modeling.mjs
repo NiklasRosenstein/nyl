@@ -229,6 +229,22 @@ export const domainModelingRoadmap = {
         'A Release emits a declaration only where its definition allows, the declaration never reaches Kubernetes, exists only in the environments that render the Release with the inputs that produce it, is admitted there like a file, and a consumer re-runs exactly when the emitted content changes.',
     },
     {
+      id: 'R16',
+      title: 'Per-environment values in declarations',
+      summary:
+        'A declaration file reads values that differ per environment with `$fromEnvironment`, so one declaration serves every environment.',
+      needs: ['R12', 'R13'],
+      items: [
+        { text: '`$fromEnvironment` carried in declaration files at any depth of `spec`, with the envelope and `x-nyl-reference` fields literal-only', done: false },
+        { text: 'Resolution in the consumer’s environment: a unit’s run, `nyl get resources -e` and `nyl bundle -e`, and a Release when published or rendered with `-e`; unresolved and unknown otherwise', done: false },
+        { text: 'No dependency edge, and the resolved value in the bundle digest', done: false },
+        { text: '`nyl validate` resolving and validating each declaration for every Environment and template sample instance that holds it', done: false },
+        { text: '`$fromEnvironment` offered in `nyl schema resources`', done: false },
+      ],
+      exitCriterion:
+        'One declaration file yields different resolved specs in two environments from their values, each validated by `nyl validate` before any run; a consumer re-runs only when its resolved members change; selection and membership never depend on the value.',
+    },
+    {
       id: 'R11',
       title: 'One Release per resource',
       summary: 'A Release instantiates once per matching declaration with `forEach`.',
