@@ -152,9 +152,14 @@ contributes no inline target.
 
 A placed target compiles with a placeholder of the declared type for each
 `$fromUnit` and `$fromPromotion` binding, because only a run resolves their
-values. What a `$fromInput` `pointer` selects in such an input is unknown, so
-neither the pointer nor the selected value's type is checked; the input's
-declared type is. Each `$fromUnit` binding must instead name a unit the Environment
+values. What a `$fromInput` `pointer` selects in such an `object` or `array`
+input is unknown, so the pointer is not checked, and the selected value is
+a stand-in of the type of where it lands: a HelmChart's `includeCrds` and
+`lookup` read `false`, chart values read the type the chart's
+`values.schema.json` gives them (`false`, `0`, `{}`, `[]`, or the first
+`enum` value), and any other place the string `<from orchestration>`. A
+pointer into a scalar input is an error; the input's declared type is
+checked. Each `$fromUnit` binding must instead name a unit the Environment
 selects and enables; an `output` reference must name an output the unit
 declares and does not mark `sensitive`. An `artifact` reference is checked
 only for the unit's existence. Every problem names its binding, such as

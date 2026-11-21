@@ -282,9 +282,9 @@ pub enum OrchestratedInputs {
     Placeholders,
 }
 
-/// The value `nyl validate` gives a Release input, or what a `$fromInput`
-/// pointer selects in one, whose value only orchestration knows
-/// ([`OrchestratedInputs::Placeholders`]).
+/// The value `nyl validate` gives a string Release input, or what a
+/// `$fromInput` pointer selects in an input, whose value only orchestration
+/// knows ([`OrchestratedInputs::Placeholders`]), where a string fits.
 pub const ORCHESTRATED_PLACEHOLDER: &str = "<from orchestration>";
 
 impl OrchestratedInputs {

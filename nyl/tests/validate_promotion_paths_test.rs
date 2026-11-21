@@ -448,7 +448,12 @@ fn test_a_malformed_selector_is_a_finding_and_the_path_is_still_listed() {
 /// a publication unit prod selects, and the extra ApplicationGroup documents
 /// `groups`. Commits the result, as `plan` renders the committed source.
 fn bound_checkout(world: &World, path: &str, bindings: &str, groups: &str) -> std::path::PathBuf {
-    let checkout = checkout_with(world, path);
+    bound_checkout_at(&checkout_with(world, path), bindings, groups)
+}
+
+/// [`bound_checkout`] of an existing `checkout` made with [`checkout_with`].
+fn bound_checkout_at(checkout: &Path, bindings: &str, groups: &str) -> std::path::PathBuf {
+    let checkout = checkout.to_path_buf();
     let platform = checkout.join("nyl/platform.yaml");
     let mut contents = std::fs::read_to_string(&platform).unwrap();
     contents.push_str(&format!(
@@ -532,6 +537,69 @@ fn test_validate_compares_promoted_values_with_release_input_types() {
             .and(predicate::str::contains("/releases/web~1web/databaseHost"))
             .and(predicate::str::contains("accepts a string")),
     );
+}
+
+/// What a `$fromInput` pointer selects in an `object` input a `$fromPromotion`
+/// binding fills is not known before a run, so `validate` gives it the type
+/// of where it lands: HelmChart `includeCrds` and `lookup` take booleans, and
+/// chart values take the type the chart's `values.schema.json` gives them.
+/// Catches a correct bundle failing validation because the unknown value is
+/// a placeholder string. Needs `helm`.
+#[test]
+fn test_validate_types_unknown_values_where_they_land() {
+    let world = World::new(&scenario::shell::shared_project());
+    let path = format!("{SOUND}    settings:\n      select: {{unit: web-image, artifact: image, pointer: ''}}\n");
+    let bindings = "    web/web:\n      image: {$fromPromotion: {value: webImage}}\n      databaseHost: {$fromPromotion: {value: dbHost}}\n      settings: {$fromPromotion: {value: settings}}\n";
+    let checkout = checkout_with(&world, &path);
+    let release = checkout.join("applications/web/release.yaml");
+    let text = std::fs::read_to_string(&release).unwrap().replace("\r\n", "\n");
+    let inputs = "    databaseHost: {type: string}\n";
+    assert!(text.contains(inputs));
+    std::fs::write(
+        &release,
+        format!(
+            "{}---\napiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata:\n  name: settings\n  namespace: web\nspec:\n  chart: {{name: ../charts/settings}}\n  includeCrds: {{$fromInput: {{name: settings, pointer: /crds}}}}\n  lookup: {{$fromInput: {{name: settings, pointer: /lookup}}}}\n  values:\n    replicas: {{$fromInput: {{name: settings, pointer: /replicas}}}}\n    enabled: {{$fromInput: {{name: settings, pointer: /enabled}}}}\n    name: {{$fromInput: {{name: settings, pointer: /name}}}}\n",
+            text.replace(
+                inputs,
+                "    databaseHost: {type: string}\n    settings:\n      type: object\n      default: {crds: true, lookup: false, replicas: 2, enabled: true, name: web}\n",
+            )
+        ),
+    )
+    .unwrap();
+    let chart = checkout.join("charts/settings");
+    std::fs::create_dir_all(chart.join("templates")).unwrap();
+    std::fs::write(
+        chart.join("Chart.yaml"),
+        "apiVersion: v2\nname: settings\nversion: 0.1.0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        chart.join("values.schema.json"),
+        r#"{"type": "object", "properties": {"replicas": {"type": "integer"}, "enabled": {"type": "boolean"}, "name": {"type": "string"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        chart.join("templates/settings.yaml"),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\ndata:\n  replicas: '{{ .Values.replicas }}'\n  enabled: '{{ .Values.enabled }}'\n  name: '{{ .Values.name }}'\n",
+    )
+    .unwrap();
+    let platform = checkout.join("nyl/platform.yaml");
+    let text = std::fs::read_to_string(&platform).unwrap();
+    std::fs::write(
+        &platform,
+        text.replace(
+            "v1/Namespace, apps/v1/Deployment]",
+            "v1/Namespace, apps/v1/Deployment, v1/ConfigMap]",
+        ),
+    )
+    .unwrap();
+    git(&checkout, &["add", "-A"]);
+    git(&checkout, &["commit", "-q", "--no-gpg-sign", "-m", "Read settings"]);
+    let checkout = bound_checkout_at(&checkout, bindings, "");
+    nyl(&world, &checkout, &["validate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("GitOps configuration is valid"));
 }
 
 /// A Release input declared in a remote ApplicationGroup source is typed

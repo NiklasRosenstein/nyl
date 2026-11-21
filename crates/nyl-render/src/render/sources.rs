@@ -27,10 +27,13 @@
 //!   manifest) holds no source ([`reject_sources_in_output`]).
 //! - An input only orchestration fills (`$fromUnit`, `$fromPromotion`) holds a
 //!   placeholder of its declared type in `nyl validate`. What a `pointer`
-//!   selects in it, when its type is `object` or `array`, is unknown, like a blocked value: the pointer and the
-//!   selected value's type are not checked, and the selected value is a
-//!   placeholder string; a `valuesFrom` entry with a `pointer` into it adds
-//!   nothing. The input's own type and every structural check still apply.
+//!   selects in it, when its type is `object` or `array`, is unknown, like a
+//!   blocked value: the pointer is not checked, and the selected value is a
+//!   stand-in of the type its position takes ([`settle_unknown`]): in a typed
+//!   field the type Nyl's schema gives it, in chart values the type the
+//!   chart's `values.schema.json` gives it ([`settle_chart_values`]), else the
+//!   placeholder string. A `valuesFrom` entry with a `pointer` into it adds
+//!   nothing. The input's own type and every other check still apply.
 //!
 //! Every value read enters the dependency recorder at the layer that consumes
 //! it: a values file is returned to the caller as a bundle input (the Release
@@ -81,6 +84,13 @@ impl BundleFiles<'_> {
 /// declares any, and `unknown` names those whose value only orchestration
 /// knows. Values files read are appended to `read`. Messages show paths as
 /// provenance records them (`roots`).
+///
+/// Returns the JSON Pointers of the resource's free-form data (chart values,
+/// a Component's spec) that hold a value not known before a run: what a
+/// pointer selects in an unknown input. In the resource's typed fields such
+/// a value takes the type Nyl's schema gives the field
+/// ([`settle_unknown`]); in chart values, rendering gives it the type the
+/// chart's `values.schema.json` gives it ([`settle_chart_values`]).
 pub(crate) fn resolve_bundle_resource(
     resource: &mut Value,
     file: &Path,
@@ -89,8 +99,9 @@ pub(crate) fn resolve_bundle_resource(
     inputs: Option<&Value>,
     unknown: &BTreeSet<String>,
     read: &mut Vec<PathBuf>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let subject = BundleResource::of(resource);
+    let mut unknown_data = Vec::new();
     let mut issues = literal_field_issues(resource)
         .into_iter()
         .map(BindingIssue::new)
@@ -104,14 +115,21 @@ pub(crate) fn resolve_bundle_resource(
             }
         }
         if issues.is_empty() {
+            let unknown_at = resolved
+                .provenance
+                .iter()
+                .filter(|(_, origin)| **origin == ReleaseInputOrigin::Unknown)
+                .map(|(pointer, _)| pointer.clone())
+                .collect::<Vec<_>>();
             *resource = resolved.value;
+            unknown_data = subject.settle_unknown_fields(resource, unknown_at);
             if subject == BundleResource::HelmChart {
                 merge_values_from(resource, file, files, roots, &provider, read, &mut issues)?;
             }
         }
     }
     if issues.is_empty() {
-        return Ok(());
+        return Ok(unknown_data);
     }
     let messages = issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>();
     Err(NylError::value_source(format!(
@@ -167,6 +185,93 @@ impl BundleResource {
         };
         Scope { context, within }
     }
+
+    /// The JSON Schema of the resource's typed fields, when Nyl types it.
+    fn schema(self) -> Option<Value> {
+        Some(match self {
+            Self::HelmChart => serde_json::json!(schemars::schema_for!(crate::resources::HelmChart)),
+            Self::RemoteManifest => serde_json::json!(schemars::schema_for!(RemoteManifest)),
+            Self::Release => crate::resources::generate_release_schema(),
+            Self::Component => serde_json::json!(schemars::schema_for!(crate::resources::NylComponent)),
+            Self::Manifest => return None,
+        })
+    }
+
+    /// Give each unknown value at `unknown` in the resource's typed fields
+    /// the type Nyl's schema gives its field, so the resource's checks skip
+    /// it ([`settle_unknown`]). Returns the pointers in its free-form data,
+    /// which only what reads the data can type.
+    fn settle_unknown_fields(self, resource: &mut Value, unknown: Vec<String>) -> Vec<String> {
+        let scope = self.scope();
+        let (data, typed): (Vec<_>, Vec<_>) = unknown.into_iter().partition(|pointer| {
+            scope.context == Context::ReleaseData
+                || scope
+                    .within
+                    .iter()
+                    .any(|(prefix, context)| *context == Context::ReleaseData && pointer_within(pointer, prefix))
+        });
+        if let (false, Some(schema)) = (typed.is_empty(), self.schema()) {
+            settle_unknown(resource, &typed, &schema);
+        }
+        data
+    }
+}
+
+/// Whether `pointer` is `prefix` or lies beneath it.
+fn pointer_within(pointer: &str, prefix: &str) -> bool {
+    pointer
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The pointers of `unknown` beneath `prefix`, relative to it: the unknown
+/// values of chart values that a HelmChart's `/spec/values` or a Component's
+/// `/spec` holds.
+pub(crate) fn unknown_under(unknown: &[String], prefix: &str) -> Vec<String> {
+    unknown
+        .iter()
+        .filter(|pointer| pointer_within(pointer, prefix))
+        .map(|pointer| pointer[prefix.len()..].to_owned())
+        .collect()
+}
+
+/// Replace the value at each of `unknown`, one not known before a run, with
+/// a stand-in of the type the JSON Schema `schema` gives its position
+/// ([`nyl_core::bindings::schema_placeholder`]): the placeholder string
+/// where a string fits or the schema says nothing, else `false`, `0`, `{}`,
+/// `[]`, or the first allowed value. A check of `document` against `schema`
+/// then passes at those positions, as admission skips a value not yet
+/// known, and still checks everything else.
+pub(crate) fn settle_unknown(document: &mut Value, unknown: &[String], schema: &Value) {
+    for pointer in unknown {
+        if let Some(slot) = document.pointer_mut(pointer) {
+            *slot = nyl_core::bindings::schema_placeholder(schema, pointer, slot);
+        }
+    }
+}
+
+/// The chart values `values` with each unknown value at `unknown` typed by
+/// the chart's `values.schema.json` in `chart_dir`, when it has a readable
+/// one ([`settle_unknown`]); without one, the values as they are. Helm then
+/// validates the values against the schema everywhere else.
+pub(crate) fn settle_chart_values<'a>(
+    values: &'a Value,
+    unknown: &[String],
+    chart_dir: &Path,
+) -> std::borrow::Cow<'a, Value> {
+    if unknown.is_empty() {
+        return std::borrow::Cow::Borrowed(values);
+    }
+    // A schema Helm cannot read fails the render there, with Helm's error.
+    let Some(schema) = std::fs::read(chart_dir.join("values.schema.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return std::borrow::Cow::Borrowed(values);
+    };
+    let mut values = values.clone();
+    settle_unknown(&mut values, unknown, &schema);
+    std::borrow::Cow::Owned(values)
 }
 
 /// `HelmChart "web"`, for messages.
@@ -321,17 +426,23 @@ impl ReleaseInputs<'_> {
 /// Where a resolved `$fromInput` source read its value: always the Release
 /// input, because the source has no default of its own.
 #[derive(Debug, Clone, PartialEq)]
-struct ReleaseInputOrigin;
+enum ReleaseInputOrigin {
+    /// The input's value, or what a pointer selects in it.
+    Input,
+    /// What a pointer selects in an input only orchestration fills: not
+    /// known before a run, so it holds a stand-in.
+    Unknown,
+}
 
 impl Origin for ReleaseInputOrigin {
     fn from_default() -> Self {
-        Self
+        Self::Input
     }
     fn from_override() -> Self {
-        Self
+        Self::Input
     }
     fn from_value() -> Self {
-        Self
+        Self::Input
     }
     fn describe(&self, field: &str) -> String {
         format!("{field} (from a Release input)")
@@ -351,7 +462,7 @@ impl Providers for ReleaseInputs<'_> {
             // orchestration delivers; the value's type is unknown too.
             return Ok(Provision::Value(Resolved {
                 value: Value::String(crate::gitops::inputs::ORCHESTRATED_PLACEHOLDER.to_owned()),
-                origin: ReleaseInputOrigin,
+                origin: ReleaseInputOrigin::Unknown,
             }));
         }
         let pointer = source.pointer.as_deref().unwrap_or_default();
@@ -363,7 +474,7 @@ impl Providers for ReleaseInputs<'_> {
         };
         Ok(Provision::Value(Resolved {
             value: value.clone(),
-            origin: ReleaseInputOrigin,
+            origin: ReleaseInputOrigin::Input,
         }))
     }
 
@@ -779,6 +890,58 @@ mod tests {
         assert!(
             scalar.contains("reads \"/repository\" of Release input \"image\", which holds nothing there"),
             "{scalar}"
+        );
+    }
+
+    /// Catches a correct bundle failing `nyl validate` because what a pointer
+    /// selects in an input only orchestration fills is a placeholder string:
+    /// in a typed field it takes the type Nyl's schema gives the field, and in
+    /// chart values the type the chart's `values.schema.json` gives it, while
+    /// it stays the string where a string fits or nothing says otherwise.
+    #[test]
+    fn test_an_unknown_value_takes_the_type_of_where_it_lands() {
+        let temp = project(
+            "  includeCrds: {$fromInput: {name: settings, pointer: /crds}}
+  lookup: {$fromInput: {name: settings, pointer: /lookup}}
+  values:
+    replicas: {$fromInput: {name: settings, pointer: /replicas}}
+    feature: {enabled: {$fromInput: {name: settings, pointer: /enabled}}}
+    name: {$fromInput: {name: settings, pointer: /name}}
+",
+            &[],
+        );
+        let mut context = context(Some(json!({"settings": {}})));
+        context.unknown_inputs = BTreeSet::from(["settings".to_owned()]);
+        let bundle = load_release_bundle(&temp.path().join("apps/app.yaml"), &context).unwrap();
+        let resource = &bundle.resources[1];
+        let chart: crate::resources::HelmChart = serde_json::from_value(resource.value.clone()).unwrap();
+        assert_eq!(chart.spec.include_crds, Some(false));
+        assert_eq!(chart.spec.lookup.map(|lookup| lookup.is_enabled()), Some(false));
+        assert_eq!(
+            resource.unknown,
+            [
+                "/spec/values/feature/enabled",
+                "/spec/values/name",
+                "/spec/values/replicas"
+            ]
+        );
+
+        let unknown = unknown_under(&resource.unknown, "/spec/values");
+        let placeholder = crate::gitops::inputs::ORCHESTRATED_PLACEHOLDER;
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+        let untyped = settle_chart_values(&chart.spec.values, &unknown, &chart_dir);
+        assert_eq!(*untyped, chart.spec.values);
+        fs::write(
+            chart_dir.join("values.schema.json"),
+            r##"{"type": "object", "properties": {"replicas": {"type": "integer"}, "name": {"type": "string"},
+                "feature": {"$ref": "#/$defs/feature"}}, "$defs": {"feature": {"properties": {"enabled": {"type": "boolean"}}}}}"##,
+        )
+        .unwrap();
+        let typed = settle_chart_values(&chart.spec.values, &unknown, &chart_dir);
+        assert_eq!(
+            *typed,
+            json!({"replicas": 0, "feature": {"enabled": false}, "name": placeholder})
         );
     }
 

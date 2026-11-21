@@ -55,7 +55,8 @@ pub use declaration::{json_type_name, validate_declarations_at, validate_input_n
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
 pub use schema::{
-    offer_sources, reserved_key_issues, schema_alternatives, schema_resolve, schema_step, source_variants, SchemaStep,
+    offer_sources, reserved_key_issues, schema_alternatives, schema_placeholder, schema_resolve, schema_step,
+    source_variants, SchemaStep,
 };
 pub use walk::{find_clauses, provide, resolve_document, FoundClause, Scope};
 

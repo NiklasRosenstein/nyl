@@ -101,6 +101,60 @@ pub fn schema_step(root: &Value, node: &Value, segment: &str) -> SchemaStep {
     }
 }
 
+/// A stand-in for a value not known yet at `pointer` of a document the JSON
+/// Schema `root` describes, such as what a pointer selects in a value only
+/// orchestration delivers: `unknown` itself (a string) unless the schema
+/// rules strings out there; then the first value its `enum` or `const`
+/// allows, else an empty value of its first type that is not `null`
+/// (`false`, `0`, `{}`, `[]`). Where the schema says nothing about the
+/// position, any value may be there, so it is `unknown`. Deterministic, so
+/// a check of the document skips the position without a kind's own rules.
+pub fn schema_placeholder(root: &Value, pointer: &str, unknown: &Value) -> Value {
+    let mut node = root.clone();
+    if !pointer.is_empty() {
+        for segment in pointer.trim_start_matches('/').split('/') {
+            let segment = segment.replace("~1", "/").replace("~0", "~");
+            match schema_step(root, &node, &segment) {
+                SchemaStep::Node(next) => node = next,
+                SchemaStep::Free | SchemaStep::Missing => return unknown.clone(),
+            }
+        }
+    }
+    // A stand-in of each branch's type; a branch that admits a string admits
+    // the placeholder itself.
+    let mut candidates = Vec::new();
+    for branch in schema_alternatives(root, &node) {
+        let allowed = match (branch.get("enum"), branch.get("const")) {
+            (Some(Value::Array(values)), _) => values.clone(),
+            (_, Some(value)) => vec![value.clone()],
+            _ => Vec::new(),
+        };
+        if !allowed.is_empty() {
+            if allowed.iter().any(Value::is_string) {
+                return unknown.clone();
+            }
+            candidates.extend(allowed.into_iter().find(|value| !value.is_null()));
+            continue;
+        }
+        let kinds = match branch.get("type") {
+            Some(Value::String(kind)) => vec![kind.as_str()],
+            Some(Value::Array(kinds)) => kinds.iter().filter_map(Value::as_str).collect(),
+            _ => vec!["string"],
+        };
+        for kind in kinds {
+            match kind {
+                "string" => return unknown.clone(),
+                "boolean" => candidates.push(Value::Bool(false)),
+                "integer" | "number" => candidates.push(json!(0)),
+                "object" => candidates.push(json!({})),
+                "array" => candidates.push(json!([])),
+                _ => {}
+            }
+        }
+    }
+    candidates.into_iter().next().unwrap_or_else(|| unknown.clone())
+}
+
 /// Report every `$` key of `document` that is not a known source, where the
 /// JSON Schema `root` has no place for it: inside a typed field the whole `$`
 /// namespace is reserved, so such a key is an unknown source. `field` names
@@ -352,6 +406,38 @@ mod tests {
             },
             "$defs": {"Source": {"type": "object", "additionalProperties": false, "properties": {"path": {"type": "string"}}}},
         })
+    }
+
+    /// Catches a value not known yet failing a typed position's check: its
+    /// stand-in takes the type the schema gives the position, stays the
+    /// string where strings are allowed or the schema says nothing, and is
+    /// the same for the same schema.
+    #[test]
+    fn test_schema_placeholder_takes_the_type_of_the_position() {
+        let root = json!({
+            "type": "object",
+            "properties": {
+                "crds": {"type": ["boolean", "null"]},
+                "replicas": {"type": "integer"},
+                "mode": {"enum": [3, 4]},
+                "name": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+                "nested": {"$ref": "#/$defs/Nested"},
+                "list": {"type": "array", "items": {"type": "number"}},
+                "free": {"type": "object"},
+            },
+            "$defs": {"Nested": {"type": "object", "properties": {"on/off": {"type": "boolean"}, "map": {"type": "object"}}}},
+        });
+        let unknown = json!("<unknown>");
+        let placeholder = |pointer: &str| schema_placeholder(&root, pointer, &unknown);
+        assert_eq!(placeholder("/crds"), json!(false));
+        assert_eq!(placeholder("/replicas"), json!(0));
+        assert_eq!(placeholder("/mode"), json!(3));
+        assert_eq!(placeholder("/name"), unknown);
+        assert_eq!(placeholder("/nested/on~1off"), json!(false));
+        assert_eq!(placeholder("/nested/map"), json!({}));
+        assert_eq!(placeholder("/list/0"), json!(0));
+        assert_eq!(placeholder("/free/anything"), unknown);
+        assert_eq!(placeholder("/undeclared"), unknown);
     }
 
     /// Catches an unknown `$` key in a typed field left to a generic

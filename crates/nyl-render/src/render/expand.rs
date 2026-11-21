@@ -251,6 +251,7 @@ pub(crate) async fn generate_render_resource(
     let provenance = resource.provenance.resource(&resource.value);
     let generated = generate_resource(
         &resource.value,
+        &resource.unknown,
         context,
         config,
         kube_version,
@@ -271,6 +272,7 @@ pub(crate) async fn generate_render_resource(
             Ok(RenderResource {
                 value,
                 provenance: provenance.clone(),
+                unknown: Vec::new(),
             })
         })
         .collect()
@@ -332,9 +334,12 @@ fn render_chart_reference(chart: Option<&serde_json::Value>) -> String {
 /// CD sync wave and phase ([`super::sync_order`]). A resource that does not
 /// expand generates only itself. A value source in what a resource generates
 /// is an error that names the resource ([`super::sources::reject_sources_in_output`]).
+/// `unknown` points at values of its chart values not known before a run
+/// ([`RenderResource::unknown`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_resource(
     resource: &serde_json::Value,
+    unknown: &[String],
     context: &TemplateContext,
     config: &ProjectConfig,
     kube_version: &str,
@@ -345,6 +350,7 @@ pub(crate) async fn generate_resource(
 ) -> Result<Vec<serde_json::Value>> {
     let mut generated = expand_resource(
         resource,
+        unknown,
         context,
         config,
         kube_version,
@@ -364,6 +370,7 @@ pub(crate) async fn generate_resource(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn expand_resource(
     resource: &serde_json::Value,
+    unknown: &[String],
     context: &TemplateContext,
     config: &ProjectConfig,
     kube_version: &str,
@@ -402,6 +409,7 @@ async fn expand_resource(
         };
         let manifests = render_helm_chart(
             &chart,
+            &super::sources::unknown_under(unknown, "/spec/values"),
             lookup,
             owner,
             context,
@@ -493,6 +501,7 @@ async fn expand_resource(
             };
             let manifests = render_helm_chart(
                 &chart,
+                &super::sources::unknown_under(unknown, "/spec"),
                 lookup,
                 owner,
                 context,
@@ -554,6 +563,7 @@ async fn expand_resource(
             };
             let manifests = render_helm_chart(
                 &chart,
+                &super::sources::unknown_under(unknown, "/spec"),
                 lookup,
                 owner,
                 context,
@@ -835,6 +845,7 @@ pub(crate) fn apply_parent_tracking_annotations(
 #[allow(clippy::too_many_arguments)]
 fn render_helm_chart(
     chart: &HelmChart,
+    unknown: &[String],
     lookup: Option<bool>,
     owner: LookupOwner<'_>,
     context: &TemplateContext,
@@ -888,10 +899,12 @@ fn render_helm_chart(
     // Default namespace to "default" for deterministic rendering
     let namespace = chart.release_namespace().or(Some("default"));
 
+    // A value not known before a run takes the type the chart's schema gives it.
+    let values = super::sources::settle_chart_values(&chart.spec.values, unknown, &resolved.path);
     if context.target.is_some() {
-        executor.template_with_source_comments(&resolved, chart.release_name(), namespace, &chart.spec.values)
+        executor.template_with_source_comments(&resolved, chart.release_name(), namespace, &values)
     } else {
-        executor.template(&resolved, chart.release_name(), namespace, &chart.spec.values)
+        executor.template(&resolved, chart.release_name(), namespace, &values)
     }
 }
 

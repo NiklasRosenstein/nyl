@@ -609,7 +609,8 @@ impl RenderSession {
                 if let Some(probe) = &mut cache_probe {
                     record_resource_directory_dependency(&mut probe.recorder, &resource.value, &self.project_config)?;
                 }
-                for manifest in generate_render_resource(
+                // Boxed: expansion's future is large, and every render awaits it.
+                for manifest in Box::pin(generate_render_resource(
                     &resource,
                     template_context,
                     &self.project_config,
@@ -618,7 +619,7 @@ impl RenderSession {
                     request.track_parent,
                     self.cache.as_ref(),
                     &artifact_resolver,
-                )
+                ))
                 .await?
                 {
                     if let Some(reason) = resource_render_cache_bypass_reason(&manifest.value, &self.project_config) {

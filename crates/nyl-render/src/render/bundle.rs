@@ -294,7 +294,7 @@ fn load_resource_file(
     let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
     let source_path = provenance_path(path, provenance_root);
     for (index, mut value) in source_ctx.parse_yaml_documents(&rendered)?.into_iter().enumerate() {
-        resolve_bundle_resource(
+        let unknown = resolve_bundle_resource(
             &mut value,
             path,
             files,
@@ -306,6 +306,7 @@ fn load_resource_file(
         resources.push(RenderResource {
             value,
             provenance: RenderProvenance::source(source_path.clone(), index + 1),
+            unknown,
         });
     }
 

@@ -371,7 +371,13 @@ or `$fromPromotion` has no value before a run, so
 [`nyl validate`](/nyl/reference/cli/validate/) gives it a placeholder of its
 declared type, and what a `pointer` selects in an `object` or `array` input
 is unknown and not checked: an `object` input that holds an image artifact
-can be read with `{$fromInput: {name: image, pointer: /digest}}`. A `pointer`
+can be read with `{$fromInput: {name: image, pointer: /digest}}`. The unknown
+value takes the type of where it lands, so the checks there pass: in a typed
+field of a Nyl resource the type its schema gives the field (`includeCrds`
+and `lookup` read `false`), in chart values the type the chart's
+`values.schema.json` gives it, as `false`, `0`, `{}`, `[]`, or the first
+`enum` value, and anywhere else, or where a string fits, the string
+`<from orchestration>`. A `pointer`
 into a `string`, `integer`, `number`, or `boolean` input, a `pointer` that selects nothing, a
 `null` value, an input the Release does not declare, and a resource outside a
 Release that declares inputs are errors. String interpolation such as

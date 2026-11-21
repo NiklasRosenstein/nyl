@@ -124,10 +124,17 @@ and fails the driver call.
 the declared type for each Release input bound with `$fromUnit` or
 `$fromPromotion`. What a `$fromInput` `pointer` selects in such an input of
 type `object` or `array` is unknown (a pointer into a scalar input selects
-nothing and stays an error), like a value a run is blocked on: validation does not check the
-pointer or the selected value's type (the value is a placeholder string), and
-a `valuesFrom` entry with a `pointer` into it contributes nothing; the input's
-declared type and every structural check still apply.
+nothing and stays an error), like a value a run is blocked on: validation does
+not check the pointer, and a `valuesFrom` entry with a `pointer` into it
+contributes nothing; the input's declared type and every other check still
+apply. The selected value is a deterministic stand-in of the type of where it
+lands, so the check there skips it, as admission skips a value not known yet:
+the resolver records which positions hold one, and in a typed field of a Nyl
+resource it takes the type the resource's JSON Schema gives the field, in a
+HelmChart's (or Component's) chart values the type the chart's
+`values.schema.json` gives it (`false`, `0`, `{}`, `[]`, or the first `enum`
+or `const` value), and the placeholder string `<from orchestration>` where a
+string fits or no schema says otherwise.
 
 - **Data vs. configuration.** A value read from outside the user's
   configuration (a unit's output, artifact, or observed value; a file read with
