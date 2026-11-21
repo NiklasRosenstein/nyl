@@ -1050,8 +1050,11 @@ spec:
 | `kinds` | all | Kinds as `--kind` names them: the kind when one definition serves it, or `<group>/<version>/<kind>` |
 | `paths` | all | Globs over the resource's trusted, worktree-rooted path, under the local path rule |
 
+- **Declaration files only.** The selector chooses among declaration files.
+  A declaration [emitted by a Release](#declarations-emitted-by-releases) is
+  active wherever its Release is published, whatever the selector says.
 - **Absent means everything.** Without `resourceSelector`, every admitted
-  resource is active. With it, a resource is active when it matches every
+  declaration file is active. With it, a resource is active when it matches every
   filter the selector gives. An EnvironmentTemplate takes the same field for
   its instances. An EnvironmentGroup sets none, as it sets no unit selector.
 - **Literal.** The selector reads only the envelope and the trusted path,
@@ -1098,16 +1101,18 @@ spec:
 
 **Inspection and checks.**
 
-- `nyl get resources -e <env>` lists the active set; without `-e` it lists
-  the whole catalog. `nyl get resource <kind>/<name>` names the Environments
-  and EnvironmentTemplates whose selectors make it active.
+- `nyl get resources -e <env>` lists the active set, each resource with its
+  origin: `selected`, or `emitted by <group>/<release> for <target>`; without
+  `-e` it lists the declaration files. `nyl get resource <kind>/<name>` names
+  the Environments and EnvironmentTemplates whose selectors make it active.
 - `nyl bundle -e <env>` selects from the active set, so a `--kind` selection
   and a unit's named collections hold what the environment holds.
 - `nyl validate` evaluates the selector of every Environment and
   EnvironmentTemplate and warns, without changing its exit code:
   - `NYL-ENVIRONMENT-RESOURCE-SELECTOR-EMPTY`: a `resourceSelector` that
-    matches no admitted resource, with the kinds and labels that exist;
-  - `NYL-RESOURCE-UNSELECTED`: an admitted resource that no Environment or
+    matches no admitted declaration file, with the kinds and labels that
+    exist;
+  - `NYL-RESOURCE-UNSELECTED`: an admitted declaration file that no Environment or
     EnvironmentTemplate selects, so no consumer in any environment receives
     it. A project without Environments and EnvironmentTemplates gets
     neither warning.
@@ -1195,9 +1200,14 @@ the point of declaring it next to the manifests. The rules:
   environment whose `KubernetesPublication` renders the Release, with that
   target's bindings, and nowhere else. Its envelope and identity come from
   the render, so `metadata.name` may be templated; `$` sources in the
-  envelope stay errors, as for every literal-only field. The environment's
-  `resourceSelector` applies to emitted declarations as to declaration
-  files.
+  envelope stay errors, as for every literal-only field.
+- **Not selected.** An emitted declaration is active exactly where its
+  Release is published, and `resourceSelector` never filters it. Publishing
+  the Release is the environment's choice, and a second filter could only
+  contradict it: the application would deploy while its consumer, such as
+  Dex, silently lacked the declaration it needs. What a Release may emit is
+  guarded by the definition's `emitters` and by policies with emitter
+  context, not by the environment.
 - **Identity.** `<group>/<kind>/<name>` is unique within an environment's
   catalog: declaration files and every Release that environment renders.
   A clash is `NYL-RESOURCE-DUPLICATE`, naming the file or the Release and
@@ -1239,7 +1249,7 @@ the point of declaring it next to the manifests. The rules:
   the environment.
 - **Inspection.** `nyl get resources -e <env>` and `nyl bundle -e <env>`
   render the environment's emitting Releases and list their declarations
-  with the Release and target as provenance. Without `-e`, they list
+  with the origin `emitted by <group>/<release> for <target>`. Without `-e`, they list
   declaration files only and name the Releases that may emit, because
   emitted declarations exist only per environment. `nyl render` and
   `nyl render-tree` print the manifests without the emitted declarations and
