@@ -498,6 +498,7 @@ metadata:
             cluster: None,
             target: None,
             inputs: None,
+            unknown_inputs: std::collections::BTreeSet::new(),
         };
         let resource = serde_json::json!({
             "apiVersion": "k8s.nyl/v1",
@@ -506,7 +507,18 @@ metadata:
             "spec": {"url": "http://example.com/manifests.yaml"}
         });
 
-        let result = generate_resource(&resource, &context, &config, "", &[], false, None, &artifact_resolver).await;
+        let result = generate_resource(
+            &resource,
+            &[],
+            &context,
+            &config,
+            "",
+            &[],
+            false,
+            None,
+            &artifact_resolver,
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("https://"));
     }
@@ -948,6 +960,7 @@ spec:
             cluster: None,
             target: None,
             inputs: None,
+            unknown_inputs: std::collections::BTreeSet::new(),
         };
 
         let bundle = load_release_bundle_with_root(
@@ -993,6 +1006,7 @@ spec:
             cluster: None,
             target: None,
             inputs: None,
+            unknown_inputs: std::collections::BTreeSet::new(),
         };
         assert!(load_release_bundle(&entry, &context)
             .unwrap_err()

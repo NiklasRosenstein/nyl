@@ -79,10 +79,14 @@ only the context decides which sources are allowed. The rules:
   `_`, and `-` are ignored. In a unit document the kind's `spec_schema` says
   which fields are typed: where the schema has no place for a `$` key that is
   no source, the key is an unknown source, reported with the typo's
-  suggestion or else the nearest source under the same normalisation; where
-  it leaves an object open, the key is data. The check reads only the schema,
-  so it is the same for every driver and runs before the driver's own
-  validation.
+  suggestion or else the nearest source under the same normalisation. An
+  object whose schema names its members (`properties` or `required`) is typed
+  even when the schema does not close it; only an object the schema leaves
+  free-form (no members named) or opens explicitly (`additionalProperties`)
+  holds such a key as data. The check reads only the schema, so it is the
+  same for every driver, and it runs before the driver's own validation, whose
+  error for the same spec (such as a required field the `$` key stands in
+  for) would not name the typo.
 
 ### Contexts
 
@@ -101,7 +105,36 @@ only the context decides which sources are allowed. The rules:
 
 A source a context rejects is an error that teaches the fix, such as `$fromUnit`
 in a Release: "declare a Release input and bind it on the target with
-`$fromUnit`". A bare literal binding is the input's value.
+`$fromUnit`". Where the context's provider knows a source valid there that
+reads what was meant, the fix names it instead: `$fromInput: crds` in an
+EnvironmentTemplate's values that declares parameter `crds` says to write
+`{$fromParameter: crds}`. A bare literal binding is the input's value.
+
+A configuration mistake with value sources in what a unit renders, such as a
+Release bundle of a KubernetesPublication's target, what it generates, or a
+binding of the target's `releaseInputs` that does not fit its Release, fails the unit with
+`NYL-UNIT-INVALID` and the fix the message names, in a run as in `nyl
+validate`; messages name files as provenance records them, relative to the
+project, never a run's temporary checkout. A failure outside the
+configuration, such as a `valuesFrom` or `$fromFile` file or a Git object
+that cannot be read, or a Release outside a Git worktree, keeps its own error
+and fails the driver call.
+
+`nyl validate` compiles a target an environment places with a placeholder of
+the declared type for each Release input bound with `$fromUnit` or
+`$fromPromotion`. What a `$fromInput` `pointer` selects in such an input of
+type `object` or `array` is unknown (a pointer into a scalar input selects
+nothing and stays an error), like a value a run is blocked on: validation does
+not check the pointer, and a `valuesFrom` entry with a `pointer` into it
+contributes nothing; the input's declared type and every other check still
+apply. The selected value is a deterministic stand-in of the type of where it
+lands, so the check there skips it, as admission skips a value not known yet:
+the resolver records which positions hold one, and in a typed field of a Nyl
+resource it takes the type the resource's JSON Schema gives the field, in a
+HelmChart's (or Component's) chart values the type the chart's
+`values.schema.json` gives it (`false`, `0`, `{}`, `[]`, or the first `enum`
+or `const` value), and the placeholder string `<from orchestration>` where a
+string fits or no schema says otherwise.
 
 - **Data vs. configuration.** A value read from outside the user's
   configuration (a unit's output, artifact, or observed value; a file read with

@@ -397,6 +397,7 @@ impl Eq for LookupBackendOverride {}
 fn same_error(error: &NylError) -> NylError {
     match error {
         NylError::Config(message) => NylError::Config(message.clone()),
+        NylError::ValueSource(message) => NylError::ValueSource(message.clone()),
         other => NylError::Other(other.to_string()),
     }
 }

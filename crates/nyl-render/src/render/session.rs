@@ -58,6 +58,10 @@ pub struct RenderRequest<'a> {
     pub strip_empty_metadata_labels_default: bool,
     /// Resolved inputs of a Release that declares inputs, exposed as `inputs.*`.
     pub inputs: Option<&'a serde_json::Map<String, Value>>,
+    /// Inputs among `inputs` whose value only orchestration knows, as `nyl
+    /// validate` renders them: a `$fromInput` pointer into one selects an
+    /// unknown value, which is not checked.
+    pub unknown_inputs: Option<&'a BTreeSet<String>>,
     /// Where the Release is published, for the Helm `lookup` of charts that
     /// declare it. Without it, `lookup` finds nothing.
     pub lookup_scope: Option<ScopeSource>,
@@ -92,6 +96,7 @@ impl<'a> RenderRequest<'a> {
             track_parent: false,
             strip_empty_metadata_labels_default: false,
             inputs: None,
+            unknown_inputs: None,
             lookup_scope: None,
             destination_namespace: None,
             namespace_without_release: None,
@@ -313,6 +318,7 @@ impl RenderSession {
                 cluster: None,
                 target: None,
                 inputs: None,
+                unknown_inputs: BTreeSet::new(),
             }
         }
         .with_gitops_context(cluster_context, target_context);
@@ -368,6 +374,7 @@ impl RenderSession {
                     cluster: None,
                     target: None,
                     inputs: None,
+                    unknown_inputs: BTreeSet::new(),
                 }
             };
             let (kube_version, api_versions) = explicit_capabilities.unwrap_or_default();
@@ -457,7 +464,7 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
     ) -> Result<RenderedBundle> {
-        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None, None, None, None)
+        self.render_release_file_with_inputs(path, provenance_root, worktree_root, None, None, None, None, None)
             .await
     }
 
@@ -473,6 +480,7 @@ impl RenderSession {
         provenance_root: &Path,
         worktree_root: Option<&Path>,
         inputs: Option<&serde_json::Map<String, Value>>,
+        unknown_inputs: Option<&BTreeSet<String>>,
         lookup_scope: Option<ScopeSource>,
         destination_namespace: Option<&str>,
         checkout: Option<&Path>,
@@ -481,6 +489,7 @@ impl RenderSession {
         request.provenance_worktree_root = worktree_root;
         request.source_checkout = checkout;
         request.inputs = inputs;
+        request.unknown_inputs = unknown_inputs;
         request.lookup_scope = lookup_scope;
         request.destination_namespace = destination_namespace;
         self.render(request).await
@@ -504,6 +513,7 @@ impl RenderSession {
             Some(inputs) => {
                 let mut context = self.template_context.clone();
                 context.inputs = Some(Value::Object(inputs.clone()));
+                context.unknown_inputs = request.unknown_inputs.cloned().unwrap_or_default();
                 input_context = context;
                 &input_context
             }
@@ -599,7 +609,8 @@ impl RenderSession {
                 if let Some(probe) = &mut cache_probe {
                     record_resource_directory_dependency(&mut probe.recorder, &resource.value, &self.project_config)?;
                 }
-                for manifest in generate_render_resource(
+                // Boxed: expansion's future is large, and every render awaits it.
+                for manifest in Box::pin(generate_render_resource(
                     &resource,
                     template_context,
                     &self.project_config,
@@ -608,7 +619,7 @@ impl RenderSession {
                     request.track_parent,
                     self.cache.as_ref(),
                     &artifact_resolver,
-                )
+                ))
                 .await?
                 {
                     if let Some(reason) = resource_render_cache_bypass_reason(&manifest.value, &self.project_config) {
@@ -821,6 +832,7 @@ impl RenderSession {
             &serde_json::json!({
                 "resourceCatalogue": self.project_config.resource_catalogue.0.iter().map(|d| (d.name, d.api_version, d.dynamic_kind)).collect::<Vec<_>>(),
                 "onlySourceKind": request.only_source_kind,
+                "unknownInputs": request.unknown_inputs,
                 "pathMode": format!("{:?}", request.path_mode),
                 "provenanceRoot": request.provenance_root,
                 "provenanceWorktreeRoot": request.provenance_worktree_root,
@@ -1783,6 +1795,7 @@ spec:
                         &root,
                         None,
                         Some(&inputs),
+                        None,
                         None,
                         None,
                         None,

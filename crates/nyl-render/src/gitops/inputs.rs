@@ -282,6 +282,11 @@ pub enum OrchestratedInputs {
     Placeholders,
 }
 
+/// The value `nyl validate` gives a string Release input, or what a
+/// `$fromInput` pointer selects in an input, whose value only orchestration
+/// knows ([`OrchestratedInputs::Placeholders`]), where a string fits.
+pub const ORCHESTRATED_PLACEHOLDER: &str = "<from orchestration>";
+
 impl OrchestratedInputs {
     /// Overrides for one Release's declared inputs.
     fn overrides(
@@ -472,6 +477,11 @@ pub type ResolvedInput = Resolved<InputOrigin>;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedReleaseInputs {
     pub inputs: BTreeMap<String, ResolvedInput>,
+    /// Inputs whose value only orchestration knows, in a render with
+    /// [`OrchestratedInputs::Placeholders`]: each holds a placeholder of its
+    /// declared type, and what a `$fromInput` pointer selects in it is
+    /// unknown, so the bundle does not check it.
+    pub unknown: BTreeSet<String>,
 }
 
 impl ResolvedReleaseInputs {
@@ -606,7 +616,7 @@ pub fn resolve_target_inputs(
     sources: &InputSources<'_>,
 ) -> Result<ResolvedTargetInputs> {
     let target_name = &target.metadata.name;
-    let mut issues = Vec::new();
+    let mut issues = InputIssues::default();
     let mut declared = BTreeMap::new();
     for release in releases {
         if let Some(previous) = declared.insert(release.key.clone(), release) {
@@ -647,7 +657,9 @@ pub fn resolve_target_inputs(
             ));
             continue;
         }
-        issues.extend(undeclared_binding_issues(&key, bindings, release.declarations));
+        issues
+            .messages
+            .extend(undeclared_binding_issues(&key, bindings, release.declarations));
         bound.insert(key, bindings);
     }
 
@@ -673,7 +685,7 @@ pub fn resolve_target_inputs(
             .orchestrated
             .map(|orchestrated| orchestrated.overrides(&key.to_string(), release.declarations, bindings))
             .unwrap_or_default();
-        let inputs = resolve_release_inputs(
+        let mut inputs = resolve_release_inputs(
             &format!("spec.releaseInputs.{:?}", key.to_string()),
             &key.to_string(),
             release.declarations,
@@ -682,21 +694,14 @@ pub fn resolve_target_inputs(
             sources,
             &mut issues,
         );
+        if matches!(sources.orchestrated, Some(OrchestratedInputs::Placeholders)) {
+            inputs.unknown = overrides.into_keys().collect();
+        }
         resolved.releases.insert(key.clone(), inputs);
     }
 
-    if issues.is_empty() {
-        Ok(resolved)
-    } else {
-        Err(NylError::config(format!(
-            "DeploymentTarget {target_name:?} has invalid Release inputs:\n{}",
-            issues
-                .iter()
-                .map(|issue| format!("  - {issue}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )))
-    }
+    issues.into_result(&format!("DeploymentTarget {target_name:?} has invalid Release inputs"))?;
+    Ok(resolved)
 }
 
 /// A binding must name an input its Release declares.
@@ -725,28 +730,36 @@ pub fn resolve_release_inputs(
     bindings: Option<&BTreeMap<String, InputBinding>>,
     overrides: &BTreeMap<String, Value>,
     sources: &InputSources<'_>,
-    issues: &mut Vec<String>,
+    issues: &mut InputIssues,
 ) -> ResolvedReleaseInputs {
     // Rendering reports messages only: its providers state no stable codes.
     let mut found = Vec::new();
+    let providers = InputProviders {
+        sources,
+        failed: std::cell::Cell::new(false),
+    };
     let slots = nyl_core::bindings::resolve(
         field_prefix,
         &format!("Release {release}"),
         declarations,
         bindings,
         overrides,
-        sources,
+        &providers,
         &mut found,
     );
-    issues.extend(found.into_iter().map(|issue| issue.message));
+    issues.failed |= providers.failed.get();
+    issues.messages.extend(found.into_iter().map(|issue| issue.message));
     // Rendering has no later wave to wait for, so a blocked input fails.
-    issues.extend(
+    issues.messages.extend(
         slots
             .blocked
             .into_iter()
             .map(|blocked| format!("{} is not available yet: {}", blocked.field, blocked.reason)),
     );
-    ResolvedReleaseInputs { inputs: slots.values }
+    ResolvedReleaseInputs {
+        inputs: slots.values,
+        unknown: BTreeSet::new(),
+    }
 }
 
 impl nyl_core::bindings::Origin for InputOrigin {
@@ -777,27 +790,115 @@ impl nyl_core::bindings::Origin for InputOrigin {
     }
 }
 
+/// Why a Release input source was not read.
+enum ReadFailure {
+    /// The binding reads something its source does not hold or may not
+    /// read: its author fixes it.
+    Invalid(String),
+    /// Reading failed for a reason outside the configuration: a file or Git
+    /// object that cannot be read, or a publication branch that is unavailable.
+    Failed(String),
+}
+
+impl From<String> for ReadFailure {
+    fn from(message: String) -> Self {
+        ReadFailure::Invalid(message)
+    }
+}
+
+/// A path the configuration names that cannot be resolved: an I/O error is
+/// the environment's, anything else (a malformed path, one that leaves the
+/// worktree or traverses a link) the configuration's.
+fn path_failure(error: NylError) -> ReadFailure {
+    match error {
+        NylError::Io(_) => ReadFailure::Failed(error.to_string()),
+        error => ReadFailure::Invalid(error.to_string()),
+    }
+}
+
+/// Problems resolving Release inputs, collected to be reported together.
+#[derive(Debug, Default)]
+pub struct InputIssues {
+    pub messages: Vec<String>,
+    /// Whether a source could not be read for a reason outside the
+    /// configuration, such as an unreadable file or Git object.
+    pub failed: bool,
+}
+
+impl InputIssues {
+    /// Record a configuration issue.
+    pub fn push(&mut self, message: impl Into<String>) {
+        self.messages.push(message.into());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    /// The error `header` introduces, listing every issue. Mistakes in the
+    /// bindings are a value-source configuration error
+    /// ([`NylError::value_source`]); when a source could not be read, the
+    /// configuration is not known to be at fault and the error is an
+    /// ordinary one.
+    pub fn into_result(self, header: &str) -> Result<()> {
+        if self.messages.is_empty() {
+            return Ok(());
+        }
+        let message = format!(
+            "{header}:\n{}",
+            self.messages
+                .iter()
+                .map(|issue| format!("  - {issue}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        Err(if self.failed {
+            NylError::config(message)
+        } else {
+            NylError::value_source(message)
+        })
+    }
+}
+
 /// Release input sources: project files, locked Git blobs, and publication
-/// state. `$fromUnit` and `$fromPromotion` need orchestrated execution.
-impl Providers for InputSources<'_> {
+/// state. `$fromUnit` and `$fromPromotion` need orchestrated execution. It
+/// records whether a source failed for a reason outside the configuration.
+struct InputProviders<'s, 'a> {
+    sources: &'s InputSources<'a>,
+    failed: std::cell::Cell<bool>,
+}
+
+impl InputProviders<'_, '_> {
+    fn issue(&self, failure: ReadFailure) -> BindingIssue {
+        match failure {
+            ReadFailure::Invalid(message) => BindingIssue::new(message),
+            ReadFailure::Failed(message) => {
+                self.failed.set(true);
+                BindingIssue::new(message)
+            }
+        }
+    }
+}
+
+impl Providers for InputProviders<'_, '_> {
     type Origin = InputOrigin;
 
     fn file(&self, field: &str, source: &FileInputSource) -> Provided<InputOrigin> {
-        resolve_file(field, source, self)
+        resolve_file(field, source, self.sources)
             .map(Provision::Value)
-            .map_err(BindingIssue::from)
+            .map_err(|failure| self.issue(failure))
     }
 
     fn git(&self, field: &str, source: &GitInputSource) -> Provided<InputOrigin> {
-        resolve_git(field, source, self)
+        resolve_git(field, source, self.sources)
             .map(Provision::Value)
-            .map_err(BindingIssue::from)
+            .map_err(|failure| self.issue(failure))
     }
 
     fn publication(&self, field: &str, source: &PublicationInputSource) -> Provided<InputOrigin> {
-        resolve_publication(field, source, self)
+        resolve_publication(field, source, self.sources)
             .map(|input| input.map_or(Provision::Unbound, Provision::Value))
-            .map_err(BindingIssue::from)
+            .map_err(|failure| self.issue(failure))
     }
 
     fn unit(&self, field: &str, _source: &UnitInputSource) -> Provided<InputOrigin> {
@@ -817,9 +918,11 @@ impl Providers for InputSources<'_> {
         let path = &source.path;
         Some(
             if self
+                .sources
                 .publication
                 .is_some_and(|base| base.origin == PublicationBaseOrigin::Unavailable)
             {
+                self.failed.set(true);
                 format!(
                 "{requirement}, but {field}.$fromPublication state file {path} is unavailable: the publication branch was not refreshed and is not in the local Git cache, and the input has no default; run once with network access or declare a default"
             )
@@ -842,25 +945,24 @@ fn resolve_publication(
     field: &str,
     source: &PublicationInputSource,
     sources: &InputSources<'_>,
-) -> std::result::Result<Option<ResolvedInput>, String> {
+) -> std::result::Result<Option<ResolvedInput>, ReadFailure> {
     let field = format!("{field}.$fromPublication");
     if let Some(carry) = &source.carry_file_from_worktree {
         let carry_path = sources
             .paths
             .resolve(&format!("{field}.carryFileFromWorktree"), carry)
-            .map_err(|error| error.to_string())?;
+            .map_err(path_failure)?;
         if is_tracked(&carry_path) {
-            return Err(format!(
+            return Err(ReadFailure::Invalid(format!(
                 "{field}.carryFileFromWorktree {carry} is tracked by Git; a carried file is produced by this run and left uncommitted, so bind tracked files with $fromFile"
-            ));
+            )));
         }
         // A pinned state (a comparison baseline) replaces the worktree file.
         let carried = match sources.pinned_state {
             Some(pinned) => pinned.get(Path::new(&source.path)).cloned(),
-            None if carry_path.is_file() => Some(
-                std::fs::read(&carry_path)
-                    .map_err(|error| format!("{field}.carryFileFromWorktree: cannot read {carry}: {error}"))?,
-            ),
+            None if carry_path.is_file() => Some(std::fs::read(&carry_path).map_err(|error| {
+                ReadFailure::Failed(format!("{field}.carryFileFromWorktree: cannot read {carry}: {error}"))
+            })?),
             None => None,
         };
         if let Some(bytes) = carried {
@@ -889,17 +991,20 @@ fn resolve_publication(
         .git
         .read_publication_blob(&base.url, commit, &base.repository_path(&source.path))
         .map_err(|error| {
-            format!(
+            ReadFailure::Failed(format!(
                 "{field}: cannot read {} at publication commit {commit}: {error}",
                 source.path
-            )
+            ))
         })?
     else {
-        if source.carry_file_from_worktree.is_some() && owned_at(sources.git, base, commit, &source.path)? {
-            return Err(format!(
+        if source.carry_file_from_worktree.is_some()
+            && owned_at(sources.git, base, commit, &source.path).map_err(ReadFailure::Failed)?
+        {
+            // The branch changed outside Nyl: the configuration is not at fault.
+            return Err(ReadFailure::Failed(format!(
                 "{field}: {} is owned by this target but was deleted from the publication branch outside Nyl; restore it, or provide its carry file",
                 source.path
-            ));
+            )));
         }
         return Ok(None);
     };
@@ -959,21 +1064,24 @@ fn resolve_file(
     field: &str,
     source: &FileInputSource,
     sources: &InputSources<'_>,
-) -> std::result::Result<ResolvedInput, String> {
+) -> std::result::Result<ResolvedInput, ReadFailure> {
     let path = sources
         .paths
         .resolve(&format!("{field}.$fromFile.path"), &source.path)
-        .map_err(|error| error.to_string())?;
+        .map_err(path_failure)?;
     let visible = path
         .strip_prefix(&sources.paths.worktree_root)
         .is_ok_and(|relative| sources.visible_files.contains(relative));
     if !visible {
-        return Err(format!(
+        return Err(ReadFailure::Invalid(format!(
             "{field}.$fromFile.path {:?} names no Git-visible YAML or JSON file of this repository; the file must exist and must not be ignored by Git or lie in the output or vendor subtree",
             source.path
-        ));
+        )));
     }
-    let document = read_single_document(&path).map_err(|reason| format!("{field}.$fromFile: {reason}"))?;
+    let bytes = std::fs::read(&path)
+        .map_err(|error| ReadFailure::Failed(format!("{field}.$fromFile: cannot read {}: {error}", path.display())))?;
+    let document =
+        parse_single_document(&bytes).map_err(|reason| format!("{field}.$fromFile: {} {reason}", path.display()))?;
     let value =
         select(&document, &source.pointer).map_err(|reason| format!("{field}.$fromFile: {} {reason}", source.path))?;
     Ok(ResolvedInput {
@@ -986,7 +1094,7 @@ fn resolve_git(
     field: &str,
     source: &GitInputSource,
     sources: &InputSources<'_>,
-) -> std::result::Result<ResolvedInput, String> {
+) -> std::result::Result<ResolvedInput, ReadFailure> {
     let (repository, repository_source) = match (&source.git.repository, &source.git.repository_ref) {
         (Some(repository), _) => (repository.repo_url.clone(), None),
         (None, Some(reference)) => {
@@ -1000,7 +1108,7 @@ fn resolve_git(
     let bytes = sources
         .git
         .read_blob(&repository, commit, path)
-        .map_err(|error| match error {
+        .map_err(|error| ReadFailure::Failed(match error {
             NylError::Git(_) => format!(
                 "{field}.$fromGit cannot read {} at locked commit {} of {}: {}. Rendering reads only the locked commit and fetches it by ID; offline, it must already be in the local Git cache",
                 path,
@@ -1017,7 +1125,7 @@ fn resolve_git(
                 "{field}.$fromGit: {}",
                 nyl_git::redact_url_credentials(&other.to_string(), &repository)
             ),
-        })?
+        }))?
         .ok_or_else(|| {
             format!(
                 "{field}.$fromGit: commit {} of {} has no file {}",
@@ -1409,8 +1517,10 @@ mod tests {
             &[],
             temp.path(),
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        // Every one is the configuration's mistake (NYL-UNIT-INVALID in a run).
+        assert!(error.is_value_source_config(), "{error}");
+        let error = error.to_string();
         for expected in [
             "DeploymentTarget \"dev\" has invalid Release inputs",
             "\"platform/missing\" names no Release this target renders",
@@ -1423,6 +1533,27 @@ mod tests {
         ] {
             assert!(error.contains(expected), "missing {expected:?} in:\n{error}");
         }
+    }
+
+    /// Catches a source that cannot be read, such as a Git object the reader
+    /// fails on, reported as the configuration's mistake: the error stays an
+    /// ordinary one, even next to a binding mistake.
+    #[test]
+    fn test_an_unreadable_source_is_no_configuration_mistake() {
+        let temp = TempDir::new().unwrap();
+        let declared = declarations(json!({"tier": {"type": "string"}}));
+        let commit = "3f1c9a0000000000000000000000000000000000";
+        let target = target(json!({"platform/web": {
+            "tier": {"$fromGit": {"repository": {"repoURL": "https://git.example.com/state.git"}, "revision": "main", "commit": commit, "path": "sizing.yaml"}},
+            "unknown": 1,
+        }}));
+        let error = resolve(&target, &[("platform/web", &declared)], &[], temp.path()).unwrap_err();
+        assert!(!error.is_value_source_config(), "{error}");
+        let error = error.to_string();
+        assert!(
+            error.contains("$fromGit: no Git in this test") && error.contains("does not declare"),
+            "{error}"
+        );
     }
 
     struct FakeGit(BTreeMap<(String, String, String), Vec<u8>>);

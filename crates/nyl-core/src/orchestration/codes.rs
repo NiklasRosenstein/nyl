@@ -78,7 +78,7 @@ codes! {
     UnitNameDuplicate => "NYL-UNIT-NAME-DUPLICATE",
     /// No driver serves a unit's `apiVersion` and `kind`.
     UnitKindUnknown => "NYL-UNIT-KIND-UNKNOWN",
-    /// A unit's rendered spec fails its kind's validation.
+    /// A unit's rendered spec fails its kind's validation, or what the unit renders uses value sources wrong, such as a source in the wrong place, a typo of a source's name, or a source in a file read as data in a Release bundle of a publication's target.
     UnitInvalid => "NYL-UNIT-INVALID",
     /// Two units of the ownership set claim overlapping native resources.
     UnitOwnershipOverlap => "NYL-UNIT-OWNERSHIP-OVERLAP",

@@ -401,7 +401,7 @@ fn resolve_with(
         ),
         None => (release_name.to_owned(), None, "--input/--inputs".to_owned()),
     };
-    let mut issues = Vec::new();
+    let mut issues = super::inputs::InputIssues::default();
     let resolved = super::inputs::resolve_release_inputs(
         &field_prefix,
         &label,
@@ -411,16 +411,7 @@ fn resolve_with(
         &input_sources,
         &mut issues,
     );
-    if !issues.is_empty() {
-        return Err(NylError::config(format!(
-            "Release {label} has invalid inputs:\n{}",
-            issues
-                .iter()
-                .map(|issue| format!("  - {issue}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )));
-    }
+    issues.into_result(&format!("Release {label} has invalid inputs"))?;
     Ok(DirectInputs {
         declarations,
         resolved,

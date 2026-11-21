@@ -79,6 +79,10 @@ pub struct TemplateContext {
     pub target: Option<serde_json::Value>,
     /// Resolved inputs exposed as `inputs.*`, only while rendering a Release that declares inputs.
     pub inputs: Option<serde_json::Value>,
+    /// Inputs whose value only orchestration knows, as `nyl validate` renders
+    /// them: a `$fromInput` pointer into one selects an unknown value. Not
+    /// part of what templates see.
+    pub unknown_inputs: std::collections::BTreeSet<String>,
 }
 
 impl TemplateContext {
@@ -98,6 +102,7 @@ impl TemplateContext {
             cluster: None,
             target: None,
             inputs: None,
+            unknown_inputs: std::collections::BTreeSet::new(),
         })
     }
 

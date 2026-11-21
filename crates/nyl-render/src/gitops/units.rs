@@ -1145,7 +1145,7 @@ pub(crate) fn placeholder_overrides(
 
 fn placeholder(input_type: InputType) -> Value {
     match input_type {
-        InputType::String => Value::String("<from orchestration>".to_owned()),
+        InputType::String => Value::String(super::inputs::ORCHESTRATED_PLACEHOLDER.to_owned()),
         InputType::Integer | InputType::Number => Value::from(0),
         InputType::Boolean => Value::Bool(false),
         InputType::Object => Value::Object(Map::new()),
