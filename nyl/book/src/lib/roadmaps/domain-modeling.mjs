@@ -217,6 +217,7 @@ export const domainModelingRoadmap = {
       items: [
         { text: '`spec.emitters.paths` on definitions, and `NYL-RESOURCE-EMITTER-UNTRUSTED` for a Release outside them', done: false },
         { text: 'The top-level render of a Release’s file and `spec.manifests`, with defined kinds cut out of the manifests, and `NYL-RESOURCE-EMITTED-BY-EXPANSION` for chart, Component, or RemoteManifest output', done: false },
+        { text: 'Emitted declarations active exactly where their Release is published, never filtered by `resourceSelector`', done: false },
         { text: 'Per-environment identity with `NYL-RESOURCE-DUPLICATE` across files and targets, provenance naming the Release and target, and admission with emitter context', done: false },
         { text: 'Unknown values from inputs bound with `$fromUnit` or `$fromPromotion`, and dependency edges from consumers to the units the emitting bindings read', done: false },
         { text: '`nyl get resources -e` and `nyl bundle -e` listing emitted declarations, and `--show-emitted` on `nyl render` and `render-tree`', done: false },
