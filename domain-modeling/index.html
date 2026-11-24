@@ -131,14 +131,27 @@ Definitions load only from paths that <code dir="auto">nyl.toml</code> lists.</l
 <li>Teams write instances of the type as literal YAML. Each has a project-wide
 identity, and Nyl takes its source path from Git, never from the document.</li>
 <li>Nyl validates each declaration against its schema and admits it through
-Kyverno policies, which receive the trusted source path as context.</li>
-<li>A unit declares the collections it consumes: a type, plus label and path
-filters. Membership is explicit, and nothing is linked by matching names.</li>
-<li>Nyl resolves references to other units’ outputs and builds one tool-neutral
-bundle for the unit. The bundle is part of the unit’s execution key.</li>
+Kyverno policies, which receive the trusted source path and the resources
+the declaration references as context.</li>
+<li>A unit declares the collections it consumes: a type, plus label, field,
+and path filters. Membership is explicit, and nothing is linked by matching names.</li>
+<li>Nyl resolves the value sources a declaration holds, such as
+<code dir="auto">$fromUnit</code> for another unit’s output, in the consuming unit’s
+environment, and builds one tool-neutral bundle for the unit. The bundle
+is part of the unit’s execution key.</li>
 <li>The unit’s driver turns the bundle into native input, such as a Terraform
 variable that <code dir="auto">for_each</code> iterates over.</li>
 </ol>
+<p>An Environment decides which declarations are active in it, by labels, kinds,
+and paths, so a preview environment can hold only test services while
+production holds all of them. An environment may hold declarations and no
+units at all.</p>
+<p>A definition can also declare a status: facts that exist per environment,
+such as a service’s URL, kept in the environment’s state rather than in Git.
+The unit that owns a declaration fills its status from its outputs; without
+such a unit, a deploy job writes it with <code dir="auto">nyl resources status set</code>, for one
+declaration or for many from one document. Units and Kubernetes publications
+read it with <code dir="auto">$fromResource</code>, without naming the unit that produced it.</p>
 <p>A unit can also declare <code dir="auto">forEach</code> and be instantiated once per declaration,
 for example one OpenTofu configuration per team, each with its own state.</p>
 <p>Kubernetes Releases are planned to read collections too, without
@@ -161,6 +174,17 @@ blocks only the units that consume it, before anything is applied.</li>
 <li><strong>Sensitive changes are guarded.</strong> A definition can forbid a change, such as
 moving a workload account back to the sandbox OU, or require approval for
 it, such as changing an account’s email.</li>
+<li><strong>Domain modeling works on its own.</strong> Validating, admitting, collecting,
+and bundling declarations needs no unit, driver, Release, or cluster.
+<code dir="auto">nyl get resources -o yaml</code> exports the admitted catalog, and <code dir="auto">nyl bundle</code>
+exports a versioned bundle for any selection of declarations, so other
+tools can read them. Values that come from other units’ outputs are listed
+as unresolved, or resolved read-only with <code dir="auto">-e</code>, which also adds each
+declaration’s status in that environment.</li>
+<li><strong>Each status field has one writer.</strong> In an environment where the owning
+unit fills a field, nothing else can write it. A value written from
+outside can expire, so consumers wait for a fresh one instead of using an
+old one.</li>
 <li><strong>Orchestration is optional.</strong> In an existing Terraform or OpenTofu
 pipeline, <code dir="auto">nyl exec</code> runs the tool with the collected inputs, or Nyl
 writes the inputs for the pipeline’s own commands. Either way they are the
