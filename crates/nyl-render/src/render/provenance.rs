@@ -102,6 +102,11 @@ pub(crate) type RenderProvenance = Provenance;
 pub(crate) struct RenderResource {
     pub value: serde_json::Value,
     pub(crate) provenance: RenderProvenance,
+    /// JSON Pointers of `value`'s free-form data, such as chart values, that
+    /// hold a value not known before a run (`nyl validate` of a target whose
+    /// Release inputs orchestration fills); rendering types each by what reads
+    /// it. Empty otherwise.
+    pub(crate) unknown: Vec<String>,
 }
 
 impl std::ops::Deref for RenderResource {

@@ -66,8 +66,7 @@ spec:
       namespace: platform
       fullname: platform
       host: develop.platform.example.invalid
-      imageRepository: {$fromUnit: {unit: platform-image, artifact: image, pointer: /repository}}
-      imageDigest: {$fromUnit: {unit: platform-image, artifact: image, pointer: /digest}}
+      image: {$fromUnit: {unit: platform-image, artifact: image}}   # read by pointer in the chart values
       clusterWide: true                      # develop owns the CRD and the operator
       chartValues: {ingress: {className: internal}}
       # The release tooling writes the channel develop follows back to the

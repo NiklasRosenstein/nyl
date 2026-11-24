@@ -287,7 +287,7 @@ pub(crate) fn render_at(
         resource_catalogue: catalogue.clone(),
         instances,
     })
-    .map_err(|error| DriverError::before_effects(format!("cannot render DeploymentTarget {target:?}: {error}")))
+    .map_err(|error| render_failed(&target, &error))
 }
 
 /// Render the target `spec` names or declares inline at `worktree` as
@@ -331,7 +331,7 @@ pub(crate) fn render_for_validation(
         resource_catalogue: catalogue.clone(),
         instances: ctx.instances,
     })
-    .map_err(|error| DriverError::before_effects(format!("cannot render DeploymentTarget {target:?}: {error}")))
+    .map_err(|error| render_failed(&target, &error))
 }
 
 /// Render the target at resolution and read the execution key's inputs from
@@ -523,6 +523,23 @@ pub(crate) const STATE_CHANGED: &str = "publication-state-changed";
 pub(crate) const TARGET_CHANGED: &str = "target-changed";
 /// The `detail` of a unit whose target declares another reconciler than it published for.
 pub(crate) const RECONCILER_CHANGED: &str = "reconciler-changed";
+/// The `detail` of a unit whose target's Release bundles or Release inputs
+/// use value sources wrong.
+pub(crate) const VALUE_SOURCE_INVALID: &str = "value-source-invalid";
+
+/// A failed render of `target` as a driver error. A mistake in how what the
+/// target renders uses value sources is the unit's invalid configuration,
+/// with the fix the message names; anything else fails the driver call.
+fn render_failed(target: &str, error: &nyl_render::NylError) -> DriverError {
+    let failed = DriverError::before_effects(format!("cannot render DeploymentTarget {target:?}: {error}"));
+    if error.is_value_source_config() {
+        failed
+            .coded(Code::UnitInvalid, Some(VALUE_SOURCE_INVALID))
+            .with_fix("correct the value source the message names, as it says, and run again")
+    } else {
+        failed
+    }
+}
 /// The `detail` of the warning about a shared catalog the branch holds in another form.
 pub(crate) const SHARED_CATALOG_DIFFERS: &str = "shared-catalog-differs";
 /// The `detail` of the warning about a Release a teardown left in place.
@@ -1337,6 +1354,144 @@ mod tests {
 
     use super::*;
     use crate::kubernetes_publication::run::world;
+
+    /// Catches a configuration mistake with value sources in what a target
+    /// renders reported as the driver's own failure (`NYL-DRIVER-ERROR`):
+    /// it is the unit's invalid configuration, with the fix the message
+    /// names. A failure that is no such mistake keeps no code.
+    #[test]
+    fn test_a_value_source_mistake_in_the_target_is_the_units_invalid_configuration() {
+        let world = world::World::new();
+        let release = world.work().join("applications/web/release.yaml");
+        let text = std::fs::read_to_string(&release).unwrap().replace("\r\n", "\n");
+        let anchor = "image: {$fromInput: image}";
+        assert!(text.contains(anchor));
+        std::fs::write(&release, text.replace(anchor, "image: {$fromInputs: image}")).unwrap();
+        let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
+        descriptors.extend_from_slice(crate::catalog::RESOURCES);
+        let error = render(
+            &nyl_render::config::ResourceCatalogue(descriptors),
+            &world.work(),
+            &world.work().join("nyl"),
+            &world.root.path().join("cache"),
+            &nyl_core::orchestration::instance::NO_INSTANCES,
+            &world::spec(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), Some(Code::UnitInvalid));
+        assert_eq!(error.detail(), Some(VALUE_SOURCE_INVALID));
+        assert!(
+            error.message().contains(
+                "Deployment \"web\" in /applications/web/release.yaml: spec.template.spec.containers[0].image.$fromInputs is not a value source; did you mean $fromInput?"
+            ),
+            "{}",
+            error.message()
+        );
+
+        let other = render_failed("dev", &nyl_render::NylError::config("Failed to clone"));
+        assert_eq!(other.code(), None);
+    }
+
+    /// Catches a Release input binding that does not fit its Release, such as
+    /// one naming an input the Release does not declare, reported as the
+    /// driver's own failure (`NYL-DRIVER-ERROR`): the value-source docs
+    /// promise the unit's invalid configuration.
+    #[test]
+    fn test_a_binding_of_an_undeclared_input_is_the_units_invalid_configuration() {
+        let world = world::World::new();
+        let spec = json!({
+            // Next to the static target "dev", reconciled directly so that
+            // the two generate no common Argo CD resource.
+            "target": {"name": "dev-inline", "sourceFile": "nyl/units.yaml", "inline": {
+                "reconciler": {"direct": {}},
+                "clusterRef": {"name": "dev"},
+                "applicationGroupSelector": {"matchLabels": {"app": "web"}},
+                "publication": {"repositoryRef": {"name": "platform"}, "revision": "deploy", "pathPrefix": "inline"},
+                "releaseInputs": {"web/web": {"image": "web:1", "databaseHost": "db", "port": 5432}},
+            }},
+            "releases": {},
+        });
+        let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
+        descriptors.extend_from_slice(crate::catalog::RESOURCES);
+        let error = render(
+            &nyl_render::config::ResourceCatalogue(descriptors),
+            &world.work(),
+            &world.work().join("nyl"),
+            &world.root.path().join("cache"),
+            &nyl_core::orchestration::instance::NO_INSTANCES,
+            &spec,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("spec.releaseInputs.\"web/web\".port binds an input Release web/web does not declare"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(error.code(), Some(Code::UnitInvalid), "{}", error.message());
+        assert_eq!(error.detail(), Some(VALUE_SOURCE_INVALID));
+    }
+
+    /// Catches a value source in what rendering generated reaching the unit
+    /// as the driver's own failure: the expansion wraps the error with the
+    /// generating resource's provenance, and the unit still reports its
+    /// invalid configuration. A vendored RemoteManifest generates the output,
+    /// so no tool or network is needed.
+    #[test]
+    fn test_a_value_source_in_generated_output_is_the_units_invalid_configuration() {
+        let world = world::World::new();
+        let url = "https://manifests.invalid/web.yaml";
+        let manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: generated, namespace: web}\ndata: {image: {$fromInput: image}}\n";
+        let request = nyl_render::render::artifact::ArtifactRequest::RemoteManifest { url: url.to_owned() };
+        let vendor = world.work().join("nyl/vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join("web.yaml"), manifest).unwrap();
+        std::fs::write(
+            vendor.join("lock.yaml"),
+            format!(
+                "version: 1\nartifacts:\n  {}:\n    request: {{kind: remote-manifest, coordinate: '{url}'}}\n    path: web.yaml\n    format: manifest\n    size: {}\n    digest: {}\n",
+                request.fingerprint().unwrap(),
+                manifest.len(),
+                nyl_core::digest::sha256_hex(manifest.as_bytes()),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            world.work().join("nyl/nyl.toml"),
+            "[project]\n\n[vendor]\nmode = 'required'\n",
+        )
+        .unwrap();
+        let release = world.work().join("applications/web/release.yaml");
+        let text = format!(
+            "{}---\napiVersion: k8s.nyl/v1\nkind: RemoteManifest\nmetadata: {{name: generated, namespace: web}}\nspec: {{url: '{url}'}}\n",
+            std::fs::read_to_string(&release).unwrap()
+        );
+        std::fs::write(&release, text).unwrap();
+        let mut descriptors = nyl_render::resources::catalog::resource_catalogue();
+        descriptors.extend_from_slice(crate::catalog::RESOURCES);
+        let error = render(
+            &nyl_render::config::ResourceCatalogue(descriptors),
+            &world.work(),
+            &world.work().join("nyl"),
+            &world.root.path().join("cache"),
+            &nyl_core::orchestration::instance::NO_INSTANCES,
+            &world::spec(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("ConfigMap \"generated\" holds a $fromInput source at data.image"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(error.code(), Some(Code::UnitInvalid), "{}", error.message());
+        assert_eq!(error.detail(), Some(VALUE_SOURCE_INVALID));
+    }
 
     /// Catches "create only when absent" being a blind push: a publication
     /// that loses the race for the branch head, after another created the

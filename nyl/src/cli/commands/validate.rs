@@ -185,7 +185,7 @@ async fn collect(project_dir: &Path, offline: bool, report: &mut ValidationRepor
             .warnings
             .extend(warnings.into_iter().map(ValidationWarning::Environment)),
         (Err(error), Ok(_)) | (Ok(()), Err(error)) => return Err(error),
-        (Err(targets), Err(units)) => return Err(NylError::config(format!("{targets}\n{units}"))),
+        (Err(targets), Err(units)) => return Err(both_failed(targets, units)),
     }
     report.gitops = Some(GitOpsSummary {
         resources: inventory.resources.len(),
@@ -193,6 +193,29 @@ async fn collect(project_dir: &Path, offline: bool, report: &mut ValidationRepor
         yaml_files: inventory.yaml_files.len(),
     });
     Ok(())
+}
+
+/// The error when both the target and the unit checks fail, reported once
+/// each. A cause both reach is reported once: an EnvironmentTemplate whose
+/// sample instance does not render fails its inline target, and the units of
+/// the instance, which render the same template, fail with the same error
+/// inside theirs. The units' error then holds the target's and may say more,
+/// such as promotion findings, so it is the one reported.
+fn both_failed(targets: NylError, units: NylError) -> NylError {
+    let (targets_message, units_message) = (message(&targets), message(&units));
+    if units_message.contains(&targets_message) {
+        return units;
+    }
+    NylError::config(format!("{targets_message}\n{units_message}"))
+}
+
+/// The message of a configuration error, without the prefix and hint its
+/// display adds, so combining two does not repeat them.
+fn message(error: &NylError) -> String {
+    match error {
+        NylError::Config(message) | NylError::ValueSource(message) => message.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// A configured path as `nyl.toml` names it: relative to its directory, or
@@ -352,6 +375,30 @@ mod tests {
         assert!(report.config_file.is_some());
         let rendered = report.render(Some(strict));
         rendered.split_once('\n').unwrap().1.to_string()
+    }
+
+    /// Catches `nyl validate` printing one cause twice: a template whose
+    /// sample instance does not render fails its inline target and the
+    /// instance's units, whose error holds the target's.
+    #[test]
+    fn test_a_cause_both_checks_reach_is_reported_once() {
+        let cause = "NYL-TEMPLATE-INVALID: EnvironmentTemplate preview does not render";
+        let units = NylError::config(format!(
+            "Rendering the units of Environment preview-sample-1 at 0 failed: {}",
+            NylError::config(cause)
+        ));
+        let reported = both_failed(NylError::config(cause), units).to_string();
+        assert_eq!(reported.matches(cause).count(), 1, "{reported}");
+        assert!(
+            reported.contains("Rendering the units of Environment preview-sample-1"),
+            "{reported}"
+        );
+
+        let reported = both_failed(NylError::config("target broken"), NylError::config("unit broken")).to_string();
+        assert!(
+            reported.starts_with("Configuration error: target broken\nunit broken\n"),
+            "{reported}"
+        );
     }
 
     #[tokio::test]

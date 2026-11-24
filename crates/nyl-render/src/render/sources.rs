@@ -25,6 +25,15 @@
 //!   with the fix.
 //! - What rendering generates (a chart's output, a Component's, a remote
 //!   manifest) holds no source ([`reject_sources_in_output`]).
+//! - An input only orchestration fills (`$fromUnit`, `$fromPromotion`) holds a
+//!   placeholder of its declared type in `nyl validate`. What a `pointer`
+//!   selects in it, when its type is `object` or `array`, is unknown, like a
+//!   blocked value: the pointer is not checked, and the selected value is a
+//!   stand-in of the type its position takes ([`settle_unknown`]): in a typed
+//!   field the type Nyl's schema gives it, in chart values the type the
+//!   chart's `values.schema.json` gives it ([`settle_chart_values`]), else the
+//!   placeholder string. A `valuesFrom` entry with a `pointer` into it adds
+//!   nothing. The input's own type and every other check still apply.
 //!
 //! Every value read enters the dependency recorder at the layer that consumes
 //! it: a values file is returned to the caller as a bundle input (the Release
@@ -33,6 +42,7 @@
 //! key; and the resolved documents are what the Helm cache key (chart values)
 //! and the remote manifest cache (URLs) read.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use nyl_core::bindings::{
@@ -42,7 +52,8 @@ use nyl_core::bindings::{
 use nyl_core::constants::API_VERSION;
 use serde_json::Value;
 
-use crate::gitops::values::{load_chart_values_file, ValuesFileRoot};
+use super::bundle::{shown_path, ProvenanceRoots};
+use crate::gitops::values::{load_chart_values_file, ValuesFileError, ValuesFileRoot};
 use crate::resources::{merge_chart_values, HelmValuesOrigin, HelmValuesSource, Release, RemoteManifest};
 use crate::{NylError, Result};
 
@@ -70,21 +81,33 @@ impl BundleFiles<'_> {
 
 /// Resolve the value sources of one resource that `file` declares, in place.
 /// `inputs` are the Release's resolved inputs, when the bundle's Release
-/// declares any. Values files read are appended to `read`.
+/// declares any, and `unknown` names those whose value only orchestration
+/// knows. Values files read are appended to `read`. Messages show paths as
+/// provenance records them (`roots`).
+///
+/// Returns the JSON Pointers of the resource's free-form data (chart values,
+/// a Component's spec) that hold a value not known before a run: what a
+/// pointer selects in an unknown input. In the resource's typed fields such
+/// a value takes the type Nyl's schema gives the field
+/// ([`settle_unknown`]); in chart values, rendering gives it the type the
+/// chart's `values.schema.json` gives it ([`settle_chart_values`]).
 pub(crate) fn resolve_bundle_resource(
     resource: &mut Value,
     file: &Path,
     files: BundleFiles<'_>,
+    roots: ProvenanceRoots<'_>,
     inputs: Option<&Value>,
+    unknown: &BTreeSet<String>,
     read: &mut Vec<PathBuf>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let subject = BundleResource::of(resource);
+    let mut unknown_data = Vec::new();
     let mut issues = literal_field_issues(resource)
         .into_iter()
         .map(BindingIssue::new)
         .collect::<Vec<_>>();
     if issues.is_empty() {
-        let provider = ReleaseInputs { inputs };
+        let provider = ReleaseInputs { inputs, unknown };
         let resolved = resolve_document("", "", resource, subject.scope(), &provider, &mut issues);
         for issue in &mut issues {
             if let Some(field) = issue.message.strip_prefix('.') {
@@ -92,20 +115,27 @@ pub(crate) fn resolve_bundle_resource(
             }
         }
         if issues.is_empty() {
+            let unknown_at = resolved
+                .provenance
+                .iter()
+                .filter(|(_, origin)| **origin == ReleaseInputOrigin::Unknown)
+                .map(|(pointer, _)| pointer.clone())
+                .collect::<Vec<_>>();
             *resource = resolved.value;
+            unknown_data = subject.settle_unknown_fields(resource, unknown_at);
             if subject == BundleResource::HelmChart {
-                merge_values_from(resource, file, files, &provider, read, &mut issues);
+                merge_values_from(resource, file, files, roots, &provider, read, &mut issues)?;
             }
         }
     }
     if issues.is_empty() {
-        return Ok(());
+        return Ok(unknown_data);
     }
     let messages = issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>();
-    Err(NylError::config(format!(
+    Err(NylError::value_source(format!(
         "{} in {}: {}",
         describe(resource),
-        crate::util::path_for_display(file).display(),
+        shown_path(file, roots),
         messages.join("; ")
     )))
 }
@@ -155,6 +185,93 @@ impl BundleResource {
         };
         Scope { context, within }
     }
+
+    /// The JSON Schema of the resource's typed fields, when Nyl types it.
+    fn schema(self) -> Option<Value> {
+        Some(match self {
+            Self::HelmChart => serde_json::json!(schemars::schema_for!(crate::resources::HelmChart)),
+            Self::RemoteManifest => serde_json::json!(schemars::schema_for!(RemoteManifest)),
+            Self::Release => crate::resources::generate_release_schema(),
+            Self::Component => serde_json::json!(schemars::schema_for!(crate::resources::NylComponent)),
+            Self::Manifest => return None,
+        })
+    }
+
+    /// Give each unknown value at `unknown` in the resource's typed fields
+    /// the type Nyl's schema gives its field, so the resource's checks skip
+    /// it ([`settle_unknown`]). Returns the pointers in its free-form data,
+    /// which only what reads the data can type.
+    fn settle_unknown_fields(self, resource: &mut Value, unknown: Vec<String>) -> Vec<String> {
+        let scope = self.scope();
+        let (data, typed): (Vec<_>, Vec<_>) = unknown.into_iter().partition(|pointer| {
+            scope.context == Context::ReleaseData
+                || scope
+                    .within
+                    .iter()
+                    .any(|(prefix, context)| *context == Context::ReleaseData && pointer_within(pointer, prefix))
+        });
+        if let (false, Some(schema)) = (typed.is_empty(), self.schema()) {
+            settle_unknown(resource, &typed, &schema);
+        }
+        data
+    }
+}
+
+/// Whether `pointer` is `prefix` or lies beneath it.
+fn pointer_within(pointer: &str, prefix: &str) -> bool {
+    pointer
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The pointers of `unknown` beneath `prefix`, relative to it: the unknown
+/// values of chart values that a HelmChart's `/spec/values` or a Component's
+/// `/spec` holds.
+pub(crate) fn unknown_under(unknown: &[String], prefix: &str) -> Vec<String> {
+    unknown
+        .iter()
+        .filter(|pointer| pointer_within(pointer, prefix))
+        .map(|pointer| pointer[prefix.len()..].to_owned())
+        .collect()
+}
+
+/// Replace the value at each of `unknown`, one not known before a run, with
+/// a stand-in of the type the JSON Schema `schema` gives its position
+/// ([`nyl_core::bindings::schema_placeholder`]): the placeholder string
+/// where a string fits or the schema says nothing, else `false`, `0`, `{}`,
+/// `[]`, or the first allowed value. A check of `document` against `schema`
+/// then passes at those positions, as admission skips a value not yet
+/// known, and still checks everything else.
+pub(crate) fn settle_unknown(document: &mut Value, unknown: &[String], schema: &Value) {
+    for pointer in unknown {
+        if let Some(slot) = document.pointer_mut(pointer) {
+            *slot = nyl_core::bindings::schema_placeholder(schema, pointer, slot);
+        }
+    }
+}
+
+/// The chart values `values` with each unknown value at `unknown` typed by
+/// the chart's `values.schema.json` in `chart_dir`, when it has a readable
+/// one ([`settle_unknown`]); without one, the values as they are. Helm then
+/// validates the values against the schema everywhere else.
+pub(crate) fn settle_chart_values<'a>(
+    values: &'a Value,
+    unknown: &[String],
+    chart_dir: &Path,
+) -> std::borrow::Cow<'a, Value> {
+    if unknown.is_empty() {
+        return std::borrow::Cow::Borrowed(values);
+    }
+    // A schema Helm cannot read fails the render there, with Helm's error.
+    let Some(schema) = std::fs::read(chart_dir.join("values.schema.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return std::borrow::Cow::Borrowed(values);
+    };
+    let mut values = values.clone();
+    settle_unknown(&mut values, unknown, &schema);
+    std::borrow::Cow::Owned(values)
 }
 
 /// `HelmChart "web"`, for messages.
@@ -170,26 +287,29 @@ fn describe(resource: &Value) -> String {
 /// Merge a resolved HelmChart's `valuesFrom` entries in order, then its
 /// inline `values`; the result replaces `spec.values` and the entries are
 /// removed. The merged values are data and are never walked, and a values
-/// file that holds a source is an error: it would read as data.
+/// file that holds a source is an error: it would read as data. A values file
+/// the configuration may not read is an issue; one that cannot be read for a
+/// reason outside the configuration, such as an I/O error, is returned as it is.
 fn merge_values_from(
     resource: &mut Value,
     file: &Path,
     files: BundleFiles<'_>,
+    roots: ProvenanceRoots<'_>,
     provider: &ReleaseInputs<'_>,
     read: &mut Vec<PathBuf>,
     issues: &mut Vec<BindingIssue>,
-) {
+) -> Result<()> {
     let Some(spec) = resource.get_mut("spec").and_then(Value::as_object_mut) else {
-        return;
+        return Ok(());
     };
     let Some(entries) = spec.remove("valuesFrom") else {
-        return;
+        return Ok(());
     };
     let entries: Vec<HelmValuesSource> = match serde_json::from_value(entries) {
         Ok(entries) => entries,
         Err(error) => {
             issues.push(BindingIssue::new(format!("spec.valuesFrom: {error}")));
-            return;
+            return Ok(());
         }
     };
     let mut sources = Vec::new();
@@ -205,9 +325,10 @@ fn merge_values_from(
         let source = match origin {
             HelmValuesOrigin::File(path) => {
                 let directory = file.parent().filter(|parent| !parent.as_os_str().is_empty());
-                match load_chart_values_file(files.root(), directory.unwrap_or_else(|| Path::new(".")), path) {
+                let shown = |path: &Path| shown_path(path, roots);
+                match load_chart_values_file(files.root(), directory.unwrap_or_else(|| Path::new(".")), path, &shown) {
                     Ok((path, document)) => {
-                        let what = format!("values file {}", crate::util::path_for_display(&path).display());
+                        let what = format!("values file {}", shown_path(&path, roots));
                         read.push(path);
                         match sources_in("", &document).first() {
                             Some((at, source)) => Err(format!(
@@ -218,11 +339,15 @@ fn merge_values_from(
                             None => entry.select(&document, &what),
                         }
                     }
-                    Err(NylError::Config(message)) => Err(message),
-                    Err(error) => Err(error.to_string()),
+                    Err(ValuesFileError::Invalid(NylError::Config(message))) => Err(message),
+                    Err(ValuesFileError::Invalid(error)) => Err(error.to_string()),
+                    Err(ValuesFileError::Failed(error)) => return Err(error),
                 }
             }
             HelmValuesOrigin::Input(name) => match provider.input_value(&format!("{field}.input"), name) {
+                // What a pointer selects in an unknown input is unknown: the
+                // entry contributes nothing, and the input's type still counts.
+                Ok(value) if value.is_object() && provider.selects_unknown(name, entry.pointer.as_deref()) => continue,
                 Ok(value) if value.is_object() => entry.select(value, &format!("Release input {name:?}")),
                 Ok(value) => Err(format!(
                     "Release input {name:?} has type {}; valuesFrom reads only inputs of type object",
@@ -240,7 +365,7 @@ fn merge_values_from(
         }
     }
     if !issues.is_empty() {
-        return;
+        return Ok(());
     }
     let inline = spec.get("values").cloned().unwrap_or(Value::Null);
     match merge_chart_values(sources, inline) {
@@ -249,15 +374,34 @@ fn merge_values_from(
         }
         Err(message) => issues.push(BindingIssue::new(message)),
     }
+    Ok(())
 }
 
 /// The `$fromInput` source of a Release bundle: the Release's resolved inputs,
 /// when its Release declares any.
 struct ReleaseInputs<'a> {
     inputs: Option<&'a Value>,
+    /// Inputs whose value only orchestration knows (`nyl validate`): each
+    /// holds a placeholder of its declared type, so what a pointer selects in
+    /// one is unknown and not checked.
+    unknown: &'a BTreeSet<String>,
 }
 
 impl ReleaseInputs<'_> {
+    /// Whether reading `pointer` of input `name` selects a value only
+    /// orchestration knows: a non-empty pointer into an unknown input whose
+    /// declared type is `object` or `array`, which its placeholder holds. A
+    /// pointer into a scalar input selects nothing whatever its value, so it
+    /// stays an error.
+    fn selects_unknown(&self, name: &str, pointer: Option<&str>) -> bool {
+        pointer.is_some_and(|pointer| !pointer.is_empty())
+            && self.unknown.contains(name)
+            && self
+                .inputs
+                .and_then(|inputs| inputs.get(name))
+                .is_some_and(|value| value.is_object() || value.is_array())
+    }
+
     /// The resolved value of input `name`, read at `field`.
     fn input_value(&self, field: &str, name: &str) -> std::result::Result<&Value, BindingIssue> {
         let Some(inputs) = self.inputs.and_then(Value::as_object) else {
@@ -282,17 +426,23 @@ impl ReleaseInputs<'_> {
 /// Where a resolved `$fromInput` source read its value: always the Release
 /// input, because the source has no default of its own.
 #[derive(Debug, Clone, PartialEq)]
-struct ReleaseInputOrigin;
+enum ReleaseInputOrigin {
+    /// The input's value, or what a pointer selects in it.
+    Input,
+    /// What a pointer selects in an input only orchestration fills: not
+    /// known before a run, so it holds a stand-in.
+    Unknown,
+}
 
 impl Origin for ReleaseInputOrigin {
     fn from_default() -> Self {
-        Self
+        Self::Input
     }
     fn from_override() -> Self {
-        Self
+        Self::Input
     }
     fn from_value() -> Self {
-        Self
+        Self::Input
     }
     fn describe(&self, field: &str) -> String {
         format!("{field} (from a Release input)")
@@ -307,6 +457,14 @@ impl Providers for ReleaseInputs<'_> {
     fn input(&self, field: &str, source: &InputSource) -> Provided<ReleaseInputOrigin> {
         let field = format!("{field}.$fromInput");
         let input = self.input_value(&field, &source.name)?;
+        if self.selects_unknown(&source.name, source.pointer.as_deref()) {
+            // The placeholder's shape says nothing about the value
+            // orchestration delivers; the value's type is unknown too.
+            return Ok(Provision::Value(Resolved {
+                value: Value::String(crate::gitops::inputs::ORCHESTRATED_PLACEHOLDER.to_owned()),
+                origin: ReleaseInputOrigin::Unknown,
+            }));
+        }
         let pointer = source.pointer.as_deref().unwrap_or_default();
         let Some(value) = input.pointer(pointer) else {
             return Err(BindingIssue::new(format!(
@@ -316,7 +474,7 @@ impl Providers for ReleaseInputs<'_> {
         };
         Ok(Provision::Value(Resolved {
             value: value.clone(),
-            origin: ReleaseInputOrigin,
+            origin: ReleaseInputOrigin::Input,
         }))
     }
 
@@ -339,7 +497,7 @@ pub(crate) fn reject_generated_values_from(resource: &Value) -> Result<()> {
     if resource.pointer("/spec/valuesFrom").is_none() {
         return Ok(());
     }
-    Err(NylError::config(format!(
+    Err(NylError::value_source(format!(
         "{} was generated while rendering, and spec.valuesFrom is read only in the files of a Release bundle",
         describe(resource)
     )))
@@ -367,7 +525,7 @@ pub(crate) fn reject_sources_in_output(expanding: &str, generated: &[Value]) -> 
     if issues.is_empty() {
         return Ok(());
     }
-    Err(NylError::config(format!(
+    Err(NylError::value_source(format!(
         "{expanding} generated value sources, which resolve only in the files of a Release bundle, never in what rendering generates: {}; write the value in the bundle's own files, such as the chart's values (see {VALUE_SOURCES_DOCS})",
         issues.join("; ")
     )))
@@ -392,6 +550,7 @@ mod tests {
             cluster: None,
             target: None,
             inputs,
+            unknown_inputs: BTreeSet::new(),
         }
     }
 
@@ -525,6 +684,34 @@ mod tests {
         assert!(error(&list, None).contains("spec.valuesFrom[0]"));
         let escaped = project("  valuesFrom: [{file: ../../outside.yaml}]\n", &[]);
         assert!(error(&escaped, None).contains("outside the Git worktree"));
+        let missing = project("  valuesFrom: [{file: missing.yaml}]\n", &[]);
+        for temp in [&ignored, &list, &escaped, &missing] {
+            assert!(load(temp, None).unwrap_err().is_value_source_config());
+        }
+    }
+
+    /// Catches a values file that cannot be read for a reason outside the
+    /// configuration, such as a Release outside any Git repository, reported
+    /// as the configuration's mistake (`NYL-UNIT-INVALID` in a run) instead
+    /// of the failure it is.
+    #[test]
+    fn test_values_from_environment_failures_keep_their_error() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("values.yaml"), "a: 1\n").unwrap();
+        fs::write(
+            temp.path().join("app.yaml"),
+            "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata: {name: web}\nspec:\n  chart: {name: ./chart}\n  valuesFrom: [{file: values.yaml}]\n",
+        )
+        .unwrap();
+        if git2::Repository::discover(temp.path()).is_ok() {
+            return; // The temporary directory lies in a Git worktree here.
+        }
+        let error = load_release_bundle(&temp.path().join("app.yaml"), &context(None)).unwrap_err();
+        assert!(!error.is_value_source_config(), "{error}");
+        assert!(
+            error.to_string().contains("reads a file of the Git worktree, but"),
+            "{error}"
+        );
     }
 
     /// Catches `$fromInput` in a HelmChart's fields not resolving, a value of
@@ -658,6 +845,157 @@ mod tests {
         assert!(
             message.contains("spec.valuesFrom[0]: values file") && message.contains("holds a $fromInput source at web.image; value sources are not resolved inside valuesFrom files, which are data; move it to the inline values"),
             "{message}"
+        );
+    }
+
+    /// Catches `nyl validate` failing a correct bundle that reads an object
+    /// input by pointer, when a target binds the input with `$fromUnit`: the
+    /// input holds a placeholder before a run, so what the pointer selects is
+    /// unknown and unchecked, while the input's own type still is. Catches,
+    /// too, a pointer into a known input left unchecked.
+    #[test]
+    fn test_a_pointer_into_an_input_only_orchestration_knows_is_unchecked() {
+        let temp = project(
+            "  valuesFrom: [{input: image, pointer: /extra}]
+  values:
+    image:
+      repository: {$fromInput: {name: image, pointer: /repository}}
+      digest: {$fromInput: {name: image, pointer: /digest}}
+",
+            &[],
+        );
+        let unknown = BTreeSet::from(["image".to_owned()]);
+        let mut context = context(Some(json!({"image": {}})));
+        context.unknown_inputs = unknown;
+        let bundle = load_release_bundle(&temp.path().join("apps/app.yaml"), &context).unwrap();
+        let chart = &bundle.resources[1].value;
+        let placeholder = crate::gitops::inputs::ORCHESTRATED_PLACEHOLDER;
+        assert_eq!(
+            chart["spec"]["values"],
+            json!({"image": {"repository": placeholder, "digest": placeholder}})
+        );
+
+        let known = error(&temp, Some(json!({"image": {}})));
+        assert!(
+            known.contains("reads \"/repository\" of Release input \"image\", which holds nothing there"),
+            "{known}"
+        );
+
+        // A scalar input holds nothing a pointer selects, known or not.
+        let mut context = super::tests::context(Some(json!({"image": placeholder})));
+        context.unknown_inputs = BTreeSet::from(["image".to_owned()]);
+        let scalar = load_release_bundle(&temp.path().join("apps/app.yaml"), &context)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            scalar.contains("reads \"/repository\" of Release input \"image\", which holds nothing there"),
+            "{scalar}"
+        );
+    }
+
+    /// Catches a correct bundle failing `nyl validate` because what a pointer
+    /// selects in an input only orchestration fills is a placeholder string:
+    /// in a typed field it takes the type Nyl's schema gives the field, and in
+    /// chart values the type the chart's `values.schema.json` gives it, while
+    /// it stays the string where a string fits or nothing says otherwise.
+    #[test]
+    fn test_an_unknown_value_takes_the_type_of_where_it_lands() {
+        let temp = project(
+            "  includeCrds: {$fromInput: {name: settings, pointer: /crds}}
+  lookup: {$fromInput: {name: settings, pointer: /lookup}}
+  values:
+    replicas: {$fromInput: {name: settings, pointer: /replicas}}
+    feature: {enabled: {$fromInput: {name: settings, pointer: /enabled}}}
+    name: {$fromInput: {name: settings, pointer: /name}}
+",
+            &[],
+        );
+        let mut context = context(Some(json!({"settings": {}})));
+        context.unknown_inputs = BTreeSet::from(["settings".to_owned()]);
+        let bundle = load_release_bundle(&temp.path().join("apps/app.yaml"), &context).unwrap();
+        let resource = &bundle.resources[1];
+        let chart: crate::resources::HelmChart = serde_json::from_value(resource.value.clone()).unwrap();
+        assert_eq!(chart.spec.include_crds, Some(false));
+        assert_eq!(chart.spec.lookup.map(|lookup| lookup.is_enabled()), Some(false));
+        assert_eq!(
+            resource.unknown,
+            [
+                "/spec/values/feature/enabled",
+                "/spec/values/name",
+                "/spec/values/replicas"
+            ]
+        );
+
+        let unknown = unknown_under(&resource.unknown, "/spec/values");
+        let placeholder = crate::gitops::inputs::ORCHESTRATED_PLACEHOLDER;
+        let chart_dir = temp.path().join("chart");
+        fs::create_dir_all(&chart_dir).unwrap();
+        let untyped = settle_chart_values(&chart.spec.values, &unknown, &chart_dir);
+        assert_eq!(*untyped, chart.spec.values);
+        fs::write(
+            chart_dir.join("values.schema.json"),
+            r##"{"type": "object", "properties": {"replicas": {"type": "integer"}, "name": {"type": "string"},
+                "feature": {"$ref": "#/$defs/feature"}}, "$defs": {"feature": {"properties": {"enabled": {"type": "boolean"}}}}}"##,
+        )
+        .unwrap();
+        let typed = settle_chart_values(&chart.spec.values, &unknown, &chart_dir);
+        assert_eq!(
+            *typed,
+            json!({"replicas": 0, "feature": {"enabled": false}, "name": placeholder})
+        );
+    }
+
+    /// Catches a run's error naming the absolute path of its temporary
+    /// checkout: the resource's file and a values file show as provenance
+    /// records them, relative to the project or the worktree.
+    #[test]
+    fn test_errors_name_files_as_provenance_records_them() {
+        let temp = project(
+            "  valuesFrom: [{file: base.yaml}, {file: /shared/values.yaml}]\n",
+            &[
+                ("apps/base.yaml", "web: {image: {$fromInput: image}}\n"),
+                ("shared/values.yaml", "host: {$fromInput: host}\n"),
+            ],
+        );
+        let roots = ProvenanceRoots {
+            root: Some(&temp.path().join("apps")),
+            worktree: Some(temp.path()),
+        };
+        let files = BundleFiles {
+            project_root: temp.path(),
+            checkout: None,
+        };
+        let message = crate::render::bundle::load_release_bundle_with_root(
+            &temp.path().join("apps/app.yaml"),
+            &context(Some(json!({"image": "web:1", "host": "web"}))),
+            roots,
+            files,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("HelmChart \"web\" in app.yaml: spec.valuesFrom[0]: values file base.yaml holds")
+                && message.contains("spec.valuesFrom[1]: values file /shared/values.yaml holds"),
+            "{message}"
+        );
+        // Files that are missing show the same way.
+        let load_with_roots = |path: &Path| {
+            crate::render::bundle::load_release_bundle_with_root(path, &context(None), roots, files)
+                .unwrap_err()
+                .to_string()
+        };
+        let absent = load_with_roots(&temp.path().join("apps/absent.yaml"));
+        assert!(absent.contains("File not found: absent.yaml"), "{absent}");
+        fs::write(
+            temp.path().join("apps/app.yaml"),
+            "apiVersion: k8s.nyl/v1\nkind: HelmChart\nmetadata: {name: web}\nspec:\n  chart: {name: ./chart}\n  valuesFrom: [{file: missing.yaml}, {file: /shared/missing.yaml}]\n",
+        )
+        .unwrap();
+        let missing = load_with_roots(&temp.path().join("apps/app.yaml"));
+        assert!(
+            missing.contains("spec.valuesFrom[0]: Values file missing.yaml is missing")
+                && missing.contains("spec.valuesFrom[1]: Values file /shared/missing.yaml is missing"),
+            "{missing}"
         );
     }
 

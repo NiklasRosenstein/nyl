@@ -632,13 +632,9 @@ fn check_unit(
         .and_then(|observed| observed.receipt.as_ref())
         .expect("a checked unit has a current receipt");
     let command = check.command();
-    let failed = |message: String| {
-        driver_failure(
-            name,
-            message,
-            &format!("fix the cause, such as a missing tool or an unreadable worktree, then run nyl {command} again"),
-        )
-    };
+    let fallback_fix =
+        format!("fix the cause, such as a missing tool or an unreadable worktree, then run nyl {command} again");
+    let failed = |message: String| driver_failure(name, message, &fallback_fix);
     let project_dir = match job.project_dir {
         Ok(project_dir) => project_dir,
         Err(message) => return failed(message.clone()),
@@ -819,7 +815,13 @@ fn check_unit(
             }),
             error: None,
         },
-        Err(error) => failed(error.to_string()),
+        Err(error) => {
+            // When the driver said what went wrong, its code, detail, and fix
+            // replace the generic ones, as in a run.
+            let mut checked = failed(error.message().to_owned());
+            checked.error = Some(error.finding(&format!("unit {name}: "), &fallback_fix));
+            checked
+        }
     }
 }
 

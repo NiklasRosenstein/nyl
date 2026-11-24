@@ -868,7 +868,8 @@ are reproducible. One Release bundle serves every target: a HelmChart with
 repository and digest, `fullnameOverride`, `operator.install`, the sizing),
 `metadata.namespace: {$fromInput: namespace}`, and a `$literal` holding the
 platform's own settings, which use the `$fromEnvironment` syntax. An `OciImage`
-unit feeds the image inputs through `$fromUnit`. develop's target binds
+unit feeds its artifact to the `object` input `image` through `$fromUnit`, and
+the chart values read its repository and digest with `pointer`. develop's target binds
 `clusterWide: true` and reads `channel` with `$fromPublication`; the
 `preview` template declares `parameters: {pr: integer, crds: {type: boolean,
 default: false}}`, binds `clusterWide: {$fromParameter: crds}`, per-instance
@@ -877,7 +878,7 @@ names and hosts, and reads the previews' sizing with `$fromGit` from
 
 | Step | Action | Proves |
 | --- | --- | --- |
-| 1 | Commit the `$fromGit` lock on `main` (`%COMMIT(main)%`); `nyl validate` → 0 | The project validates, the chart rendered for develop and a sample preview |
+| 1 | Commit the `$fromGit` lock on `main` (`%COMMIT(main)%`); `nyl validate` → 0 | The project validates, the chart rendered for develop and a sample preview; the image artifact's fields are read by `pointer` before any receipt exists |
 | 2 | `reconcile -e develop` → 0 | develop's tree has the CRD, the operator, and the ClusterRole; the Deployment runs the image by the digest the unit built; Helm received `operator.install` as a boolean; the input overrides the values file, which overrides the chart's defaults; without publication state the `channel` default applies; the `$literal` content reaches the chart as data |
 | 3 | Commit `develop/state/release.json` to the `deploy` branch | A tool writes state back beside the tree |
 | 4 | Branch `pr-1`; `reconcile -e pr-1 --template preview --param pr=1` → 0 | `crds` defaults to `false`, so the preview's tree has neither the CRD nor the operator; its own image by digest; the locked sizing (one replica); its host and ingress class |
@@ -885,8 +886,8 @@ names and hosts, and reads the previews' sizing with `$fromGit` from
 | 6 | Change the values file on `pr-1`; reconcile it → 0 | The change flows through `valuesFrom`: only the publication runs, the image is current |
 | 7 | Build on `main`; `reconcile -e develop` → 0 | The new digest reaches develop with the channel read from the publication branch |
 | 8 | `state delete -e pr-2 --teardown` → 0 | The closed pull request's tree is removed and `pr-1`'s kept |
-| 9 | On `pr-3`: `$fromUnit` in the chart values, then `$fromInputs`, then a source in the values file → each 1; then fixed → 0 | Each mistake blocks the publication (`NYL-DRIVER-ERROR`) with an error that names the fix: declare a Release input and bind it with `$fromUnit`; did you mean `$fromInput`; move it to the inline values. The image unit runs regardless |
-| 10 | A template binding `clusterWide: {$fromInput: crds}`: `nyl validate` → 1 | `NYL-TEMPLATE-INVALID` for a sample instance, before any instance exists |
+| 9 | On `pr-3`: `$fromUnit` in the chart values, then `$fromInputs`, then a source in the values file → each 1; then fixed → 0 | Each mistake blocks the publication (`NYL-UNIT-INVALID`) with an error that names the fix: declare a Release input and bind it with `$fromUnit`; did you mean `$fromInput`; move it to the inline values. The image unit runs regardless |
+| 10 | A template binding `clusterWide: {$fromInput: crds}`: `nyl validate` → 1 | `NYL-TEMPLATE-INVALID` for a sample instance, before any instance exists, naming `{$fromParameter: crds}` as the fix |
 
 The cluster E2E suite deploys the same chart to a kind cluster with each
 reconciler: see [`crates/nyl-e2e/README.md`](../crates/nyl-e2e/README.md).

@@ -260,7 +260,10 @@ fn load_resource_file(
 ) -> Result<Vec<RenderResource>> {
     // Validate that path is a file, not a directory
     if !path.exists() {
-        return Err(NylError::Config(format!("File not found: {}", path.display())));
+        return Err(NylError::Config(format!(
+            "File not found: {}",
+            shown_path(path, provenance_root)
+        )));
     }
     if !path.is_file() {
         return Err(NylError::Config(format!(
@@ -291,17 +294,30 @@ fn load_resource_file(
     let source_ctx = crate::util::SourceContext::new(path.to_path_buf());
     let source_path = provenance_path(path, provenance_root);
     for (index, mut value) in source_ctx.parse_yaml_documents(&rendered)?.into_iter().enumerate() {
-        resolve_bundle_resource(&mut value, path, files, context.inputs.as_ref(), values_files)?;
+        let unknown = resolve_bundle_resource(
+            &mut value,
+            path,
+            files,
+            provenance_root,
+            context.inputs.as_ref(),
+            &context.unknown_inputs,
+            values_files,
+        )?;
         resources.push(RenderResource {
             value,
             provenance: RenderProvenance::source(source_path.clone(), index + 1),
+            unknown,
         });
     }
 
     Ok(resources)
 }
 
-fn provenance_path(path: &Path, roots: ProvenanceRoots<'_>) -> PathBuf {
+/// `path` as provenance records it, and as messages show it: relative to the
+/// provenance root, `/` plus its worktree-relative path, or else relative to
+/// the current directory. A file of a temporary checkout, as a run renders
+/// from, so never shows its absolute location.
+pub(crate) fn provenance_path(path: &Path, roots: ProvenanceRoots<'_>) -> PathBuf {
     if let Some(relative) = roots.root.and_then(|root| relative_to(path, root)) {
         return relative;
     }
@@ -311,10 +327,61 @@ fn provenance_path(path: &Path, roots: ProvenanceRoots<'_>) -> PathBuf {
     crate::util::path_for_display(path)
 }
 
+/// `path` as a message shows it: its provenance path with `/` separators on
+/// every platform, as recorded paths are.
+pub(crate) fn shown_path(path: &Path, roots: ProvenanceRoots<'_>) -> String {
+    provenance_path(path, roots).to_string_lossy().replace('\\', "/")
+}
+
 fn relative_to(path: &Path, root: &Path) -> Option<PathBuf> {
     if let Ok(relative) = path.strip_prefix(root) {
         return Some(relative.to_path_buf());
     }
-    let (path, root) = (path.canonicalize().ok()?, root.canonicalize().ok()?);
+    let (path, root) = (canonical(path)?, root.canonicalize().ok()?);
     path.strip_prefix(root).ok().map(Path::to_path_buf)
+}
+
+/// `path` with symbolic links resolved, as far as it exists: a file that is
+/// missing, which a message may name, keeps its name beneath its directory's
+/// canonical form (on macOS, `/var` is a link to `/private/var`).
+fn canonical(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+        if let Ok(canonical) = existing.canonicalize() {
+            return Some(missing.iter().rev().fold(canonical, |path, name| path.join(name)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches a missing file shown with its absolute path when the root is
+    /// reached through a symbolic link, as a temporary directory is on macOS
+    /// (`/var` links to `/private/var`) and files resolve to canonical paths.
+    #[cfg(unix)]
+    #[test]
+    fn test_provenance_path_of_a_missing_file_beneath_a_linked_root() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("real/apps")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("real"), temp.path().join("link")).unwrap();
+        let root = temp.path().join("link");
+        let roots = ProvenanceRoots {
+            root: Some(&root.join("apps")),
+            worktree: Some(&root),
+        };
+        let real = temp.path().join("real").canonicalize().unwrap();
+        assert_eq!(shown_path(&real.join("apps/missing.yaml"), roots), "missing.yaml");
+        assert_eq!(
+            shown_path(&real.join("shared/a/missing.yaml"), roots),
+            "/shared/a/missing.yaml"
+        );
+    }
 }

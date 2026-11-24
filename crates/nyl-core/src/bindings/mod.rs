@@ -55,7 +55,8 @@ pub use declaration::{json_type_name, validate_declarations_at, validate_input_n
 pub use issue::{BindingIssue, Coded};
 pub use references::{unit_references, UnitReference};
 pub use schema::{
-    offer_sources, reserved_key_issues, schema_alternatives, schema_resolve, schema_step, source_variants, SchemaStep,
+    offer_sources, reserved_key_issues, schema_alternatives, schema_placeholder, schema_resolve, schema_step,
+    source_variants, SchemaStep,
 };
 pub use walk::{find_clauses, provide, resolve_document, FoundClause, Scope};
 
@@ -156,6 +157,15 @@ pub trait Providers {
     /// provider knows more than the generic message. `requirement` reads like
     /// "Release platform/web requires input \"image\"".
     fn unbound(&self, _field: &str, _clause: &Clause, _requirement: &str) -> Option<String> {
+        None
+    }
+
+    /// The fix for `clause`, a source this context rejects, when the provider
+    /// can read what it meant with a source valid here: such as
+    /// `$fromParameter: crds` for `$fromInput: crds` in an EnvironmentTemplate's
+    /// values that declares parameter `crds`. It replaces the context's
+    /// generic fix ([`Context::misplaced`]).
+    fn instead(&self, _clause: &Clause) -> Option<String> {
         None
     }
 }
