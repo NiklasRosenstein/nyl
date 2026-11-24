@@ -46,6 +46,8 @@ variables:
 | `$fromParameter` | a name, `{$fromParameter: pr}` | `{name, pointer?}` | An EnvironmentTemplate instance's typed parameter. |
 | `$fromUnit` | none | `{unit, output \| artifact \| observation, pointer?, environment?, kind?, evidence?, attestations?}` | A unit's output, artifact, or observed value from its current receipt. |
 | `$fromPromotion` | none | `{value, path?}` | A value recorded through a PromotionPath. |
+| *Planned (M9):* `$fromResource` | none | `{kind, name, pointer}` | A domain resource's `spec`, or its status in the environment as the owning unit projects it from an output. |
+| *Planned (M9):* `$fromCollection` | none | `{collection, each?, pointer?}` | One of the unit's own collections, from its bundle. |
 | `$fromFile`, `$fromGit`, `$fromPublication` | none | `{path, pointer?}`; `{repository \| repositoryRef, revision, commit, path, pointer?}`; `{path, pointer?, carryFileFromWorktree?}` | A file of this repository, a file at a locked commit, a state file in the target's publication branch. |
 | `$literal` | — | any value | Its content, verbatim and never walked. |
 
@@ -103,6 +105,11 @@ only the context decides which sources are allowed. The rules:
 | Declared Environment and EnvironmentGroup `values` | — | as template values |
 | DeploymentTarget `releaseInputs`, declared or inline | `$fromFile`, `$fromGit`, `$fromPublication`, `$fromUnit`, `$fromPromotion` (the last two only through orchestration), `$literal` | — |
 | Output of recursive expansion: a chart's or a Component's output, a remote manifest, a HelmChart either generates | — (any source is an error naming the expanding resource) | — |
+| *Planned (M9):* a domain resource's `spec`, at discovery and admission | `$literal` | `$fromEnvironment`, `$fromUnit`, `$fromPromotion`, `$fromResource` at any depth, to the consumer's resolution |
+| *Planned (M9):* a domain resource's `spec`, when a consumer resolves its bundle | `$fromEnvironment`, `$fromUnit`, `$fromPromotion`, `$fromResource`, `$literal`, in the consumer's environment | — |
+| *Planned (M9):* `$fromResource` in a unit document, a DeploymentTarget's `releaseInputs`, and EnvironmentTemplate `spec.values` | Where `$fromUnit` resolves: when a run resolves the unit, and in `releaseInputs` only through orchestration | Where `$fromUnit` is carried: by a rendered unit to its run, and by template values to where they land |
+| *Planned (M9):* `$fromCollection` in a unit document | When a run resolves the unit, from its bundle | By a rendered unit to its run |
+| *Planned (M9):* a domain resource emitted by a Release | As every document of the Release bundle: `$fromInput` | — |
 | Anything else, such as a target's other fields or a template's parameter declarations | — | — |
 
 A source a context rejects is an error that teaches the fix, such as `$fromUnit`
@@ -138,6 +145,27 @@ HelmChart's (or Component's) chart values the type the chart's
 or `const` value), and the placeholder string `<from orchestration>` where a
 string fits or no schema says otherwise.
 
+The two domain-resource rows are planned with
+[domain modeling](domain-resources.md#value-sources-in-declarations) and not
+implemented. They follow the unit rows: a declaration carries
+`$fromEnvironment` and the execution-time sources, and its consumer (a unit's
+run, or `nyl bundle -e`) resolves them in its environment; every other source
+is rejected with a fix, such as declaring the value or splitting it into its
+own declaration. The envelope and `x-nyl-reference` fields are
+literal-only. The definition's schema validates the resolved values: admission
+treats a position that holds a source as not yet known, and resolution
+validates the value against the field's subschema. The same design plans
+`$fromCollection`, which a unit's spec carries and its run resolves from the
+unit's bundle.
+
+`$fromResource`, planned with
+[resource status](domain-resources.md#reading-status-fromresource), reads a
+domain resource's `spec` or status in the consumer's environment. A
+projected status resolves to the owning unit's output, with the dependency
+edge, freshness, and blocking of `$fromUnit`. An unknown resource, or one
+not active in the environment, is a resolution error; a status with no value
+yet blocks the consumer.
+
 - **Data vs. configuration.** A value read from outside the user's
   configuration (a unit's output, artifact, or observed value; a file read with
   `$fromFile`, `$fromGit`, `$fromPublication`, or a `valuesFrom` file; a promotion record;
@@ -149,6 +177,8 @@ string fits or no schema says otherwise.
 - **Literal-only fields.** `apiVersion`, `kind`, `metadata.name`, and
   `metadata.labels` are read by discovery and selection before anything
   resolves, so a source there is an error. `metadata.namespace` may hold one.
+  A domain resource (planned) adds `metadata.annotations` and its
+  `x-nyl-reference` fields.
 - **`$literal` in unit documents.** A unit renders before a run resolves it,
   and the rendered spec is stored. `$literal` unwraps when the unit renders,
   unless its content holds `$` keys; then it unwraps when the run resolves the

@@ -116,10 +116,10 @@ spec:
       type: {apiVersion: domain.acme.example/v1, kind: AwsAccount}
       paths: ['/teams/**', '/platform/accounts/**']
   variables:
-    accounts: {fromCollection: {collection: accounts, each: /spec}}
+    accounts: {$fromCollection: {collection: accounts, each: /spec}}
 ```
 
-`fromCollection` produces a map from each account's name to its `spec`, which
+`$fromCollection` produces a map from each account's name to its `spec`, which
 is the shape `for_each` expects:
 
 ```hcl
