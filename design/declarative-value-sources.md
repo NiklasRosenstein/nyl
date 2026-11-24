@@ -2,7 +2,8 @@
 
 **Status:** implemented for unit documents, EnvironmentTemplate and
 environment values, DeploymentTarget Release-input bindings, and every
-resource of a Release bundle.
+resource of a Release bundle. [Target values](#target-values), `$fromTarget`
+and the `target.values` template variable, are planned.
 
 *Structural* templating is Jinja that makes a document invalid YAML before it
 renders, or that decides a value's shape or type (`{{ x | tojson }}`,
@@ -41,6 +42,7 @@ variables:
 | --- | --- | --- | --- |
 | `$fromEnvironment` | a JSON Pointer, `{$fromEnvironment: /target}` | `{pointer, default?, optional?}` | The environment's effective values: an Environment's over its groups', or a template instance's. |
 | `$fromInput` | a name, `{$fromInput: image}` | `{name, pointer?}` | A Release's declared, typed input. |
+| `$fromTarget` (planned) | a JSON Pointer, `{$fromTarget: /storage/class}` | `{pointer, default?, optional?}` | The target's effective values: a DeploymentTarget's over its Cluster's. |
 | `$fromParameter` | a name, `{$fromParameter: pr}` | `{name, pointer?}` | An EnvironmentTemplate instance's typed parameter. |
 | `$fromUnit` | none | `{unit, output \| artifact \| observation, pointer?, environment?, kind?, evidence?, attestations?}` | A unit's output, artifact, or observed value from its current receipt. |
 | `$fromPromotion` | none | `{value, path?}` | A value recorded through a PromotionPath. |
@@ -54,10 +56,10 @@ only the context decides which sources are allowed. The rules:
   did you mean image?", and `{$fromEnvironment: target}` with "`$fromEnvironment`
   takes a JSON Pointer; did you mean /target?".
 - **Missing values.** When a source finds nothing (or `null` for
-  `$fromEnvironment`): `default` applies, and it must not be `null`; with
+  `$fromEnvironment` and `$fromTarget`): `default` applies, and it must not be `null`; with
   `optional: true` the key is removed, so the rendered spec is identical to
   omitting the field; otherwise it is an error that names the location, the
-  context (the environment, the instance, or the Release), the keys that
+  context (the environment, the instance, the target, or the Release), the keys that
   exist, and the nearest one. `default` and `optional` are exclusive. `$fromInput`
   and `$fromParameter` have no `default` of their own: the declaration's applies.
 - **Types.** The resolved document is deserialized and validated exactly as a
@@ -88,8 +90,8 @@ only the context decides which sources are allowed. The rules:
 
 | Context | Resolves | Carries |
 | --- | --- | --- |
-| Release bundle, typed fields: a HelmChart's, a RemoteManifest's, a Release's, a Component's envelope (`$` keys reserved) | `$fromInput`, `$literal` | — |
-| Release bundle, free-form data: a HelmChart's `spec.values`, a Component's `spec`, plain Kubernetes manifests (foreign `$` keys are data) | `$fromInput`, `$literal` | — |
+| Release bundle, typed fields: a HelmChart's, a RemoteManifest's, a Release's, a Component's envelope (`$` keys reserved) | `$fromInput`, `$fromTarget` (planned), `$literal` | — |
+| Release bundle, free-form data: a HelmChart's `spec.values`, a Component's `spec`, plain Kubernetes manifests (foreign `$` keys are data) | `$fromInput`, `$fromTarget` (planned), `$literal` | — |
 | A Release's `spec.inputs` declarations | — | — |
 | Unit document, when the unit renders | `$fromEnvironment` | `$fromUnit`, `$fromPromotion` to the run; in an inline target's `releaseInputs` also `$fromFile`, `$fromGit`, `$fromPublication` to the target's rendering |
 | Unit document, when a run resolves it | `$fromUnit`, `$fromPromotion`, `$literal` | — |
@@ -136,6 +138,58 @@ in a Release: "declare a Release input and bind it on the target with
   their `$fromInput` sources resolved) last. Its merged values are data.
 - **Component value imports** stay as they are: target values reach nested
   invocations without sources.
+
+### Target values
+
+Nyl has two sets of untyped values, and both were called "values":
+
+| Set | Declared on | Read by |
+| --- | --- | --- |
+| Environment values | Environment over its EnvironmentGroups, or an EnvironmentTemplate instance | `$fromEnvironment`, in unit documents |
+| Target values | DeploymentTarget over its Cluster, deep-merged | `$fromTarget` and `target.values` in a Release bundle, and component value imports |
+
+They meet in one direction only: an environment's values may hold an inline
+target, and with it that target's values. `$from<Owner>` reads the owner's
+effective values by JSON Pointer, so the source names the set it reads.
+
+- **`$fromTarget`** resolves when a Release bundle renders for a target, in
+  the contexts where `$fromInput` resolves, with the `$fromEnvironment` forms
+  and missing-value rules. Without a target the values are empty: `default`
+  or `optional` applies, or the error says that no target is selected.
+  `$fromTarget` reads values only, never the target's or the Cluster's
+  metadata, which stays string interpolation (`'{{ target.metadata.name }}'`).
+  It is rejected in unit documents, where the fix names `$fromEnvironment`,
+  and in DeploymentTarget `releaseInputs`, where the target's values are its
+  own configuration.
+- **The template variable.** Jinja reads the merged values as
+  `target.values`. The top-level `values` variable is removed, and so are
+  `target.spec.values` and `cluster.spec.values`, so one name reaches one
+  set. This is a breaking change, recorded as such in the changelog, with no
+  alias. Without a target, `target` is undefined, as it is today.
+- **Inputs or target values.** A Release's inputs stay its interface. Use
+  `$fromTarget` for platform facts that hold for every Release on a target,
+  such as a region, a storage class, or an ingress class. Use an input for
+  anything a Release needs decided for it: a value that needs a type, an
+  enum, or a default, or that comes from a unit, a promotion, or Git.
+- **Checks.** `nyl validate` renders every Release for every target that
+  places it, so each `$fromTarget` pointer is resolved against each of them,
+  and the value is checked where it lands, as for `$fromInput`.
+
+```yaml
+apiVersion: k8s.nyl/v1
+kind: HelmChart
+metadata: {name: api}
+spec:
+  chart: {name: ./chart}
+  values:
+    image: {$fromInput: image}
+    storageClass: {$fromTarget: /storage/class}
+    tolerations: {$fromTarget: {pointer: /scheduling/tolerations, optional: true}}
+    host: 'api.{{ target.values.dns.zone }}'   # interpolation stays Jinja
+```
+
+Component value imports keep `from`: a pointer into the target values,
+unchanged.
 
 ## Implementation shape
 
